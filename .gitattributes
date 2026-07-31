@@ -9,6 +9,13 @@
 notify.conf.example   text eol=lf
 iplist.conf.example   text eol=lf
 awg.conf.example      text eol=lf
+# Маркеры версии/манифесты уезжают на роутер и парсятся busybox (gh-update.sh) — LF.
+VERSION               text eol=lf
+*.txt                 text eol=lf
+# Хеши релиза: читает busybox-awk на роутере и `sha256sum -c` на Linux. CRLF здесь особенно
+# опасен — сумма считается по БАЙТАМ, и файл с \r разошёлся бы с git-блобом, который отдаёт
+# raw.githubusercontent (обновление молча начало бы отказывать).
+SHA256SUMS            text eol=lf
 
 # Бинарники под роутер (ELF/UPX) — НИКОГДА не трогать text-конверсией (иначе порча).
 *.user                binary
