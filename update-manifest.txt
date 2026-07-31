@@ -1,0 +1,117 @@
+# update-manifest.txt — список файлов, которые gh-update.sh apply-scripts обновляет с GitHub.
+# Один репо-относительный путь в строке; # — комментарий. ТОЛЬКО публично-безопасные файлы
+# (без секретов: awg.conf / configs/ / *.json / *.yaml кроме hev.yaml / notify.conf — НЕ здесь).
+# gh-update.sh дополнительно фильтрует по whitelist (manifest_safe), так что лишнее отсеется.
+# Бинари (bin/*.user) обновляются отдельным путём (gh-update.sh fetch-bin / proto-install.sh).
+
+VERSION
+update-manifest.txt
+
+# Роутерные скрипты (ядро + плагины + рантайм)
+mark-core.sh
+transport.sh
+# Реестр «выходов» (слотов) мульти-транспорта — mark-core.sh зовёт его list-enabled (нет
+# файла/реестр пуст => слот-блок no-op, деградация безопасна).
+slots.sh
+transport-awg.sh
+# Общий резолв имени сервера: грузят awg_setup.sh и плагины xray/hy2 — без него несущая
+# не встанет, поэтому файл должен ехать в ЛЮБОМ обновлении, где едут они.
+dns-lib.sh
+# Общий примитив «внешний IPv4» (IP-литерал-проба, DNS-free) — сорсят awg-status.sh и web/cgi-bin/ip.
+ip-lib.sh
+# Единый детект модели роутера — сорсят web/cgi-bin/status (шапка), notify.sh и events.sh (префикс тем).
+router-lib.sh
+# Выбор языка событийных уведомлений (письма + журнал панели) по панельному pref lang — сорсят
+# iplist-update/awg-heal/switch-vpn/xray|hy2-transport. Без него деградируют в ru (шим у caller'а).
+nf-i18n.sh
+# Общий слой шифрованного DNS (DoH): сорсят dns-сеттеры транспортов (awg/xray/hy2/byedpi/zapret).
+# Без него DoH недоступен, поведение прежнее (шим doh_apply_dns→1 у каждого caller'а).
+doh-lib.sh
+slot-tun-lib.sh
+xray-transport.sh
+transport-hy2.sh
+transport-byedpi.sh
+byedpi-test.sh
+xray-test.sh
+zapret.sh
+awg-heal.sh
+awg-watchdog.sh
+switch-vpn.sh
+vpn-toggle.sh
+apply-bypass.sh
+domain.sh
+iplist-update.sh
+lists-lib.sh
+lists-update.sh
+groups.sh
+geo.sh
+geo-v2fly-catalog.txt
+geo-rfip-catalog.txt
+geo-rfgs-catalog.txt
+awg-status.sh
+awg-dump.sh
+# Чистка флеша + разбивка занятого. Это ЕДИНСТВЕННЫЙ владелец списка «что считается мусором»:
+# карточка «Компоненты» зовёт его вербами json/clean, второй копии списка в CGI нет намеренно.
+awg-clean.sh
+notify.sh
+notify-event.sh
+events.sh
+awg-setup-be7000.sh
+awg_setup.sh
+xiaomi-bypass.sh
+gh-update.sh
+proto-install.sh
+packages.sh
+uninstall.sh
+web-ui.sh
+traffic-acct.sh
+support.sh
+devwatch.sh
+dns-hosts.sh
+dns-split.sh
+net-tune.sh
+update-sched.sh
+# Headless-обновление подписок (cron) + общий слой подписок: их зовут update-sched.sh (job subs)
+# и cgi-bin/action (fetch_sub делегирует закачку — одна копия гарда/gzip-детекта).
+subs-update.sh
+subs-lib.sh
+# Второй фактор входа в панель (TOTP) + сессии: CGI-гейт СОРСИТ этот файл, а cgi-bin/2fa зовёт
+# его вербами. Без него панель работает как раньше (гейт — no-op), поэтому порядок доставки
+# внутри обновления неважен.
+totp.sh
+# «Доступ домой» (роутер как VPN-сервер, awgs0): секции awg-heal/vpn-toggle repair зовут его
+# только при флаге server/.on, панель — только при наличии файла. Ключи пиров лежат в server/
+# на /data и обновлением НЕ затрагиваются.
+vpn-server.sh
+hev.yaml
+
+# Шаблоны (без секретов)
+notify.conf.example
+iplist.conf.example
+awg.conf.example
+
+# Веб-панель (появится в публичном репо позже — сейчас 404 пропустится без ошибки).
+# panel.css/panel.js вынесены из index.html — тянуть ОБЯЗАТЕЛЬНО вместе с ним: index.html
+# ссылается на них с ?v=<CODE>, и без свежей пары панель останется на старом коде.
+web/index.html
+web/htmlwrap
+web/assets/panel.css
+web/assets/panel.js
+web/assets/icons.css
+web/assets/icons.woff2
+web/cgi-bin/status
+web/cgi-bin/sysinfo
+web/cgi-bin/ip
+web/cgi-bin/ping
+web/cgi-bin/list
+web/cgi-bin/data
+web/cgi-bin/action
+web/cgi-bin/token
+web/cgi-bin/traffic
+# Вход по коду (второй фактор) — без этого файла панель с включённым 2FA не пустит НИКОГО.
+web/cgi-bin/2fa
+# backup/diag раньше сюда не входили (обновлялись только с ПК), но теперь именно в них живёт
+# 2FA-гейт: без доставки они остались бы единственными CGI, отдающими бэкап с ключами и полный
+# диаг-срез в обход второго фактора.
+web/cgi-bin/backup
+web/cgi-bin/diag
