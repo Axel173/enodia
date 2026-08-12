@@ -5,23 +5,23 @@
 #
 # Размер тут = размер СЖАТОГО UPX файла в репо, т.е. ровно то, что займёт /data после
 # установки (на роутер кладётся байт-в-байт, не распаковывая).
-amneziawg-go	arm64	1021884	v3.0.3
-amneziawg-go	armv7	1027664	v3.0.3
-awg	arm64	138776	v3.0.20260730
-awg	armv7	151656	v3.0.20260730
+amneziawg-go	arm64	1021804	v3.0.20260805
+amneziawg-go	armv7	1027312	v3.0.20260805
+awg	arm64	138800	v3.0.20260805
+awg	armv7	151624	v3.0.20260805
 byedpi	arm64	138376	0.17.3
 byedpi	armv7	64244	0.17.3
 dot-proxy	arm64	301256	own-2026-07-23
 dot-proxy	armv7	299736	own-2026-07-23
-hev	arm64	154500	2.15.0
-hev	armv7	134768	2.15.0
-https-dns-proxy	arm64	21084	own-2026-07-21
-https-dns-proxy	armv7	563096	own-2026-07-21
-hysteria	arm64	4765936	v2.10.0
-hysteria	armv7	4720908	v2.10.0
-nfqws	arm64	125444	v72.12
-nfqws	armv7	119812	v72.12
+hev	arm64	157368	2.17.0
+hev	armv7	134712	2.17.0
+https-dns-proxy	arm64	609652	own-2026-08-12
+https-dns-proxy	armv7	596972	own-2026-08-12
+hysteria	arm64	5232580	v2.12.1
+hysteria	armv7	5186620	v2.12.1
+nfqws	arm64	125444	v72.13
+nfqws	armv7	121688	v72.13
 panel-tls	arm64	292488	own-2026-07-29
 panel-tls	armv7	290648	own-2026-07-29
-xray	arm64	7931084	26.3.27
-xray	armv7	7748752	26.3.27
+xray	arm64	8175020	26.7.28
+xray	armv7	7992848	26.7.28
