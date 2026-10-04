@@ -1,0 +1,2710 @@
+<!DOCTYPE html>
+<!-- data-theme В РАЗМЕТКЕ НЕ ПИШЕМ: прибитый атрибут делает ветку prefers-color-scheme мёртвым
+     кодом (это уже случалось — мастер светил белым в тёмной системе, хотя панель, куда он
+     ведёт, тему уважает). Атрибут ставит ПЕРЕКЛЮЧЕНИЕ ТЕМЫ, и только когда человек выбрал
+     светлую или тёмную руками; «как в системе» его снимает и отдаёт решение медиа-условию.
+     Довод «мастеру своего переключателя не надо, он живёт один сеанс» не выдержал: система и
+     привычка расходятся чаще, чем кажется, а установка идёт в самом ярком окне на экране. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enodia</title>   <!-- язык ставит paintChrome(): статический заголовок обязан быть нейтральным -->
+<!--
+  СТРАНИЦА МАСТЕРА УСТАНОВКИ. Её отдаёт локальный агент (`enodia.py --wizard`), он же ходит
+  на роутер: браузер сам по SSH не умеет. Гарды агента (слушаем только 127.0.0.1, токен у
+  всех /api/*, сверка Host от DNS-rebinding) живут в enodia.py — здесь их видно лишь по тому,
+  что токен уезжает ЗАГОЛОВКОМ, а из адресной строки убирается сразу.
+
+  ГРАНИЦА МАСТЕРА (решение 28.08.2026): довёл до панели и предложил её открыть. Протокол,
+  серверы, сайты и проверка «работает ли» живут в ПАНЕЛИ и повторяться здесь не должны —
+  два места правды разъезжаются всегда (это уже случилось с CLI-меню и панелью).
+
+  ЧЕГО ЗДЕСЬ НЕТ И НЕ БУДЕТ: своей арифметики и своих вердиктов. Страница ПОКАЗЫВАЕТ то,
+  что сказал агент (а тот — то, что сказал роутер). «Роутер не ответил» ≠ «всё плохо»:
+  такие ответы разведены по разным строкам, а не слиты в один индикатор.
+
+  МАТЕРИАЛ — ПАНЕЛИ, И НЕ КОПИЕЙ (шаг 8b, 24.09.2026). Карточка, строки-факты, плитки выбора,
+  двери, поля, кнопки, плашки, консоль, токены обеих тем и шрифт — это `web/assets/panel.css`,
+  который отдаёт агент (`/assets/…`, список в enodia.py::WIZARD_ASSETS). До 8b у мастера была
+  СВОЯ копия материала — и она разъехалась: мастер жил на палитре до редизайна, тёплой бумагой
+  рядом с холодной панелью, куда он ведёт. Установка и панель — один продукт, человек не должен
+  чувствовать пересадку. Своё у страницы — только раскладка (`.wz*`: колонка, шапка, степпер,
+  заставка) и то, чего у панели нет вовсе (галочка согласия, поле с глазом, окраска лога).
+  Знаки спрайта ниже — КОПИИ символов `web/index.html` (у <use> нет ссылки на символ внутри
+  HTML-документа); сверяет их, подключение стилей и список агента проверка C110.
+  Эталон вида — макет `local/redesign-proto.html`, экраны `wz-*`. Без CDN и без сборки.
+-->
+<link rel="stylesheet" href="/assets/panel.css">
+<script>
+/* ТЕМА ДО ПЕРВОЙ ОТРИСОВКИ. Основной скрипт стоит в конце страницы, а браузер рисует разметку раньше: человек с ручной
+   тёмной темой при светлой системе видел бы вспышку белого — самой заметной части страницы. Здесь — только чтение выбора;
+   переключатель и запись живут ниже (`applyTheme`). Хранилище может быть запрещено — тогда тема «как в системе». */
+(function(){ try { var t = localStorage.getItem('enodia_theme');
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch (e) {} })();
+</script>
+<style>
+/* РАСКЛАДКА МАСТЕРА — всё своё у страницы. Цвета — ТОЛЬКО токенами panel.css (сверяет C110): своих
+   значений здесь нет, иначе мастер снова уедет от панели на первой же правке палитры. Исключение одно —
+   окраска строк лога: плашка консоли тёмная в обеих темах (`.term` панели), и её цвета темы не знают. */
+body{min-height:100vh}
+/* Колонка шириной в карточку страниц вне панели (560, как вход и заглушка): мастер — страница «до
+   панели», и выглядеть он обязан так же, как они, а не как панель без сайдбара. */
+.wz{max-width:560px;margin:0 auto;padding:36px 18px 44px;display:flex;flex-direction:column;gap:14px}
+/* ШАПКА: знак и имя, язык, тема, чип агента. Переносится строкой ниже, когда не влезает, — на
+   ширине колонки чип уходит под переключатели (макет `wz-*` так и рисует). */
+.wzhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;color:var(--ink2)}
+.wzfill{flex:1 1 0}
+.wzbrand{display:flex;align-items:center;gap:9px;font-weight:500;color:var(--ink);letter-spacing:.04em;white-space:nowrap}
+.wzmk{width:28px;height:28px;filter:var(--mark-glow)}
+/* Переключатели — вкладки-пилюли панели (`.tabs2>.seg`, `Tabs` макета: выбранная — тёмной заливкой), своей плотности нет.
+   До шага 7 пачки 5 это были сегменты в треке (`.segbar`, выбранная — белая с тенью) — шапка мастера была единственным
+   местом, где язык и тема выглядели не так, как в макете. Тема — иконками: три слова («Как в системе» / «Светлая» /
+   «Тёмная») в шапку не влезают ни в одном из языков, а смысл у иконок читается без перевода; подпись есть в title и
+   aria-label, и она переводится. */
+.wzsg svg{width:15px;height:15px;display:block;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+/* ВЫБОР ЯЗЫКА НА ЗАСТАВКЕ — две плитки (`Pick` макета), выбранная — зелёной рамкой на мягком зелёном. У панели такого
+   элемента нет (язык она берёт у роутера), поэтому разметка своя, а цвета — токены panel.css. */
+.wzpick{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.wzpick .wzp{display:inline-flex;align-items:center;gap:8px;padding:9px 13px;border-radius:11px;border:1.5px solid var(--line);
+             background:var(--card);font-size:13.5px;color:var(--ink);cursor:pointer}
+@media (hover:hover){ .wzpick .wzp:hover{border-color:var(--line2)} }
+.wzpick .wzp.on{border-color:var(--acc);background:var(--acc-soft);color:var(--acc-deep);cursor:default}
+.wzpick .wzp:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.wzpick .wzp.dis{opacity:.4;cursor:not-allowed}
+/* Смена языка перерисовывает экран, а экраны с идущим заданием перерисовывать нельзя (это
+   запустило бы установку второй раз). Там переключатель ВИДЕН, но заперт (`.seg.dis` панели:
+   бледный, курсор «нельзя», подсказка — почему): спрятать его значило бы заставить человека искать,
+   куда он делся. Щелчок по запертому глушит обработчик, а не `pointer-events` — иначе не видно ни
+   курсора, ни подсказки (ревью шага 8b). */
+/* СТЕППЕР — четыре шага кружками с номером (макет `wz-*`). «Доступ» — отдельный шаг: это
+   единственное место во всей установке, где трогают прошивку роутера. Текущий — цветом главной
+   кнопки (`--pri`/`--pri-ink`: белый на `--acc` в «Ночи» не читается), пройденный — мягким
+   зелёным с галочкой. */
+.wzsteps{display:flex;gap:6px;flex-wrap:wrap}
+/* Пустой степпер (заставка, «агент не отвечает») — не узел раскладки: иначе колонка ставит лишний зазор над карточкой. */
+.wzsteps:empty{display:none}
+.wzst{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink3);padding:5px 10px 5px 6px;border-radius:99px;background:var(--soft)}
+.wzst i{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:11px;line-height:1;background:var(--soft2);color:var(--ink2)}
+.wzst.on{color:var(--ink);background:var(--acc-soft);font-weight:500}
+.wzst.on i{background:var(--pri);color:var(--pri-ink)}
+.wzst.done{color:var(--ink2)}
+.wzst.done i{background:var(--acc-soft);color:var(--acc-deep);font-weight:600}
+/* КАРТОЧКА ШАГА — `.card` панели с ЕЁ полями (`.card.pad` макета, 14/16/13). До шага 7 пачки 5 — поля страниц вне панели
+   (`.bare-card`, 30/28/26): у мастера макет рисует обычную карточку, и колонка текста была уже на 24 px. Межстрочный у
+   заголовка — макета (22 × 1,5), а не плотный `.bh1` страниц вне панели. */
+.wzcard{min-width:0}
+.wzh1{font-size:22px;line-height:1.5;outline:none}
+.wzbody{margin-top:14px}
+.wzacts{margin-top:18px}
+.wzi{padding:10px 12px;font-size:14px}
+.wzgap{margin-top:14px}
+#accsteps:not(:empty),#res:not(:empty){margin-top:14px}
+.wzfoot{font-size:12px;color:var(--ink3);text-align:center}
+.wzfoot code,.note2 code{font-family:var(--font-mono);font-size:12px}
+/* ЗАСТАВКА — первый кадр мастера. Композиция — заставки панели (знак 120 px НАД словом, слово
+   в разрядку, янтарная линия «как в hero»): кадр, с которого человек начинает, обязан быть тем
+   же, каким он продолжит. Линия — символ `lg-uline` и правило `.bname .uline` панели. */
+.wzsplash{display:flex;flex-direction:column;align-items:center;gap:14px;padding:26px 0 8px;text-align:center}
+.wzmkb{width:120px;height:120px;filter:var(--mark-glow-big)}
+.wzbn{font-size:25px;font-weight:500;letter-spacing:.16em}
+.wzlead{max-width:420px;margin-top:10px}
+.wzsplash .wzgo{margin-top:6px}   /* кнопка обычного размера, как в макете: крупная спорила бы со знаком */
+.wzpre{margin-top:4px}
+/* АДРЕС ПАНЕЛИ на «Готово» — крупно и моноширинно: его перепечатывают и кладут в закладки. */
+.wzurl{font-size:19px;font-weight:600;font-family:var(--font-mono);background:var(--soft);border-radius:var(--r);padding:12px 16px;text-align:center;word-break:break-all;color:var(--ink)}
+/* СТРОКИ-ФАКТЫ — `.lrow` панели: знак состояния слева, значение — чипом справа. Мастер ПОКАЗЫВАЕТ,
+   что увидел: «проверка прошла» без чисел не даёт человеку ни одного способа поспорить. Цвет несёт
+   и знак, и чип — у строки без значения другого признака состояния нет. Вес и размер знака — `.lrow .av` панели (15 px,
+   обычный), как в макете: жирный знак и номер шага были своими у мастера (шаг 7 пачки 5). */
+.lrow .av.wzok{background:var(--acc-soft);color:var(--acc-deep)}
+.lrow .av.wzno{background:var(--bad-soft);color:var(--bad)}
+.lrow .av.wzwr{background:var(--warn-soft);color:var(--warn)}
+.lrow .av.wzrun::after{content:"";width:14px;height:14px;border-radius:50%;border:2px solid var(--acc);border-right-color:transparent;animation:wzspin .8s linear infinite}
+@keyframes wzspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){ .lrow .av.wzrun::after{animation:none;border-right-color:var(--acc)} }
+.wzr>.wzv{flex:none;max-width:60%;white-space:normal;text-align:right}
+/* Плитки выбора — `.opt` панели; трёх в ряд хватает по ширине колонки, на телефоне — две (третья переносится, макет). */
+.wzopt.o3{grid-template-columns:repeat(3,minmax(0,1fr))}
+/* Галочка СОГЛАСИЯ — не тумблер: согласие не «настройка с немедленным действием», а подпись под
+   прочитанным. Мягкая плашка — чтобы её не проскочить глазами. Стоит СРАЗУ после предупреждения,
+   и без отступа две мягкие плашки читались одним блоком (поймано глазами 02.09.2026) — отступ живёт
+   в правиле, а не обёрткой у места вызова: обёртку забывали дважды. */
+.wzchk{display:flex;gap:10px;align-items:flex-start;padding:11px 13px;border-radius:var(--r);background:var(--soft);cursor:pointer;font-size:12.5px;line-height:1.55;color:var(--ink2)}
+.wzchk input{margin:2px 0 0;width:16px;height:16px;flex:none;accent-color:var(--acc);cursor:pointer}
+.note2+.wzchk{margin-top:14px}
+.note2+.note2{margin-top:9px}
+.note2.acc{background:var(--acc-soft);color:var(--acc-deep)}
+/* Настройка шага (снять копию прошивки, поставить перевод) — тумблер `.sw` панели СЛЕВА и одна мелкая строка рядом
+   (`WChk` макета): это оговорка к выбранной плитке, а не строка-факт, и весить как факт (имя 14/500 + пояснение, тумблер
+   справа — так было до шага 7 пачки 5) она не должна. Вся строка — подпись поля: нажать можно по тексту. */
+.wzsw{display:flex;align-items:center;gap:9px;margin-top:10px;cursor:pointer}
+.wzsw .wzswt{min-width:0;color:var(--ink2)}
+/* ПОЛЕ ПАРОЛЯ: набранного не видно, а ошибиться в нём легче всего — даём посмотреть ГЛАЗАМИ.
+   Место под кнопку освобождаем в самом поле, иначе длинный пароль уезжает под неё. */
+.wzinp{display:block;position:relative;margin-top:4px}
+.wzinp.pw .wzi{padding-right:42px}
+.wzeye{position:absolute;top:0;right:0;height:100%;width:40px;display:flex;align-items:center;justify-content:center;
+       background:none;border:0;padding:0;border-radius:var(--r-md);cursor:pointer;color:var(--ink3)}
+@media (hover:hover){ .wzeye:hover{background:none;color:var(--ink2)} }
+.wzeye:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.wzeye svg{width:19px;height:19px;display:block}
+.wzeye .wzsl{display:none} .wzeye.off .wzsl{display:inline}
+.wzhint{display:block;margin-top:5px;font-size:12px;color:var(--ink3);line-height:1.45}
+/* Пара полей нового пароля — ДРУГ ПОД ДРУГОМ и ОДНА подсказка под обеими (макет): в две колонки подсказка резалась на две
+   половины одной фразы, и вторая читалась правилом только для «Ещё раз». Обёртка нужна `pwDonePaint`: он убирает её целиком. */
+.wztwo>.wzhint{margin-top:4px}
+.wzchips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+/* Чип-обещание длиннее строки на 320 px («Wi-Fi и настройки сети остаются вашими») — переносится, а не режет край карточки. */
+.wzcp{white-space:normal}
+/* ЛОГ ЗАДАНИЯ — консоль панели (`.term`). Пустой не показываем ВООБЩЕ: тёмная полоса на светлом
+   экране читается как цензурная плашка, а не как «сюда придёт вывод»; вместе с ним прячем и
+   подпись над ним (она про строки, которых ещё нет). Метки [ OK ]/[WARN]/[FAIL] красим: в
+   сплошной простыне отказ иначе приходится ИСКАТЬ глазами. */
+.wzlh{margin:0 0 6px}
+.wzt{max-height:240px;min-height:0}
+/* Два правила, а не одно через запятую: браузер без `:has()` выбросил бы правило ЦЕЛИКОМ — и пустая тёмная
+   плашка стала бы видна; отдельное `:empty` работает везде. */
+.wzt:empty{display:none}
+.wzlog:has(.wzt:empty){display:none}
+.term .wzl-ok{color:#7fbf9d} .term .wzl-wr{color:#d2ab60} .term .wzl-bad{color:#dd8b76}
+.term .wzl-sec{color:#e8e5d8;font-weight:600}
+/* УЗКОЕ ОКНО — как макет на телефоне: шапка переносится во вторую строку и НИЧЕГО не прячет (до шага 7 пачки 5 уступали
+   подпись «· установка» и чип агента — макет держит обоих), значение строки-факта остаётся чипом СПРАВА (уводить его под
+   пояснение макет не рисует; длинное значение переносится внутри чипа — `.wzr>.wzv` выше), плиток раскладки — две в ряд. */
+@media (max-width:520px){
+  .wz{padding:22px 14px 34px}
+  .wzmkb{width:88px;height:88px}
+  .wzbn{font-size:21px}
+  .wzopt.o3{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:360px){ .wzopt,.wzopt.o3{grid-template-columns:minmax(0,1fr)} }   /* карточка уже 300 px — плитки столбиком, как `@container card (max-width:300px)` макета */
+</style>
+</head>
+<body>
+<!-- СПРАЙТ. Знак — ОДНА копия геометрии на всю страницу (шапка 28 px и заставка 120 px ставят её
+     через <use>), та же, что `lg-mark` панели и заглушки (сверяет C45). Знаки дверей и плиток и
+     линия под словом — копии символов `web/index.html` (сверяет C110). Цвет третьего кольца —
+     правило `.cc` и токен `--mark-ink` panel.css. Спрятан размером, а не `display:none`: у скрытого
+     так маски и фильтр знака мертвы. -->
+<svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+<symbol id="lg-mark" viewBox="0 0 64 64" fill="none" stroke-linecap="round" stroke-linejoin="round"><g transform="translate(-2.75 0)"><defs><filter id="enmarkbl" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.1"/></filter></defs><mask id="enmark0"><rect width="64" height="64" fill="#fff"/><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark0)"><circle cx="43" cy="32" r="15" fill="none" stroke="#F96C00" stroke-width="5"/><mask id="enmark0s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="43" cy="32" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark0s)"><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g><mask id="enmark1"><rect width="64" height="64" fill="#fff"/><circle cx="43" cy="32" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark1)"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#F5B300" stroke-width="5"/><mask id="enmark1s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark1s)"><circle cx="43" cy="32" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g><mask id="enmark2"><rect width="64" height="64" fill="#fff"/><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark2)"><circle cx="26.5" cy="22.47" r="15" fill="none" class="cc" stroke-width="5"/><mask id="enmark2s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark2s)"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g></g></symbol>
+<symbol id="lg-uline" viewBox="0 -.455 1 1.037" preserveAspectRatio="none" overflow="visible"><path d="M0 .327C.33333 .668 .66667 .875 1 -.455" fill="none" stroke="#F5B300" stroke-width="1.1" stroke-linecap="round" vector-effect="non-scaling-stroke"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2 6M20 5v6h-6"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+<symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 4v11M8 11l4 4 4-4M5 19h14"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></symbol>
+<symbol id="i-router" viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="8" rx="2"/><path d="M7 17h.01M11 17h.01M17 8a5 5 0 0 0-5-5M15 8a3 3 0 0 0-3-3M12 13V8"/></symbol>
+<symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/></symbol>
+<symbol id="i-usb" viewBox="0 0 24 24"><rect x="8" y="6.5" width="13" height="11" rx="2"/><rect x="2.5" y="9" width="5.5" height="6" rx="1"/><path d="M12 9.5v5M16 9.5v5"/></symbol>
+<symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
+<symbol id="i-term" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></symbol>
+</svg>
+<main class="wz">
+  <div class="wzhead">
+    <div class="wzbrand"><svg class="mark wzmk" viewBox="0 0 64 64" role="img" aria-label="Enodia"><use href="#lg-mark"/></svg><span>ENODIA <span class="wzsub" id="nmsub"></span></span></div>
+    <div class="grow wzfill"></div>
+    <div id="langsm"></div>
+    <div id="themesw"></div>
+    <span class="chip" id="wz-env"></span>
+  </div>
+  <div class="wzsteps" id="wz-steps"></div>
+  <div id="wz-view"></div>
+  <div class="wzfoot" id="wz-foot"></div>
+</main>
+
+<script>
+/* ─── агент: токен, запросы, задания ─────────────────────────────────────────
+   Токен приходит в адресе ОДИН раз. Убираем его из строки браузера сразу: адрес видно на
+   скриншотах и в истории, а секрет там не нужен — дальше он уезжает заголовком. */
+var TOKEN = new URLSearchParams(location.search).get('t') || '';
+if (TOKEN) {
+  history.replaceState(null, '', location.pathname);
+  try { sessionStorage.setItem('enodia_wizard_token', TOKEN); } catch (e) {}
+} else {
+  /* F5 — самое обычное движение человека, а токена в адресе уже нет: мы его оттуда сами и
+     убрали. Без него страница честно показывала «Агент не отвечает», хотя агент жив, и
+     лечилось это только возвращением в окно консоли за ссылкой (ЗАМЕР В БРАУЗЕРЕ 02.09.2026).
+     Держим копию в sessionStorage: он привязан к ORIGIN, а origin у каждого запуска свой —
+     порт мастер просит у ОС ⇒ чужому агенту ключ не подойдёт, вкладка переживает перезагрузку,
+     а закрытие вкладки его уносит. Хранилище может быть запрещено (приватный режим, политика) —
+     тогда всё работает ровно как раньше. */
+  try { TOKEN = sessionStorage.getItem('enodia_wizard_token') || ''; } catch (e) {}
+}
+
+/* ─── язык: русский / английский ─────────────────────────────────────────────
+   ПАРА СТОИТ В МЕСТЕ ИСПОЛЬЗОВАНИЯ: T('Найдём роутер', 'Let us find your router'). Словарь с
+   ключами на дальнем конце файла разъезжается молча — строку правят, ключ остаётся, и человек
+   видит английский там, где ждал перевода. Пара видна в ревью, а её отсутствие видит проверка
+   в сборке: русский литерал вне T() = непереведённая строка.
+
+   ПЕРВЫЙ ЯЗЫК БЕРЁМ У БРАУЗЕРА и не угадываем дальше него: `ru` → русский, всё остальное →
+   английский. Присваивать русский всем соседним локалям — значит решать за человека; для
+   этого на заставке стоит переключатель, и он же первое, что видно.
+   Ключ хранилища — ТОТ ЖЕ, что у панели (`enodia_lang`), но ОБЩЕГО ЗНАЧЕНИЯ У НИХ НЕТ, и
+   даже между запусками мастера оно не живёт: агент слушает порт, который выдала ОС, то есть
+   каждый запуск — свой origin со своим localStorage. Хранилище тут — память В ПРЕДЕЛАХ сеанса
+   (перезагрузил вкладку — язык на месте), не больше. Выбор переживает мастер по другому
+   каналу: он уезжает НА РОУТЕР (`INSTALL_LANG` → `lang=` в `.prefs`), и панель читает язык
+   оттуда — установленная английским мастером панель откроется английской. */
+var LANG = 'ru';
+try {
+  var _sv = localStorage.getItem('enodia_lang');
+  LANG = (_sv === 'en' || _sv === 'ru') ? _sv : (/^ru\b/i.test(navigator.language || '') ? 'ru' : 'en');
+} catch (e) { LANG = /^ru\b/i.test(navigator.language || '') ? 'ru' : 'en'; }
+function T(ru, en){ return LANG === 'en' ? en : ru; }
+/* Заголовок экрана, подпись и надпись кнопки живут в описании экрана — то есть вычисляются
+   ОДИН раз, а язык меняется потом. Поэтому там хранится не строка, а пара, и рендер зовёт её
+   как функцию: Lbl('Найдём роутер', 'Find your router'). Тело экрана (body) — уже функция,
+   ему хватает обычного T(). */
+function Lbl(ru, en){ return function(){ return T(ru, en); }; }
+
+function req(method, path, params, body){
+  var u = path + (params ? '?' + new URLSearchParams(params).toString() : '');
+  /* Язык уезжает АГЕНТУ на каждом запросе: его строки идут в тот же лог, что и наши, и
+     разноязычный лог хуже одноязычного любого. Заголовком, а не параметром: параметр видно
+     в адресной строке и в логах, а язык — часть сеанса, а не адреса. */
+  var o = {method: method, headers: {'X-Wizard-Token': TOKEN, 'X-Wizard-Lang': LANG}};
+  if (body){ o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(body); }
+  /* Чип агента — ФАКТ последнего запроса, а не старта: агент умер посреди работы — шапка обязана это сказать (до круга 2
+     ревью 8b она оставалась зелёной, а отказ читался «роутер не ответил»); ожил — снова зелёная. */
+  return fetch(u, o).then(function(r){
+    if (ENV.k === 'dead' && ENV.v){ ENV.k = 'ok'; paintEnv(); }
+    return r.json().catch(function(){ return {}; }).then(function(j){
+      /* `http` — агент ОТВЕТИЛ отказом (409 «уже идёт», 403…): это не «связь потерялась», и экран обязан
+         сказать это другими словами (`lostTxt`). */
+      if (!r.ok){ var er = new Error(j.error || (T('ошибка ', 'error ') + r.status)); er.http = r.status; throw er; }
+      return j;
+    });
+  }, function(e){ if (ENV.k === 'ok'){ ENV.k = 'dead'; paintEnv(); } throw e; });
+}
+var api  = function(path, params){ return req('GET', path, params, null); };
+/* Отказ посреди работы — словами того, что случилось: агент ответил отказом или связь с ним оборвалась. */
+/* Отказ действия — словами того, кто отказал: ответил агент (`e.http`) — его текст за нашей приставкой, не ответил — `lostTxt`.
+   Прежде «Не смог проверить: Failed to fetch» читалось как «роутер не ответил», хотя молчал агент. */
+function failTxt(pre, e){ return (e && e.http) ? pre + esc(e.message) : lostTxt(e); }
+function lostTxt(e){
+  return (e && e.http ? T('Агент отказал: ', 'The agent refused: ') : T('Связь с агентом потерялась: ', 'Lost contact with the agent: ')) +
+    esc(e && e.message); }
+var post = function(path, body){ return req('POST', path, null, body || {}); };
+
+/* Задание = фоновое действие агента (заливка, установщик, дамп). Опрашиваем его, пока идёт,
+   и отдаём строки вызывающему ПО МЕРЕ появления: человек должен видеть живой вывод, а не
+   крутилку — та же причина, по которой он виден в консоли. */
+/* ЗАМОК ЯЗЫКА — СЧЁТЧИКОМ ДЕРЖАТЕЛЕЙ, а не флагом (ревью шага 8b). Держат его ожидание ответа агента
+   (`runJob` от POST до исхода), опрос задания (`watchJob`) и проба роутера (`act('probe')`); флаг, который каждый
+   снимал за себя, отпирал язык посреди ЧУЖОГО задания: отказ второго запроса («уже идёт») ставил JOB_RUN=false,
+   пока удаление ещё шло, — смена языка перерисовывала экран, и итог удаления терялся. */
+var JOB_N = 0;
+function jobHold(){ JOB_N++; JOB_RUN = true; paintLang(); }
+function jobFree(){ JOB_N = Math.max(0, JOB_N - 1); JOB_RUN = JOB_N > 0; paintLang(); }
+/* «Агент освободился от НАШЕГО задания» — обещание, которое никогда не отказывает. Следующее задание страница
+   ставит за ним в очередь, а не шлёт поверх: агент держит ОДНО задание (второе — 409), и отказ «уже идёт» читался
+   человеком как «связь с агентом потерялась». */
+var JOB_P = null;
+/* Сколько заданий запущено С КАКОГО показа экрана (ключ — RENDER_SEQ): плитки экрана заперты только его собственными
+   заданиями. По общему замку плитки «Доступа» молчали, пока доживал автовход с экрана пароля (ревью шага 8b, круг 2). */
+var JOB_OWN = {};
+var PROBE_BUSY = false;   /* проба роутера летит — см. act('probe') */
+/* Наблюдать за УЖЕ ИДУЩИМ заданием — тот же опрос, но БЕЗ старта. Нужен ровно там, где
+   страницу перезагрузили посреди работы: задание крутится в агенте, а вкладка о нём не знала и
+   уходила на #welcome — человек терял и прогресс, и результат (поймано на живом стенде
+   02.09.2026). Второй копии цикла не заводим: runJob ниже зовёт этот же watchJob после POST. */
+function watchJob(onLine, seq, queued){
+  /* `seq` — снимок RENDER_SEQ, СДЕЛАННЫЙ ВЫЗЫВАЮЩИМ. У runJob он снимается ДО POST, и это не
+     мелочь: экран можно сменить, пока запрос летит, и результат обязан достаться тому экрану,
+     который задание начал (иначе таблица «проверки» приезжает на «Диагностику» — воспроизведено
+     31.08.2026). Свой снимок берём только когда за заданием пришли БЕЗ него (экран resume). */
+  if (seq === undefined) seq = RENDER_SEQ;
+  jobHold();
+  var since = 0, gone = false, miss = 0;
+  var p = new Promise(function(resolve, reject){
+    (function tick(){
+      api('/api/job', {since: since}).then(function(j){
+        miss = 0;
+        since = j.next;
+        /* Экран сменили — ничего больше не рисуем (узлы чужие), но задание на роутере ИДЁТ: опрос продолжается
+           молча до его конца, и замок держится до него же. Бросить опрос значило бы отпереть язык и следующее
+           действие поверх занятого агента. */
+        if (seq !== RENDER_SEQ) gone = true;
+        if (!gone && onLine && j.lines.length) onLine(j.lines);
+        if (j.state === 'run') return setTimeout(tick, 600);
+        if (gone) return resolve({ok: false, gone: true});
+        var out = j.result || {};
+        if (!('ok' in out)) out.ok = (j.state === 'ok');
+        out.name = j.name;
+        resolve(out);
+      }).catch(function(e){
+        /* ОДИН сорванный опрос — не конец задания: агент на роутере работает дальше (обрыв сокета, занятый порт
+           Windows). Прежде первый же сбой хоронил живое удаление: «не смог снять», кнопка открыта, повтор — «уже
+           идёт» (ревью шага 8b, круг 2). Терпим несколько подряд, отказ АГЕНТА (e.http) — сразу. */
+        if (!e.http && ++miss < 4) return setTimeout(tick, 1000);
+        reject(e);
+      });
+    })();
+  });
+  var done = p.then(function(v){ jobFree(); return v; }, function(e){ jobFree(); throw e; });
+  /* Очередь ведёт тот, кто задание ЗАПУСТИЛ (`runJob` ставит её сразу, ещё до POST); сюда — только наблюдение за чужим
+     заданием (экран resume), иначе наблюдение затёрло бы очередь, собранную позже. */
+  if (!queued) JOB_P = done.then(function(){}, function(){});
+  return done;
+}
+
+function runJob(path, body, onLine){
+  /* Снимок ДО POST: пока запрос летит, экран могли сменить — см. разбор в watchJob. */
+  var seq = RENDER_SEQ;
+  /* Пока задание идёт, экран перерисовывать нельзя — а смена языка это и делает. Замок
+     ставим здесь, в одном месте на все задания: иначе про него забудут на первом же новом.
+     Ставим ЕЩЁ ДО POST: запрос может лететь секунды, и всё это время задание уже началось. */
+  jobHold();
+  JOB_OWN[seq] = (JOB_OWN[seq] || 0) + 1;
+  var prev = JOB_P || Promise.resolve();
+  /* А ДАЛЬШЕ — ТОТ ЖЕ watchJob: цикл опроса, разбор исхода и снятие замка живут В ОДНОМ месте.
+     Своя копия цикла здесь была до 02.09.2026 — ровно та, про которую комментарий рядом уже
+     утверждал «второй копии не заводим»; ревью нашло, что копий было две. */
+  var job = prev.then(function(){
+    /* Пока ждали прошлое задание, экран сменили — это задание уже никому не нужно: не стартуем. */
+    if (seq !== RENDER_SEQ) return {ok: false, gone: true};
+    /* Что менялось на роутере в этом сеансе — для честной строки «пока мастер только смотрит» у поиска роутера. */
+    if (/^\/api\/(access|rootpw|install|panelpw|storemode|remove)$/.test(path)) ST.touched = true;
+    /* С какого экрана и в каком режиме начато задание — в хранилище вкладки: имя задания агент знает, а экран — нет
+       (`panelpw` у установки и у «Сменить пароль панели» одно), и F5 вёл смену пароля в «Готово» установки, а
+       обновление — к паролю панели без «Оставить прежний» (ревью шага 8b, круг 3). */
+    try { sessionStorage.setItem('enodia_wizard_job', JSON.stringify({scr: CUR, upd: !!ST.upd})); } catch (e) {}
+    return post(path, body).then(function(){ return watchJob(onLine, seq, true); });
+  /* Отказ ушедшего экрана — тоже «ушёл»: опрос бросает после четырёх сбоев сети и для экрана, с которого ушли, а
+     `catch` вызывателя брал `#res`/`#acts` ТЕКУЩЕГО экрана — «Связь потерялась» и чужие кнопки на экране входа (ревью
+     шага 8b, круг 3). */
+  }).then(function(v){ JOB_OWN[seq]--; jobFree(); return v; },
+          function(e){ JOB_OWN[seq]--; jobFree(); if (seq !== RENDER_SEQ) return {ok: false, gone: true}; throw e; });
+  /* В очередь — СРАЗУ, а не после ответа на POST: действие, нажатое, пока POST летит, иначе ушло бы вторым POST'ом
+     поверх занятого агента (поймано стендом `wizard-jobseq-test`, шаг 8b). */
+  JOB_P = job.then(function(){}, function(){});
+  return job;
+}
+
+/* ─── мелкие сборки разметки (второй копии не заводить) ──────────────────── */
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+  return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); }
+/* Строка-факт — `.lrow` панели (макет `wz-*`): знак состояния (✓ ok · ✕ no · ! wr · номер шага `mkt` ·
+   крутилка run · «·» wait), имя, пояснение, значение — чипом того же цвета. */
+function Rows(a){ return '<div class="wzrows">' + a.filter(Boolean).map(function(r){
+  var m = r.mk || (r.mkt ? 'num' : 'wait');
+  var sign = {ok: '✓', no: '✕', wr: '!', wait: '·', num: r.mkt || ''}[m] || '';
+  return '<div class="lrow wzr"><div class="av wz' + m + '">' + sign + '</div>' +
+    '<div class="grow wzg"><div class="nm">' + r.t + '</div>' + (r.d ? '<div class="ds">' + r.d + '</div>' : '') + '</div>' +
+    (r.v ? '<span class="chip wzv' + ({ok: ' acc', wr: ' wr', no: ' bd'}[m] || '') + '">' + esc(r.v) + '</span>' : '') +
+    '</div>'; }).join('') + '</div>'; }
+/* Плашка — `.note2` панели. Вариантов пять: info · warn · bad · acc (успокаивающее: «VPN не включается») и
+   ok — синоним acc (успех на месте). */
+function Note(t, k){ return '<div class="note2' + (k ? ' ' + (k === 'ok' ? 'acc' : k) : '') + '">' + t + '</div>'; }
+/* Знак из спрайта — одной записью, как `icUse` панели; рядом с текстом он только украшает. */
+function Ic(id, cls){ return '<svg class="ic' + (cls ? ' ' + cls : '') + '" aria-hidden="true"><use href="#' + id + '"/></svg>'; }
+/* Раздвижка ряда кнопок: всё, что после неё, — к правому краю (`.acts > .grow` панели). */
+var SP = '<div class="grow"></div>';
+/* Глаз рисуем ОДНИМ path на два состояния (открыт / перечёркнут): вторая иконка — это
+   та же дуга плюс косая линия, держать ради неё второй svg незачем. */
+var EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+  'stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 12S5.5 5.5 12 5.5 22.2 12 22.2 12' +
+  ' 18.5 18.5 12 18.5 1.8 12 1.8 12Z"/><circle cx="12" cy="12" r="3.2"/>' +
+  '<path class="wzsl" d="M4 20 20 4" stroke-width="1.9"/></svg>';
+/* Поле — подпись над полем (`.dsfld`) и само поле (`.inp`) панели, как у формы входа. */
+/* ЧЕРНОВИК поля живёт в сеансе (`ST.draft`, ключ — экран и поле; обработчик `input` ниже): смена языка перерисовывает
+   экран, и набранный пароль пропадал (ревью шага 8b). Ключ с экраном — у `rootpw` и `panelpw` поля одинаковых имён, а
+   пароли разные. Поле нового пароля root ведёт своя форма (`ST.acc`). `autocomplete` — как у панели: иначе менеджер
+   паролей по адресу 127.0.0.1 впишет сохранённое туда, где ждут НОВЫЙ пароль. */
+function Fld(id, lb, val, hint, type){
+  var pw = type === 'password', dk = CUR + ':' + id;
+  var v = (REPAINT && id !== 'newpw' && Object.prototype.hasOwnProperty.call(ST.draft, dk)) ? ST.draft[dk] : (val || '');
+  return '<label class="dsfld wzf">' + lb +
+    '<span class="wzinp' + (pw ? ' pw' : '') + '">' +
+    '<input class="inp wzi" id="' + id + '" type="' + (type || 'text') + '" value="' + esc(v) + '" spellcheck="false" autocomplete="' +
+    (pw ? (id === 'pw' ? 'current-password' : 'new-password') : 'off') + '">' +
+    (pw ? '<button type="button" class="wzeye" data-eye="' + id + '" aria-label="' +
+      T('Показать пароль', 'Show password') + '" title="' + T('Показать пароль', 'Show password') +
+      '">' + EYE + '</button>' : '') + '</span>' +
+    (hint ? '<span class="wzhint">' + hint + '</span>' : '') + '</label>'; }
+function Chk(id, t){ return '<label class="wzchk"><input id="' + id + '" type="checkbox"' + (ST.pick[id] ? ' checked' : '') + '><span>' + t + '</span></label>'; }
+/* Настройка шага — тумблер панели (`.sw`) слева и одна мелкая строка «что — почему» (макет `WChk`). Тумблер, а не галочка:
+   это выбор «как делать», а галочка у мастера — подпись под прочитанным (`Chk`). Вся строка — подпись поля: нажать можно
+   по тексту. */
+function Sw(id, t, d, on){
+  return '<label class="wzsw"><span class="sw"><input id="' + id + '" type="checkbox"' + (on ? ' checked' : '') + '><i></i></span>' +
+    '<span class="grow tiny wzswt">' + t + (d ? ' — ' + d : '') + '</span></label>'; }
+/* ПЛИТКИ ВЫБОРА — `.opt .o` панели в роли кнопок с `aria-pressed` (как `slotTile`: выбор ещё не применён).
+   Выбор — это ещё НЕ действие: действие делает кнопка экрана, и её подпись называет выбранное. До 8b карточки
+   были кнопками-действиями — «Удалить полностью» срабатывал от касания карточки, а запертость согласием жила в
+   самой карточке. Разделено: плитка только выбирает (`optPick` помнит выбор в ST), кнопка ряда — делает и
+   заперта галочкой (`data-need` + syncNeed), когда выбранное того требует. `g` — имя группы, `cur` — выбранное. */
+function Opt(g, a, cur){ return '<div class="opt wzopt o' + a.length + '" data-optg="' + g + '">' + a.map(function(o){
+  var on = o.v === cur;
+  return '<div class="o' + (on ? ' on' : '') + '" role="button" tabindex="0" data-opt="' + g + '" data-v="' + o.v + '" aria-pressed="' +
+    (on ? 'true' : 'false') + '"><span class="oi">' + Ic(o.ic) + '</span><div class="t">' + o.t + '</div><div class="d">' + o.d + '</div></div>';
+}).join('') + '</div>'; }
+/* ДВЕРИ — `.door` панели: переход на соседний экран мастера. Цвет — раздела панели, к которому дверь ближе
+   (`--g4` «Роутер», `--g5` «Панель»), как в макете `wz-exists`. */
+function Doors(a){ return '<div class="doors">' + a.map(function(o){
+  return '<div class="door" role="button" tabindex="0" data-go="' + o.go + '"><span class="bar" style="background:' + o.c +
+    '"></span><span class="sq" style="background:' + o.c + '">' + Ic(o.ic) + '</span><div class="grow"><div class="nm">' +
+    o.t + '</div><div class="ds">' + o.d + '</div></div>' + Ic('i-chev', 's chev') + '</div>'; }).join('') + '</div>'; }
+/* Живой лог задания. В АНГЛИЙСКОМ мастере над ним стоит оговорка, и это не мелочь: в лог
+   уходит вывод РОУТЕРНЫХ скриптов (install.sh, uninstall.sh), а они одноязычны — русские (у открытия доступа пишут
+   утилита и агент — по-английски или на языке консоли, поэтому оговорка «может быть по-русски», а не «по-русски»).
+   Замерено 31.08.2026: на экране установки 48 строк из 248 кириллицей, на снятии — почти
+   весь лог. Мастер обещал быть английским; молча вывалить на человека кириллицу значит
+   выглядеть сломанным. Перевести роутер целиком — отдельная работа, а честная строка
+   стоит ноль и снимает ровно то недоумение, ради которого сюда и смотрят.
+   Строку рисуем ОДИН раз здесь, а не на трёх экранах: копии разъедутся. */
+function Log(id){
+  return '<div class="wzlog">' + (LANG === 'en'
+    ? '<div class="cline wzlh">These are raw lines from the router’s scripts and tools — some of them may be ' +
+      'in Russian.</div>' : '') +
+    /* tabindex — листать длинный вывод с клавиатуры (консоль панели так же). */
+    '<pre class="term wzt" id="' + id + '" tabindex="0"></pre></div>'; }
+/* Полоска шагов открытия доступа. Состояния приходят маркерами ::STEP:: ОТ АГЕНТА (он один
+   знает, какой скрипт сейчас крутит) — своей арифметики во фронте нет. Рисуем теми же Rows. */
+function stepLabel(id){
+  return {connect: T('Подключение и эксплойт', 'Connecting and running the exploit'),
+          backup:  T('Резервная копия прошивки', 'Firmware backup'),
+          ssh:     T('Установка постоянного SSH', 'Installing permanent SSH'),
+          lang:    T('Перевод интерфейса RU/EN', 'Interface translation RU/EN')}[id] || id;
+}
+/* Сделанный шаг — ЧТО получилось словами и чип «готово» (макет `wz-access-run`): одно «готово» в пояснении не говорило,
+   где теперь лежит копия прошивки. */
+function stepDone(id){
+  return {connect: T('вошли через заводскую морду', 'signed in through the stock web interface'),
+          backup:  T('сохранена на этом компьютере', 'saved on this computer'),
+          ssh:     T('включён постоянно', 'enabled permanently'),
+          lang:    T('интерфейс роутера переведён', 'the router interface is translated')}[id] || '';
+}
+function stepsRender(el, order, state){
+  if (!el) return;
+  el.innerHTML = Rows(order.map(function(id){
+    var st = state[id] || 'wait';
+    return {mk: {run: 'run', ok: 'ok', fail: 'no', wait: 'wait'}[st], t: stepLabel(id),
+            d: st === 'ok' ? stepDone(id) : {run: T('идёт…', 'running…'), fail: T('не удалось', 'failed'),
+                                              wait: T('ожидает', 'waiting')}[st],
+            v: st === 'ok' ? T('готово', 'done') : ''};
+  }));
+}
+/* Лог задания. Строки ЭКРАНИРУЕМ — в них уезжает вывод роутера, а он чужой текст; метки
+   [ OK ]/[WARN]/[FAIL] красим: в сплошной простыне отказ иначе приходится ИСКАТЬ глазами,
+   а он ровно то, ради чего лог и показан. */
+function logPush(el, lines){
+  if (!el || !lines || !lines.length) return;
+  el.insertAdjacentHTML('beforeend', lines.map(function(s){
+    var t = esc(s);
+    var c = {'[ OK ]': 'wzl-ok', '[WARN]': 'wzl-wr', '[FAIL]': 'wzl-bad'}[t.slice(0, 6)];
+    if (c) return '<span class="' + c + '">' + t.slice(0, 6) + '</span>' + t.slice(6);
+    if (t.slice(0, 3) === '===') return '<span class="wzl-sec">' + t + '</span>';
+    return t;
+  }).join('\n') + '\n');
+  el.scrollTop = el.scrollHeight;
+}
+/* Имя ДВИЖКА — продуктом, как его зовёт панель («Xray», «AmneziaWG»): `xray`/`awg` — язык роутера (`.transport`), в лицо
+   человеку он попадал на «Панель уже стоит» и «Удалить» (сверка 26.09.2026). Незнакомое имя — как есть: пусть будет что назвать. */
+function tptName(v){ return {awg: 'AmneziaWG', xray: 'Xray', hy2: 'Hysteria2', byedpi: 'ByeDPI', zapret: 'Zapret'}[v] || v || ''; }
+/* Заголовок и подзаголовок — ИСХОДОМ, когда работа экрана кончилась (макет `wz-storerun`: «Перенесено»): подзаголовок
+   в будущем времени («ненадолго исчезнет и поднимется») над сделанной работой читается как «ещё идёт». Экран работы помечен
+   `once` и сменой языка не перерисовывается — поставленное здесь не затрётся. */
+function headSet(h, sub){
+  var v = document.getElementById('wz-view'), a = v && v.querySelector('h1'), b = v && v.querySelector('.bsub');
+  if (a) a.textContent = h;
+  if (b) b.textContent = sub; }
+function kb(n){ /* КБ у агента; человеку — мегабайты, как их показывает и панель. */
+  if (n == null) return '—';
+  if (n < 1024) return n + T(' КБ', ' KB');
+  /* Разделитель дробной части — часть языка, а не оформления: 1,4 МБ по-русски и 1.4 MB
+     по-английски. Смешать их значит написать число, которое читается как опечатка. */
+  var m = (n / 1024).toFixed(1);
+  return T(m.replace('.', ',') + ' МБ', m + ' MB'); }
+/* Байты — отдельной кистью от kb(). Тот принимает КИЛОбайты (в них агент меряет payload) и
+   выше мегабайтов не поднимается; накопители же бывают на десятки гигабайт, и «31234,5 МБ»
+   читается как опечатка, а не как размер. Разделитель дробной части — часть языка, как и в kb(). */
+function hb(b){
+  var v = Number(b);
+  if (!(v > 0)) return '—';
+  var u = v / 1048576, big = u >= 1024;
+  if (big) u = u / 1024;
+  var s = u.toFixed(1);
+  return T(s.replace('.', ',') + (big ? ' ГБ' : ' МБ'), s + (big ? ' GB' : ' MB')); }
+
+/* ─── состояние сеанса ───────────────────────────────────────────────────────
+   Ровно то, что мастер УЗНАЛ, а не то, что он предполагает. Пустое поле = «не спрашивали». */
+var ST = {ip: '192.168.31.1', probe: null, conn: null, facts: null, agent: null, tight: false,
+          pwAsked: false, pwWhy: '',    /* показывать ли поле пароля и почему — см. экран login */
+          store: null,                  /* срез движка накопителя (usb-offload.sh json) */
+          storeMode: '', storeDev: '',  /* что выбрал человек на экране раскладки */
+          storeDone: '',                /* раскладка, в которую РЕАЛЬНО переехали (для экрана «Готово») */
+          /* ВЫБОР НА ПЛИТКАХ (`Opt`) — по группе: доступ (login|open), раскладка (data|bins|full), снятие
+             (off|purge). Пусто = «ещё не выбирали» — экран берёт свой вариант по умолчанию из фактов. */
+          pick: {},
+          /* Форма открытия доступа. Живёт в сеансе, а не только в полях: экран перерисовывается сменой
+             языка (набранный пароль пропадал бы), а отказ задания возвращает человека к форме — с тем, что
+             он уже ввёл. Пароль — в памяти вкладки и только до успеха (снимаем его там же). */
+          acc: {bak: true, lang: false, pw: ''},
+          draft: {},                    /* набранное в полях — см. Fld */
+          jobName: '',                  /* какое задание шло, когда страницу перезагрузили (экран resume) */
+          rm: null,                     /* экран снятия: план роутера и исход — см. rmPaint */
+          diagDone: null, pwDone: null};
+var RENDER_SEQ = 0;
+function STEPS(){ return [T('Роутер', 'Router'), T('Доступ', 'Access'),
+                          T('Установка', 'Install'), T('Готово', 'Done')]; }
+var S = {};
+function scr(id, o){ o.id = id; S[id] = o; }
+
+/* ─── смена языка на ходу ────────────────────────────────────────────────────
+   Экран пересобирается целиком — то есть вместе с `enter()`. Для читающих экранов это
+   безобидно (спросят роутер заново), а для ДЕЙСТВУЮЩИХ — нет: перерисовка «Ставлю панель»
+   запустила бы установку второй раз. Такие экраны помечены `once`, и на них переключатель
+   заперт, а не спрятан: исчезнувшая кнопка читается как поломка, а запертая — как «не сейчас». */
+var CUR = '';          /* id текущего экрана */
+var JOB_RUN = false;   /* идёт задание агента */
+function langLocked(){ return JOB_RUN || !!(S[CUR] && S[CUR].once); }
+/* Разметка переключателя ОДНА на оба места (шапка и заставка): в шапке коротко, на заставке
+   словами. Второй копии не заводить. */
+/* Сегмент — узел с ролью кнопки и `aria-pressed` (как `wireSeg` панели), Enter и пробел даёт общий обработчик клавиш
+   ниже; вид — классом `cls`: в шапке пилюля `.tabs2>.seg`, на заставке плитка `.wzp`. Запертый — `.dis` и
+   `aria-disabled`: виден, но не нажимается. */
+/* Запертый сегмент остаётся В ПОРЯДКЕ ФОКУСА (`tabindex=0`, `aria-disabled`) и несёт причину подсказкой: с `tabindex=-1`
+   клавиатура и читалка не узнавали, почему язык не меняется (ревью шага 8b, круг 2). */
+function segHtml(cls, attr, v, on, body, lbl, dis, lng){
+  return '<div class="' + cls + (on ? ' on' : '') + (dis ? ' dis' : '') + '" role="button" tabindex="0' +
+    (lng ? '" lang="' + lng : '') +
+    '" ' + attr + '="' + v + '" aria-pressed="' + (on ? 'true' : 'false') + '"' + (dis ? ' aria-disabled="true"' : '') +
+    (lbl ? ' title="' + esc(lbl) + '" aria-label="' + esc(lbl) + '"' : '') + '>' + body + '</div>';
+}
+/* Почему язык заперт — словами той причины, что есть: идёт задание — или экран сам и есть работа (`once`: перерисовка
+   запустила бы её заново — так и после её конца, подсказка «пока идёт работа» тогда врала). */
+function langWhy(){
+  return JOB_RUN ? T('Язык не сменить, пока идёт работа: экран перерисовался бы посреди неё',
+                     'The language cannot change while work is running: the screen would be redrawn mid-way')
+                 : T('Язык не сменить на этом экране: перерисовка запустила бы его работу заново',
+                     'The language cannot change on this screen: redrawing it would start its work again');
+}
+/* В шапке — вкладки-пилюли (`.tabs2`, «RU/EN»), на заставке — две плитки словами (`.wzpick`, макет `Pick`). */
+function langHtml(sm){
+  var dis = langLocked(), c = sm ? 'seg wzsg' : 'wzp';
+  return '<div class="' + (sm ? 'tabs2 wzseg' : 'wzpick') + '" role="group" aria-label="' + esc(T('Язык', 'Language')) + '"' +
+    (dis ? ' title="' + esc(langWhy()) + '"' : '') + '>' +
+    /* Имя языка пишется НА НЁМ САМОМ — «Русский» и в английском мастере тоже: выбирающий язык
+       ищет глазами знакомое слово, а не перевод незнакомого. */
+    /* …и помечено своим языком (`lang`): иначе читалка прочтёт «Русский» английским голосом. */
+    segHtml(c, 'data-lang', 'ru', LANG === 'ru', sm ? 'RU' : /*i18n-ok*/'Русский', dis ? langWhy() : '', dis, 'ru') +
+    segHtml(c, 'data-lang', 'en', LANG === 'en', sm ? 'EN' : 'English', dis ? langWhy() : '', dis, 'en') + '</div>';
+}
+/* ПЕРЕРИСОВКА ПЕРЕКЛЮЧАТЕЛЯ НЕ УНОСИТ ФОКУС. Язык и тема перерисовываются на каждом шаге задания (замок) и на своём же
+   нажатии; фокус клавиатуры с выброшенного узла браузер отдаёт BODY, и человек снова шёл Tab'ом через шапку (ревью
+   шага 8b). Возвращаем фокус на сегмент с тем же значением. */
+function segRepaint(box, html){
+  if (!box) return;
+  var a = document.activeElement, keep = null;
+  if (a && a !== box && box.contains(a) && a.getAttribute)
+    keep = a.getAttribute('data-lang') ? ['data-lang', a.getAttribute('data-lang')]
+         : a.getAttribute('data-theme-set') ? ['data-theme-set', a.getAttribute('data-theme-set')] : null;
+  box.innerHTML = html;
+  if (keep){ var n = box.querySelector('[' + keep[0] + '="' + keep[1] + '"]'); if (n) n.focus(); }
+}
+function paintLang(){
+  segRepaint(document.getElementById('langsm'), langHtml(1));
+  segRepaint(document.getElementById('langbig'), langHtml(0));
+}
+
+/* ─── тема ───────────────────────────────────────────────────────────────────
+   Три состояния, как в панели: «как в системе» · светлая · тёмная. Своего выбора у мастера
+   не было вовсе — считалось, что он живёт один сеанс, а система про тему уже знает. Довод
+   не выдержал: система и привычка расходятся чаще, чем кажется, а установка идёт в самом
+   ярком окне на экране, и деться от неё некуда. Ключ хранилища — ТОТ ЖЕ, что у панели, и с
+   той же оговоркой, что у языка: origin у каждого запуска свой, значит помнится тема только
+   в пределах сеанса. Дальше мастера ей ехать и незачем — у панели тема своя, на роутере.
+   Смена темы экран НЕ перерисовывает: она меняет только токены, а значит безопасна даже
+   посреди установки — в отличие от смены языка. */
+var THEME = 'auto';
+try {
+  var _tv = localStorage.getItem('enodia_theme');
+  if (_tv === 'light' || _tv === 'dark') THEME = _tv;
+} catch (e) {}
+/* Атрибут на первом кадре ставит скрипт в <head> (до отрисовки разметки) — здесь только значение для переключателя. */
+function applyTheme(v){
+  THEME = (v === 'light' || v === 'dark') ? v : 'auto';
+  /* auto = СНЯТЬ атрибут и отдать решение `prefers-color-scheme`. Своей копии «что сейчас у
+     системы» не держим: она протухнет на первом же переключении темы в самой ОС, а CSS
+     переживает его сам, без единой строки JS. */
+  if (THEME === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', THEME);
+  try { localStorage.setItem('enodia_theme', THEME); } catch (e) {}
+  paintTheme();
+}
+/* Иконки рисуем сами: ни CDN, ни шрифта-иконок у мастера нет и не будет. «Как в системе» —
+   круг, залитый наполовину: это же значение и в панели. */
+var THEME_ICON = {
+  auto:  '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/>' +
+         '<path d="M12 3.4a8.6 8.6 0 0 0 0 17.2z" fill="currentColor" stroke="none"/></svg>',
+  light: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/>' +
+         '<path d="M12 2.4v2.3M12 19.3v2.3M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6' +
+         'M2.4 12h2.3M19.3 12h2.3M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>',
+  dark:  '<svg viewBox="0 0 24 24"><path d="M20.2 14.4A8.4 8.4 0 0 1 9.6 3.8a8.6 8.6 0 1 0 10.6 10.6z"/></svg>'
+};
+function themeHtml(){
+  return '<div class="tabs2 wzseg" role="group" aria-label="' + esc(T('Тема', 'Theme')) + '">' + [
+    ['auto',  T('Как в системе', 'Match the system')],
+    ['light', T('Светлая', 'Light')],
+    ['dark',  T('Тёмная', 'Dark')]
+  ].map(function(it){ return segHtml('seg wzsg', 'data-theme-set', it[0], THEME === it[0], THEME_ICON[it[0]], it[1], false); }).join('') + '</div>';
+}
+function paintTheme(){ segRepaint(document.getElementById('themesw'), themeHtml()); }
+/* ПЕРЕРИСОВКА СМЕНОЙ ЯЗЫКА — НЕ ВХОД НА ЭКРАН (`REPAINT`). Экран с данными роутера рисуется из того, что уже знает
+   сеанс, и задания НЕ зовёт: до шага 8b смена языка на «Удалить» заново слала план снятия — а он кладёт на роутер свежий
+   uninstall.sh, — и итог удаления исчезал, возвращая плитки и красную кнопку (ревью шага 8b). */
+var REPAINT = false;
+function setLang(v){
+  if (v === LANG || langLocked()) return;
+  var big = document.activeElement && document.activeElement.closest && document.activeElement.closest('#langbig');
+  LANG = v;
+  try { localStorage.setItem('enodia_lang', LANG); } catch (e) {}
+  paintChrome();
+  REPAINT = true;
+  try { if (CUR) render(CUR); } finally { REPAINT = false; }
+  /* Переключатель на заставке живёт внутри экрана — его перерисовал render: фокус — на выбранный язык. */
+  if (big){ var n = document.querySelector('#langbig [data-lang="' + v + '"]'); if (n) n.focus(); }
+}
+/* Чип в шапке ХРАНИТ, что показывает, а не только показывает: смена языка обязана
+   перерисовать и его, а спрашивать агента заново ради строчки незачем. */
+var ENV = {k: 'boot', v: null};
+function paintEnv(){
+  var e = document.getElementById('wz-env');
+  if (!e) return;
+  /* Цвет чипа — состояние агента (макет `wz-*`): жив — зелёный, молчит — красный, ждём — нейтральный. */
+  e.className = 'chip' + (ENV.k === 'ok' ? ' acc' : (ENV.k === 'dead' || ENV.k === 'nokey' ? ' bd' : ''));
+  if (ENV.k === 'ok') e.textContent = T('агент ', 'agent ') + ENV.v.version + ' · Python ' + ENV.v.python;
+  else if (ENV.k === 'dead') e.textContent = T('агент не отвечает', 'agent is not responding');
+  else if (ENV.k === 'bye') e.textContent = T('агент остановлен', 'agent stopped');
+  else if (ENV.k === 'nokey') e.textContent = T('у вкладки нет ключа', 'this tab has no key');
+  else e.textContent = T('агент запускается…', 'starting the agent…');
+  paintFoot();
+}
+/* КОНЕЦ — КНОПКОЙ, А НЕ КОНСОЛЬЮ (30.09.2026): установка у человека только в браузере, и слать его в чёрное окно жать Ctrl+C
+   нельзя. Кнопка — здесь, а не на одном экране: закончить можно и после удаления, и после диагностики, и открыв панель с экрана
+   «Панель уже стоит». Окно, пока мастер работает, закрывать по-прежнему нельзя — это и говорим. Кнопка — только при ЖИВОМ агенте
+   (при молчащем она умеет лишь выдать ошибку), поэтому подвал рисует та же кисть, что и чип агента; после закрытия подвалу
+   сказать нечего. */
+function paintFoot(){
+  var ft = document.getElementById('wz-foot');
+  if (!ft) return;
+  ft.innerHTML = (CUR === 'bye' || ENV.k === 'bye') ? '' : T(
+    'Окно консоли, из которого запущен мастер, не закрывайте, пока он нужен. Закончили — закройте мастер здесь.',
+    'Keep the console window the wizard was started from open while you need it. Done? Close the wizard here.') +
+    (ENV.k === 'ok' ? ' <button type="button" class="btn sm gh" data-act="bye">' + T('Закрыть мастер', 'Close the wizard') + '</button>' : '');
+}
+/* Постоянная часть страницы (заголовок вкладки, подпись бренда, подвал, чип) — вне экранов,
+   поэтому язык ей меняет отдельная кисть. */
+function paintChrome(){
+  document.documentElement.lang = LANG;
+  document.title = T('Enodia — установка', 'Enodia — setup');
+  document.getElementById('nmsub').textContent = T('· установка', '· setup');
+  paintEnv();
+  paintLang();
+  paintTheme();
+}
+
+/* ═══ 0. ЗАСТАВКА. Первый кадр: знак, имя и единственный выбор, который здесь уместен, — язык.
+   Ставить его дальше поздно: человек уже читает то, чего не понимает.
+   Линия под словом — символ `lg-uline` и правило `.bname .uline` панели: геометрию несёт CSS в долях
+   слова и прописной, а не замер в JS. До 8b мастер рисовал её сам (`fitUline` по ширине слова) —
+   третья копия той же кривой рядом с панелью и макетом; теперь копия одна, и её сверяет C110. ═══ */
+scr('welcome', {step: -1, bare: true,
+ body: function(){
+   return '<div class="wzsplash">' +
+     '<svg class="mark wzmkb" viewBox="0 0 64 64" role="img" aria-label="Enodia"><use href="#lg-mark"/></svg>' +
+     '<span class="bname wzbn" aria-hidden="true">ENODIA<svg class="uline"><use href="#lg-uline"/></svg></span>' +
+     '<div class="bsub wzlead">' + T(
+       'Мастер поставит на роутер веб-панель, из которой настраивается обход блокировок. ' +
+       'Займёт несколько минут.',
+       'This wizard installs the web panel on your router — everything else is configured from ' +
+       'there. It takes a few minutes.') + '</div>' +
+     '<div id="langbig">' + langHtml(0) + '</div>' +
+     '<button class="btn pri wzgo" data-go="scan">' + T('Начать', 'Start') + '</button>' +
+     '<div class="tiny wzpre">' + T('Роутер при этом продолжает работать как обычно.',
+                              'Your router keeps working as usual while it runs.') + '</div>' +
+   '</div>';
+ }});
+
+/* «Агент не ответил» — тоже ЭКРАН, а не разовая вставка в разметку. Причина ровно одна: смена
+   языка перерисовывает ЭКРАН, и вставленный мимо реестра текст остался бы на прежнем языке —
+   причём именно там, где человек и полез бы переключать, ничего не понимая. Кнопок у экрана нет:
+   выход ровно один — запустить мастер заново, и он в консоли, а не здесь. */
+scr('noagent', {step: -1,
+ t: function(){ return ST.agentNoKey ? T('У этой вкладки нет ключа', 'This tab has no key') : T('Агент не отвечает', 'The agent is not responding'); },
+ sub: function(){ return ST.agentNoKey
+   /* Причину знаем сами (403 = ключ), текст агента не нужен: он на языке консоли, а не вкладки. */
+   ? T('Агент работает, но эта вкладка открыта без ключа.', 'The agent is running, but this tab was opened without a key.')
+   /* Причина — СЛОВАМИ, а не строкой браузера: `fetch` отказывает текстом движка («Failed to fetch», «NetworkError…»,
+      «Load failed») — по-английски посреди русской фразы и одинаково для любой беды сети. У агента на 127.0.0.1 беда одна:
+      порт никто не слушает, то есть соединение отклонено (ответ отказом, 403, — ветка выше). */
+   : T('Страница открыта, но локальный агент не ответил: соединение отклонено.',
+       'The page is open, but the local agent did not answer: the connection was refused.'); },
+ body: function(){
+   return ST.agentNoKey
+     ? Note(T('Ключ приходит только в ссылке, которую мастер печатает в окне консоли, и живёт в своей вкладке. Откройте ту ' +
+              'ссылку — или запустите мастер заново, он откроет новую вкладку сам.',
+              'The key only comes in the link the wizard prints in its console window, and it lives in its own tab. Open that ' +
+              'link — or start the wizard again, and it will open a new tab itself.'), 'info')
+     : Note(T('Так бывает, если окно мастера закрыли, а вкладку оставили. Запустите мастер заново — ' +
+              'он откроет новую вкладку со свежим ключом.',
+              'That happens when the wizard window was closed but the tab stayed open. Start the wizard ' +
+              'again — it will open a new tab with a fresh key.'), 'info');
+ }});
+
+/* ═══ 1. РОУТЕР ══════════════════════════════════════════════════════════════ */
+scr('scan', {step: 0, t: Lbl('Найдём роутер', 'Find your router'),
+ sub: Lbl('Мастер работает по локальной сети. Роутер Xiaomi по умолчанию отвечает на 192.168.31.1 — ' +
+          'если адрес меняли, впишите свой.',
+          'The wizard works over your local network. A Xiaomi router answers at 192.168.31.1 out of ' +
+          'the box — if you changed the address, enter yours.'),
+ body: function(){
+   return Fld('ip', T('Адрес роутера', 'Router address'), ST.ip,
+              T('Проверю, что он отвечает, и определю модель — до этого ничего не делаю.',
+                'I will check that it answers and identify the model — nothing is touched before that.')) +
+     '<div id="res" role="status"></div>';
+ },
+ acts: [{t: Lbl('Проверить', 'Check'), act: 'probe', k: 'pri'}],
+ enter: function(){
+   var i = document.getElementById('ip');
+   i.addEventListener('keydown', function(e){ if (e.key === 'Enter') act('probe', document.querySelector('#acts [data-act="probe"]')); });
+   if (ST.probe) showProbe(ST.probe);
+ }});
+
+function showProbe(p){
+  var res = document.getElementById('res');
+  if (!res) return;
+  /* «Хост молчит» и «морда не ответила» — РАЗНЫЕ факты, и лечатся по-разному: первое про
+     сеть и адрес, второе про прошивку. Сливать их в одну строку нельзя. */
+  var rows = [
+    p.web ? {mk: 'ok', t: T('Роутер отвечает', 'The router answers'),
+             d: T('заводская веб-морда на месте', 'the stock web interface is there'), v: p.ip}
+      : (p.alive ? {mk: 'wr', t: T('Заводская морда не ответила', 'The stock web interface did not answer'),
+                    d: T('но по сети хост живой: бывает своя прошивка или другой порт',
+                         'but the host is alive on the network: custom firmware or a different port'), v: p.ip}
+                 : {mk: 'no', t: T('По этому адресу никто не отвечает', 'Nothing answers at this address'),
+                    d: T('ни SSH, ни веб — похоже, адрес не тот',
+                         'neither SSH nor web — the address is probably wrong'), v: p.ip}),
+    /* Модель показываем СВОИМ именем: китайская прошивка зовёт роутер «Xiaomi路由器BE7000».
+       Незнакомый код — не отказ: показываем код как есть, чтобы человеку было что назвать. */
+    p.model ? (p.known ? {mk: 'ok', t: T('Модель', 'Model'),
+                          d: T('узнал по ответу морды, без пароля',
+                               'read from the web interface, no password needed'), v: p.model}
+                       : {mk: 'wr', t: T('Модель нам незнакома', 'Unfamiliar model'),
+                          d: T('проверено на BE7000, BE10000, BE3600 и AX3600 — но попробовать можно',
+                               'tested on BE7000, BE10000, BE3600 and AX3600 — you can still try'), v: p.model})
+             : {mk: 'wr', t: T('Модель определить не вышло', 'Could not identify the model'),
+                d: T('спрошу у самого роутера после подключения',
+                     'I will ask the router itself after connecting'), v: '—'},
+    p.firmware ? {mk: 'ok', t: T('Прошивка', 'Firmware'),
+                  d: T('версия заводской прошивки', 'stock firmware version'), v: p.firmware} : null,
+    p.ssh ? {mk: 'ok', t: T('Доступ по SSH', 'SSH access'),
+             d: T('порт 22 открыт — шаг «Доступ» можно пропустить',
+                  'port 22 is open — the “Access” step can be skipped'), v: T('открыт', 'open')}
+          : {mk: 'wr', t: T('Доступ по SSH', 'SSH access'),
+             d: T('на стоке закрыт — откроем на шаге «Доступ»',
+                  'closed on stock firmware — we will open it at the “Access” step'), v: T('закрыт', 'closed')}
+  ];
+  res.innerHTML = '<div class="wzgap">' + Rows(rows) + '</div>' +
+    (!p.alive
+      ? '<div class="wzgap">' + Note(T(
+          '<b>Роутер не отозвался ни на одном порту.</b> Проверьте: компьютер в сети именно ' +
+          'этого роутера, адрес верный (он же «шлюз по умолчанию»), клиент VPN на компьютере выключен.',
+          '<b>The router did not answer on any port.</b> Check that the computer is on this router’s ' +
+          'network, that the address is right (it is the “default gateway”), and that any VPN client ' +
+          'on the computer is off.'), 'bad') + '</div>'
+      : ST.touched ? ''
+      : '<div class="wzgap">' + Note(T('Пока мастер только смотрит: на роутере ничего не менялось.',
+          'So far the wizard has only looked — nothing on the router has been changed.'), 'info') + '</div>');
+  var a = document.getElementById('acts');
+  actsSet('<button class="btn gh" data-act="probe">' + T('Проверить снова', 'Check again') +
+    '</button><div class="grow"></div>' +
+    '<button class="btn pri" data-go="hello"' + (p.alive ? '' : ' disabled') + '>' +
+    T('Дальше', 'Continue') + '</button>');
+}
+
+/* ═══ 2. СОГЛАСИЕ. Первое из трёх предупреждений: согласие на вмешательство вообще.
+   Дальше нельзя, пока галочка не стоит — это единственное место, где человек читает
+   границы ДО того, как что-то произошло. ══════════════════════════════════════ */
+scr('hello', {step: 0, picks: ['agree'], t: Lbl('Что сейчас произойдёт', 'What is about to happen'),
+ sub: Lbl('Три шага. Всё делается на вашем компьютере и вашем роутере, наружу ничего не уходит.',
+          'Three steps. Everything happens on your computer and your router — nothing leaves them.'),
+ body: function(){
+   /* ПЕРВЫЙ ШАГ ЗАВИСИТ ОТ ТОГО, ЧТО МЫ УЖЕ ЗНАЕМ. Экран «Найдём роутер» ПЕРЕД этим спросил
+      порт 22 и, если он открыт, прямо написал «шаг „Доступ“ можно пропустить». Обещать после
+      этого «понадобится вмешательство в прошивку» — врать в самом дорогом месте: человек
+      читает границы ДО того, как что-то произошло, и решает по ним. Обещание строим по
+      ФАКТУ пробы, а не по общему случаю. */
+   var open = ST.probe && ST.probe.ssh;
+   return Rows([
+     open ? {mkt: '1', t: T('Доступ к роутеру уже открыт', 'Router access is already open'),
+             d: T('порт 22 отвечает — вмешательство в прошивку не понадобится',
+                  'port 22 answers — no changes to the firmware will be needed')}
+          : {mkt: '1', t: T('Открою доступ к роутеру', 'I will open access to the router'),
+             d: T('на стоковой прошивке он закрыт; понадобится вмешательство в прошивку',
+                  'stock firmware keeps it closed, so the firmware has to be modified')},
+     {mkt: '2', t: T('Поставлю панель управления', 'I will install the control panel'),
+      d: T('веб-панель :8088, скрипты, автозапуск и сторож',
+           'the :8088 web panel, the scripts, autostart and the watchdog')},
+     {mkt: '3', t: T('Открою панель в браузере', 'I will open the panel in your browser'),
+      d: T('дальше — протоколы, серверы и сайты — уже там',
+           'protocols, servers and sites are set up there')}
+   ]) +
+   '<div class="wzgap">' +
+   Note(T('<b>VPN при этом НЕ включается.</b> До вашего выбора в панели роутер работает ровно как из коробки: ' +
+          'трафик идёт как раньше, ничего не ломается.',
+          '<b>This does NOT switch a VPN on.</b> Until you pick one in the panel, the router behaves exactly ' +
+          'as it did out of the box: traffic takes the same path and nothing breaks.'), 'acc') +
+   Note(T('<b>Всё на ваш страх и риск.</b> Enodia — свободная программа без гарантий: автор не отвечает за ' +
+          'работоспособность роутера, потерю настроек и последствия вмешательства в прошивку. ' +
+          'Роутер — ваш, решение — ваше.',
+          '<b>Everything here is at your own risk.</b> Enodia is free software with no warranty: the author ' +
+          'is not liable for the state of your router, lost settings, or the consequences of modifying the ' +
+          'firmware. It is your router and your decision.'), 'warn') + '</div>' +
+   '<div class="wzgap">' + Chk('agree', T('Понимаю и принимаю: делаю на свой страх и риск',
+                                        'I understand and accept: I am doing this at my own risk')) + '</div>';
+ },
+ acts: [{t: Lbl('Назад', 'Back'), go: 'scan', k: 'gh', bk: 1},
+        {t: Lbl('Дальше', 'Continue'), go: 'access', k: 'pri', need: 'agree'}]});
+
+/* ═══ 3. ДОСТУП. Три состояния, и мастер обязан различать их САМ: «закрыт», «открыт, но
+   пароль не тот» и «открыт» — разные беды с разным лечением.
+   Выбор дороги и форма открытия — НА ОДНОМ экране (макет `wz-access`): плитка «Открыть доступ здесь»
+   показывает, ЧТО именно произойдёт (копия прошивки, перевод, новый пароль root), до нажатия, а не на
+   следующем экране. Кнопка ряда называет выбранное; сама работа — на экране `access-run`. ════════ */
+function accWay(){ return ST.pick.acc || ((ST.probe && ST.probe.ssh) ? 'login' : 'open'); }
+scr('access', {step: 1, t: Lbl('Доступ к роутеру', 'Access to the router'),
+ sub: Lbl('Панель ставится по SSH. На стоковой прошивке он закрыт — открывается один раз, дальше не понадобится.',
+          'The panel is installed over SSH. Stock firmware keeps SSH closed — it is opened once and not needed again.'),
+ body: function(){
+   var open = ST.probe && ST.probe.ssh, way = accWay();
+   /* Пробы в этом сеансе не было (F5 → resume → сюда): про порт не знаем — так и говорим, а не «закрыт». */
+   return Rows([!ST.probe ? {mk: 'wait', t: T('Доступ по SSH', 'SSH access'),
+        d: T('в этот раз порт не проверял — «Назад» к поиску роутера проверит', 'the port was not checked this time — go back to finding the router to check it'), v: '?'}
+     : open
+     ? {mk: 'ok', t: T('SSH открыт', 'SSH is open'),
+        d: T('порт 22 отвечает — открывать заново не нужно',
+             'port 22 answers — there is nothing to open'), v: '22/tcp'}
+     /* Жёлтым, как на экране «Роутер», а не красным крестом: закрытый SSH на стоке — норма, а не поломка. И без
+        вида отказа («отклоняется»): проба знает только, что порт не ответил (ревью шага 8b). */
+     : {mk: 'wr', t: T('SSH закрыт', 'SSH is closed'),
+        d: T('порт 22 не отвечает — на стоковой прошивке так и должно быть',
+             'port 22 does not answer — that is expected on stock firmware'), v: T('закрыт', 'closed')}]) +
+   '<div class="wzgap">' + Opt('acc', [
+     {v: 'login', ic: 'i-term',
+      t: open ? T('Проверить пароль root', 'Check the root password') : T('Доступ уже открыт', 'Access is already open'),
+      d: open ? T('порт открыт — остался пароль, и мы пойдём дальше',
+                  'the port is open — only the password is left, then we move on')
+              : T('открывали раньше сами — введите пароль root',
+                  'you opened it yourself earlier — enter the root password')},
+     {v: 'open', ic: 'i-lock', t: T('Открыть доступ здесь', 'Open access here'),
+      d: T('резервная копия прошивки, затем постоянный SSH', 'a firmware backup, then permanent SSH')}
+   ], way) + '</div>' +
+   /* Форма — только у дороги «открыть»: у «проверить пароль» её полей нет, и показывать их значило бы
+      спрашивать то, что не понадобится. Значения — из сеанса (ST.acc), см. там. */
+   '<div id="accform"' + (way === 'open' ? '' : ' hidden') + '>' +
+     '<div class="wzgap">' +
+       Sw('bak', T('Сначала снять резервную копию прошивки', 'Back up the firmware first'),
+          T('рекомендуется: без неё к заводской прошивке не вернуться', 'recommended: without it there is no way back to the stock firmware'),
+          ST.acc.bak) +
+       Sw('lang', T('Заодно поставить перевод интерфейса роутера (RU/EN)', 'Also install the router interface translation (RU/EN)'),
+          T('необязательно: не встанет, доступ всё равно откроется', 'optional: if it fails, access still opens'), ST.acc.lang) +
+     '</div>' +
+     /* Правило формы — ДО отказа, а не в нём: агент проверяет форму раньше первого шага (правило одно с панелью). */
+     Fld('newpw', T('Новый пароль root', 'New root password'), ST.acc.pw,
+         T('8–64 символа: латиница, цифры и знаки, без пробелов и кириллицы. Задам его сразу после открытия доступа — ' +
+           'прежний знать не нужно.',
+           '8–64 characters: Latin letters, digits and symbols, no spaces, no Cyrillic. I will set it right after access ' +
+           'is open — the old one is not needed.'), 'password') +
+     '<div class="wzgap">' +
+     Note(T('Открытие доступа — <b>вмешательство в прошивку роутера</b>. Оно обратимо, но делается на ваш страх и ' +
+            'риск, и перед ним нужна резервная копия заводской прошивки.',
+            'Opening access <b>modifies the router firmware</b>. It is reversible, but it is done at your own ' +
+            'risk, and it needs a backup of the stock firmware first.'), 'warn') + '</div>' +
+   '</div>' +
+   '<div id="res" role="status"></div>';
+ },
+ acts: [{t: Lbl('Назад', 'Back'), go: 'hello', k: 'gh', bk: 1},
+        {t: function(){ return accWay() === 'open' ? T('Открыть доступ', 'Open access') : T('Проверить пароль', 'Check the password'); },
+         act: 'accgo', k: 'pri'}],
+ enter: function(){
+   var i = document.getElementById('newpw');
+   if (i) i.addEventListener('keydown', function(e){ if (e.key === 'Enter') act('accgo', document.querySelector('#acts [data-act="accgo"]')); });
+ }});
+
+/* Открытие доступа встроено: утилита (её агент качает сам, в проекте её нет) снимает резервную копию прошивки и включает
+   постоянный SSH, вывод идёт живым логом (как на установке). Новый пароль root задаётся на экране «Доступ» — прежний
+   забыт, а после открытия доступа нужен известный. Пароль вводит ЧЕЛОВЕК.
+   Экран — только ход работы (`once`): задание стартует на входе, кнопок ухода, пока оно идёт, нет. Отказ даёт «Назад»
+   (к форме, со всем набранным) и «Повторить» (шаги идемпотентны). Дорога назад в описании экрана нужна «назад»
+   браузера после исхода; пока задание идёт, её держит JOB_RUN. */
+scr('access-run', {step: 1, once: true, t: Lbl('Открываю доступ', 'Opening access'),
+ /* Подзаголовок — по форме: копию прошивки человек мог выключить, и обещать её тогда нельзя. */
+ sub: function(){ return ST.acc.bak !== false
+   ? T('Резервная копия прошивки, затем постоянный SSH. Всё в этом окне — не закрывайте его.',
+       'A firmware backup, then permanent SSH. It all happens in this window — keep it open.')
+   : T('Постоянный SSH — без резервной копии прошивки (вы её выключили). Всё в этом окне — не закрывайте его.',
+       'Permanent SSH — without a firmware backup (you turned it off). It all happens in this window — keep it open.'); },
+ body: function(){
+   return '<div id="accsteps"></div>' +
+     '<div id="res" role="status"></div>' +
+     '<div class="wzgap">' + Log('wzlog') + '</div>';
+ },
+ acts: [{t: Lbl('Назад', 'Back'), go: 'access', k: 'gh', bk: 1}],
+ enter: function(){ accessRun(); }});
+
+/* ═══ 4. ВХОД. Пароль root уезжает в системное хранилище ПК — то же самое, куда его кладёт
+   консольная сторона: второго места хранения у проекта нет. ═══════════════════ */
+/* ЭКРАН ОБЯЗАН ДЕРЖАТЬ СВОЁ ОБЕЩАНИЕ. До 30.08.2026 он писал «второй раз спрашивать не буду»
+   и спрашивал ВСЕГДА: агент отдаёт `have_password` в /api/state, а страница флаг не читала.
+   Серверная половина была готова и тогда — `wizard_connect` с ПУСТЫМ паролем берёт сохранённый.
+   Поэтому: пароль есть => поля нет вовсе, входим молча.
+   АВТОМАТА «вошли и поехали» тут при этом быть не может, и это не перестраховка: на части
+   моделей Xiaomi сток возвращает пароль root к заводскому на КАЖДОЙ загрузке (замерено на
+   AX3600), то есть сохранённый ЗАКОННО перестаёт подходить. Отказ по паролю обязан ОТКРЫТЬ
+   поле, а не оставить человека в тупике «не спрашиваю» — ради этого ST.pwAsked и ветка в
+   act('connect'). Флаг живёт в ST, а не в агенте: он про ЭТОТ сеанс, а не про хранилище. */
+/* Сохранён ли пароль — для ПРОВЕРЕННОГО адреса: проба отвечает за свой адрес (`have_password`), а `/api/state` — за адрес
+   со старта. Без этого вход на другой роутер пробовал чужой пароль и писал «сохранённый не подошёл» (ревью шага 8b,
+   круг 3). После F5 пробы нет — тогда ответ агента, но только если его адрес и есть наш. */
+function pwStored(){
+  var have = (ST.probe && ST.probe.ip === ST.ip && typeof ST.probe.have_password === 'boolean')
+    ? ST.probe.have_password : !!(ST.agent && ST.agent.have_password && ST.agent.host === ST.ip);
+  return have && !ST.pwAsked;
+}
+scr('login', {step: 1, t: Lbl('Пароль root', 'Root password'),
+ sub: Lbl('Мастер заходит на роутер под root. Пароль лежит в системном хранилище компьютера.',
+          'The wizard signs in to the router as root. The password lives in your computer’s system store.'),
+ body: function(){
+   /* АГЕНТ УЖЕ ВНУТРИ. Перезагрузка вкладки (F5) не рвёт его SSH-сессию, а состояние страницы
+      обнуляет — и мастер спрашивал пароль root заново, хотя он ему не нужен (поймано на живом
+      стенде 02.09.2026). Ответ берём у агента (`connected` в /api/state), своей памяти о
+      подключении у страницы нет и быть не может. */
+   /* `!ST.pwAsked` — то же условие, что у pwStored ниже, и по той же причине: если молчаливый
+      вход уже НЕ ПОДОШЁЛ, экран обязан открыть поле, а не повторять «пароль не нужен». Без него
+      живая когда-то сессия (роутер перезагрузили под нами) превращала экран в тупик. */
+   if (ST.agent && ST.agent.connected && ST.agent.host === ST.ip && !ST.pwAsked)
+     return Note(T('Мастер уже подключён к ' + esc(ST.ip) + ' — пароль не нужен. Нажмите «Войти».',
+                   'The wizard is already connected to ' + esc(ST.ip) + ' — no password needed. Press “Sign in”.'),
+                 'ok') + '<div id="res" role="status"></div>';
+   if (pwStored())
+     return Note(T('Пароль root уже сохранён — второй раз не спрашиваю.', 'The root password is already saved — I will not ask again.') +
+                 (REPAINT ? '' : ' ' + T('Захожу на ' + esc(ST.ip) + '…', 'Signing in to ' + esc(ST.ip) + '…')),
+                 'info') + '<div id="res" role="status"></div>';
+   return Fld('pw', T('Пароль', 'Password'), '',
+              {auth: T('Сохранённый пароль не подошёл — введите текущий.',
+                       'The saved password did not work — enter the current one.'),
+               access: T('Тот, который вы задали на шаге «Доступ».',
+                         'The one you set at the “Access” step.'),
+               /* Третий случай — «пароль на шаге „Доступ“ ЗАДАТЬ НЕ ВЫШЛО». Он обязан звучать
+                  иначе: подсказка `access` отправила бы вводить пароль, которого на роутере
+                  нет, а это ровно тот тупик, ради которого экран и различает причины. */
+               kept: T('Пароль root на шаге «Доступ» остался прежним — введите тот, что у вас есть.',
+                       'The root password was left unchanged at the “Access” step — enter the one you have.'),
+               defroot: T('Сменить пароль на шаге «Доступ» не вышло — сейчас он «root».',
+                          'Changing the password at the “Access” step failed — right now it is “root”.')}[ST.pwWhy] ||
+              T('После открытия доступа пароль по умолчанию — root.',
+                'Once access is open, the default password is root.'), 'password') +
+   '<div class="wzgap">' + Note(T('Хранилище — системное: Windows Credential Manager · Keychain · Secret Service. ' +
+          'Мастер не отправляет пароль никуда, кроме самого роутера.',
+          'The store is the system one: Windows Credential Manager · Keychain · Secret Service. ' +
+          'The wizard sends the password nowhere except the router itself.'), 'info') + '</div>' +
+   '<div id="res" role="status"></div>';
+ },
+ acts: [{t: Lbl('Назад', 'Back'), go: 'access', k: 'gh', bk: 1},
+        {t: Lbl('Войти', 'Sign in'), act: 'connect', k: 'pri'}],
+ enter: function(){
+   /* Смена языка — не новый вход (ревью шага 8b, круг 2): исход прошлой попытки рисуем из сеанса, автовход не зовём. */
+   if (REPAINT){ var r0 = document.getElementById('res'); if (r0 && ST.connErr) r0.innerHTML = connFailHtml(ST.connErr); }
+   else ST.connErr = null;
+   if (pwStored()){ if (!REPAINT) act('connect', document.querySelector('[data-act=connect]')); return; }
+   var i = document.getElementById('pw');
+   /* ПОЛЯ МОЖЕТ НЕ БЫТЬ: у экрана три тела, и одно из них («мастер уже подключён») его не
+      рисует. Замер в браузере 02.09.2026: render('login') падал здесь с TypeError ровно в том
+      состоянии, ради которого ветка и написана, — а вместе с ним не доигрывал и сам render
+      (после s.enter() у него ещё syncNeed). Та же классика, что в панели: тянуться к узлу,
+      которого в документе нет. */
+   if (!i) return;
+   if (!REPAINT) i.focus();   /* смена языка — не вход: фокус остаётся на переключателе */
+   i.addEventListener('keydown', function(e){ if (e.key === 'Enter') act('connect', document.querySelector('#acts [data-act="connect"]')); });
+ }});
+
+/* ═══ 5. ПАРОЛЬ ROOT. Сегодня README отсылает менять его чужой утилитой — человек уходит и
+   не возвращается, роутер остаётся с паролем, который знает весь интернет. ════════ */
+scr('rootpw', {step: 1, t: Lbl('Смените пароль root', 'Change the root password'),
+ sub: Lbl('Вошли. Сейчас у роутера пароль по умолчанию — так открывают доступ на любом таком роутере.',
+          'Signed in. The router still has the default password — that is how access is opened on every ' +
+          'router like this one.'),
+ body: function(){
+   /* Роутер сам сказал, что сток возвращает заводской пароль на каждой загрузке (AX3600).
+      Молчать об этом нельзя: смена там держится до первого ребута, после которого мастер по
+      сохранённому паролю не войдёт вообще — то есть «полезное действие» ломает вход. */
+   var reset = !!(ST.conn && ST.conn.pw_resets);
+   return (reset ? Note(T(
+        '<b>На этом роутере пароль root сбрасывается при КАЖДОЙ перезагрузке.</b> ' +
+        'Заводская прошивка возвращает его сама — смена продержится только до ребута, а мастер ' +
+        'после него по новому паролю уже не войдёт. Здесь честнее оставить как есть.',
+        '<b>On this router the root password is reset on EVERY reboot.</b> The stock firmware restores ' +
+        'it by itself, so a change lasts only until the next reboot — after that the wizard cannot sign ' +
+        'in with the new password. Leaving it as it is is the honest choice here.'), 'bad') +
+        '<div class="wzgap"></div>' : '') +
+   '<div class="wztwo">' + Fld('p1', T('Новый пароль', 'New password'), '', '', 'password') +
+     Fld('p2', T('Ещё раз', 'Repeat'), '', '', 'password') +
+     '<span class="wzhint">' + T('Не короче 8 символов · латиница, цифры и знаки — без пробелов и кириллицы',
+       'At least 8 characters · Latin letters, digits and symbols — no spaces, no Cyrillic') + '</span></div>' +
+   '<div class="wzgap">' + Note(T('Пароль сохраню в хранилище компьютера, вводить каждый раз не придётся — но <b>запишите его себе</b>: ' +
+          'восстановить его мастер не может.',
+          'The password goes into your computer’s store, so you will not have to type it again — but ' +
+          '<b>write it down</b>: the wizard cannot recover it.'), 'info') + '</div>' +
+   '<div class="wzgap">' + Note(T('Это <b>не</b> пароль веб-панели — тот зададим в конце, и он третий. ' +
+        'Этот пускает в сам роутер.',
+        'This is <b>not</b> the web panel password — that one comes at the end and is a third password. ' +
+        'This one gets you into the router itself.'), 'warn') + '</div>' +
+   '<div id="res" role="status"></div>';
+ },
+ acts: [{t: Lbl('Оставить как есть', 'Leave it as is'), go: 'check', k: 'gh'},
+        {t: Lbl('Сменить и продолжить', 'Change and continue'), act: 'rootpw', k: 'pri'}],
+ enter: function(){
+   /* Там, где смена бессмысленна, ГЛАВНОЙ становится кнопка «оставить»: выделять зелёным
+      действие, которое сломает вход после ребута, — это подсказывать не туда. */
+   pwEnter('rootpw');
+   if (!(ST.conn && ST.conn.pw_resets)) return;
+   /* Ряд собираем заново, а не меняем классы: главная кнопка стоит справа (раздвижка перед ней), и перекрашенная
+      «оставить» слева читалась бы второстепенной. */
+   actsSet('<button class="btn" data-act="rootpw">' + T('Сменить и продолжить', 'Change and continue') + '</button>' + SP +
+     '<button class="btn pri" data-go="check">' + T('Оставить как есть', 'Leave it as is') + '</button>');
+ }});
+
+/* ═══ 6. ПРОВЕРКА ПЕРЕД УСТАНОВКОЙ — с ЧИСЛАМИ. Тестер 23.08.2026 получил «успех» на
+   забитом /data и пошёл искать причину в панели: цифру места ему никто не показал. ══ */
+scr('check', {step: 2, picks: ['tight'], t: Lbl('Проверка перед установкой', 'Checks before installing'),
+ sub: Lbl('Смотрю, что за роутер и влезет ли то, что я повезу.',
+          'Looking at what this router is and whether what I bring will fit.'),
+ body: function(){
+   return '<div id="res" role="status">' + Rows([{mk: 'run', t: T('Спрашиваю роутер…', 'Asking the router…'),
+     d: T('модель, место, каталог, интернет', 'model, free space, directory, internet')}]) + '</div>' +
+     '<div class="wzgap" id="extra"></div>';
+ },
+ /* Кнопка стоит СРАЗУ, до ответа роутера: экран без единой кнопки — тупик, из которого
+    человеку остаётся только перезагрузить страницу (а на ней он потеряет сеанс). */
+ acts: [{t: Lbl('Назад', 'Back'), go: 'login', k: 'gh', bk: 1}],
+ enter: function(){
+   /* Смена языка рисует из сеанса — и факты, и ОТКАЗ. Вход на экран — с чистого листа: прошлые зелёные факты при
+      упавшей перепроверке воскресали сменой языка вместе с открытой «Обновить» (ревью шага 8b, круг 2). */
+   if (REPAINT && ST.facts) return showFacts(ST.facts);
+   if (REPAINT && ST.factsErr) return checkStuck(ST.factsErr);
+   ST.facts = null; ST.factsErr = null;
+   runJob('/api/facts', {}).then(function(r){
+     if (r.gone) return;
+     if (!r.facts){ checkStuck(ST.factsErr = {error: r.error || ''}); return; }
+     ST.facts = r.facts;
+     showFacts(r.facts);
+   }).catch(function(e){ checkStuck(ST.factsErr = {lost: true, error: e.message, http: e.http}); });
+ }});
+
+/* Проверка не дала фактов — причина и дорога: назад и «проверить снова». */
+function checkStuck(fe){
+  var res = document.getElementById('res'), a = document.getElementById('acts');
+  if (res) res.innerHTML = Note(fe.lost ? failTxt(T('Не смог проверить: ', 'Could not run the check: '), {message: fe.error, http: fe.http})
+                                        : esc(fe.error || T('Проверка не прошла', 'The check did not pass')), 'bad');
+  if (a) actsSet('<button class="btn gh" data-go="login" data-bk="1">' + T('Назад', 'Back') + '</button>' + SP +
+    '<button class="btn pri" data-act="recheck">' + T('Проверить снова', 'Check again') + '</button>');
+}
+function showFacts(f){
+  var res = document.getElementById('res'), extra = document.getElementById('extra');
+  /* Вердикт по месту — от агента (space_verdict). Своей арифметики у страницы нет:
+     вторая копия дала бы два разных ответа про одно и то же место. */
+  /* Имя тома называет РОУТЕР (facts.mount): на BE10000 флеш поделён на три ubifs, и наш —
+     /data/usr, а не /data. Литерал в подписи означал бы «числа с одного тома, имя с другого». */
+  var spmp = esc(f.mount || '/data');
+  /* Чем занят роутер (facts.busy): строка проверки (t, d) и причина в плашке (n). Словарь собирается при показе — язык выбран. */
+  var BUSY = {
+    upd: {t: T('Идёт обновление из панели', 'An update from the panel is running'),
+          d: T('обновление или откат кода ещё не закончились', 'a code update or rollback has not finished yet'),
+          n: T('на роутере идёт обновление или откат кода из панели — ставить поверх значит разорвать ему снимок отката.',
+               'a code update or rollback from the panel is running on the router — installing over it would tear its rollback snapshot.')},
+    pkg: {t: T('Идёт установка кода', 'A code installation is running'),
+          d: T('прежний запуск ещё не закончился на роутере', 'an earlier run has not finished on the router yet'),
+          n: T('на роутере ещё идёт установка кода (прежний запуск доработывает сам) — вторая поверх неё перемешала бы наборы файлов.',
+               'a code installation is still going on the router (an earlier run finishing on its own) — a second one on top would mix the file sets.')},
+    uninst: {t: T('Идёт снятие системы', 'The system is being removed'),
+             d: T('отключение или полное удаление ещё не закончились', 'a turn-off or full removal has not finished yet'),
+             n: T('на роутере идёт снятие системы — установка поверх него оставила бы половину системы.',
+                  'the system is being removed on the router — installing over it would leave half a system.')},
+    mode: {t: T('Идёт смена раскладки', 'A layout switch is running'),
+           d: T('код и настройки переезжают на накопитель или обратно', 'the code and settings are moving to the drive or back'),
+           n: T('идёт смена раскладки — установка писала бы в каталоги, которые сейчас копируются.',
+                'a layout switch is running — the installation would write into the directories being copied right now.')}
+  };
+  var space = {
+    /* «Пик» — это НЕ сумма: заливка кладёт рядом временную копию ОДНОГО файла и лишь потом
+       делает mv, поэтому лишнего на флеше — крупнейший файл, а не весь payload. */
+    ok:   {mk: 'ok', d: T('повезу ' + kb(f.payload_kb) + ', при заливке временно ещё ' + kb(f.peak_kb),
+                          'bringing ' + kb(f.payload_kb) + ', plus ' + kb(f.peak_kb) + ' held temporarily while uploading')},
+    near: {mk: 'wr', d: T('впритык: payload ' + kb(f.payload_kb) + ' + неснижаемый резерв ' + kb(f.reserve_kb),
+                          'only just: payload ' + kb(f.payload_kb) + ' + a reserve of ' + kb(f.reserve_kb) + ' that cannot be used')},
+    tight:{mk: 'wr', d: T('меньше, чем payload ' + kb(f.payload_kb) + ' — но UBIFS сжимает, шанс есть',
+                          'less than the payload (' + kb(f.payload_kb) + ') — but UBIFS compresses, so it may still fit')},
+    none: {mk: 'no', d: T('не влезет даже самый крупный файл (' + kb(f.peak_kb) + ')',
+                          'not even the largest single file fits (' + kb(f.peak_kb) + ')')},
+    unknown: {mk: 'wr', d: T('df на роутере не ответил — поставлю без проверки',
+                             'df on the router did not answer — installing without this check')}
+  }[f.space];
+  res.innerHTML = Rows([
+    {mk: 'ok', t: T('Модель и архитектура', 'Model and architecture'),
+     d: T('арку опознал по /bin/busybox, а не по названию',
+          'the architecture is read from /bin/busybox, not from the name'),
+     v: (f.model || T('модель не спрашивали', 'model not queried')) + ' · ' + f.arch_label},
+    /* Пакет кода рядом с мастером — тот же, которым роутер обновляется из панели. Нет или битый —
+       ОТКАЗ: ставить нечем, и причину называет агент (local_package), своей у страницы нет. */
+    f.pkg_ok ? {mk: 'ok', t: T('Пакет кода', 'Code package'),
+                d: T('тот же, которым роутер потом обновляется из панели', 'the same one the router later updates with from the panel'),
+                v: f.payload_version || ''}
+             : {mk: 'no', t: T('Пакет кода', 'Code package'), d: esc(f.pkg_why || ''), v: T('нельзя ставить', 'cannot install')},
+    {mk: space.mk, t: T('Место на ' + spmp, 'Space on ' + spmp), d: space.d,
+     v: f.free_kb == null ? '—' : T('свободно ' + kb(f.free_kb), kb(f.free_kb) + ' free')},
+    f.writable ? {mk: 'ok', t: T('Каталог установки', 'Install directory'),
+                  d: esc(f.dir) + T(' — записывается', ' — writable'), v: T('готов', 'ready')}
+               : {mk: 'no', t: T('Каталог установки', 'Install directory'),
+                  d: esc(f.dir) + T(' не записывается: вход не под root?',
+                               ' is not writable — signed in as someone other than root?'), v: T('нет', 'no')},
+    f.net ? {mk: 'ok', t: T('Интернет на роутере', 'Internet on the router'),
+             d: T('нужен, чтобы панель потом сама скачала протоколы',
+                  'needed so the panel can download the protocols itself later'), v: T('есть', 'yes')}
+          : {mk: 'wr', t: T('Интернет на роутере', 'Internet on the router'),
+             d: T('панель встанет, но компоненты качать будет неоткуда',
+                  'the panel will install, but there will be nowhere to fetch components from'), v: T('нет', 'no')},
+    f.dns ? null : {mk: 'wr', t: T('DNS на роутере не резолвит', 'DNS on the router does not resolve'),
+                    d: T('маршрут есть, имена не разрешаются — GitHub будет недоступен',
+                         'the route works but names do not resolve — GitHub will be unreachable'), v: T('нет', 'no')},
+    f.installed ? {mk: 'wr', t: T('Панель уже стоит', 'The panel is already installed'),
+                   d: T('это обновление, а не установка с нуля', 'this is an update, not a fresh install'),
+                   v: f.version || '?'}
+                : {mk: 'wr', t: T('Панели ещё нет', 'No panel yet'),
+                   d: T('это установка с нуля, а не обновление', 'this is a fresh install, not an update'), v: '—'},
+    /* Прежняя установка рядом — ОТКАЗ, а не предупреждение: две копии дерутся за одни iptables
+       и cron. Строка стоит ПОСЛЕДНЕЙ намеренно: она отменяет вывод предыдущей («панели ещё
+       нет» — правда про НАШ каталог и неправда про роутер в целом). */
+    /* СИСТЕМА НА НАКОПИТЕЛЕ. С 30.09.2026 ПК ставит туда, где система живёт (как обновление из панели), — это ФАКТ, а не
+       запрет. Запрет остался один: система числится на накопителе, а накопителя нет (`store`) — ставить некуда, а на флеше
+       выросла бы ВТОРАЯ система рядом с настоящей, оставшейся на полке. */
+    f.store ? {mk: 'no', t: T('Система живёт на накопителе', 'The system lives on a drive'),
+               d: T('…а накопителя сейчас нет — воткните его и проверьте снова',
+                    '…and the drive is not plugged in — plug it in and check again'),
+               v: T('нельзя ставить', 'cannot install')}
+            : (f.store_mode === 'full' ? {mk: 'ok', t: T('Система живёт на накопителе', 'The system lives on a drive'),
+               d: T('ставлю туда же: ' + esc(f.store_dir || ''), 'installing into the same place: ' + esc(f.store_dir || '')),
+               v: T('на накопитель', 'onto the drive')} : null),
+    /* Роутер занят тем, поверх чего ставить нельзя (ревью ветки pkg-update, круги 1–2): обновление или откат из панели (разорвали
+       бы ему снимок отката), прежняя установка кода (доработывает отцепленно — вторая перемешала бы наборы), смена раскладки
+       (установка писала бы в каталог, который сейчас копируется). Причину называет роутер (`busy`), слова — здесь. */
+    BUSY[f.busy] ? {mk: 'no', t: BUSY[f.busy].t, d: BUSY[f.busy].d, v: T('нельзя ставить', 'cannot install')} : null,
+    f.legacy ? {mk: 'no', t: T('Стоит прежняя версия', 'An older version is installed'),
+                d: (f.legacy_dir ? esc(f.legacy_dir) : T('прежний каталог', 'the old directory')) +
+                   T(' — её надо снять, иначе две копии будут драться за правила',
+                     ' — it has to be removed, or two copies will fight over the same rules'),
+                v: T('нельзя ставить', 'cannot install')} : null
+  ]);
+  var blocked = (f.space === 'none') || !f.writable || !!f.legacy || !!f.store || !!f.busy || !f.pkg_ok;
+  extra.innerHTML =
+    Note(T('<b>Что поставлю:</b> веб-панель :8088, скрипты, автозапуск и сторож в cron, плюс два маленьких ' +
+           'компонента обхода блокировок без сервера (ByeDPI и Zapret) — они же аварийный канал до GitHub.',
+           '<b>What gets installed:</b> the :8088 web panel, the scripts, autostart and the watchdog in cron, ' +
+           'plus two small server-less circumvention components (ByeDPI and Zapret) — which double as an ' +
+           'emergency channel to GitHub.'), 'acc') +
+    '<div class="wzchips"><span class="chip wzcp">' + T('заводская морда не трогается', 'the stock web interface is untouched') +
+    '</span><span class="chip wzcp">' + T('Wi-Fi и настройки сети остаются вашими', 'Wi-Fi and network settings stay yours') +
+    '</span><span class="chip wzcp">' + T('снимается целиком — из панели или мастером', 'fully removable — from the panel or this wizard') + '</span></div>' +
+    (f.space === 'tight' ? '<div class="wzgap">' +
+       Note(T('Места меньше, чем занимает payload на компьютере. UBIFS сжимает, и обычно этого хватает — ' +
+              'а если не хватит, установка сама снимет то, что успела положить, и роутер останется прежним.',
+              'There is less free space than the payload takes on the computer. UBIFS compresses, and usually ' +
+              'that is enough — and if it is not, the installation removes what it managed to place, and the ' +
+              'router stays as it was.'), 'warn') +
+       Chk('tight', T('Понимаю и всё равно пробую', 'I understand and want to try anyway')) + '</div>' : '') +
+    (f.space === 'none' ? '<div class="wzgap">' +
+       Note(T('<b>Установка не начнётся.</b> Чистить чужой роутер молча мастер не станет. Освободите место ' +
+              '(по SSH: <code>du -xsk ' + spmp + '/* | sort -n | tail -15</code>) и проверьте снова.',
+              '<b>The installation will not start.</b> The wizard will not clean out someone else’s router on ' +
+              'its own. Free up space (over SSH: <code>du -xsk ' + spmp + '/* | sort -n | tail -15</code>) and check ' +
+              'again.'), 'bad') + '</div>' : '') +
+    /* Кнопка выключена — и человек обязан прочитать ПОЧЕМУ. Без этой строки он ставит галочку
+       «всё равно пробую», видит мёртвую кнопку и решает, что сломан мастер. */
+    (f.legacy ? '<div class="wzgap">' +
+       Note(T('<b>Установка не начнётся.</b> На роутере лежит установка прежней версии — ' +
+              '<code>' + esc(f.legacy_dir || '') + '</code>. Снимите её: в её же панели ' +
+              '«Настройки» → «Удаление» → «Удалить всё», либо по SSH ' +
+              '<code>sh ' + esc(f.legacy_dir || '') + '/uninstall.sh purge</code>. ' +
+              'Сами мы её не трогаем: снять установку умеет только её собственный снимальщик — ' +
+              'он знает свои имена правил и задач, а мы уже нет.',
+              '<b>The installation will not start.</b> An older installation is present on the router — ' +
+              '<code>' + esc(f.legacy_dir || '') + '</code>. Remove it from its own panel: ' +
+              '“Settings” → “Uninstall” → “Remove everything”, or over SSH ' +
+              '<code>sh ' + esc(f.legacy_dir || '') + '/uninstall.sh purge</code>. ' +
+              'We do not touch it ourselves: only its own uninstaller knows the names of its rules and ' +
+              'cron jobs — we no longer do.'), 'bad') + '</div>' : '') +
+    (f.store ? '<div class="wzgap">' +
+       Note(T('<b>Установка не начнётся.</b> Система стоит на внешнем накопителе, а накопителя на ' +
+             'роутере сейчас нет. Воткните его: панель и настройки поднимутся сами. Ставить ' +
+             'сейчас нельзя — на флеше выросла бы ВТОРАЯ установка, а прежняя, с ключами и ' +
+             'паролем панели, осталась бы на накопителе сиротой.',
+             '<b>The installation will not start.</b> The system is installed on an external drive, ' +
+             'and the drive is not in the router right now. Plug it in: the panel and the settings ' +
+             'come back on their own. Installing now is not possible — a SECOND installation would ' +
+             'grow on the flash, and the old one, with the keys and the panel password, would be ' +
+             'orphaned on the drive.'), 'bad') + '</div>' : '') +
+    (f.busy ? '<div class="wzgap">' +
+       Note(T('<b>Установка не начнётся:</b> ', '<b>The installation will not start:</b> ') +
+            (BUSY[f.busy] ? BUSY[f.busy].n : esc(f.busy)) +
+            T(' Дождитесь конца и проверьте снова.', ' Wait for it to finish and check again.'), 'bad') + '</div>' : '') +
+    (!f.writable ? '<div class="wzgap">' +
+       Note(T('<b>Установка не начнётся:</b> каталог <code>' + esc(f.dir) + '</code> не записывается. ' +
+              'Чаще всего это значит, что на роутер вошли не под root — проверьте, тем ли паролем ' +
+              'входили, и попробуйте снова.',
+              '<b>The installation will not start:</b> the directory <code>' + esc(f.dir) + '</code> is not ' +
+              'writable. Most often that means the router session is not root — check which password was ' +
+              'used and try again.'), 'bad') + '</div>' : '') +
+    (!f.pkg_ok ? '<div class="wzgap">' +
+       Note(T('<b>Установка не начнётся:</b> ставить нечем — код роутера едет одним пакетом ' +
+              '(<code>enodia-*.tar.gz</code> рядом с мастером), а с ним не так: ' + esc(f.pkg_why || '') + '.',
+              '<b>The installation will not start:</b> there is nothing to install — the router code travels as one ' +
+              'package (<code>enodia-*.tar.gz</code> next to the wizard), and something is wrong with it: ' +
+              esc(f.pkg_why || '') + '.'), 'bad') + '</div>' : '');
+  actsSet('<button class="btn gh" data-act="recheck">' + T('Проверить снова', 'Check again') +
+    '</button><div class="grow"></div>' +
+    /* Панель стоит — пришли с «Панель уже стоит», туда и дорога назад (`data-bk`: «назад» браузера идёт по ней). */
+    (f.installed ? '<button class="btn" data-go="exists" data-bk="1">' + T('Что с ней можно сделать', 'What can be done with it') +
+      '</button>' : '') +
+    '<button class="btn pri" data-act="install"' + (blocked ? ' disabled data-blocked="1"' : '') +
+    (f.space === 'tight' ? ' data-need="tight"' : '') + '>' +
+    (f.installed ? T('Обновить', 'Update') : T('Установить', 'Install')) + '</button>');
+  syncNeed();
+}
+
+/* ═══ 7. УСТАНОВКА. Прогресс ЭТАПАМИ и живой лог: этапы разной длины, и человек должен
+   видеть, что процесс идёт, а не завис. ═══════════════════════════════════════ */
+scr('install', {step: 2, once: true, t: Lbl('Ставлю панель', 'Installing the panel'),
+ sub: Lbl('Полторы-две минуты. Роутер продолжает раздавать интернет — связь не прервётся.',
+          'A minute or two. The router keeps serving the internet — your connection will not drop.'),
+ body: function(){
+   return '<div id="res" role="status">' + Rows([{mk: 'run', t: T('Идёт установка…', 'Installing…'),
+     d: T('проверка → заливка → установщик → проверка', 'checks → upload → installer → verification')}]) + '</div>' +
+     '<div class="wzgap">' + Log('wzlog') + '</div>';
+ },
+ acts: [],
+ enter: function(){
+   var res = document.getElementById('res'), log = document.getElementById('wzlog');
+   runJob('/api/install', {tight_ok: ST.tight === true}, function(lines){
+     logPush(log, lines);
+   }).then(function(r){
+     if (r.gone) return;
+     if (r.ok){
+       ST.panelUp = true;   /* экран «Мастер закрыт» называет адрес панели, только когда она правда стоит */
+       res.innerHTML = Rows([{mk: 'ok', t: T('Панель установлена', 'The panel is installed'),
+         d: T('файлы, cron и автозапуск на месте', 'files, cron and autostart are in place'), v: r.url || ''}]);
+       /* Обновление (панель уже стояла) пароль панели не трогает: задать новый можно, но и оставить прежний — тоже.
+          Прежде единственная дорога вела через «Задать пароль» (ревью шага 8b, круг 2). */
+       actsSet((ST.upd ? keepPwBtn() : '') +
+         SP + '<button class="btn pri" data-go="panelpw">' + T('Дальше · пароль панели', 'Continue · panel password') + '</button>');
+     } else if (r.stage === 'running'){
+       /* Установщик на роутере ещё работает (он отцеплен и доработает сам) или роутер не ответил — это не неудача, и
+          «Повторить» здесь вредно: вторая установка поверх первой откажет, а человек решит, что сломано. Дорога — к проверке:
+          она скажет «идёт установка кода», пока та не кончится (ревью ветки pkg-update, круг 2). */
+       res.innerHTML = Rows([{mk: 'wr', t: T('Установка ещё идёт на роутере', 'The installation is still running on the router'),
+         d: esc(r.error || ''), v: T('идёт', 'running')}]);
+       actsSet('<div class="grow"></div><button class="btn pri" data-go="check">' + T('Проверить снова', 'Check again') + '</button>');
+     } else {
+       /* «Установка не прошла» — это ТРИ разные беды (проверка, заливка, установщик), и
+          повторять после каждой можно: установка идемпотентна. */
+       res.innerHTML = Rows([{mk: 'no', t: T('Установка не завершилась', 'The installation did not finish'),
+         d: esc(r.error || T('смотрите вывод ниже', 'see the output below')),
+         v: {preflight: T('проверка', 'checks'), upload: T('заливка', 'upload'),
+             installer: T('установщик', 'installer')}[r.stage] || ''}]);
+       actsSet('<button class="btn gh" data-go="check" data-bk="1">' + T('К проверке', 'Back to checks') +
+         '</button><div class="grow"></div>' +
+         '<button class="btn pri" data-go="install">' + T('Повторить', 'Try again') + '</button>');
+     }
+   }).catch(function(e){
+     /* Оборвалась связь С АГЕНТОМ (не с роутером): установка при этом могла и продолжаться.
+        Кнопки обязаны остаться — иначе экран становится тупиком ровно там, где страшнее всего. */
+     res.innerHTML = Note(lostTxt(e) + T('. Установка на роутере могла продолжиться — проверьте состояние, прежде чем повторять.',
+         '. The installation on the router may have carried on — check the state before retrying.'), 'bad');
+     actsSet('<button class="btn gh" data-act="recheck">' + T('Проверить состояние', 'Check the state') +
+       '</button><div class="grow"></div>' +
+       '<button class="btn" data-go="scan">' + T('В начало', 'Start over') + '</button>');
+   });
+ }});
+
+/* ═══ 8. ПАРОЛЬ ПАНЕЛИ. Отдельным экраном и ПОСЛЕ установки: до неё пароль некуда положить,
+   а панель без пароля не отдаётся никому. ═════════════════════════════════════ */
+/* Экран служит ДВУМ входам, и это одна и та же работа: шаг установки («панель поставлена —
+   придумайте пароль») и «Панель уже стоит» -> «Сменить пароль панели» (пароль забыт: в саму
+   панель войти нечем, а сменить его больше неоткуда — раньше это умело ТОЛЬКО текстовое меню).
+   Владелец применения один — `_apply_panel_password` на ПК, — поэтому и экран один: собран
+   фабрикой и разложен в два id. Второй копии ФОРМЫ не заводить: разъехавшиеся правила ввода на
+   двух входах мы уже чинили (16.08.2026 — лишний символ дал роутер, в панель которого не войти).
+   Отличий ровно два: в режиме смены экран говорит, что установку не трогает, и имеет дорогу
+   НАЗАД — пришли не из потока, и человек вправе передумать; метка `bk` нужна, чтобы «назад»
+   БРАУЗЕРА вела туда же, куда кнопка (иначе она увела бы вперёд и запустила чужое задание). */
+function panelPwScreen(only){
+ return {step: 2,
+ t: only ? Lbl('Сменить пароль панели', 'Change the panel password')
+         : Lbl('Пароль веб-панели', 'Web panel password'),
+ sub: only ? Lbl('Забыли пароль от панели — задайте новый. Панель спросит его формой при открытии.',
+                 'Forgot the panel password — set a new one. The panel asks for it in a sign-in form when it opens.')
+           : Lbl('Панель доступна всем, кто в вашей сети, — поэтому у неё свой пароль. Панель спросит его формой при открытии.',
+                 'The panel is reachable by everyone on your network, so it has a password of its own. ' +
+                 'The panel asks for it in a sign-in form when it opens.'),
+ body: function(){
+   return '<div class="wztwo">' + Fld('p1', T('Пароль', 'Password'), '', '', 'password') +
+     Fld('p2', T('Ещё раз', 'Repeat'), '', '', 'password') +
+     '<span class="wzhint">' + T('8–64 символа, без пробелов и кириллицы · опечатку иначе не поймать: панель подтвердит ровно то, что вы набрали',
+       '8–64 characters, no spaces, no Cyrillic · the only way to catch a typo: the panel will accept exactly what you typed') +
+     '</span></div>' +
+   '<div class="wzgap">' + Note(T('Это <b>не</b> пароль root от роутера и не пароль от заводской морды Xiaomi. Третий, отдельный.',
+          'This is <b>not</b> the router’s root password, nor the Xiaomi stock interface password. ' +
+          'It is a third, separate one.'), 'warn') + '</div>' +
+   (only ? '<div class="wzgap">' + Note(T('Меняется только пароль панели: скрипты, серверы и правила роутера остаются как есть.',
+          'Only the panel password changes: the router scripts, servers and rules stay as they are.'), 'info') + '</div>' : '') +
+   '<div class="wzgap">' + Note(T('Проверю пароль тем же путём, которым пойдёт браузер: не «команда выполнилась», ' +
+        'а «панель пустила».',
+        'The password is verified the same way the browser will use it: not “the command ran”, but ' +
+        '“the panel let us in”.'), 'info') + '</div>' +
+   '<div id="res" role="status"></div>';
+ },
+ acts: only ? [{t: Lbl('Назад', 'Back'), go: 'exists', k: 'gh', bk: true},
+               {t: Lbl('Задать пароль', 'Set the password'), act: 'panelpw', k: 'pri'}]
+            : [{t: Lbl('Задать пароль', 'Set the password'), act: 'panelpw', k: 'pri'}],
+ enter: function(){
+   pwEnter('panelpw');
+   /* Обновление — прежний пароль можно оставить и отсюда (сюда же ведёт F5 посреди обновления). */
+   if (!only && ST.upd){ var ka = document.getElementById('acts'); if (ka) ka.insertAdjacentHTML('afterbegin', keepPwBtn()); }
+   if (!REPAINT){ ST.pwDone = null; return; }
+   if (only && ST.pwDone) pwDonePaint();
+ }};
+}
+/* Куда после заданного пароля панели: экран раскладки существует, ТОЛЬКО когда роутеру есть что предложить (накопитель
+   виден и бутстрап назвал текущую раскладку). Спрашивает об этом задание пароля — тем же SSH-сеансом. Иначе экран мигнул
+   бы и увёл дальше сам. Один разбор на экран пароля и на F5 (`RESUME`). */
+function keepPwBtn(){ return '<button class="btn gh" data-act="keeppw">' + T('Оставить прежний пароль', 'Keep the current password') + '</button>'; }
+function pwNext(r){
+  ST.store = r.store || null;
+  var cn = (ST.store && ST.store.cands) || [];
+  return (ST.store && ST.store.mode && cn.length) ? 'storage' : 'done';
+}
+/* Enter в любом из двух полей пароля — то же, что кнопка действия (на «Найдём роутер», «Пароль root» и форме доступа
+   Enter работал, здесь — нет; ревью шага 8b, круг 2). */
+function pwEnter(a){
+  ['p1', 'p2'].forEach(function(id){
+    var i = document.getElementById(id);
+    if (i) i.addEventListener('keydown', function(e){ if (e.key === 'Enter') act(a, document.querySelector('#acts [data-act="' + a + '"]')); });
+  });
+}
+/* Успех смены пароля панели — на месте (человек ничего не устанавливал, в «Готово» ему не за чем). Художник один —
+   на ответ роутера и на смену языка (`ST.pwDone` — адрес панели, который назвал агент). */
+function pwDonePaint(){
+  var res = document.getElementById('res'), ac = document.getElementById('acts');
+  /* Поля с принятым паролем убираем: Enter в них задавал его второй раз (ревью шага 8b, круг 3). */
+  var fm = document.querySelector('#wz-view .wztwo'); if (fm) fm.remove();
+  if (res) res.innerHTML = '<div class="wzgap">' + Note(T('Панель приняла новый пароль. Адрес ',
+    'The panel accepted the new password. Address ') + '<b>' + esc(ST.pwDone.url) + '</b>.', 'ok') + '</div>';
+  if (ac) actsSet('<button class="btn gh" data-go="exists" data-bk="1">' + T('Назад', 'Back') + '</button>' + SP +
+    '<button class="btn pri" data-act="openpanel">' + T('Открыть панель', 'Open the panel') + '</button>');
+}
+scr('panelpw', panelPwScreen(false));
+scr('panelpw-only', panelPwScreen(true));
+
+/* ═══ 8b. РАСКЛАДКА. Экран появляется ТОЛЬКО там, где роутер видит накопитель: спрашивать
+   «куда ставить» на роутере без флешки — вопрос ради вопроса.
+   Стоит ПОСЛЕ пароля панели, а не до установки, и это не «как удобнее». Переносит систему САМ
+   РОУТЕР (usb-offload.sh), а до установки его на роутере нет вовсе; свежая установка с ПК ложится
+   на флеш (переустановка — туда, где система уже живёт, с 30.09.2026). Значит у НОВОЙ системы порядок
+   ровно один — «поставили на флеш → убедились, что панель пускает → перенесли», и он же обратим:
+   не переехало — установка цела.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+scr('storage', {step: 2, picks: ['store', 'removable'], t: Lbl('Где будет жить система', 'Where the system will live'),
+ sub: Lbl('К роутеру подключён накопитель. На него можно перенести часть системы или всю — ' +
+          'или оставить всё как есть.',
+          'A drive is plugged into the router. Part of the system — or all of it — can move there, ' +
+          'or you can leave everything as it is.'),
+ body: function(){
+   return '<div id="res" role="status">' + Rows([{mk: 'run', t: T('Спрашиваю роутер…', 'Asking the router…'),
+     d: T('что за накопитель и сколько на нём места',
+          'what the drive is and how much room it has')}]) + '</div>' +
+     '<div class="wzgap" id="extra"></div>';
+ },
+ /* Кнопка ухода стоит СРАЗУ, до ответа роутера: экран без единой кнопки — тупик (то же
+    правило, что на экране проверки). */
+ acts: [{t: Lbl('Пропустить', 'Skip'), go: 'done', k: 'gh'}],
+ enter: function(){
+   /* Срез берём из сеанса, если он там уже есть (его привёз экран пароля или «Оставить прежний пароль» — оба ведут
+      сюда только через `pwNext`, то есть когда накопитель виден). Обнулили его ровно в одном месте — после попытки
+      переезда: возвращаться к выбору надо с тем, что на роутере СЕЙЧАС. */
+   if (ST.store) return showStore(ST.store);
+   if (REPAINT && ST.storeErr) return storeFail(ST.storeErr);
+   ST.storeErr = null;
+   /* Ответ и отказ ушедшего экрана `runJob` гасит сам (`gone`). */
+   runJob('/api/store', {}).then(function(r){
+     if (r.gone) return;
+     ST.store = r.store || {};
+     showStore(ST.store);
+   }).catch(function(e){ storeFail(ST.storeErr = {error: e.message, http: e.http}); });
+ }});
+function storeFail(se){
+  var res = document.getElementById('res');
+  if (res) res.innerHTML = Note(failTxt(T('Не смог спросить роутер: ', 'Could not ask the router: '), {message: se.error, http: se.http}), 'bad');
+}
+
+/* ГДЕ ЖИВЁТ СИСТЕМА — человеческим словом. `data`/`bins`/`full` это язык движка, и в лицо
+   человеку он уже попадал (ярлыки `nopass`/`negotiation` на экране входа — их вычищали
+   отдельной правкой). Кисть ОДНА на оба экрана раскладки: две копии разошлись бы. */
+function storeWhere(m){
+  /* `none` — законный ответ бутстрапа: «код на накопителе, а накопителя НЕТ» (его видно, если
+     флешку выдернули посреди переезда). Без своей строки сюда приехало бы слово движка. */
+  return {data: T('на роутере', 'on the router'), bins: T('частично', 'partly'),
+          full: T('на накопителе', 'on the drive'),
+          none: T('накопителя нет', 'no drive')}[m] || m || '';
+}
+function showStore(s){
+  var res = document.getElementById('res'), extra = document.getElementById('extra');
+  var cands = (s.cands || []).filter(function(c){ return c && c.dev; });
+  var mode = s.mode || '';
+  /* Режим называет БУТСТРАП, и пусто — это не «data». Пусто значит, что бутстрапа на роутере
+     нет (сборка старее фичи либо `boot.sh sync` не прошёл): перенести систему нечем, и
+     карточки, которые молча ничего не делают, хуже их отсутствия. Ровно тем же правилом
+     живёт панель — раздел раскладки она в этом случае не рисует. */
+  if (!mode || !cands.length){
+    res.innerHTML = Rows([{mk: 'wr',
+      t: cands.length ? T('Раскладку менять нечем', 'There is no layout to change')
+                      : T('Накопителя роутер не видит', 'The router does not see a drive'),
+      d: cands.length ? T('роутер не назвал текущую раскладку — обновите установку и попробуйте из панели',
+                          'the router did not name its current layout — update the installation and try from the panel')
+                      : T('всё останется во встроенной памяти роутера — как и было',
+                          'everything stays in the router’s built-in storage, just as before'),
+      v: T('пропускаю', 'skipping')}]);
+    extra.innerHTML = '';
+    actsSet('<div class="grow"></div><button class="btn pri" data-go="done">' + T('Дальше', 'Continue') + '</button>');
+    return;
+  }
+  /* Ёмкость показываем ТОЛЬКО когда накопитель один и уже смонтирован: движок не монтирует
+     чужую флешку ради красивой цифры, а `blkid` на роутере нет. Не знаем — так и говорим,
+     а не выдумываем «≈ 32 ГБ». Правило и текст — те же, что в панели. */
+  var one = cands.length === 1 ? cands[0] : null;
+  var free = one && Number(one.free_b) > 0 ? Number(one.free_b) : Number(s.store_free_b);
+  var total = one && Number(one.total_b) > 0 ? Number(one.total_b) : Number(s.store_total_b);
+  res.innerHTML = Rows([
+    {mk: 'ok', t: T('Сейчас система живёт', 'The system currently lives'),
+     d: {data: T('целиком во встроенной памяти роутера', 'entirely in the router’s built-in storage'),
+         bins: T('на накопителе только тяжёлые протоколы, остальное на роутере',
+                 'only the heavy protocols are on the drive; the rest is on the router'),
+         full: T('на накопителе целиком', 'entirely on the drive')}[mode] || '',
+     v: storeWhere(mode)},
+    {mk: 'ok', t: T('Накопитель', 'The drive'),
+     d: one ? (esc(one.dev) + (one.fs && one.fs !== '?' ? ' · ' + esc(one.fs) : '') +
+               (one.mnt && one.mnt !== '-' ? T(' · уже смонтирован', ' · already mounted')
+                                           : T(' · роутер смонтирует сам', ' · the router will mount it')))
+            : T('роутер видит несколько — выберите ниже', 'the router sees several — pick one below'),
+     v: total > 0 ? T('свободно ' + hb(free), hb(free) + ' free')
+                  : T('размер узнаем при переносе', 'size known once it is mounted')}
+  ]);
+  /* «Сейчас так» — на карточке текущей раскладки: она никуда не ведёт, но и не спрятана.
+     Спрятать значило бы заставить искать, чем сейчас всё устроено. */
+  var cur = function(m){ return m === mode ? T(' · сейчас так', ' · current') : ''; };
+  var sel = storeSel();
+  /* ХРАНИТ ЛИ ПРАВА ФС ЦЕЛЕВОГО накопителя. Считает РОУТЕР (поле `perm` кандидата,
+     mount-lib.sh::fs_keeps_perms) — своей таблицы файловых систем здесь нет и быть не должно:
+     вторая копия уже есть в панели, третья разошлась бы с обеими. Старый движок поля не
+     назовёт ⇒ `undefined` ⇒ «не хранит», то есть прежний текст байт-в-байт.
+     Свойство это — ВЫБРАННОГО накопителя, а не первого попавшегося: накопителей бывает
+     несколько и размечены они по-разному, поэтому на смену выбора экран перерисовывается
+     (общий обработчик change ниже). */
+  var tgt = one || cands.filter(function(c){ return c.dev === ST.storeDev; })[0] || cands[0];
+  var perm = !!(tgt && tgt.perm === true);
+  var tgtFs = (tgt && tgt.fs && tgt.fs !== '?') ? esc(tgt.fs) : '';
+  extra.innerHTML =
+    (one ? '' : '<label class="dsfld">' + T('Какой накопитель', 'Which drive') +
+       '<span class="wzinp"><select class="inp wzi" id="storedev">' + cands.map(function(c){
+         return '<option value="' + esc(c.dev) + '">' + esc(c.dev) +
+           (Number(c.total_b) > 0 ? ' · ' + hb(c.total_b) : '') + '</option>'; }).join('') +
+       '</select></span><span class="wzhint">' +
+       T('Движок не угадывает: накопителей несколько, и выбрать должен человек.',
+         'The engine does not guess: there is more than one drive, so the choice is yours.') +
+       '</span></label>') +
+    '<div class="wzgap">' + Opt('store', [
+      {v: 'data', ic: 'i-router', t: T('На роутере', 'On the router') + cur('data'),
+       d: T('Вся система во встроенной памяти. Накопитель можно вынуть — ничего не изменится.',
+            'The whole system stays in built-in storage. The drive can be pulled out and nothing changes.')},
+      {v: 'bins', ic: 'i-zap', t: T('Протоколы — на накопителе', 'Protocols on the drive') + cur('bins'),
+       d: T('Xray, Hysteria2 и десинк переедут на накопитель, освободив место. Код, настройки и ключи ' +
+            'останутся на роутере.',
+            'Xray, Hysteria2 and the desync tools move to the drive and free up room. The code, the ' +
+            'settings and the keys stay on the router.')},
+      {v: 'full', ic: 'i-usb', t: T('Всё на накопителе', 'Everything on the drive') + cur('full'),
+       d: T('На роутере останется только запускатель (около 20 КБ). Без накопителя роутер работает ' +
+            'как обычный, без VPN.',
+            'Only the launcher (about 20 KB) stays on the router. Without the drive the router works ' +
+            'as a plain router, with no VPN.')}
+    ], sel) + '</div>' +
+    /* ЦЕНУ НАЗЫВАЕМ ДО КЛИКА, а не после. Пользователь принял этот размен осознанно («это
+       домашние устройства») — значит и человеку за мастером он обязан быть назван вслух, а не
+       найден потом в документации. Галочка — тот же механизм согласия, что у «места впритык».
+
+       ФАКТОВ ЗДЕСЬ ДВА, И ОНИ РАЗНЫЕ — прежний текст сваливал их в один и врал половине людей:
+         * НОСИТЕЛЬ СЪЁМНЫЙ. Кто его вынул и вставил в компьютер — прочитает всё. Это верно при
+           ЛЮБОЙ разметке: под своим root'ом права чужой машине не указ. Отсюда галочка стоит
+           ВСЕГДА, и текст про exFAT её никогда не отпирал.
+         * ПРАВА ДОСТУПА НА САМОМ РОУТЕРЕ. Вот это уже свойство ФС: exFAT их не хранит вовсе и
+           монтируется с fmask=0000 (0777 на каждый файл), а ext4 хранит. Роутер не однопользо-
+           вательский — проба десинка бежит из-под nobody, — так что разница настоящая.
+       Владелец ответа на второй вопрос — роутер (`perm`), здесь только выбор строки. */
+    /* Цена и согласие — у ВЫБРАННОГО «всё на накопителе» (и если раскладка уже не такая): у «протоколов» и «на
+       роутере» галочка ничего не запирала, а плашка про секреты читалась ценой того, что человек выбрал (ревью 8b). */
+    (sel !== 'full' || mode === 'full' ? '' :
+    '<div class="wzgap">' +
+    Note(T('<b>Всё на накопителе:</b> туда переедут и секреты — ключи AmneziaWG, ссылки подписок, ' +
+           'хэш пароля панели и пароль почты. Накопитель съёмный: кто вынет его и вставит в ' +
+           'компьютер — прочитает всё.',
+           '<b>Everything on the drive:</b> the secrets move along — AmneziaWG keys, subscription links, ' +
+           'the panel password hash and the mail password. The drive is removable: anyone who pulls it ' +
+           'out and plugs it into a computer can read everything.') +
+         /* СОСТОЯНИЙ ТРИ, А НЕ ДВА, и третье — самое частое. ФС кандидата роутер знает, ТОЛЬКО
+            если тот уже смонтирован: `blkid` на роутере нет, а монтировать чужую флешку ради
+            информационного экрана — побочный эффект (см. cmd_detect). ЗАМЕР 02.09.2026: сразу
+            после форматирования в ext4 стоковый automount флешку не поднял (uuid сменился), и
+            экран, зная про неё только имя устройства, уверенно сообщил «exFAT прав не хранит».
+            Гейт при этом был верен (галочка на месте), а вот УТВЕРЖДЕНИЕ — нет: мы называли
+            конкретную ФС у накопителя, разметки которого не знаем. Ровно тот класс, ради
+            которого вся эта правка и затевалась, — поэтому «не знаем» говорим вслух. */
+         /* Текст ветки «права хранит» — макета `wz-storage`: оба факта одной фразой — от программ роутера закрыто, от
+            вынувшего флешку не спасает. */
+         (perm
+           ? T(' Разметка ' + (tgtFs || 'этого накопителя') + ' права хранит — от остальных программ на роутере ключи закрыты, ' +
+               'но от того, кто вынет флешку, не спасает и она.',
+               ' The ' + (tgtFs ? tgtFs + ' format' : 'format of this drive') + ' keeps access rights — the keys are closed to ' +
+               'the other programs on the router, but it does not stop whoever pulls the drive out either.')
+           : tgtFs
+           ? T(' Прав доступа на нём вдобавок нет: exFAT их не хранит, и роутер монтирует его так, ' +
+               'что файлы открыты и остальным программам на самом роутере. Разметка ext4 это ' +
+               'убирает — но съёмности носителя не отменяет.',
+               ' On top of that it keeps no access rights: exFAT does not store them, and the router ' +
+               'mounts it so the files are open to the other programs on the router as well. An ext4 ' +
+               'drive removes that — but not the fact that the drive is removable.')
+           : T(' Какая на нём разметка — узнаем при переносе, он ещё не смонтирован. Если exFAT или ' +
+               'FAT, прав доступа на нём нет вовсе: файлы будут открыты и остальным программам на ' +
+               'самом роутере. Если ext4 — права сохранятся. На съёмность носителя это не влияет ' +
+               'в любом случае.',
+               ' Which format it uses we will learn during the move — it is not mounted yet. If it is ' +
+               'exFAT or FAT, it keeps no access rights at all: the files will be open to the other ' +
+               'programs on the router as well. If it is ext4, the rights are kept. Either way this ' +
+               'does not change the fact that the drive is removable.')), 'warn') +
+    /* Идентификатор — про СЪЁМНОСТЬ, а не про exFAT: согласие спрашивается при любой разметке,
+       и имя `exfat` звало бы будущего читателя убрать галочку вместе с exFAT-веткой текста. */
+    Chk('removable', T('Понимаю: ключи и пароли будут лежать на съёмном накопителе',
+                       'I understand: keys and passwords will live on a removable drive')) +
+    '</div>');
+  /* Выбор накопителя и галочка переживают перерисовку: она затем и происходит, что от выбора зависит
+     текст выше, — а сбросить при этом сам выбор значило бы отменять действие человека. Галочку возвращает `Chk`
+     (из `ST.pick`), накопитель — здесь. */
+  var sd = document.getElementById('storedev');
+  if (sd && ST.storeDev) sd.value = ST.storeDev;
+  storeActs();
+}
+/* Выбранная плитка раскладки: не выбирали — текущая раскладка (её плитка «· сейчас так»). */
+function storeSel(){ return ST.pick.store || ((ST.store || {}).mode || ''); }
+/* РЯД КНОПОК РАСКЛАДКИ зависит от выбора, поэтому собирается здесь, а не в описании экрана. Выбрана текущая —
+   переносить нечего, и кнопка одна: «Дальше» (две кнопки в одно место — «Пропустить» и «Оставить так» — читались бы
+   как два разных исхода). Выбрано «всё на накопителе» — «Перенести» заперта галочкой про съёмный носитель
+   (`data-need`): цена названа ДО нажатия, и мимо неё не пройти. */
+function storeActs(){
+  var a = document.getElementById('acts'), mode = (ST.store || {}).mode || '', sel = storeSel();
+  if (!a) return;
+  actsSet(sel === mode
+    ? SP + '<button class="btn pri" data-go="done">' + T('Дальше', 'Continue') + '</button>'
+    : '<button class="btn gh" data-go="done">' + T('Пропустить', 'Skip') + '</button>' + SP +
+      '<button class="btn pri" data-act="storego"' + (sel === 'full' ? ' data-need="removable"' : '') + '>' +
+      T('Перенести', 'Move') + '</button>');
+  syncNeed();
+}
+
+/* ПЕРЕЕЗД. Свой экран, помеченный `once`: перерисовка (смена языка) запустила бы перенос
+   второй раз — то же правило, что у установки. ══════════════════════════════════ */
+scr('storerun', {step: 2, once: true, t: Lbl('Переношу', 'Moving the system'),
+ sub: Lbl('Роутер копирует файлы и сверяет каждый. Панель ненадолго исчезнет и поднимется уже ' +
+          'на новом месте — это нормально.',
+          'The router copies the files and verifies every one. The panel disappears for a moment and ' +
+          'comes back in its new place — that is expected.'),
+ body: function(){
+   return '<div id="res" role="status">' + Rows([{mk: 'run', t: T('Переношу…', 'Moving…'),
+     d: T('копия → сверка → пробный запуск → переключение',
+          'copy → verify → test run → switch')}]) + '</div>' +
+     '<div class="wzgap">' + Log('wzlog') + '</div>';
+ },
+ acts: [],
+ enter: function(){
+   var res = document.getElementById('res'), log = document.getElementById('wzlog');
+   runJob('/api/storemode', {mode: ST.storeMode, dev: ST.storeDev}, function(lines){
+     logPush(log, lines);
+   }).then(function(r){
+     if (r.gone) return;
+     /* Срез устарел в ЛЮБОМ исходе — и на успехе, и на отказе: к выбору надо возвращаться с
+        тем, что на роутере сейчас, а не с тем, что было до попытки. */
+     ST.store = null;
+     if (r.ok){
+       ST.storeDone = r.mode || ST.storeMode;
+       /* Движок ответил «режим уже такой» — переезда не было. Состояние могло смениться между
+          отрисовкой выбора и кликом (панель, вторая сессия мастера), и рапорт «перенесено» о
+          несостоявшемся переезде — то же враньё, что письмо о падении того, что не поднималось. */
+       if (r.same){
+         res.innerHTML = Rows([{mk: 'ok', t: T('Раскладка уже такая', 'The layout is already like this'),
+           d: T('переносить нечего: роутер уже живёт именно так',
+                'nothing to move: the router already lives exactly this way'),
+           v: storeWhere(ST.storeDone)}]);
+         actsSet('<div class="grow"></div><button class="btn pri" data-go="done">' + T('Дальше', 'Continue') + '</button>');
+         return;
+       }
+       /* Исход — заголовком (макет `wz-storerun`), строкой — пройденные этапы и что теперь где, чип — «готово». */
+       headSet(T('Перенесено', 'Moved'), T('Роутер скопировал файлы и сверил каждый. Панель поднялась уже на новом месте.',
+                                           'The router copied the files and verified every one. The panel is back up in its new place.'));
+       res.innerHTML = Rows([{mk: 'ok', t: T('копия → сверка → пробный запуск → переключение', 'copy → verify → test run → switch'),
+         d: {data: T('всё вернулось во встроенную память роутера',
+                     'everything is back in the router’s built-in storage'),
+             bins: T('протоколы теперь на накопителе', 'the protocols now live on the drive'),
+             full: T('система на накопителе, на роутере остался только запускатель',
+                     'the system lives on the drive; only the launcher stays on the router')}[ST.storeDone] || '',
+         v: T('готово', 'done')}]);
+       actsSet('<div class="grow"></div><button class="btn pri" data-go="done">' + T('Дальше', 'Continue') + '</button>');
+     } else if (r.running){
+       /* Движок ещё переносит (агент перестал ждать по потолку) — это не «перенести не вышло»: писать «установка цела,
+          не переехала только раскладка» про идущий перенос — неправда (ревью шага 8b, круг 3). */
+       res.innerHTML = Rows([{mk: 'wr', t: T('Перенос ещё идёт', 'The move is still running'), d: esc(r.error || '')}]);
+       actsSet('<div class="grow"></div><button class="btn pri" data-go="done">' + T('Дальше', 'Continue') + '</button>');
+     } else {
+       /* ОТКАЗ ПЕРЕЕЗДА — НЕ ОТКАЗ УСТАНОВКИ, и сказать это надо прямо: панель работает, пароль
+          задан, прежней осталась только раскладка. Без этой строки красная плашка читается как
+          «установка сломалась», и человек идёт переустанавливать рабочую систему. */
+       /* Значение — где система осталась (агент отдаёт факт), словом, а не режимом. БЕЗ
+          приставки «осталась»: она склеивалась со словом-статусом в «осталась накопителя нет»
+          (поймано браузером). Заголовок строки и так говорит, что переезда не было. */
+       res.innerHTML = Rows([{mk: 'no', t: T('Перенести не вышло', 'The move did not go through'),
+         d: esc(r.error || T('смотрите вывод ниже', 'see the output below')),
+         v: storeWhere(r.mode)}]);
+       res.insertAdjacentHTML('beforeend', '<div class="wzgap">' +
+         Note(T('<b>Установка цела.</b> Панель работает там же, где и была, пароль задан — не переехала ' +
+                'только раскладка. Её можно сменить позже из панели.',
+                '<b>The installation is intact.</b> The panel works where it did and the password is set — ' +
+                'only the layout stayed put. It can be changed later from the panel.'), 'acc') + '</div>');
+       actsSet('<button class="btn gh" data-go="storage" data-bk="1">' + T('К выбору', 'Back to the choice') +
+         '</button><div class="grow"></div>' +
+         '<button class="btn pri" data-go="done">' + T('Дальше', 'Continue') + '</button>');
+     }
+   }).catch(function(e){
+     ST.store = null;
+     res.innerHTML = Note(lostTxt(e) +
+       T('. Перенос на роутере запущен отцепленно и мог продолжиться — загляните в панель, прежде чем повторять.',
+         '. The move runs detached on the router and may have carried on — look at the panel before retrying.'),
+       'bad');
+     actsSet('<button class="btn gh" data-go="storage" data-bk="1">' + T('К выбору', 'Back to the choice') +
+       '</button><div class="grow"></div>' +
+       '<button class="btn" data-go="done">' + T('Дальше', 'Continue') + '</button>');
+   });
+ }});
+
+/* ═══ 8в. ЗАДАНИЕ УЖЕ ИДЁТ. Экран для одного случая: вкладку перезагрузили (или закрыли и
+   открыли заново) ПОСРЕДИ работы. Задание живёт в агенте и доживёт само — но до 02.09.2026
+   страница об этом не знала и начинала с #welcome, то есть человек терял и прогресс, и
+   результат, а «Начать» вело по кругу к кнопке, которую агент честно отказывался выполнять
+   («уже идёт»). Экран НЕ запускает ничего: только смотрит (watchJob) и показывает исход.
+   Кнопок ухода нет намеренно — уходить некуда, пока идёт работа; исход добавит кнопку сам. ═══ */
+/* ЗАДАНИЕ НАЗЫВАЕТ АГЕНТ (`job_name` в /api/state): экран говорит, ЧТО идёт, и по исходу ведёт туда, куда повёл бы
+   экран самого задания. До шага 8b исход вёл всегда в начало — и после F5 посреди установки шаг «пароль панели»
+   выпадал: человек проходил до «Панель уже стоит» и открывал панель, в которую нечем войти (ревью шага 8b). */
+/* `ok` — экран или функция от итога (у пароля панели следующий экран решает сам ответ роутера). Задание, которого в
+   таблице нет (проверка, вход, срез, отчёт), продолжать нечем — кнопка честно зовётся «В начало». */
+var RESUME = {
+  install:   {t: Lbl('Ставлю панель', 'Installing the panel'), ok: 'panelpw', bad: 'check', step: 2},
+  access:    {t: Lbl('Открываю доступ', 'Opening access'), ok: 'login', bad: 'access', step: 1},
+  panelpw:   {t: function(){ return pwOnlyJob() ? T('Меняю пароль панели', 'Changing the panel password') : T('Задаю пароль панели', 'Setting the panel password'); },
+              ok: function(r){ return pwOnlyJob() ? 'exists' : pwNext(r); }, bad: function(){ return pwOnlyJob() ? 'panelpw-only' : 'panelpw'; }, step: 2},
+  rootpw:    {t: Lbl('Меняю пароль root', 'Changing the root password'), ok: 'check', bad: 'rootpw', step: 1},
+  storemode: {t: Lbl('Переношу', 'Moving the system'), ok: function(r){ ST.storeDone = r.mode || ''; return 'done'; }, bad: 'done', step: 2},
+  remove:    {t: Lbl('Снимаю с роутера', 'Removing from the router'), ok: 'scan', bad: 'remove', step: 2}};
+function resumeOf(){ return RESUME[ST.jobName] || null; }
+/* Пароль панели меняли с «Панель уже стоит» (не установка): итог — туда же, а не в «Готово» установки. */
+function pwOnlyJob(){ return !!(ST.jobCtx && ST.jobCtx.scr === 'panelpw-only'); }
+scr('resume', {step: function(){ var j = resumeOf(); return j ? j.step : 2; }, once: true,
+ t: function(){ var j = resumeOf(); return j ? j.t() : T('Работа уже идёт', 'A job is already running'); },
+ sub: Lbl('Страницу перезагрузили, а задание никуда не делось — вот его вывод.',
+          'The page was reloaded, but the job kept going — here is its output.'),
+ body: function(){
+   /* Куда поведёт исход — говорим, только когда знаем (задание есть в RESUME); иначе исход ведёт в начало. */
+   return '<div id="accsteps"></div><div id="res" role="status">' + Rows([{mk: 'run', t: T('Задание выполняется…', 'The job is running…'),
+     d: resumeOf() ? T('мастер снова показывает его вывод; исход поведёт туда же, куда повёл бы экран задания',
+                       'the wizard is showing its output again; the outcome leads where the job’s own screen would')
+                   : T('мастер снова показывает его вывод', 'the wizard is showing its output again')}]) + '</div>' +
+     '<div class="wzgap">' + Log('wzlog') + '</div>';
+ },
+ acts: [],
+ enter: function(){
+   var res = document.getElementById('res'), acts = document.getElementById('acts'), j = resumeOf();
+   /* Маркеры шагов открытия доступа — тем же разбором, что на `access-run`: сырыми строками в логе им не место. */
+   watchJob(stepFeed(document.getElementById('accsteps'), document.getElementById('wzlog'))).then(function(r){
+     if (r.gone) return;
+     res.innerHTML = Rows([{mk: r.ok ? 'ok' : 'no',
+       t: r.ok ? T('Задание завершено', 'The job has finished')
+               : T('Задание завершилось ошибкой', 'The job failed'),
+       d: r.ok ? T('можно продолжать', 'you can carry on')
+               : esc(r.error || T('причина — в выводе выше', 'the reason is in the output above'))}]);
+     if (ST.jobName === 'access' && r.ok){ if (ST.probe) ST.probe.ssh = true; ST.pwAsked = true; ST.pwWhy = accPwWhy(r); }
+     var to = j ? (r.ok ? j.ok : j.bad) : 'scan';
+     if (typeof to === 'function') to = to(r);
+     actsSet(SP + '<button class="btn pri" data-go="' + to + '">' +
+       (j ? T('Продолжить', 'Continue') : T('В начало', 'Start over')) + '</button>');
+   }).catch(function(e){
+     res.innerHTML = Rows([{mk: 'no', t: e.http ? T('Агент отказал', 'The agent refused') : T('Связь с агентом потеряна', 'Lost contact with the agent'),
+       d: esc(e.message)}]);
+     /* Не тупик: без кнопки выход был только через новую вкладку. */
+     actsSet(SP + '<button class="btn pri" data-go="scan">' + T('В начало', 'Start over') + '</button>');
+   });
+ }});
+
+/* ═══ 9. ГОТОВО. Мастер кончается здесь: дальше — панель. Три следующих шага НАЗВАНЫ, но не
+   продублированы экранами: два места правды разъезжаются всегда. ═══════════════ */
+scr('done', {step: 3, t: Lbl('Готово', 'All set'),
+ sub: Lbl('Панель работает. Дальше всё — в браузере.',
+          'The panel is running. Everything else happens in the browser.'),
+ body: function(){
+   var url = panelUrl();
+   /* Адрес — крупно и моноширинно (макет `wz-done`): его перепечатывают и кладут в закладки. */
+   return '<div class="wzurl">' + esc(url) + '</div>' +
+     '<div class="cline" style="text-align:center">' +
+     T('Логин — admin (он уже подставлен), пароль — тот, что вы задали. Адрес не изменится — можно добавить в закладки.',
+       'The user name is admin (already filled in), the password is the one you set. The address will not change — feel free to bookmark it.') +
+     '</div>' +
+   '<div class="wzgap">' + Rows([
+     {mkt: '1', t: T('Компоненты', 'Components'),
+      d: T('выбрать протокол — роутер скачает его сам',
+           'pick a protocol — the router downloads it by itself')},
+     {mkt: '2', t: T('Серверы', 'Servers'),
+      d: T('перетащить ссылку vless://, hy2:// или конфиг AmneziaWG',
+           'drop in a vless:// or hy2:// link, or an AmneziaWG config')},
+     {mkt: '3', t: T('Включить', 'Switch on'),
+      d: T('нет своего сервера — включите ByeDPI или Zapret, они работают без него',
+           'no server of your own — turn on ByeDPI or Zapret, they work without one')}
+   ]) + '</div>' +
+   '<div class="wzgap">' +
+   /* Обновление настроек не трогало: «VPN пока выключен» там неправда (транспорт работает, как работал). */
+   (ST.upd
+     ? Note(T('<b>Панель обновлена</b> — настройки, серверы и правила остались прежними, VPN работает, как работал.',
+              '<b>The panel is updated</b> — the settings, servers and rules are as they were, and the VPN works as it did.'), 'acc')
+     : Note(T('<b>VPN пока выключен</b> — роутер работает как из коробки, пока вы не выберете протокол в панели.',
+              '<b>No VPN is on yet</b> — the router behaves as it did out of the box until you pick a protocol ' +
+              'in the panel.'), 'acc')) +
+   /* Переехавшая на накопитель система — это новое условие эксплуатации, а не деталь установки:
+      вынутый накопитель оставляет роутер стоковым. Говорим об этом на последнем экране, который
+      человек точно прочтёт, а не только на том, где он выбирал. */
+   (ST.storeDone === 'full' ?
+     Note(T('<b>Система живёт на накопителе.</b> Не вынимайте его: без него роутер работает как обычный, ' +
+            'без VPN, и панель не откроется.',
+            '<b>The system lives on the drive.</b> Do not pull it out: without it the router works as a ' +
+            'plain router with no VPN, and the panel will not open.'), 'warn') : '') +
+   Note(T('Напоминание: всё сделано на ваш страх и риск. Резервную копию настроек умеет делать сама панель ' +
+          '(«Роутер» → «Бэкап настроек»), и она же умеет их вернуть.',
+          'A reminder: all of this was done at your own risk. The panel itself can back up its settings ' +
+          '(“Router” → “Settings backup”) and restore them.'), 'warn') + '</div>';
+ },
+ acts: [{t: Lbl('Мастер больше не нужен', 'Done with the wizard'), act: 'bye', k: 'gh'},
+        {t: Lbl('Открыть панель', 'Open the panel'), act: 'openpanel', k: 'pri'}]});
+
+/* Адрес панели — одна формула на экраны, что его называют («Готово», «Мастер закрыт»). */
+function panelUrl(){ return 'http://' + ST.ip + ':8088'; }
+
+/* ═══ МАСТЕР ЗАКРЫТ. Агент уже остановлен (`/api/bye`): экран не ходит к нему ни за чем, а шагов не рисует — закрыть
+   мастер можно и до установки. Адрес панели — только если она стоит (поставили сейчас или нашли установленной; снятие сбрасывает
+   `ST.conn`): закрывший мастер чаще всего идёт туда, а адрес несуществующей панели звал бы в пустоту. ═══ */
+scr('bye', {step: -1, t: Lbl('Мастер закрыт', 'The wizard is closed'),
+ sub: Lbl('Агент остановлен. Окно консоли, если осталось открытым, и эту вкладку можно закрыть.',
+          'The agent has stopped. You can close the console window if it is still open, and this tab too.'),
+ body: function(){
+   if (!ST.ip || !(ST.panelUp || (ST.conn && ST.conn.installed))) return '';
+   var url = panelUrl();
+   return '<div class="cline" style="text-align:center">' + T('Панель: ', 'The panel: ') +
+     '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(url) + '</a></div>';
+ },
+ acts: []});
+
+/* ═══ 10. ПАНЕЛЬ УЖЕ СТОИТ. Мастер обязан это УЗНАТЬ и не предлагать «установить» как
+   единственный путь: чаще всего человек пришёл обновиться. ════════════════════ */
+scr('exists', {step: 2, t: Lbl('Панель уже стоит', 'The panel is already installed'),
+ sub: Lbl('Нашёл установленную панель — покажу, что с ней можно сделать.',
+          'Found an installed panel — here is what can be done with it.'),
+ body: function(){
+   var c = ST.conn || {}, f = ST.facts || {};
+   /* Сравниваем ВЕРСИЮ СБОРКИ с версией сборки — номер enodia.py тут не при чём: он про
+      другое, и его показ звал «обновиться» на номер меньше того, что стоит (замер 28.08). */
+   var mine = c.payload_version || f.payload_version || '';
+   var there = c.version || f.version || '';
+   var same = mine && there && mine === there;
+   /* Не знаем — не утверждаем: «?» стоит с нейтральной точкой, а не с зелёной галочкой (экран открыт без входа — F5,
+      «назад» браузера). Транспорт «нет» говорим, только когда роутер нам ответил. */
+   var tv = c.transport || f.transport, known = !!(tv || ST.conn || ST.facts);
+   /* Строки — как в макете `wz-exists`: номер версии и имя транспорта — в пояснении, чип — только у «Версии у меня», и он
+      называет СРАВНЕНИЕ («новее»). Сравниваем номер СБОРКИ (`CODE` из VERSION: агент отдаёт его и за роутер, и за себя), а
+      не строку версии — у дев-сборок строка одна, номера разные. Номера нет (срез проверки их не несёт) — чипа нет, а не
+      догадка. */
+   var mc = parseInt(c.payload_code, 10), tc = parseInt(c.code, 10);
+   var rel = same ? 'same' : (mc > tc ? 'new' : (mc < tc ? 'old' : ''));
+   var nok = T('не знаю: в этот раз на роутер не входил', 'unknown: I have not signed in to the router this time');
+   return Rows([
+     {mk: there ? 'ok' : 'wait', t: T('Версия на роутере', 'Version on the router'), d: there ? esc(there) : nok},
+     {mk: rel === 'old' ? 'wr' : (mine ? 'ok' : 'wait'), t: T('Версия у меня', 'Version I have'),
+      d: (mine ? esc(mine) + ' — ' : '') +
+         (same ? T('та же самая: обновлять нечего, но переустановить можно',
+                   'the same one: nothing to update, though you can reinstall')
+               : T('обновление заменит скрипты и панель, настройки останутся',
+                   'an update replaces the scripts and the panel; the settings stay')),
+      v: {same: T('та же', 'same'), 'new': T('новее', 'newer'), old: T('старее', 'older')}[rel] || ''},
+     {mk: known ? 'ok' : 'wait', t: T('Активный транспорт', 'Active transport'),
+      d: tv ? esc(tptName(tv)) + ' · ' + T('настроен в панели, мастер его не трогает',
+                                           'configured in the panel — the wizard does not touch it')
+            : (known ? T('не выбран — выбирается в панели', 'none chosen — it is picked in the panel') : nok)}
+   ]) +
+   /* Двери — переходы на экраны мастера (макет `wz-exists`); цвет — раздел панели, к которому действие ближе:
+      «Роутер» (установка, диагностика) и «Панель» (её пароль, её снятие). */
+   '<div class="wzgap">' + Doors([
+     {t: T('Обновить', 'Update'), go: 'check', c: 'var(--g4)', ic: 'i-refresh',
+      d: T('Заменить скрипты и панель. Настройки, серверы и правила остаются',
+           'Replace the scripts and the panel. Settings, servers and rules stay')},
+     {t: T('Переустановить', 'Reinstall'), go: 'check', c: 'var(--g4)', ic: 'i-cpu',
+      d: T('То же самое, но целиком — если что-то работает странно',
+           'The same thing, but in full — if something behaves oddly')},
+     {t: T('Сменить пароль панели', 'Change the panel password'), go: 'panelpw-only', c: 'var(--g5)', ic: 'i-lock',
+      d: T('Забыли пароль от :8088 — задайте новый. Установку и настройки не трогаем',
+           'Forgot the :8088 password — set a new one. The installation and settings stay untouched')},
+     {t: T('Диагностика', 'Diagnostics'), go: 'diag', c: 'var(--g4)', ic: 'i-dl',
+      d: T('Собрать отчёт для разбора: что установлено, что живо, что в логах',
+           'Collect a report: what is installed, what is alive, what is in the logs')},
+     {t: T('Удалить', 'Remove'), go: 'remove', c: 'var(--g5)', ic: 'i-trash',
+      d: T('Выключить VPN или снять всё — сначала покажу, что уберётся', 'Switch the VPN off or remove everything — first I show what goes')}
+   ]) + '</div>';
+ },
+ acts: [{t: Lbl('Открыть панель', 'Open the panel'), act: 'openpanel', k: 'pri'}]});
+
+/* ═══ 11. ДИАГНОСТИКА. Отчёт собирает и МАСКИРУЕТ сам роутер: решать, что считать секретом,
+   на ПК нельзя — два места правды дадут два разных ответа. ═══════════════════ */
+scr('diag', {step: 2, t: Lbl('Диагностика', 'Diagnostics'),
+ sub: Lbl('Соберу один файл, который можно приложить к вопросу в чате.',
+          'I will collect one file you can attach to a question in chat.'),
+ body: function(){
+   return Rows([
+     {mk: 'ok', t: T('Что собираю', 'What goes in'),
+      d: T('версии, состояние подсистем, правила, последние логи',
+           'versions, subsystem state, rules, recent logs')},
+     {mk: 'ok', t: T('Что вырезаю', 'What is stripped out'),
+      d: T('ключи, пароли, адреса серверов и внешний IP — маскирует сам роутер',
+           'keys, passwords, server addresses and the external IP — masked by the router itself')}
+   ]) +
+   '<div class="wzgap">' + Note(T('Отчёт собирается <b>на роутере</b> и им же маскируется. Всё равно просмотрите файл ' +
+     'перед публикацией: маскировка эвристическая.',
+     'The report is collected <b>on the router</b> and masked there. Look through the file before ' +
+     'posting it anyway: the masking is heuristic.'), 'info') + '</div>' +
+   '<div id="res" role="status"></div>';
+ },
+ acts: [{t: Lbl('Назад', 'Back'), go: 'exists', k: 'gh', bk: 1},
+        {t: Lbl('Собрать отчёт', 'Collect the report'), act: 'diag', k: 'pri'}],
+ enter: function(){
+   if (!REPAINT){ ST.diagDone = null; return; }
+   if (ST.diagDone) document.getElementById('res').innerHTML = diagHtml(ST.diagDone);
+ }});
+function diagHtml(d){
+  return '<div class="wzgap">' + Rows([{mk: 'ok', t: T('Отчёт готов', 'The report is ready'), d: esc(d.path), v: d.kb + T(' КБ', ' KB')}]) +
+    '</div><div class="wzgap"><button class="btn" data-act="openfile">' + T('Открыть файл', 'Open the file') + '</button></div>';
+}
+
+/* ═══ 12. СНЯТИЕ. Два варианта, и они РАЗНЫЕ по последствиям. План того, что будет снято,
+   спрашиваем у роутера: там единственная истина, и она меняется вместе с подсистемами. ══ */
+/* Заголовок — «Удалить», а не «Снять»: так это действие названо и в меню ПК-программы
+   (`action_uninstall`), и в обоих README. Карточка на экране «панель уже стоит» ведёт сюда, и
+   расходиться с тем, что человек нажал, экран не имеет права. */
+scr('remove', {step: 2, picks: ['rm', 'sure'], t: Lbl('Удалить с роутера', 'Remove from the router'),
+ sub: Lbl('Сначала посмотрим, что именно уберётся.', 'First, a look at what exactly goes away.'),
+ body: function(){
+   return '<div id="res" role="status">' + Rows([{mk: 'run', t: T('Спрашиваю роутер…', 'Asking the router…'),
+     d: T('что установлено и что будет снято', 'what is installed and what will be removed')}]) + '</div>' +
+     '<div class="wzgap" id="extra"></div>';
+ },
+ acts: [{t: Lbl('Назад', 'Back'), go: 'exists', k: 'gh', bk: 1}],
+ enter: function(){
+   /* Смена языка рисует экран из сеанса: план роутера и исход уже известны, а новый план — это заливка uninstall.sh. */
+   if (REPAINT && ST.rm) return rmPaint();
+   ST.rm = null;
+   runJob('/api/removeplan', {}).then(function(r){
+     if (r.gone) return;
+     ST.rm = {plan: r, done: null, log: []};
+     rmPaint();
+   }).catch(function(e){
+     /* Отказ плана — тоже в сеанс: смена языка иначе звала бы план заново (заливку uninstall.sh). */
+     ST.rm = {plan: {ok: false, lost: {message: e.message, http: e.http}}, done: null, log: []};
+     rmPaint();
+   });
+ }});
+
+/* Экран снятия ЦЕЛИКОМ из сеанса (`ST.rm`): план роутера, выбор, исход. Один художник на вход и на смену языка. */
+function rmPaint(){
+  var res = document.getElementById('res'), extra = document.getElementById('extra'), r = ST.rm.plan, dn = ST.rm.done;
+  /* Вывод удаления — из сеанса: итог «смотрите вывод ниже» без самого вывода — отсылка в пустоту. */
+  var logBack = function(){ if (ST.rm.log && ST.rm.log.length) logPush(document.getElementById('wzlog'), ST.rm.log); };
+  if (!r.ok){ res.innerHTML = Note(r.lost ? failTxt(T('Не смог спросить роутер: ', 'Could not ask the router: '), r.lost)
+                                          : esc(r.error || T('Не смог спросить роутер', 'Could not ask the router')), 'bad'); return; }
+  if (dn){
+    res.innerHTML = rmDoneRow(dn);
+    if (dn.ok){
+      extra.innerHTML = '<div class="wzgap">' + Log('wzlog') + '</div>';
+      logBack();
+      actsSet(SP + '<button class="btn pri" data-go="scan">' + T('В начало', 'Start over') + '</button>');
+      return;
+    }
+  } else res.innerHTML = rmPlanRows(r);
+  extra.innerHTML = rmExtraHtml();
+  logBack();
+  /* Разметку экрана дорисовали ПОСЛЕ render() — значит и кнопку с её запертостью ставим сами:
+     syncNeed() отработал, когда этих узлов ещё не было. */
+  rmActs();
+}
+/* Отказ ДО начала (`started: false` — нет связи, роутер занят установкой кода или снятием) — не «снялось не всё»: роутер не
+   тронут, и строка говорит это вместе с ПРИЧИНОЙ от агента (ревью ветки pkg-update, круг 3). */
+function rmDoneRow(dn){
+  return Rows([dn.ok ? {mk: 'ok', t: dn.full ? T('Роутер вернулся к стоковому состоянию', 'The router is back to stock')
+                                             : T('VPN снят', 'VPN switched off'),
+                        d: esc(dn.message || ''), v: dn.full ? T('удалено', 'removed') : T('выключено', 'off')}
+                     : dn.started === false
+                     ? {mk: 'no', t: T('Снятие не начиналось — роутер не тронут', 'The removal did not start — the router is untouched'),
+                        d: esc(dn.message || T('смотрите вывод ниже', 'see the output below')), v: '—'}
+                     : {mk: 'no', t: T('Снялось не всё', 'Not everything was removed'),
+                        d: esc(dn.message || T('смотрите вывод ниже', 'see the output below')), v: '—'}]);
+}
+function rmPlanRows(r){
+     var p = r.plan || {};
+     return Rows([
+       {mk: 'wr', t: T('Маркировка и правила', 'Marking and rules'),
+        d: T('ip rule, таблицы, цепочки вырезов и блокировок',
+             'ip rules, routing tables, bypass and block chains'), v: T('снимутся', 'will go')},
+       {mk: 'wr', t: T('Несущая и доп-выходы', 'Carrier and extra exits'),
+        d: T('активный транспорт и слоты', 'the active transport and the slots'),
+        v: (p.transport ? tptName(p.transport) : T('нет', 'none')) + ' · ' + (p.slots == null ? '?' : p.slots)},
+       p.server ? {mk: 'wr', t: T('«Доступ домой»', '“Home access”'),
+        d: T('VPN-сервер awgs0 — телефон в домашнюю сеть больше не зайдёт',
+             'the awgs0 VPN server — your phone will no longer reach the home network'),
+        v: T('снимется', 'will go')} : null,
+       p.zapret ? {mk: 'wr', t: 'Zapret', d: T('nfqws и очередь NFQUEUE', 'nfqws and the NFQUEUE queue'),
+        v: T('снимется', 'will go')} : null,
+       {mk: 'wr', t: T('cron и dnsmasq', 'cron and dnsmasq'),
+        d: T('наши строки и сниппеты; резолверы провайдера вернутся',
+             'our lines and snippets; the provider’s resolvers come back'),
+        v: T('строк: ', 'lines: ') + (p.cron == null ? '?' : p.cron)},
+       r.fresh ? null : {mk: 'wr', t: T('Скрипт снятия — прежней версии', 'The uninstaller is an older one'),
+        d: T('свежий залить не вышло: может не знать про часть подсистем',
+             'a fresh one could not be uploaded — it may not know about some subsystems')}
+     ]);
+}
+function rmExtraHtml(){
+     /* ПОРЯДОК ЗДЕСЬ — ЧАСТЬ ЗАЩИТЫ. Совет «сделайте бэкап» и галочка стоят ПЕРЕД выбором:
+        прочитать их после клика поздно, а «удалить полностью» необратимо. Галочка же и
+        отпирает кнопку, когда выбрано полное удаление (rmActs → data-need → syncNeed), так что
+        мимо неё пройти нельзя. */
+     return '<div id="pre">' +
+       Note(T('Резервную копию настроек умеет делать <b>сама панель</b> («Роутер» → «Бэкап настроек») — и она же умеет их применить обратно. ' +
+              'Сделайте её до удаления: файловая копия с компьютера этого не умеет.',
+              'The <b>panel itself</b> can back up its settings (“Router” → “Settings backup”) — and apply them back. Make a backup before ' +
+              'removing anything: a file copy from the computer cannot do that.'), 'warn') +
+       '<div class="wzgap">' + Chk('sure', T('Понимаю: «удалить полностью» стирает настройки и ключи безвозвратно',
+                                           'I understand: “remove everything” erases settings and keys for good')) +
+       '</div></div>' +
+       '<div class="wzgap" id="rmopt">' + Opt('rm', [
+         {v: 'off', ic: 'i-ban', t: T('Выключить VPN', 'Switch VPN off'),
+          d: T('Снять маршрутизацию и правила. Панель, настройки и серверы остаются — можно включить обратно',
+               'Remove the routing and the rules. The panel, settings and servers stay — you can switch it back on')},
+         {v: 'purge', ic: 'i-trash', t: T('Удалить полностью', 'Remove everything'),
+          d: T('То же плюс панель и все файлы. Роутер станет стоковым, настройки исчезнут',
+               'The same plus the panel and every file. The router goes back to stock and the settings are gone')}
+       ], rmWay()) + '</div>' +
+       '<div class="wzgap">' + Log('wzlog') + '</div>';
+}
+
+/* Что выбрано на экране снятия: не выбирали — «Выключить VPN», обратимое. */
+function rmWay(){ return ST.pick.rm === 'purge' ? 'purge' : 'off'; }
+/* РЯД КНОПОК СНЯТИЯ: главная — красная и называет выбранное («Выключить VPN» / «Удалить полностью»), полное удаление
+   заперто галочкой `sure` (`data-need`). До 8b действие висело на самой карточке — касание плитки и было удалением. */
+function rmActs(){
+  var a = document.getElementById('acts');
+  if (!a) return;
+  var full = rmWay() === 'purge';
+  actsSet('<button class="btn gh" data-go="exists" data-bk="1">' + T('Назад', 'Back') + '</button>' + SP +
+    '<button class="btn bad" data-act="rmgo"' + (full ? ' data-need="sure"' : '') + '>' +
+    (full ? T('Удалить полностью', 'Remove everything') : T('Выключить VPN', 'Switch VPN off')) + '</button>');
+  syncNeed();
+}
+
+/* ─── рендер и действия ─────────────────────────────────────────────────────── */
+function render(id){
+  var s = S[id] || S.welcome;
+  CUR = s.id;
+  RENDER_SEQ++;
+  /* ВХОД НА ЭКРАН (не перерисовка сменой языка) — с чистого листа: выбор на плитках и галочки экрана (`picks`) и
+     черновики его полей. Прошлый заход не решает за этот: черновик ошибочной попытки пароля подставлялся в поле на
+     следующем заходе под подсказкой «тот, что задали» (ревью шага 8b, круг 2). */
+  if (!REPAINT){
+    ST.said = null;
+    (s.picks || []).forEach(function(k){ delete ST.pick[k]; });
+    Object.keys(ST.draft).forEach(function(k){ if (k.indexOf(s.id + ':') === 0) delete ST.draft[k]; });
+  }
+  /* Заставка вне счёта шагов: она ещё не установка, а вход в неё. Полоску там не рисуем
+     вовсе — пустой степпер над знаком читался бы как «шаг 0 из 4». */
+  /* Шаг — кружок с номером, пройденный — галочкой, текущий назван и для читалки (`aria-current`). */
+  var step = typeof s.step === 'function' ? s.step() : s.step;
+  document.getElementById('wz-steps').innerHTML = step < 0 ? '' : STEPS().map(function(t, i){
+    return '<div class="wzst' + (i === step ? ' on' : (i < step ? ' done' : '')) + '"' +
+      (i === step ? ' aria-current="step"' : '') + '><i aria-hidden="true">' + (i < step ? '✓' : (i + 1)) + '</i>' + t + '</div>'; }).join('');
+  /* Карточка шага — `.card` панели; у заставки (`bare`) заголовка и кнопок нет, только тело. Ряд кнопок —
+     `.acts` панели: последняя из нескольких и одиночная ГЛАВНАЯ прижаты вправо (главное действие — справа), а
+     одиночная «Назад» стоит слева — и не прыгает туда, когда роутер ответит и ряд пополнится (ревью шага 8b).
+     Заголовок принимает фокус программно (`tabindex=-1`): после смены экрана фокус с выброшенной кнопки уходил в
+     BODY, и читалка не говорила, куда человек попал. */
+  document.getElementById('wz-view').innerHTML = '<div class="card wzcard">' + (s.bare ? s.body() :
+    '<h1 class="bh1 wzh1" tabindex="-1">' + s.t() + '</h1>' + (s.sub ? '<div class="bsub">' + s.sub() + '</div>' : '') +
+    '<div class="wzbody">' + s.body() + '</div>' +
+    '<div class="acts wzacts" id="acts">' + (s.acts || []).map(function(a, i){
+      return (i === (s.acts.length - 1) && (s.acts.length > 1 || a.k === 'pri') ? SP : '') +
+        '<button class="btn ' + (a.k || '') + '"' + (a.go ? ' data-go="' + a.go + '"' : '') + (a.bk ? ' data-bk="1"' : '') +
+        (a.act ? ' data-act="' + a.act + '"' : '') + (a.need ? ' data-need="' + a.need + '" disabled' : '') +
+        '>' + a.t() + '</button>'; }).join('') + '</div>') + '</div>';
+  paintLang();
+  /* Счётчик растёт ТОЛЬКО когда адрес правда меняется: присвоение того же хеша события не даёт,
+     и «съеденным» оказался бы СЛЕДУЮЩИЙ — то есть настоящее «назад» человека. */
+  if (location.hash !== '#' + id){ HASH_SELF++; location.hash = id; }
+  /* Сначала РАЗМЕТКА, потом работа с узлами: тянуться к элементу, которого ещё нет в
+     документе, — классика (в панели за это уже платили). */
+  if (s.enter) s.enter();
+  if (REPAINT && ST.said && ST.said.scr === s.id){ var sr = document.getElementById('res'); if (sr) sr.innerHTML = SAID[ST.said.k](ST.said.d); }
+  syncNeed();
+  /* Фокус — на заголовок нового экрана, если вход экрана не поставил его сам (поле пароля) и это не перерисовка
+     сменой языка (там фокус остаётся на переключателе). */
+  if (!REPAINT){
+    var fa = document.activeElement, h = document.querySelector('#wz-view h1');
+    if (h && (!fa || fa === document.body || !document.body.contains(fa))) h.focus();
+  }
+}
+function go(id){ render(id); }
+
+/* КНОПКА «НАЗАД» В БРАУЗЕРЕ. Хеш мы пишем как след для отладки — и до 02.09.2026 «назад» его
+   МЕНЯЛА, а экран оставался прежним: адрес говорил одно, страница показывала другое, и человек
+   видел кнопку, которая «не работает» (поймано на живом прогоне). Чинить «рендером по хешу»
+   нельзя — половина экранов на входе ЗАПУСКАЕТ работу (установка, проверка, диагностика), и
+   тогда шаг назад стартовал бы задание. Поэтому «назад» делает ровно то же, что кнопка «Назад»
+   НА ЭКРАНЕ: уходит туда, куда ведёт она. Нет такой кнопки (заставка, экран задания) — остаёмся
+   на месте и возвращаем адрес, чтобы он не врал.
+
+   КНОПКУ ИЩЕМ ПО МЕТКЕ `bk`, А НЕ ПО ВИДУ. Первая редакция брала первую попавшуюся «призрачную»
+   (k:'gh') кнопку с переходом — а призрачными нарисованы и «Оставить как есть», и «Пропустить»,
+   и «Мастер больше не нужен». ЗАМЕР В БРАУЗЕРЕ 02.09.2026: «назад» на экране пароля root уводила
+   ВПЕРЁД, на «Проверку перед установкой», и ЗАПУСКАЛА её задание (POST /api/facts) — ровно то,
+   чего этот обработчик и должен был не допустить. Вид — вопрос оформления, направление — вопрос
+   смысла; помечаем смысл.
+
+   СВОИ СМЕНЫ АДРЕСА — СЧЁТЧИКОМ, А НЕ ФЛАГОМ. Экран может увести на другой прямо из своего входа (`access-run` без формы
+   — обратно к ней): за одну задачу адрес меняется ДВАЖДЫ, событий приходит два, а флаг съедал только первое — второе
+   читалось как «назад» человека и уводило на экран раньше (поймано стендом `wizard-ui-test`, шаг 8b). */
+var HASH_SELF = 0;
+window.addEventListener('hashchange', function(){
+  if (HASH_SELF > 0){ HASH_SELF--; return; }
+  /* Дорога назад — кнопка «Назад», которая СЕЙЧАС на экране (`data-bk`), а не строка в описании экрана: исход меняет
+     ряд, и после удаления «назад» уводил на «Панель уже стоит» с роутером, которого уже нет (ревью шага 8b, круг 2). */
+  var back = document.querySelector('#acts [data-bk]');
+  if (back && !back.disabled && !JOB_RUN) return render(back.getAttribute('data-go'));
+  if (location.hash !== '#' + CUR){ HASH_SELF++; location.hash = CUR; }
+});
+
+/* Кнопка с data-need включается галочкой: согласие — не формальность, и обходить его
+   нечем. Один обработчик на все экраны, второй копии не заводить. */
+function syncNeed(){
+  document.querySelectorAll('[data-need]').forEach(function(b){
+    var c = document.getElementById(b.getAttribute('data-need'));
+    /* `data-blocked` СИЛЬНЕЕ галочки: кнопку могли запретить по другой причине (каталог не
+       пишется), и тогда отметка «всё равно пробую» не имеет права её включить. */
+    b.disabled = b.hasAttribute('data-blocked') || !(c && c.checked);
+  });
+}
+document.addEventListener('change', function(e){
+  if (e.target && e.target.type === 'checkbox') syncNeed();
+  /* Форма открытия доступа и согласие про съёмный накопитель живут в сеансе (разбор у ST.acc): экран, который
+     перерисовали, возвращает их, а не обнуляет. */
+  if (e.target && (e.target.id === 'bak' || e.target.id === 'lang') && CUR === 'access') ST.acc[e.target.id] = e.target.checked;
+  /* Галочки согласия — в сеанс (переживают смену языка); вход на экран их сбрасывает (`picks` экрана, см. render). */
+  if (e.target && /^(removable|sure|agree|tight)$/.test(e.target.id)) ST.pick[e.target.id] = e.target.checked;
+  /* Накопитель выбирают из списка, и от выбора зависит не только «куда переносить», но и что
+     мы обещаем про ключи: права доступа — свойство РАЗМЕТКИ, а размечены накопители по-разному.
+     Поэтому смена выбора перерисовывает блок целиком (showStore сам вернёт выбранное значение),
+     а не подменяет одну строку — второй копии условия «хранит ли ФС права» здесь не заводим. */
+  if (e.target && e.target.id === 'storedev' && ST.store){
+    ST.storeDev = e.target.value || '';
+    showStore(ST.store);
+    /* Список перерисован вместе с блоком — фокус обратно на него: иначе вторая стрелка листала страницу. */
+    var sd2 = document.getElementById('storedev'); if (sd2) sd2.focus();
+  }
+});
+/* Пароль формы доступа — по `input`, а не по `change`: `change` приходит только при уходе с поля, и перерисовка
+   экрана (смена языка) унесла бы набранное до него. */
+document.addEventListener('input', function(e){
+  var t = e.target;
+  if (!t || !t.id) return;
+  if (t.id === 'newpw' && CUR === 'access') ST.acc.pw = t.value;
+  else if (t.tagName === 'INPUT' && t.type !== 'checkbox') ST.draft[CUR + ':' + t.id] = t.value;
+});
+/* Плитки, двери и сегменты — узлы с ролью кнопки: Enter и пробел нажимают их так же, как щелчок (у настоящей
+   <button> это делает браузер). Один обработчик на все, как `wireSeg` у панели. */
+document.addEventListener('keydown', function(e){
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  var t = e.target;
+  if (!t || !t.getAttribute || t.getAttribute('role') !== 'button' || t.tagName === 'BUTTON') return;
+  /* Запертый сегмент (`aria-disabled`) — ни нажатия, ни прокрутки страницы пробелом. */
+  e.preventDefault();
+  t.click();
+});
+/* ВЫБОР ПЛИТКИ. Плитка только выбирает (ST.pick) — действие у кнопки ряда, и её подпись и запертость следуют за
+   выбором. Пока идёт задание, выбор не меняем: кнопка ряда занята им, а перерисовка её отперла бы. */
+function optPick(t){
+  if (JOB_OWN[RENDER_SEQ] > 0) return;
+  var g = t.getAttribute('data-opt'), v = t.getAttribute('data-v');
+  ST.pick[g] = v;
+  var box = t.parentNode;
+  box.querySelectorAll('[data-opt]').forEach(function(o){
+    var on = o === t;
+    o.classList.toggle('on', on);
+    o.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  if (g === 'acc'){
+    var f = document.getElementById('accform'), b = document.querySelector('#acts [data-act="accgo"]');
+    if (f) f.hidden = v !== 'open';
+    if (b) b.textContent = v === 'open' ? T('Открыть доступ', 'Open access') : T('Проверить пароль', 'Check the password');
+    var r = document.getElementById('res'); if (r) r.innerHTML = '';
+  }
+  /* Раскладка перерисовывается целиком: цена и согласие показываются только у «всё на накопителе». Фокус — обратно
+     на выбранную плитку (её узел заменён). */
+  if (g === 'store'){
+    showStore(ST.store);
+    var nt = document.querySelectorAll('[data-opt="store"]');
+    for (var i = 0; i < nt.length; i++) if (nt[i].getAttribute('data-v') === v) nt[i].focus();
+  }
+  if (g === 'rm') rmActs();
+}
+/* ДВОЙНОЙ ЩЕЛЧОК СКВОЗЬ СМЕНУ ЭКРАНА. Первый щелчок меняет экран, второй попадает в то, что встало на место кнопки: в
+   строку галочки «делаю на свой страх и риск» (она отмечалась, и «Дальше» отпиралась вслепую) или в дверь (задание).
+   Второй щелчок серии (`detail >= 2`), если между ним и первым сменился экран, гасим в фазе перехвата — вместе с
+   действием по умолчанию (отметкой галочки у <label>). Нажатия с клавиатуры (`detail 0`) не трогаем. */
+var CLICK_SEQ = -1;
+document.addEventListener('click', function(e){
+  if (e.detail === 1) CLICK_SEQ = RENDER_SEQ;
+  else if (e.detail >= 2 && CLICK_SEQ !== RENDER_SEQ){ e.preventDefault(); e.stopPropagation(); }
+}, true);
+document.addEventListener('click', function(e){
+  if (e.defaultPrevented) return;
+  /* Кнопка-глаз живёт ВНУТРИ <label>: клик по ней не должен уходить в общий разбор
+     действий, а фокус после переключения возвращаем в поле — иначе человек допечатывает
+     пароль в пустоту. */
+  var ey = e.target.closest('[data-eye]');
+  if (ey) {
+    var inp = document.getElementById(ey.getAttribute('data-eye'));
+    if (inp) {
+      var show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      ey.classList.toggle('off', show);
+      var lb = show ? T('Скрыть пароль', 'Hide password') : T('Показать пароль', 'Show password');
+      ey.setAttribute('aria-label', lb);
+      ey.setAttribute('title', lb);
+      inp.focus();
+      try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (err) {}
+    }
+    return;
+  }
+  var lg = e.target.closest('[data-lang]');
+  if (lg){ if (!lg.classList.contains('dis')) setLang(lg.getAttribute('data-lang')); return; }
+  var th = e.target.closest('[data-theme-set]');
+  if (th){ applyTheme(th.getAttribute('data-theme-set')); return; }
+  var op = e.target.closest('[data-opt]');
+  if (op){ optPick(op); return; }
+  var n = e.target.closest('[data-act],[data-go]');
+  if (!n || n.disabled) return;
+  var a = n.getAttribute('data-act');
+  if (a) return act(a, n);
+  go(n.getAttribute('data-go'));
+});
+
+/* ПОКА ИДЁТ ДЕЙСТВИЕ — РЯД ЗАПЕРТ ЦЕЛИКОМ: «Назад» посреди «Задаю…» уводил с экрана, и итог смены пароля панели было уже
+   не узнать, а «Оставить как есть» посреди «Меняю…» — пароль root менялся молча (ревью шага 8b, круг 3). Запертые нами
+   помечены `data-lock` и отпираются `unbusy`; новое действие снимает и прошлый исход экрана (`ST.said`). */
+/* РЯД КНОПОК ПОСЛЕ ДЕЙСТВИЯ — ОДНИМ ХУДОЖНИКОМ. Ряд пересобирается исходом, и фокус с нажатой кнопки уходил в BODY
+   (клавиатура начинала путь по странице сначала) — после пробы, пароля панели, снятия (ревью шага 8b, круг 3). Был в
+   ряду — встаёт на главную кнопку нового; ряд опустел на время работы — вернётся, когда ряд появится. */
+var ACTS_LOST = -1;
+function actsSet(h){
+  var a = document.getElementById('acts');
+  if (!a) return;
+  var f = document.activeElement;
+  var had = !!(f && f !== document.body && a.contains(f)) || (ACTS_LOST === RENDER_SEQ && (!f || f === document.body));
+  a.innerHTML = h;
+  ACTS_LOST = -1;
+  if (!had) return;
+  var bs = a.querySelectorAll('button'), p = null;
+  for (var i = 0; i < bs.length; i++) if (!bs[i].disabled && (!p || (bs[i].classList.contains('pri') && !p.classList.contains('pri')))) p = bs[i];
+  if (p) p.focus(); else ACTS_LOST = RENDER_SEQ;
+}
+function busy(node, text){
+  if (!node || node.dataset.old) return;
+  ST.said = null;
+  /* Запертая кнопка отдаёт фокус BODY — ряд, пересобранный исходом, вернёт его на свою главную (`actsSet`). */
+  var ac = document.getElementById('acts');
+  if (document.activeElement === node && ac && ac.contains(node)) ACTS_LOST = RENDER_SEQ;
+  node.disabled = true;
+  node.dataset.old = node.textContent;
+  node.textContent = text || T('Минуту…', 'One moment…');
+  document.querySelectorAll('#acts button').forEach(function(b){
+    if (b !== node && !b.disabled){ b.disabled = true; b.setAttribute('data-lock', '1'); }
+  });
+}
+function unbusy(node){
+  if (!node) return;
+  node.disabled = false;   /* безусловно: иначе кнопка без сохранённого текста остаётся мёртвой */
+  if (node.dataset.old){ node.textContent = node.dataset.old; delete node.dataset.old; }
+  document.querySelectorAll('#acts [data-lock]').forEach(function(b){ b.disabled = false; b.removeAttribute('data-lock'); });
+  syncNeed();
+  /* Запертая кнопка теряет фокус (браузер отдаёт его BODY) — вернуть, если он так там и лежит: клавиатура иначе
+     начинала путь по странице сначала после каждого отказа. */
+  var fa = document.activeElement;
+  if (node.parentNode && document.body.contains(node) && (!fa || fa === document.body)){ node.focus(); ACTS_LOST = -1; }
+}
+
+/* Строки задания открытия доступа: полоску шагов ведёт агент маркерами ::STEP:: (он один знает, что сейчас
+   крутит); эти строки в лог не пускаем — всё прочее уходит как есть. ОДИН разбор на `access-run` и `resume`:
+   после F5 посреди открытия маркеры падали в лог сырыми строками (ревью шага 8b). `steps()` — сколько шагов
+   агент объявил (отказ до первого шага полоску не держит). */
+function stepFeed(stepsEl, log){
+  var order = [], state = {};
+  var f = function(lines){
+    /* Маркеры разбираем СТРОГО по формату: что не подошло — уходит в лог как обычная строка
+       (иначе вывод патчера, случайно начавшийся с «::», сожрёт лог или подделает шаг).
+       Рисуем ОДИН раз за батч, а не на каждый маркер. */
+    var plain = [], m, dirty = false;
+    lines.forEach(function(s){
+      if ((m = /^::STEPS::(.*)$/.exec(s))){ order = m[1] ? m[1].split(',') : []; state = {}; dirty = true; }
+      else if ((m = /^::STEP::([a-z]+)::(run|ok|fail|wait)$/.exec(s))){ state[m[1]] = m[2]; dirty = true; }
+      else plain.push(s);
+    });
+    if (dirty) stepsRender(stepsEl, order, state);
+    if (plain.length) logPush(log, plain);
+  };
+  f.steps = function(){ return order.length; };
+  return f;
+}
+/* Какой пароль root спрашивать после открытия доступа — по ответу агента: задан наш (`pw_set`), сменить не вышло и
+   сейчас заводской (`pw_why: failed`) или доступ открывали раньше и пароль прежний. Один разбор на экран задания и F5. */
+function accPwWhy(r){ return r.pw_set ? 'access' : (r.pw_why === 'failed' ? 'defroot' : 'kept'); }
+/* ОТКРЫТИЕ ДОСТУПА — задание экрана `access-run`. Значения формы берём из сеанса (ST.acc): их набирали на экране
+   «Доступ», и сюда без пароля не попасть (гард у `accgo`). */
+function accessRun(){
+  var res = document.getElementById('res'), log = document.getElementById('wzlog'),
+      stepsEl = document.getElementById('accsteps'), acts = document.getElementById('acts');
+  /* Сюда пришли без формы (её гард — у «Открыть доступ» на экране «Доступ»): задание не стартуем, отправляем к ней. */
+  if (!ST.acc.pw) return go('access');
+  var body = {ip: ST.ip, backup: ST.acc.bak !== false, lang: !!ST.acc.lang, rootpw: ST.acc.pw};
+  /* Пока идёт — кнопок нет: уходить некуда, работа уже на роутере. */
+  actsSet('');
+  stepsEl.innerHTML = Rows([{mk: 'run', t: T('Запускаю…', 'Starting…'),
+                             d: T('жду первый шаг', 'waiting for the first step')}]);
+  var feed = stepFeed(stepsEl, log);
+  return runJob('/api/access', body, feed).then(function(r){
+    if (r.gone) return;
+    if (r.ok){
+      /* Порт открыт — факт задания; пробы после F5 нет, и выдумывать её нельзя: поиск роутера нарисовал бы «никто не
+         отвечает» при открытом SSH (ревью шага 8b, круг 3). */
+      if (ST.probe) ST.probe.ssh = true;
+      /* Пароль сделал своё — в памяти вкладки ему больше делать нечего. */
+      ST.acc.pw = '';
+      /* Какой пароль спрашивать дальше — знает ТОЛЬКО агент, и он же говорит (`pw_set`).
+         Утилита пароль со stdin не читает: после неё на роутере `root`, и меняет его на
+         введённый уже агент — но лишь там, где утилита доступ и открывала. На роутере, где
+         SSH был открыт РАНЬШЕ, менять нечего и нечем, пароль остаётся прежним. Подсказка
+         «тот, который вы задали» во втором случае отправила бы вводить несуществующий —
+         ровно тот тупик, который замерен на AX3600 31.08.2026. */
+      ST.pwAsked = true; ST.pwWhy = accPwWhy(r);
+      /* Успех С ОГОВОРКОЙ — отдельная строка, а не молчание: необязательный шаг (перевод
+         интерфейса) мог не встать, и человек ВИДИТ это в полоске шагов. Не объяснить —
+         значит оставить его гадать, доступ открылся или нет. */
+      /* Формулировка НЕ считает шаги («один шаг…»): агент отдаёт оговорки СПИСКОМ, и стоит
+         появиться второму необязательному шагу — заголовок начал бы врать числом. */
+      res.innerHTML = Rows([{mk: 'ok', t: T('Доступ открыт', 'Access is open'),
+        d: T('постоянный SSH включён', 'permanent SSH is enabled'), v: '22/tcp'},
+        r.warn ? {mk: 'wr', t: T('Не всё встало', 'Not everything was set up'), d: esc(r.warn),
+                  v: T('необязательное', 'optional')} : null]);
+      actsSet(SP + '<button class="btn pri" data-go="login">' + T('Дальше · пароль root', 'Continue · root password') + '</button>');
+    } else {
+      /* Отказ ДО первого шага (форма пароля проверяется агентом раньше запуска утилиты) —
+         полоска так и осталась бы на «Запускаю… жду первый шаг», то есть рядом с красным
+         «доступ не открылся» висело бы бодрое «идёт». Шагов не было — и строки быть не должно. */
+      if (!feed.steps() && stepsEl) stepsEl.innerHTML = '';
+      res.innerHTML = Rows([{mk: 'no', t: T('Доступ не открылся', 'Access was not opened'),
+        d: esc(r.error || T('смотрите вывод ниже', 'see the output below')),
+        v: {connect: T('подключение', 'connection'), backup: T('бэкап', 'backup'), ssh: 'SSH',
+            lang: T('перевод', 'translation'), verify: T('проверка', 'verification'),
+            /* Единственная стадия, на которой прошивку ещё НЕ ТРОГАЛИ: форму пароля агент
+               проверяет до первого шага (правило одно с панелью, второй копии в браузере
+               не заводим). Назвать её обязательно — иначе отказ читается как поломка. */
+            rootpw: T('пароль', 'password')}[r.stage] || ''}]);
+      /* «Назад» — к форме со всем набранным (поправить пароль), «Повторить» — те же значения: шаги идемпотентны.
+         Отказ ПО ФОРМЕ пароля (`rootpw`) детерминирован: повтор с тем же паролем — тот же отказ по кругу. Там главная —
+         «Назад» к форме, а повтора нет (ревью шага 8b). */
+      var fixPw = r.stage === 'rootpw';
+      actsSet('<button class="btn ' + (fixPw ? 'pri' : 'gh') + '" data-go="access" data-bk="1">' + T('Назад', 'Back') + '</button>' + SP +
+        (fixPw ? '' : '<button class="btn pri" data-act="reaccess">' + T('Повторить', 'Try again') + '</button>'));
+    }
+  }).catch(function(e){
+    /* Оборвалась связь С АГЕНТОМ — утилита могла продолжить. */
+    res.innerHTML = Note(lostTxt(e) + T('. Утилита могла продолжить — проверьте порт 22, прежде чем повторять.',
+        '. The tool may have carried on — check port 22 before retrying.'), 'bad');
+    actsSet('<button class="btn gh" data-act="reprobe">' + T('Проверить порт', 'Check the port') +
+      '</button>' + SP +
+      '<button class="btn" data-go="access" data-bk="1">' + T('Назад', 'Back') + '</button>');
+  });
+}
+
+/* ИСХОД НЕУДАЧНОГО ВХОДА — одним художником на ответ и на смену языка (`ST.connErr`). Три исхода разведены СЕРВЕРОМ, и
+   здесь мы их не сливаем: «не отвечает» лечится адресом и доступом, «пароль не подошёл» — паролем. */
+/* ИСХОД ДЕЙСТВИЯ В `#res` — ПРИЧИНОЙ В СЕАНС, текст при отрисовке (`say`): смена языка перерисовывает экран, и отказ
+   пробы, пароля root, пароля панели, диагностики, «Оставить прежний пароль», предупреждения форм пропадал — экран
+   возвращался к исходному (ревью шага 8b, круг 3; круг 2 закрыл это для проверки, среза, плана и входа). Вход на экран
+   и новое действие (`busy`) исход снимают. */
+var SAID = {
+  fail: function(d){ return Note(failTxt(d.pre ? T(d.pre[0], d.pre[1]) : '', d.e), 'bad'); },
+  probe: function(d){ return Note(failTxt(T('Не смог проверить: ', 'Could not check: '), d.e), 'bad'); },
+  store: function(d){ return Note(failTxt(T('Не смог спросить роутер: ', 'Could not ask the router: '), d.e), 'bad'); },
+  refused: function(d){ return '<div class="wzgap">' + Note(esc(d.error || '') || {
+      rootpw: T('Сменить пароль не вышло', 'Changing the password did not work'),
+      panelpw: T('Панель пароль не подтвердила', 'The panel did not accept the password'),
+      diag: T('Отчёт не собрался', 'The report was not collected')}[d.what], 'bad') + '</div>' +
+    (d.what === 'rootpw' ? '<div class="wzgap">' + Note(T(
+      'Это не мешает установке: можно продолжить со старым паролем и сменить его позже.',
+      'This does not block the installation: you can continue with the old password and change it later.'), 'info') + '</div>' : ''); },
+  mismatch: function(){ return Note(T('Пароли не совпадают — наберите заново.', 'The passwords do not match — type them again.'), 'warn'); },
+  nopw: function(){ return Note(T('Задайте новый пароль root — иначе после открытия доступа войти будет нечем.',
+    'Set a new root password — otherwise there will be nothing to sign in with once access is open.'), 'warn'); }
+};
+function say(k, d){
+  ST.said = {scr: CUR, k: k, d: d || {}};
+  var r = document.getElementById('res');
+  if (r) r.innerHTML = SAID[k](ST.said.d);
+}
+/* Отказ входа — ОДНОЙ красной плашкой (макет `wz-login`): жирным — что не вышло и на чём, дальше — причина словами. До
+   шага 7 пачки 5 это были строка-факт с ✕ и синяя плашка с советом — два блока про одну беду, причём синий цвет читался
+   «всё в порядке». Про сброс пароля говорим ПРЕДПОЛОЖЕНИЕМ: точный ответ («сток зовёт set_user на каждой буте») даёт только
+   проба по SSH, а её здесь ещё нет — до входа мы вправе лишь назвать частую причину; текст агента при отказе по паролю не
+   нужен (он и есть «пароль не подошёл»), у прочих отказов он и есть причина. `autohint` — молчаливый вход по сохранённому
+   паролю не подошёл: та же беда, что и у набранного. */
+function connFailHtml(r){
+  if (r.kind === 'lost') return Note(failTxt(T('Не смог войти: ', 'Could not sign in: '), {message: r.error, http: r.http}), 'bad');
+  if (r.kind === 'net')
+    return Note('<b>' + T('Роутер не отвечает по SSH', 'The router does not answer over SSH') + ' · ' + esc(ST.ip) + '.</b> ' +
+      T('Доступ ещё не открыт либо адрес не тот. Если доступ ещё не открывали — вернитесь на шаг «Доступ».',
+        'Access is not open yet, or the address is wrong. If access has not been opened yet, go back to the “Access” step.'), 'bad');
+  var pw = r.kind === 'auth' || r.kind === 'autohint';
+  /* Слово после «Вход не удался» — ДЛЯ ЧЕЛОВЕКА: «nopass» и «negotiation» — наши внутренние ярлыки, показывать их нельзя. */
+  var what = pw ? T('пароль', 'password')
+    : {nopass: T('нет пароля', 'no password'), addr: T('адрес', 'address'),
+       negotiation: T('SSH-сессия', 'SSH session')}[r.kind] || T('отказ', 'refused');
+  return Note('<b>' + T('Вход не удался', 'Sign-in failed') + ' · ' + what + '.</b> ' +
+    /* Отказ входа обязан кончаться ДЕЙСТВИЕМ: у сброшенного пароля (AX3600) текущего человек не знает, и без совета плашка —
+       тупик. Заводской пароль знает утилита открытия доступа (ревью пачки 5, круг 1). */
+    (pw ? T('Роутер перезагружали? На части моделей Xiaomi сток возвращает пароль root к заводскому на КАЖДОЙ загрузке — ' +
+            'сохранённый после этого не подходит. Заводской пароль знает утилита открытия доступа: вернитесь на шаг «Доступ» ' +
+            'и откройте его заново.',
+            'Was the router rebooted? On some Xiaomi models the stock firmware resets the root password to the factory one ' +
+            'on EVERY boot, and the saved one stops working after that. The access tool knows the factory password: go back ' +
+            'to the “Access” step and open access again.')
+        : esc(r.error || '')), 'bad');
+}
+function act(name, node){
+  /* Кнопка занята — действие уже идёт. Щелчок по запертой до сюда не доходит, а Enter в поле — доходил: два одинаковых
+     задания подряд и подпись «Задаю…» навсегда (ревью шага 8b, круг 3). */
+  if (node && node.disabled) return;
+  var res = document.getElementById('res');
+  if (name === 'probe' || name === 'reprobe'){
+    /* Проба уже летит (Enter в поле, пока ждём) — вторую параллельно не шлём. */
+    if (PROBE_BUSY) return;
+    var ip = (document.getElementById('ip') || {}).value || ST.ip;
+    ST.ip = ip.trim();
+    busy(node, T('Проверяю…', 'Checking…'));
+    if (res) res.innerHTML = '<div class="wzgap">' + Rows([{
+      mk: 'run', t: T('Проверяю ' + esc(ST.ip) + '…', 'Checking ' + esc(ST.ip) + '…'),
+      d: T('жду ответа роутера', 'waiting for the router to answer')}]) + '</div>';
+    /* Замок языка — ТОТ ЖЕ, что у заданий (`runJob` ставит его сам). Проба заданием не идёт,
+       и без замка смена языка посреди неё перерисовывала экран: ответ приходил в узел, которого
+       в документе уже нет, — то есть кнопка «Проверить» отрабатывала вхолостую и молча. */
+    jobHold(); PROBE_BUSY = true;
+    var unlock = function(){ jobFree(); PROBE_BUSY = false; };
+    /* Ответ пробы — ТОЛЬКО экрану, который её начал: без этого ответ, пришедший на «Доступ», заменял его ряд кнопок на
+       «Проверить снова / Дальше», а «Проверить порт» с `access-run` уводил с экрана, где человек уже выбирал плитку
+       (ревью шага 8b, круг 2). */
+    var pseq = RENDER_SEQ;
+    return api('/api/probe', {ip: ST.ip}).then(function(p){
+      ST.probe = p;
+      /* Новый факт порта — выбор на «Доступе» заново по нему, а не по прошлому щелчку. */
+      ST.pick.acc = '';
+      if (pseq !== RENDER_SEQ) return;
+      if (name === 'reprobe') return go(p.ssh ? 'login' : 'access');
+      showProbe(p);
+    }).catch(function(e){
+      /* Отказ — прошлая проба больше не про этот адрес: «Дальше» запирается, пока проба не пройдёт. */
+      ST.probe = null;
+      if (pseq !== RENDER_SEQ) return;
+      say('probe', {e: e});
+      var a = document.getElementById('acts');
+      if (a && name === 'probe') actsSet(SP + '<button class="btn pri" data-act="probe">' + T('Проверить снова', 'Check again') + '</button>');
+    }).then(function(){ unlock(); unbusy(node); });
+  }
+  if (name === 'accgo'){
+    if (accWay() !== 'open') return go('login');
+    /* Пустой пароль пропускать нельзя: утилита оставляет роутер с паролем `root`, который
+       знает весь интернет, и мастер меняет его СРАЗУ после открытия доступа (это делает
+       агент, а не утилита — она пароль со stdin не читает вовсе). Гард как у rootpw/panelpw. */
+    if (!ST.acc.pw){ say('nopw'); var np = document.getElementById('newpw'); if (np) np.focus(); return; }
+    /* Открытие доступа встроено — уводим на экран с живым логом, задание стартует там. */
+    return go('access-run');
+  }
+  /* Повтор после отказа — тот же экран заново: он и стартует задание, со значениями формы из сеанса. */
+  if (name === 'reaccess') return go('access-run');
+  if (name === 'connect'){
+    var pw = (document.getElementById('pw') || {}).value || '';
+    /* Запоминаем ДО запроса: внутри `.then` экран уже мог смениться, а нам важно, вошли мы
+       молча (поля не было) или человек пароль вводил — от этого зависит текст отказа. */
+    var auto = pwStored();
+    busy(node, T('Вхожу…', 'Signing in…'));
+    res.innerHTML = '<div class="wzgap">' + Rows([{
+      mk: 'run', t: T('Подключаюсь к ' + esc(ST.ip) + '…', 'Connecting to ' + esc(ST.ip) + '…'),
+      d: T('проверяю порт и пароль', 'checking the port and the password')}]) + '</div>';
+    return runJob('/api/connect', {ip: ST.ip, password: pw}).then(function(r){
+      unbusy(node);
+      if (r.gone) return;
+      ST.conn = r;
+      /* «Смените пароль root» говорит «сейчас у роутера пароль по умолчанию» — показываем его, только когда это правда
+         (`pw_default`): после доступа, открытого с новым паролем, он звал сменить его второй раз (ревью 8b, круг 3). */
+      if (r.ok) return go(r.installed ? 'exists' : (r.pw_default === false ? 'check' : 'rootpw'));
+      /* Молчаливый вход не подошёл — ОТКРЫВАЕМ поле. Иначе экран «не спрашиваю» становится
+         тупиком: кнопка «Войти» шлёт тот же негодный пароль сколько угодно раз. Перерисовка
+         обновляет и `res`, поэтому ссылку берём заново, а не через захваченную выше. */
+      if (auto && (r.kind === 'auth' || r.kind === 'nopass')){
+        ST.pwAsked = true; ST.pwWhy = 'auth';
+        go('login');   /* вход на экран стирает исход прошлой попытки — наш кладём ПОСЛЕ */
+        ST.connErr = {kind: 'autohint'};
+        var r2 = document.getElementById('res');
+        if (r2) r2.innerHTML = connFailHtml(ST.connErr);
+        return;
+      }
+      ST.connErr = r;
+      res.innerHTML = connFailHtml(r);
+    }).catch(function(e){
+      unbusy(node);
+      ST.connErr = {kind: 'lost', error: e.message, http: e.http};
+      res.innerHTML = connFailHtml(ST.connErr);
+    });
+  }
+  if (name === 'rootpw'){
+    var a = (document.getElementById('p1') || {}).value || '', b = (document.getElementById('p2') || {}).value || '';
+    if (a !== b) return say('mismatch');
+    busy(node, T('Меняю…', 'Changing…'));
+    return runJob('/api/rootpw', {password: a}).then(function(r){
+      unbusy(node);
+      if (r.gone) return;
+      if (r.ok) return go('check');   /* черновики полей стирает следующий вход на экран (render) */
+      say('refused', {what: 'rootpw', error: r.error});
+    }).catch(function(e){ unbusy(node); say('fail', {e: e}); });
+  }
+  if (name === 'recheck') return go('check');
+  if (name === 'install'){
+    var t = document.getElementById('tight');
+    ST.tight = !!(t && t.checked);
+    /* Обновление или установка с нуля — факт проверки; живёт в сеансе и в контексте задания (F5). */
+    ST.upd = !!(ST.facts && ST.facts.installed);
+    return go('install');
+  }
+  if (name === 'panelpw'){
+    var x = (document.getElementById('p1') || {}).value || '', y = (document.getElementById('p2') || {}).value || '';
+    if (x !== y) return say('mismatch');
+    busy(node, T('Задаю…', 'Setting…'));
+    return runJob('/api/panelpw', {password: x}).then(function(r){
+      unbusy(node);
+      if (r.gone) return;
+      if (r.ok){
+        /* Экран «только пароль» остаётся на месте: набранный пароль не должен вернуться в поля сменой языка. */
+        delete ST.draft[CUR + ':p1']; delete ST.draft[CUR + ':p2'];
+        if (CUR === 'panelpw-only'){
+          /* Смена пароля — работа САМА ПО СЕБЕ. Уводить отсюда в «Готово» установки нельзя:
+             человек ничего не устанавливал, и экран поздравил бы его с чужим делом. Результат
+             показываем НА МЕСТЕ, а дорог оставляем две: назад к списку действий и сразу в
+             панель — проверить новый пароль там, где им и пользуются. */
+          ST.pwDone = {url: r.url || ''};
+          pwDonePaint();
+          return;
+        }
+        /* Экран раскладки существует, ТОЛЬКО когда роутеру есть что предложить: накопитель
+           виден и бутстрап назвал текущую раскладку. Спрашивает об этом задание пароля — тем
+           же SSH-сеансом, в котором оно и так работало. Иначе экран мигнул бы и увёл дальше
+           сам, а мигающий экран читается как сбой. */
+        return go(pwNext(r));
+      }
+      say('refused', {what: 'panelpw', error: r.error});
+    }).catch(function(e){ unbusy(node); say('fail', {e: e}); });
+  }
+  /* «Оставить прежний пароль» (обновление): раскладка — только если роутеру есть что предложить. Спросить об этом
+     больше некому — задание пароля не шло, — поэтому срез отдельно, и та же развилка `pwNext`. Прежде кнопка вела на
+     экран накопителя всегда: «К роутеру подключён накопитель» над строкой «накопителя не видит» (ревью 8b, круг 3). */
+  if (name === 'keeppw'){
+    busy(node, T('Спрашиваю роутер…', 'Asking the router…'));
+    return runJob('/api/store', {}).then(function(r){
+      unbusy(node);
+      if (r.gone) return;
+      go(pwNext(r));
+    }).catch(function(e){ unbusy(node); say('store', {e: e}); });
+  }
+  if (name === 'storego'){
+    var wm = storeSel();
+    /* Устройство спрашиваем ТОЛЬКО когда накопителей несколько — тогда на экране есть список.
+       Один накопитель отдаём пустой строкой: движок в этом случае сам предпочитает уже
+       смонтированную точку, и называть ему устройство значило бы монтировать второй раз. */
+    var sel = document.getElementById('storedev');
+    ST.storeDev = sel ? (sel.value || '') : '';
+    /* Карточка текущей раскладки никуда не переносит: движок ответил бы «режим уже такой»,
+       а человек увидел бы экран переезда, на котором ничего не происходит. */
+    if (!wm || wm === ((ST.store || {}).mode || '')) return go('done');
+    ST.storeMode = wm;
+    return go('storerun');
+  }
+  if (name === 'diag'){
+    ST.diagDone = null;
+    busy(node, T('Собираю…', 'Collecting…'));
+    res.innerHTML = '<div class="wzgap">' + Rows([{
+      mk: 'run', t: T('Снимаю состояние роутера…', 'Capturing the router state…'),
+      d: T('несколько секунд', 'a few seconds')}]) + '</div>';
+    return runJob('/api/diag', {}).then(function(r){
+      unbusy(node);
+      if (r.gone) return;
+      if (!r.ok) return say('refused', {what: 'diag', error: r.error});
+      ST.diag = r.path;
+      ST.diagDone = {path: r.path, kb: r.kb};
+      res.innerHTML = diagHtml(ST.diagDone);
+    }).catch(function(e){ unbusy(node); say('fail', {e: e}); });
+  }
+  if (name === 'openfile'){
+    return post('/api/openfile', {path: ST.diag || ''}).catch(function(e){
+      if (res) res.insertAdjacentHTML('beforeend',
+        '<div class="wzgap">' + Note(T('Не смог открыть файл: ', 'Could not open the file: ') +
+          esc(e.message), 'warn') + '</div>');
+    });
+  }
+  if (name === 'bye'){
+    busy(node, T('Закрываю…', 'Closing…'));
+    /* Посреди задания агент откажет (409): оборванная заливка оставила бы роутер между двумя установками. */
+    return post('/api/bye', {}).then(function(){ ENV = {k: 'bye', v: null}; render('bye'); paintChrome(); }).catch(function(e){
+      unbusy(node);
+      alert(T('Не смог закрыть мастер: ', 'Could not close the wizard: ') + e.message);
+    });
+  }
+  if (name === 'openpanel'){
+    return post('/api/openpanel', {}).catch(function(e){
+      alert(T('Не смог открыть панель: ', 'Could not open the panel: ') + e.message);
+    });
+  }
+  if (name === 'rmgo'){
+    var full = (rmWay() === 'purge');
+    var sure = document.getElementById('sure');
+    if (full && !(sure && sure.checked)){
+      document.getElementById('extra').insertAdjacentHTML('beforeend',
+        '<div class="wzgap">' + Note(T('Отметьте галочку: полное удаление стирает настройки безвозвратно.',
+          'Tick the checkbox: a full removal erases the settings for good.'), 'warn') + '</div>');
+      return;
+    }
+    var log = document.getElementById('wzlog'), acts = document.getElementById('acts'), sure2 = document.getElementById('sure');
+    /* ПОКА ИДЁТ — НИ УХОДА, НИ ВТОРОГО НАЖАТИЯ (ревью шага 8b): ряд кнопок пуст (как на `access-run`), галочка заперта,
+       плитки не переключаются (`optPick` при задании этого экрана, `JOB_OWN`). Прежде «Назад» уводил с экрана посреди удаления, и итог не
+       показывался никогда, а снятая и поставленная галочка отпирала занятую кнопку — второй запрос поверх первого. */
+    actsSet('');
+    if (sure2) sure2.disabled = true;
+    ST.rm.log = [];
+    return runJob('/api/remove', {full: full}, function(lines){
+      ST.rm.log = ST.rm.log.concat(lines);
+      logPush(log, lines);
+    }).then(function(r){
+      if (sure2) sure2.disabled = false;
+      if (r.gone) return;
+      ST.rm.done = {ok: !!r.ok, full: full, message: r.message || '', started: r.started !== false};
+      document.getElementById('res').innerHTML = rmDoneRow(ST.rm.done);
+      /* После снятия всё, что мастер знал о роутере, устарело: возвращаем в начало, а не
+         на экран «панель уже стоит» — её там может уже не быть. */
+      ST.conn = null; ST.facts = null;
+      if (r.ok){
+        /* Карточки выбора убираем ВМЕСТЕ с галочкой И советом про бэкап: план того, что
+           снимется, только что заменён итогом, и второй клик («а теперь удалить полностью»)
+           человек делал бы вслепую. Совет «сделайте копию ДО удаления», оставленный ПОСЛЕ
+           удаления, читается издевательством — он адресован тому, кто ещё не нажал.
+           Второй заход — через «В начало», где план соберётся заново.
+           При ОТКАЗЕ оставляем всё: повтор там осмыслен. */
+        var picks = document.getElementById('rmopt');
+        if (picks) picks.remove();
+        var pre = document.getElementById('pre');
+        if (pre) pre.remove();
+        actsSet(SP + '<button class="btn pri" data-go="scan">' + T('В начало', 'Start over') + '</button>');
+      } else rmActs();   /* отказ — выбор, галочка и кнопка повтора на месте: повтор там осмыслен */
+    }).catch(function(e){
+      /* Обрыв связи посреди удаления — не отказ удаления: на роутере оно могло идти дальше. Говорим это, как у
+         установки, и повтора сразу не предлагаем — сперва план заново («Назад» → «Удалить»). */
+      if (sure2) sure2.disabled = false;
+      document.getElementById('res').insertAdjacentHTML('beforeend', '<div class="wzgap">' + Note(lostTxt(e) +
+        T('. Снятие на роутере могло продолжиться — вернитесь назад и откройте «Удалить» заново: план покажет, что осталось.',
+          '. The removal on the router may have carried on — go back and open “Remove” again: the plan will show what is left.'), 'bad') + '</div>');
+      actsSet('<button class="btn gh" data-go="exists" data-bk="1">' + T('Назад', 'Back') + '</button>');
+    });
+  }
+}
+
+/* ─── старт ──────────────────────────────────────────────────────────────────
+   Первым делом спрашиваем агента: жив ли он и что уже знает (сохранённый адрес роутера). */
+paintChrome();          /* язык мог прийти из хранилища — каркас рисуем ДО первого экрана */
+api('/api/state').then(function(s){
+  ST.agent = s;
+  if (s.host) ST.ip = s.host;
+  ENV = {k: 'ok', v: s};
+  paintEnv();
+  /* НАЧИНАЕМ ВСЕГДА С НАЧАЛА, что бы ни осталось в адресе. Хеш пишется как след для отладки,
+     но восстанавливать по нему экран нельзя: перезагрузка страницы на «#install» запустила бы
+     установку сама, без единого клика, — а состояние сеанса (ST) при перезагрузке пустое.
+     ЕДИНСТВЕННОЕ исключение — задание, которое ИДЁТ ПРЯМО СЕЙЧАС: его не надо запускать, за ним
+     надо смотреть, и спрашиваем мы об этом не адрес, а АГЕНТА (`job` в /api/state). Без этого
+     F5 посреди установки уводил на первый экран, а работа продолжалась вслепую. */
+  ST.jobName = s.job === 'run' ? (s.job_name || '') : '';
+  /* Контекст идущего задания — из хранилища вкладки (см. runJob): с какого экрана и обновление ли. */
+  ST.jobCtx = null;
+  if (ST.jobName){ try { ST.jobCtx = JSON.parse(sessionStorage.getItem('enodia_wizard_job') || 'null'); } catch (e) {} }
+  if (ST.jobCtx && ST.jobCtx.upd) ST.upd = true;
+  render(s.job === 'run' ? 'resume' : 'welcome');
+}).catch(function(e){
+  /* 403 — агент ОТВЕТИЛ: жив, а у этой вкладки нет ключа (адрес скопирован в другую вкладку или браузер). Совет «окно
+     мастера закрыли» тут неправда — нужен свой (ревью шага 8b, круг 2). */
+  ENV = {k: e.http ? 'nokey' : 'dead', v: null};
+  ST.agentNoKey = !!e.http;
+  paintEnv();
+  render('noagent');
+});
+</script>
+</body>
+</html>

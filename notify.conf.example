@@ -1,0 +1,29 @@
+# notify.conf — настройки почты для notify.sh. Подходит ЛЮБОЙ SMTP.
+#
+# Проще всего настроить почту в панели («Панель → Уведомления»): она сама запишет конфиг куда надо.
+# Руками — скопируйте этот файл в КАТАЛОГ СОСТОЯНИЯ ($ENODIA_STATE, обычно /data/usr/app/enodia-state;
+# НЕ рядом со скриптом: каталог кода обновление заменяет целиком) и впишите пароль приложения:
+#   cp notify.conf.example /data/usr/app/enodia-state/notify.conf
+#   chmod 600 /data/usr/app/enodia-state/notify.conf      # важно: внутри пароль
+#
+# Письма-уведомления ВСЕГДА идут напрямую МИМО VPN: mark-core.sh (notify-guard)
+# выводит router-локальный SMTP (порты 465/587/25) из маркировки, поэтому даже
+# при указании Gmail/Google (их IP лежат в iplist_set) письмо уйдёт напрямую и
+# при мёртвом туннеле. Яндекс — просто удобный дефолт для РФ.
+#
+# Пароль приложения (НЕ основной пароль аккаунта!):
+#   Яндекс:  smtp.yandex.ru : 465   — https://id.yandex.ru/security/app-passwords
+#   Gmail:   smtp.gmail.com : 465   — «Пароль приложения» Google (нужна 2FA)
+#   Outlook: smtp.office365.com : 587 (STARTTLS)
+#
+# SMTP_TLS — шифрование канала:
+#   auto      (по порту: 465 → implicit SSL/TLS, 587/25 → STARTTLS)   ← рекомендуется
+#   implicit  (сразу TLS, обычно порт 465)
+#   starttls  (plain → апгрейд командой STARTTLS, обычно порт 587)
+
+SMTP_HOST=smtp.yandex.ru
+SMTP_PORT=465
+SMTP_TLS=auto
+SMTP_USER=ваш_логин@yandex.ru
+SMTP_PASS=
+MAIL_TO=ваш_логин@yandex.ru

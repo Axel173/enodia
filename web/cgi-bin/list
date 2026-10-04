@@ -1,0 +1,213 @@
+#!/bin/sh
+# cgi-bin/list — серверы (конфиги) ВСЕХ транспортов для карточки «Серверы».
+# Read-only: имена configs/*.conf (awg) + xray-configs/*.json + hy2-configs/*.yaml,
+# активный каждого (.active / .xray-active / .hy2-active) и флаг ready (бинарь+конфиг
+# реально установлены) от transport.sh list. Переключение/активация — действия
+# set_server (awg) / set_xray_server / set_hy2_server в cgi-bin/action.
+# 2FA-гейт (totp.sh) — см. разбор в cgi-bin/status.
+# uhttpd НЕ ПЕРЕДАЁТ CGI своё окружение (замер на железе 01.09.2026 пробным CGI: все ENODIA_*
+# пусты), а в режиме «всё на накопителе» литералы указывают в пустоту — панель отвечала бы
+# «ничего не установлено» на живой системе, а ГЕЙТ ВТОРОГО ФАКТОРА ниже просто не находил бы
+# totp.sh и молча пропускал запрос. Каталог кода знаем бесплатно из $0, остальное разбирает
+# cgi-paths.sh: второй копии этого рассуждения в проекте быть не должно.
+_cgid=${0%/web/cgi-bin/*}; [ "$_cgid" = "$0" ] && _cgid=
+if [ -n "$_cgid" ] && [ -f "$_cgid/cgi-paths.sh" ]; then . "$_cgid/cgi-paths.sh"; fi
+if [ -f "$ENODIA_DIR/totp.sh" ]; then
+	TOTP_LIB=1; . "$ENODIA_DIR/totp.sh"
+	# СУДИМ ПО СПОСОБНОСТИ, А НЕ ПО НАЛИЧИЮ. totp.sh СТАРЕЕ формы входа сорсится успешно, но его
+	# гейт при выключенном 2FA пропускал всё — а uhttpd к этому моменту уже поднят БЕЗ `-c`, то
+	# есть панель отдавала бы данные и ДЕЙСТВИЯ без пароля. Признак эпохи — pw_verify (его же
+	# спрашивает cgi-bin/login).
+	command -v pw_verify >/dev/null 2>&1 || {
+		echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+		echo "Cache-Control: no-store"; echo ""
+		printf '{"ok":false,"need_login":true,"msg":"totp.sh старее формы входа (обновите панель)"}\n'; exit 0; }
+	totp_gate_deny
+else   # НЕТ totp.sh — ОТКАЗ, А НЕ ПРОПУСК: двери-Basic больше нет, пускать некому (разбор — в totp.sh, «Гейт»)
+	echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+	echo "Cache-Control: no-store"; echo ""
+	printf '{"ok":false,"need_login":true,"msg":"totp.sh не установлен (обновите панель)"}\n'; exit 0
+fi
+echo "Content-Type: application/json; charset=utf-8"
+echo "Cache-Control: no-store"
+echo ""
+
+D=${ENODIA_DIR:-/data/usr/app/enodia}
+DS=${ENODIA_STATE:-/data/usr/app/enodia-state}
+t=$(cat "$DS/.transport" 2>/dev/null | tr -d ' \r\n')
+[ -n "$t" ] || t=awg
+
+# Где лежит бинарь — ответ даёт store-lib (с внешним накопителем это НЕ $D). Иначе `bin_present`
+# ниже говорил бы «нужен бинарь» о переехавшем xray, причём РЯДОМ с `ready:true` от
+# transport.sh (тот store-aware) — то есть карточка спорила бы сама с собой.
+# Гард `[ -f ]` обязателен: провалившийся `.` в busybox ash убивает шелл на месте.
+if [ -f "$D/store-lib.sh" ]; then . "$D/store-lib.sh"; fi
+command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$D/$1"; }
+
+# Готовые транспорты (плагин+конфиг+бинарь). Обрамляем пробелами для точного
+# match'а " awg " (а не подстроки). Локально/быстро, без сети.
+ready=" $(sh "$D/transport.sh" list 2>/dev/null | tr '\n' ' ') "
+is_ready() { case "$ready" in *" $1 "*) printf true ;; *) printf false ;; esac; }
+
+# Установлен ли БИНАРЬ несущей (без учёта конфига). Панель по нему отличает «нет бинаря»
+# (не установлен транспорт) от «нужен конфиг» (бинарь есть, но нет секрет-конфига — типовой
+# случай тестера: awg докачали из панели, но без awg.conf transport_ready=false, а карточка
+# врала «нужен бинарь»). awg = ОБА бинаря; xray/hy2 = свой бинарь + общий hev (tun2socks).
+bin_present() {
+	case "$1" in
+		awg)  [ -x "$(bin_path amneziawg-go)" ] && [ -x "$(bin_path awg)" ] ;;
+		xray) [ -x "$(bin_path xray)" ]     && [ -x "$(bin_path hev)" ] ;;
+		hy2)  [ -x "$(bin_path hysteria)" ] && [ -x "$(bin_path hev)" ] ;;
+		*)    false ;;
+	esac && printf true || printf false
+}
+
+# НИ ОДНОГО ПРОЦЕССА НА ФАЙЛ (приёмка 24.09.2026, живой BE7000). Ответ собирался 2,7 с: у каждого из 119 xray-конфигов
+# разбор метаданных запускал ~25 процессов (sed/grep/head/tr/basename) — около трёх тысяч форков на запрос, — и столько же
+# ждал человек, нажав «Сервер» в шапке, и каждый экран «Серверов»/«Подписок». Теперь имена — разбором строки в самом шелле,
+# метаданные — одним grep по всем файлам и одним awk, карта имён — одним sed и одним awk. На живых данных ответ байт-в-байт
+# прежний (сверено на роутере md5 обоих ответов); где он сознательно другой — сказано у функций. awk — базовый (шаблоны, sub/gsub, массивы): правило проекта держит совместимость с
+# прошивками, где у busybox-awk нет index/split/функций.
+TAB=$(printf '\t')
+
+# Имена *.EXT в каталоге -> JSON-массив элементов "a","b" (без расширения). Кавычка и обратная косая из имени вырезаются, как
+# прежде (`tr -d`): процесс заводим только для такого имени, а их не бывает.
+# Порядок — по ИМЕНИ, а не по имени файла: глоб сортирует с расширением, а `-` (0x2D) меньше `.` (0x2E), и второй конфиг с тем же
+# именем («Germany-2.json», «enodiatest-2.conf» — загрузка «рядом») вставал в списке ВЫШЕ первого (замер BE7000 04.10.2026).
+# Имена у нас без переводов строки (upload_config/подписки пускают только [A-Za-z0-9_.-]) — построчный sort их не рвёт. Порядок —
+# побайтовый (`LC_ALL=C`): busybox иначе и не умеет, а GNU sort стенда в UTF-8 локали пропускал бы знаки и ставил бы имена иначе.
+# ПЕРЕБОР РЕЗЕРВА идёт иначе — глобом, по имени ФАЙЛА (switch-vpn.sh/xray-transport.sh/transport-hy2.sh::failover): «X-2» там раньше
+# «X». Сознательно: разница — только у пары «X / X-…», а общий владелец порядка на три плагина и CGI ради неё дороже; подсказка экрана
+# имени говорит «по алфавиту файлов» (ревью с.97).
+list_dir() {
+	dir="$1"; ext="$2"
+	for f in "$dir"/*."$ext"; do
+		[ -f "$f" ] || continue
+		n=${f##*/}; printf '%s\n' "${n%".$ext"}"
+	done | LC_ALL=C sort | tr -d '"\\' | awk '{ printf "%s\"%s\"", (c++ ? "," : ""), $0 }'
+}
+
+# Мета для карточек и редактора в панели (гибрид-редактор get_config_raw/editServer). Отдаём
+# ТОЛЬКО редактируемые/показываемые поля — sni/fp (xray), sni/insecure (hy2). Секреты (uuid/ключи/
+# пароль) НЕ включаем. JSON-объект {"имя":{...},...}. Значения — hostname/fp/bool =
+# JSON-безопасны, но на всякий срезаем кавычки/бэкслеш.
+meta_xray() {
+	set --
+	for f in "$DS"/xray-configs/*.json; do [ -f "$f" ] && set -- "$@" "$f"; done
+	[ $# -gt 0 ] || return 0
+	# Первая половина потока — ПОРЯДОК файлов («F⇥путь», как шёл прежний цикл: файл без единого ключа тоже получает запись),
+	# вторая — ВСЕ ключи всех файлов одним grep («K⇥путь⇥ключ⇥значение»; -H — путь и у единственного файла). Путь отрезаем
+	# ЖАДНО до «.json:"» — двоеточие бывает и в пути хранилища (метка тома у автомонтирования стока), и в имени файла, а
+	# «.json:"» после настоящего разделителя не встречается (в значении нет кавычек, ключи — фиксированные слова); прежний
+	# разрез по первому «:» молча обнулял метаданные всех конфигов (ревью приёмки, круг 1).
+	# ОДНО СОЗНАТЕЛЬНОЕ ОТЛИЧИЕ ОТ ПРЕЖНЕГО: ключ, повторённый в ОДНОЙ строке (JSON в одну строку с двумя outbound), — теперь
+	# ПЕРВОЕ вхождение, как у host/network/security всегда; прежний жадный sed брал у sni/fp ПОСЛЕДНЕЕ, и карточка сводила адрес
+	# одного outbound с SNI другого. Наши генераторы пишут по ключу в строке — на них ответ байт-в-байт прежний (стенд
+	# dev/list-cgi-test.sh держит оба случая).
+	{
+		for f in "$@"; do printf 'F\t%s\n' "$f"; done
+		grep -H -oE '"(serverName|fingerprint|address|protocol|network|security|flow)"[[:space:]]*:[[:space:]]*"[^"]*"' "$@" 2>/dev/null \
+			| sed "s#^\(.*\)\.json:\"\([A-Za-z]*\)\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"\$#K$TAB\1.json$TAB\2$TAB\3#"
+	} | awk -F"$TAB" '
+		$1 == "F" { nm = $2; sub(/^.*\//, "", nm); sub(/\.json$/, "", nm); gsub(/["\\]/, "", nm); name[$2] = nm; ord[++n] = $2; next }
+		$1 == "K" {
+			v = $4; gsub(/["\\]/, "", v)
+			# Протокол outbound — ПЕРВЫЙ из четвёрки (inbound socks и freedom в неё не входят); нет ни одного — vless.
+			if ($3 == "protocol") { if (!($2 in pr) && v ~ /^(vless|vmess|trojan|shadowsocks)$/) pr[$2] = v; next }
+			k = $2 "\t" $3; if (!(k in val)) val[k] = v
+		}
+		END {
+			for (i = 1; i <= n; i++) {
+				p = ord[i]; pp = (p in pr) ? pr[p] : "vless"
+				printf "%s\"%s\":{\"proto\":\"%s\",\"sni\":\"%s\",\"fp\":\"%s\",\"host\":\"%s\",\"network\":\"%s\",\"security\":\"%s\",\"flow\":\"%s\"}", \
+					(i > 1 ? "," : ""), name[p], pp, val[p "\tserverName"], val[p "\tfingerprint"], val[p "\taddress"], val[p "\tnetwork"], val[p "\tsecurity"], val[p "\tflow"]
+			}
+		}'
+}
+meta_hy2() {
+	out=""
+	for f in "$DS"/hy2-configs/*.yaml; do
+		[ -f "$f" ] || continue
+		n=$(basename "$f" .yaml | tr -d '"\\')
+		# Управляющие байты — вон и из sni (прежде резали только кавычку и слэш): сырой байт в JSON ронял бы разбор ВСЕГО списка.
+		sni=$(sed -n 's/^[[:space:]]*sni:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' "$f" | head -1 | tr -d '\000-\037"\\')
+		ins=$(sed -n 's/^[[:space:]]*insecure:[[:space:]]*\([A-Za-z]*\).*$/\1/p' "$f" | head -1)
+		# Адрес сервера и обфускация — строке Hysteria2 под именем (макет «Серверов»: «адрес · salamander»). Не секрет: пароль obfs
+		# и auth не отдаём. Управляющие байты — вон, диапазон ПЕРВЫМ (busybox не читает восьмеричный код сразу после `\\`, C111).
+		srv=$(sed -n 's/^server:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' "$f" | head -1 | tr -d '\000-\037"\\')
+		obf=$(sed -n 's/^[[:space:]]*type:[[:space:]]*\(salamander\)[[:space:]]*$/\1/p' "$f" | head -1)
+		out="$out${out:+,}\"$n\":{\"sni\":\"$sni\",\"insecure\":\"$ins\",\"host\":\"$srv\",\"obfs\":\"$obf\"}"
+	done
+	printf '%s' "$out"
+}
+
+# Подписки (метаданные с роутера) -> [{"tag","label"}]. URL (кред) НЕ отдаём — обновление
+# подписки идёт по tag (cgi-bin/action fetch_sub сам берёт url из .subs). Формат .subs:
+# строки "tag⇥url⇥label" (см. action save_sub). Так подписки видны с ЛЮБОГО устройства.
+subs_list() {
+	[ -f "$DS/.subs" ] || return
+	out=""
+	while IFS="$TAB" read -r tag url label; do
+		[ -n "$tag" ] || continue
+		tag=$(printf '%s' "$tag" | tr -d '"\\')
+		# Управляющие байты метки (кроме тех, что уже съел read) — вон, как у ремарки в names_map: сырой в JSON-строке ронял бы
+		# разбор ВСЕГО ответа (ревью приёмки, круг 2). Обычную метку это не меняет ни на байт. Диапазон — ПЕРВЫМ: busybox не читает
+		# восьмеричный код сразу после `\\` и снимал бы только кавычку с косой (замер на BE7000, круг 3; следит C111).
+		label=$(printf '%s' "$label" | tr -d '\000-\037"\\')
+		out="$out${out:+,}{\"tag\":\"$tag\",\"label\":\"$label\"}"
+	done < "$DS/.subs"
+	printf '%s' "$out"
+}
+
+# Настоящие имена серверов подписки (эмодзи/флаги/юникод — v2rayNG-стиль). В имя файла такое
+# не кладём (ломает глоб/скрипты); сырой remark лежит в .sub-names ("файл⇥remark"). Отдаём
+# карту {"файл":"remark"} — фронт показывает её вместо обрезанного имени файла.
+names_map() {
+	[ -f "$DS/.sub-names" ] || return
+	# Экранирование — тем же sed, что прежде у ремарки, но ОДИН раз на весь файл: у имени файла кавычка и косая всё равно
+	# вырезаются целиком (и до экранирования, и после — одно и то же). Разбор строки — как у прежнего `IFS=⇥ read`: табы по
+	# краям снимаются, поле — до первого таба, ремарка — после их серии. Последняя строка без перевода строки теперь НЕ
+	# теряется (у busybox `while read` она пропадала).
+	# Управляющие байты (кроме TAB — разделителя — и перевода строки) — вон: JSON запрещает их в строке сырыми, и один BEL или CR в
+	# ремарке ронял разбор ВСЕГО ответа — ни меню «Сервер», ни экрана «Серверы» (ревью приёмки, круг 1; диапазон — как у jtxt).
+	tr -d '\000-\010\013-\037' < "$DS/.sub-names" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '
+		{
+			l = $0; sub(/^\t+/, "", l); f = l; sub(/\t.*$/, "", f)
+			r = ""; if (l ~ /\t/) { r = l; sub(/^[^\t]*\t+/, "", r); sub(/\t+$/, "", r) }
+			if (f == "") next
+			gsub(/["\\]/, "", f)
+			printf "%s\"%s\":\"%s\"", (c++ ? "," : ""), f, r
+		}'
+}
+
+# ЗАНЯТЫЕ КЛЮЧИ AmneziaWG — {"конфиг":"держатели"} (main, s2…; через запятую). Спрашиваем ВЛАДЕЛЬЦА ответа (`slots.sh
+# key-map`): один ключ на двух наших демонах = одна сессия на двоих, и выход отваливается каждые полминуты при живом сервере
+# (замер 10.09.2026). Панель помечает занятые конфиги в выборе сервера выхода и предупреждает на экране выхода, получившего
+# чужой ключ мимо формы (импорт бэкапа). Нет slots.sh (частичное обновление) — пустая карта: пометок нет, отказ даст роутер.
+awg_held() {
+	[ -f "$D/slots.sh" ] || return 0
+	sh "$D/slots.sh" key-map 2>/dev/null | awk -F"$(printf '\t')" '$1 ~ /^[A-Za-z0-9._-]+$/ && $2 ~ /^[a-z0-9,]+$/ { printf "%s\"%s\":\"%s\"", (c++ ? "," : ""), $1, $2 }'
+}
+
+# ПОКОЛЕНИЕ ПРОТОКОЛА каждого конфига AmneziaWG — {"конфиг":"wg|1.0|…|3.1"}, бейдж строки «Серверов». Ответ — у владельца
+# (transport-awg.sh conf-gen), здесь только фильтр по форме: нет плагина (частичное обновление) — пустая карта, бейджей нет.
+awg_gen() {
+	[ -f "$D/transport-awg.sh" ] || return 0
+	set --; for f in "$DS"/configs/*.conf; do [ -f "$f" ] && set -- "$@" "$f"; done
+	[ $# -gt 0 ] || return 0
+	sh "$D/transport-awg.sh" conf-gen "$@" 2>/dev/null | awk -F"$(printf '\t')" '$1 ~ /^[A-Za-z0-9._-]+$/ && $2 ~ /^(wg|[0-9]\.[0-9])$/ { printf "%s\"%s\":\"%s\"", (c++ ? "," : ""), $1, $2 }'
+}
+
+aw_active=$(cat "$DS/.active"      2>/dev/null | tr -d ' \r\n"\\')
+xr_active=$(cat "$DS/.xray-active" 2>/dev/null | tr -d ' \r\n"\\')
+hy_active=$(cat "$DS/.hy2-active"  2>/dev/null | tr -d ' \r\n"\\')
+
+printf '{"transport":"%s",' "$t"
+printf '"awg":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"held":{%s},"gen":{%s}},'  "${aw_active:-?}" "$(is_ready awg)"  "$(bin_present awg)"  "$(list_dir "$DS/configs" conf)" "$(awg_held)" "$(awg_gen)"
+printf '"xray":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},' "${xr_active:-?}" "$(is_ready xray)" "$(bin_present xray)" "$(list_dir "$DS/xray-configs" json)" "$(meta_xray)"
+printf '"hy2":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},'  "${hy_active:-?}" "$(is_ready hy2)"  "$(bin_present hy2)"  "$(list_dir "$DS/hy2-configs" yaml)" "$(meta_hy2)"
+printf '"subs":[%s],' "$(subs_list)"
+# Настоящие имена конфигов, добавленных руками (cfg-names.sh, ключ «вид/файл»): разбор — у владельца, один запуск на список.
+printf '"cfgnames":{%s},' "$([ -f "$D/cfg-names.sh" ] && sh "$D/cfg-names.sh" json 2>/dev/null)"
+printf '"names":{%s}}' "$(names_map)"
+printf '\n'

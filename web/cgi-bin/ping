@@ -1,0 +1,244 @@
+#!/bin/sh
+# cgi-bin/ping — ЧЕСТНЫЙ пинг серверов (read-only). EOL строго LF.
+#
+# Метрика — НЕ голый ICMP (VPS часто режут ICMP, Reality молчит → пинг «врёт», хотя VPN
+# работает). Сначала пробуем TCP-connect-латентность через полноценный curl 8.4.0
+# (`%{time_connect}` к http://HOST:PORT — меряет именно TCP-рукопожатие, тело не важно),
+# и лишь если TCP-проба не дала числа — ICMP как грубый ориентир. Для UDP-несущих (awg,
+# Hysteria2/QUIC) TCP-проба к их UDP-порту неинформативна → сразу ICMP (часто «—», и это
+# НОРМА). Так число «есть подключение/задержка» отражает реальность, а не ICMP-фильтр.
+#
+#  без параметров  -> сервер АКТИВНОГО транспорта: {transport,server,ms,method} (для шапки).
+#  ?all=1          -> ВСЕ конфиги всех транспортов: {configs:[{transport,name,host,port,
+#                     proto,active,ms,method}]} (для окна «Серверы и конфиги»).
+# Проба идёт НАПРЯМУЮ (endpoint VPS в main-таблице, не через туннель) — честная задержка.
+# 2FA-гейт (totp.sh) — см. разбор в cgi-bin/status.
+# uhttpd НЕ ПЕРЕДАЁТ CGI своё окружение (замер на железе 01.09.2026 пробным CGI: все ENODIA_*
+# пусты), а в режиме «всё на накопителе» литералы указывают в пустоту — панель отвечала бы
+# «ничего не установлено» на живой системе, а ГЕЙТ ВТОРОГО ФАКТОРА ниже просто не находил бы
+# totp.sh и молча пропускал запрос. Каталог кода знаем бесплатно из $0, остальное разбирает
+# cgi-paths.sh: второй копии этого рассуждения в проекте быть не должно.
+_cgid=${0%/web/cgi-bin/*}; [ "$_cgid" = "$0" ] && _cgid=
+if [ -n "$_cgid" ] && [ -f "$_cgid/cgi-paths.sh" ]; then . "$_cgid/cgi-paths.sh"; fi
+if [ -f "$ENODIA_DIR/totp.sh" ]; then
+	TOTP_LIB=1; . "$ENODIA_DIR/totp.sh"
+	# СУДИМ ПО СПОСОБНОСТИ, А НЕ ПО НАЛИЧИЮ. totp.sh СТАРЕЕ формы входа сорсится успешно, но его
+	# гейт при выключенном 2FA пропускал всё — а uhttpd к этому моменту уже поднят БЕЗ `-c`, то
+	# есть панель отдавала бы данные и ДЕЙСТВИЯ без пароля. Признак эпохи — pw_verify (его же
+	# спрашивает cgi-bin/login).
+	command -v pw_verify >/dev/null 2>&1 || {
+		echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+		echo "Cache-Control: no-store"; echo ""
+		printf '{"ok":false,"need_login":true,"msg":"totp.sh старее формы входа (обновите панель)"}\n'; exit 0; }
+	totp_gate_deny
+else   # НЕТ totp.sh — ОТКАЗ, А НЕ ПРОПУСК: двери-Basic больше нет, пускать некому (разбор — в totp.sh, «Гейт»)
+	echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+	echo "Cache-Control: no-store"; echo ""
+	printf '{"ok":false,"need_login":true,"msg":"totp.sh не установлен (обновите панель)"}\n'; exit 0
+fi
+echo "Content-Type: application/json; charset=utf-8"
+echo "Cache-Control: no-store"
+echo ""
+
+D=${ENODIA_DIR:-/data/usr/app/enodia}
+DS=${ENODIA_STATE:-/data/usr/app/enodia-state}
+DB=${ENODIA_BIN:-/data/usr/app/enodia-bin}
+
+# WAN-интерфейс: пробу гоним НАПРЯМУЮ через него. КРИТИЧНО: IP серверов подписки часто ∈
+# iplist_set → curl из роутера к ним МАРКИРУЕТСЯ 0x1 → уходит в АКТИВНЫЙ туннель (xtun/awg0),
+# и мерился бы путь «выход-туннеля→сервер» (колокейт = ~0мс, ложно «быстро»), а не реальная
+# задержка от роутера. --interface $WAN (SO_BINDTODEVICE) форсит прямой путь. Проверено на
+# железе: без него 0.4мс (фейк, через туннель), с ним 60-86мс (реально). Активный endpoint и
+# так исключён (endpoint-bypass) — bind ему не мешает. Пусто → без bind (старое поведение).
+# WAN = dev ДЕФОЛТА MAIN-таблицы (туннельный дефолт живёт в table 1000 → сюда не попадёт), как в
+# cgi-bin/ip. Надёжнее `ip route get 8.8.8.8` (тот при спец-маршруте мог бы вернуть tun) и не даст
+# --interface забиндить пробу в САМ туннель (иначе ложно ~0мс). Свои несущие исключает владелец
+# ответа — ip-lib.sh::wan_iface (следит C81); шим = прежние строки.
+if [ -f "$D/ip-lib.sh" ]; then . "$D/ip-lib.sh"; fi
+command -v wan_iface >/dev/null 2>&1 || wan_iface() { ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'; }
+WAN=$(wan_iface)
+
+# CDN-детект (Cloudflare). ЗАЧЕМ: сервер подписки за Cloudflare (напр. sweden.cloudpath.live
+# -> 172.65.160.81) отвечает на TCP-443 БЛИЖАЙШИМ edge-узлом CDN, а не origin-сервером →
+# time_connect меряет задержку до edge (часто «слишком мало», 20-30мс из РФ/ЕС), не до реального
+# VPS. Помечаем такой пинг флагом cdn — панель честно показывает «до CDN-узла, не до сервера».
+# IP, к которому реально подключились, берём из curl (%{remote_ip}) — без лишнего резолва.
+CF_CIDRS="104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 162.158.0.0/15 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 173.245.48.0/20 131.0.72.0/22 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22"
+# is_cdn <ipv4> -> код 0, если IP в CF_CIDRS. Матч префикса без bitwise: сдвиг вправо на
+# (32-prefixlen) бит = деление на 2^(32-pl) с int() (busybox awk: split/2^/int есть).
+is_cdn() {
+	case "$1" in *.*.*.*) : ;; *) return 1 ;; esac
+	awk -v ip="$1" -v cidrs="$CF_CIDRS" 'BEGIN{
+		if(split(ip,o,".")!=4) exit 1
+		v=o[1]*16777216+o[2]*65536+o[3]*256+o[4]
+		m=split(cidrs,cs," ")
+		for(i=1;i<=m;i++){ split(cs[i],a,"/"); pl=a[2]+0; split(a[1],b,".")
+			base=b[1]*16777216+b[2]*65536+b[3]*256+b[4]; d=2^(32-pl)
+			if(int(v/d)==int(base/d)) exit 0 }
+		exit 1 }'
+}
+
+# tcp_ms <host> <port> [connect-timeout] -> печатает "МС|IP": МС = TCP-рукопожатие (мс, пусто
+# если не соединились), IP = %{remote_ip} (к кому реально подключились — для CDN-детекта).
+# ВАЖНО: возвращаем IP В STDOUT, а НЕ через глобал — вызов идёт в $(...) (субшелл), и присвоение
+# глобалу там потерялось бы (ловушка: cdn всегда был false, хотя awk-матч верный). Callers берут
+# МС как ${r%%|*}, IP как ${r#*|}.
+tcp_ms() {
+	th="$1"; tp="$2"; ct="${3:-2}"
+	{ [ -n "$th" ] && [ -n "$tp" ]; } || { printf '|'; return 0; }
+	ch="$th"; case "$th" in *:*) ch="[$th]" ;; esac   # IPv6 в скобки для curl
+	tc=$(curl -s -o /dev/null ${WAN:+--interface $WAN} --connect-timeout "$ct" --max-time $((ct+2)) -w '%{time_connect} %{remote_ip}' "http://$ch:$tp" 2>/dev/null)
+	tms=$(awk -v t="${tc%% *}" 'BEGIN{ if(t+0>0) printf "%.0f", t*1000 }')
+	printf '%s|%s' "$tms" "${tc##* }"
+}
+# probe <host> <port> <proto:tcp|udp> -> ставит MS (мс или пусто) и METHOD.
+#  METHOD: tcp = TCP-connect к реальному порту; icmp = ICMP-эхо; net:PORT = сетевой RTT до
+#  ТОГО ЖЕ хоста по открытому TCP-порту 443/80/22 (когда родной порт — UDP/закрыт, а ICMP режут:
+#  маршрут до IP один → честная сетевая задержка до сервера, просто не сам VPN-порт). Пусто = «—».
+probe() {
+	h="$1"; p="$2"; pr="$3"; MS=""; METHOD=""; CDN=0; TCP_IP=""
+	[ -n "$h" ] || return 0
+	if [ "$pr" = tcp ] && [ -n "$p" ]; then
+		r=$(tcp_ms "$h" "$p" 2); MS=${r%%|*}; [ -n "$MS" ] && { METHOD=tcp; TCP_IP=${r#*|}; }
+	fi
+	if [ -z "$MS" ]; then
+		# ICMP -W1 (не -W2): VPN-сервер с RTT >1000мс неюзабелен, а мёртвый сервер иначе
+		# отъедал лишнюю секунду на КАЖДОЙ пробе (шапка пингует каждые 10с). Если ICMP не дал
+		# числа — ниже сетевой фолбэк 443/80/22 всё равно отработает.
+		im=$(ping -c1 -W1 ${WAN:+-I $WAN} "$h" 2>/dev/null | sed -n 's/.*time=\([0-9.][0-9.]*\).*/\1/p' | head -1)
+		MS=$(awk -v t="$im" 'BEGIN{ if(t+0>0) printf "%.0f", t }'); [ -n "$MS" ] && METHOD=icmp
+	fi
+	if [ -z "$MS" ]; then
+		# Сетевой RTT до сервера по распространённым TCP-портам (для UDP/QUIC-несущих и при фильтре ICMP).
+		for cp in 443 80 22; do
+			{ [ "$pr" = tcp ] && [ "$cp" = "$p" ]; } && continue   # родной TCP-порт уже пробовали выше
+			r=$(tcp_ms "$h" "$cp" 1); m=${r%%|*}; if [ -n "$m" ]; then MS=$m; METHOD="net:$cp"; TCP_IP=${r#*|}; break; fi
+		done
+	fi
+	# CDN-флаг: только когда реально подключились по TCP (tcp/net-метод), т.е. TCP_IP известен.
+	[ -n "$TCP_IP" ] && is_cdn "$TCP_IP" && CDN=1
+}
+cdn_json() { [ "$CDN" = 1 ] && printf true || printf false; }
+
+clean() { printf '%s' "$1" | tr -d '"\\ '; }
+
+# Разбор host:port (учитывая [v6]:port). $1 = строка "host:port" -> EH, EP.
+split_hp() {
+	s=$(clean "$1"); EP=${s##*:}; EH=${s%:*}; EH=$(printf '%s' "$EH" | tr -d '[]')
+	case "$EP" in ''|*[!0-9]*) EP="" ;; esac
+}
+
+# tag=<метка> -> пинг ТОЛЬКО серверов одной подписки (sub-<tag>-*). one=<конфиг> -> пинг ОДНОГО
+# сервера (панель шлёт по одному с ограниченной конкуренцией → виден прогресс + быстрее).
+# tpt=<awg|xray|hy2> -> при one= указывает транспорт (иначе искали бы только среди xray-конфигов;
+# awg/hy2 тоже пингуемы — эндпоинт по ICMP/сетевому TCP-порту). Пусто = обратная совместимость (xray).
+gtag=""; gone=""; gtpt=""
+case "$QUERY_STRING" in *tag=*) gtag=$(printf '%s' "$QUERY_STRING" | sed 's/.*tag=//; s/&.*//') ;; esac
+case "$QUERY_STRING" in *one=*) gone=$(printf '%s' "$QUERY_STRING" | sed 's/.*one=//; s/&.*//') ;; esac
+case "$QUERY_STRING" in *tpt=*) gtpt=$(printf '%s' "$QUERY_STRING" | sed 's/.*tpt=//; s/&.*//') ;; esac
+echo "$gtag" | grep -qE '^[a-z0-9-]{1,16}$' || gtag=""
+# Форма имени — как у чтения и удаления конфига: потолок 80 уводил длинное имя в ветку шапки, и пинг отвечал про АКТИВНЫЙ сервер.
+echo "$gone" | grep -qE '^[A-Za-z0-9._-]+$' || gone=""
+case "$gtpt" in awg|xray|hy2) : ;; *) gtpt="" ;; esac
+
+if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING" ] || [ -n "$gtag" ] || [ -n "$gone" ]; then
+	aw_active=$(cat "$DS/.active"      2>/dev/null | tr -d ' \r\n"\\')
+	xr_active=$(cat "$DS/.xray-active" 2>/dev/null | tr -d ' \r\n"\\')
+	hy_active=$(cat "$DS/.hy2-active"  2>/dev/null | tr -d ' \r\n"\\')
+	printf '{"configs":['
+	first=1
+	emit() { # transport name host port proto active
+		[ "$first" = 1 ] || printf ','; first=0
+		probe "$3" "$4" "$5"
+		msj=$MS; [ -n "$msj" ] || msj=null
+		printf '{"transport":"%s","name":"%s","host":"%s","port":"%s","proto":"%s","active":%s,"ms":%s,"method":"%s","cdn":%s}' \
+			"$1" "$(clean "$2")" "$(clean "$3")" "${4:-}" "$5" "$6" "$msj" "${METHOD:-}" "$(cdn_json)"
+	}
+	# tag= (подписка) — только xray. one= — транспорт по tpt= (без tpt: xray, обратная совместимость).
+	if { [ -z "$gtag" ] && [ -z "$gone" ]; } || { [ -n "$gone" ] && [ "$gtpt" = awg ]; }; then
+	for cf in "$DS"/configs/*.conf; do
+		[ -f "$cf" ] || continue
+		name=$(basename "$cf" .conf)
+		if [ -n "$gone" ]; then [ "$name" = "$gone" ] || continue; fi
+		ep=$(grep -E '^[[:space:]]*Endpoint' "$cf" 2>/dev/null | head -1 | sed 's/.*=[[:space:]]*//')
+		split_hp "$ep"
+		a=$([ "$name" = "$aw_active" ] && echo true || echo false)
+		emit awg "$name" "$EH" "$EP" udp "$a"
+	done
+	fi
+	if [ -z "$gone" ] || [ -z "$gtpt" ] || [ "$gtpt" = xray ]; then
+	for cf in "$DS"/xray-configs/*.json; do
+		[ -f "$cf" ] || continue
+		name=$(basename "$cf" .json)
+		if [ -n "$gone" ]; then [ "$name" = "$gone" ] || continue; fi
+		if [ -n "$gtag" ]; then case "$name" in sub-"$gtag"-*) : ;; *) continue ;; esac; fi
+		host=$(grep -oE '"address"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+		# порт вненга (vnext), НЕ inbound socks 10808 — берём первый порт != 10808
+		port=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$cf" 2>/dev/null | grep -oE '[0-9]+' | grep -v '^10808$' | head -1)
+		net=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+		case "$net" in quic|kcp) pr=udp ;; *) pr=tcp ;; esac
+		a=$([ "$name" = "$xr_active" ] && echo true || echo false)
+		emit xray "$name" "$host" "$port" "$pr" "$a"
+	done
+	fi
+	if { [ -z "$gtag" ] && [ -z "$gone" ]; } || { [ -n "$gone" ] && [ "$gtpt" = hy2 ]; }; then
+	for cf in "$DS"/hy2-configs/*.yaml; do
+		[ -f "$cf" ] || continue
+		name=$(basename "$cf" .yaml)
+		if [ -n "$gone" ]; then [ "$name" = "$gone" ] || continue; fi
+		sv=$(sed -n 's/^[[:space:]]*server:[[:space:]]*//p' "$cf" 2>/dev/null | head -1)
+		split_hp "$sv"
+		a=$([ "$name" = "$hy_active" ] && echo true || echo false)
+		emit hy2 "$name" "$EH" "$EP" udp "$a"
+	done
+	fi
+	printf ']}\n'
+	exit 0
+fi
+
+# --- Сервер АКТИВНОГО транспорта (для шапки) ---
+t=$(cat "$DS/.transport" 2>/dev/null | tr -d ' \r\n'); [ -n "$t" ] || t=awg
+host=""; port=""; pr=udp
+case "$t" in
+	awg)  ep=$("$DB/awg" show awg0 endpoints 2>/dev/null | awk 'NR==1{print $2}'); split_hp "$ep"; host=$EH; port=$EP; pr=udp ;;
+	hy2)  sv=$(sed -n 's/^[[:space:]]*server:[[:space:]]*//p' "$DS/hysteria.yaml" 2>/dev/null | head -1); split_hp "$sv"; host=$EH; port=$EP; pr=udp ;;
+	xray) host=$(grep -oE '"address"[[:space:]]*:[[:space:]]*"[^"]*"' "$DS/xray.json" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+	      port=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$DS/xray.json" 2>/dev/null | grep -oE '[0-9]+' | grep -v '^10808$' | head -1)
+	      net=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^"]*"' "$DS/xray.json" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+	      case "$net" in quic|kcp) pr=udp ;; *) pr=tcp ;; esac ;;
+esac
+host=$(clean "$host")
+
+# --- Негативный кэш «сервер недавно мёртв» (только header-путь) -------------------------------
+# Мёртвый сервер (TCP+ICMP молча дропаются) стоит ~5-6с в probe(): connect-timeout 2 + ICMP -W1 +
+# фолбэк 443/80/22 по 1с. Шапка дёргает этот путь каждые 10с → КАЖДЫЙ тик висел столько же (и держал
+# uhttpd-воркер). Кэшируем ТОЛЬКО отрицательный исход: пока метка свежая (<TTL) и транспорт+хост те же
+# — сразу отдаём «нет ответа», НЕ пробируя. Живой сервер метку сносит → восстановление видно на первом
+# же реальном пробе (в пределах TTL). ?fresh=1 (ручной «проверить ещё раз») кэш игнорирует и пробит.
+# Клок роутера может врать до ntp, но дельта берётся по ОДНИМ часам; прыжок ntp → отрицательная/огромная
+# дельта → метка считается протухшей → честный проб (безопасный фолбэк).
+DEADF=/tmp/enodia-ping-active-dead
+DEAD_TTL=25
+pfresh=0; case "$QUERY_STRING" in *fresh=1*) pfresh=1 ;; esac
+if [ "$pfresh" != 1 ] && [ -n "$host" ] && [ -f "$DEADF" ]; then
+	read -r dt dh dts _drest < "$DEADF" 2>/dev/null
+	case "$dts" in ''|*[!0-9]*) dts=0 ;; esac
+	now=$(date +%s 2>/dev/null); case "$now" in ''|*[!0-9]*) now=0 ;; esac
+	# clock-raw: «протухло» здесь означает БЕЗДЕЙСТВИЕ (лишний честный проб), а не действие, поэтому
+	# кламп age_since («скачок ⇒ 0 = свежее») тут вреден — он УДЕРЖАЛ бы отрицательный кэш. Разбор — выше.
+	age=$((now - dts))
+	if [ "$dt" = "$t" ] && [ "$dh" = "$host" ] && [ "$age" -ge 0 ] && [ "$age" -lt "$DEAD_TTL" ]; then
+		printf '{"transport":"%s","server":"%s","ms":null,"method":"","cdn":false,"cached":true}\n' "$t" "${host:-?}"
+		exit 0
+	fi
+fi
+
+probe "$host" "$port" "$pr"
+# Обновляем негативный кэш по факту пробы: мёртв → пишем метку, жив → сносим (мгновенное восстановление).
+if [ -n "$host" ]; then
+	if [ -z "$MS" ]; then now=$(date +%s 2>/dev/null); case "$now" in ''|*[!0-9]*) now=0 ;; esac
+		printf '%s %s %s\n' "$t" "$host" "$now" > "$DEADF" 2>/dev/null
+	else rm -f "$DEADF" 2>/dev/null; fi
+fi
+msj=$MS; [ -n "$msj" ] || msj=null
+printf '{"transport":"%s","server":"%s","ms":%s,"method":"%s","cdn":%s}\n' "$t" "${host:-?}" "$msj" "${METHOD:-}" "$(cdn_json)"

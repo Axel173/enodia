@@ -1,0 +1,1961 @@
+/* panel.css — стили веб-панели. Вынесены из index.html (был один файл 533 КБ: 396 JS +
+   31 CSS + 17 разметки — правка одной строки заставляла браузер перекачивать всё).
+
+   ГРАБЛЯ: относительные url() здесь резолвятся от /assets/, а НЕ от корня (как было
+   внутри <style> в index.html). Поэтому шрифты — url(inter-latin.woff2) БЕЗ префикса
+   assets/ (иначе /assets/assets/... = 404 и Inter молча падает в системный шрифт).
+
+   Подключается как assets/panel.css?v=<CODE из VERSION> — см. шапку index.html. */
+  /* Inter (self-hosted subset, woff2) — тот же гуманистический сан-сериф, что в макетах панели.
+     Шрифт макетов проприетарный (на роутер не положить), Inter — ближайший открытый аналог.
+     Variable-файл (wght 400..500) на диапазон; latin + cyrillic грузятся по unicode-range.
+     Никаких CDN — файлы в assets/, панель работает офлайн. */
+  @font-face{font-family:'Inter';font-style:normal;font-weight:400 500;font-display:swap;src:url(inter-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+  @font-face{font-family:'Inter';font-style:normal;font-weight:400 500;font-display:swap;src:url(inter-cyrillic.woff2) format('woff2');unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+  /* ============================================================================
+     ТОКЕНЫ. ДВА СЛОВАРЯ, ОДИН ИСТОЧНИК ЗНАЧЕНИЙ.
+     Первый — палитра редизайна (светлая «Плотная» · тёмная «Ночь», решено 03.09.2026,
+     макет `local/redesign-proto.html`): им пишется весь НОВЫЙ код панели.
+     Второй — прежние имена панели (`--bg-page`, `--text-secondary`, …). Они остались
+     АЛИАСАМИ на те же значения, а не копиями: инлайновых стилей с ними в panel.js больше
+     мегабайта, и переписать их разом — это не перенос дизайна, а переезд всего файла в
+     один коммит. Алиас через `var()` подставляется в момент вычисления, поэтому тёмные
+     блоки переопределяют ТОЛЬКО базовые токены: алиас сам поедет за темой.
+     Правило на будущее: новый код берёт имена ПЕРВОГО словаря; экран, доведённый до
+     редизайна, заодно уходит со второго. Когда второй перестанет встречаться — удалить.
+     ============================================================================ */
+  :root{
+    /* Родные виджеты (скроллбар, поля ввода в попапах) следуют за темой страницы, иначе
+       на тёмной панели остаётся светлый скроллбар. Старый движок свойство игнорирует —
+       безвредно, в отличие от light-dark() (см. ниже). */
+    color-scheme:light dark;
+    /* ---- палитра редизайна: светлая «Плотная» ---- */
+    --paper:#f5f5f7; --card:#ffffff; --soft:#f2f2f5; --soft2:#e9e9ee;
+    --ink:#22221f; --ink2:#5d5c57; --ink3:#6f6e67;   /* ink3 ≥ 4,5:1 на card/paper/soft (AA), замер 03.09.2026 */
+    --acc:#1d9e75; --acc-deep:#0f6e56; --acc-soft:#e3f3ec;
+    --pri:#158060; --pri-ink:#ffffff;            /* главная кнопка: белый на --acc даёт 3,4:1 — глубже на шаг (4,9) */
+    --g2-ink:#2563eb; --g3-ink:#7c3aed;          /* цвет раздела КАК ТЕКСТ: сами g2/g3 дают 3,7 и 4,0 */
+    --info:#185fa5; --info-soft:#e5eefa;
+    --warn:#8a5a12; --warn-soft:#faeeda;
+    --bad:#a33a28;  --bad-soft:#fae7e2;
+    --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+    --border-success:#5dcaa5;
+    /* цвета РАЗДЕЛОВ (сайдбар, таб-бар, заголовки) */
+    --g1:#1d9e75; --g2:#3b82f6; --g3:#a855f7; --g4:#e0a33c; --g5:#e0715e;
+    /* ряды графиков — ОТДЕЛЬНАЯ палитра от разделов: у неё другая работа (различать ряды в
+       стеке, в том числе дальтонику). Прежний набор валидатор провалил, этот прошёл. */
+    --s1:#1d9e75; --s2:#3b82f6; --s3:#c8871f; --s4:#7c4ddb; --s5:#d0533f;
+    --mute:#b7b3a8;   /* «напрямую» — не ряд, а отсутствие туннеля */
+    --grid:#ececf0;   /* хайрлайн сетки графика */
+    --st-ok:#1d9e75; --st-warn:#c8871f; --st-bad:#c0392b;   /* мера: запас есть / кончается / кончился */
+    --glow:none;      /* свечение акцентов — только в тёмной подаче */
+    /* ЗНАК — ТОКЕНАМИ, а не правилами темы: крупный знак стоит через <use>, его нутро живёт в
+       теневом дереве, и селектор с предком (`:root[data-theme=dark] .cc`) туда не проходит — а
+       наследуемая переменная проходит (замер мастера 31.08.2026). Цвета — литералы канона
+       `local/logo-t1-ui.svg` (сверяет C45). Ореол — только в «Ночи»: на бумаге это грязь. */
+    --mark-ink:#2C2C2A; --mark-glow:none; --mark-glow-big:none;
+    /* СКЕЛЕТОН ПЕРВОГО КАДРА: «кость» обязана читаться И на карточке, И на плашке --soft (мера
+       ресурса), поэтому она темнее --soft2; «блик» — бегущая полоса поверх костей. */
+    --bone:#e3e3e9; --shim:rgba(255,255,255,.75);
+    --h0:#edf5f0; --h1:#c9e9db; --h2:#8fd1b4; --h3:#43b489; --h4:#157a58;   /* тепловая карта */
+    --r:10px; --r2:12px; --r3:16px;
+    --sh:0 1px 2px rgba(0,0,0,.04); --sh2:0 2px 8px rgba(0,0,0,.06);
+    /* ---- прежние имена панели: АЛИАСЫ, значений своих не держат ---- */
+    --bg-page:var(--paper); --bg-primary:var(--card); --bg-secondary:var(--soft);
+    --bg-success:var(--acc-soft); --bg-warning:var(--warn-soft);
+    --text-primary:var(--ink); --text-secondary:var(--ink2); --text-tertiary:var(--ink3);
+    --text-success:var(--acc-deep); --text-warning:var(--warn); --text-info:var(--info);
+    /* danger — только для журнала событий: там надо отличать «сбой» (VPN упал, резервов нет)
+       от «внимание» (ушли на резерв — работает, но не штатно). В остальной панели проблемы
+       по-прежнему амберные: красным подсвечивать нечего, действия fail-open по смыслу. */
+    --text-danger:var(--bad); --bg-danger:var(--bad-soft);
+    --toggle-on:var(--acc);
+    --border-t:var(--line); --border-s:var(--line2);
+    /* Радиусы: --r-sm нужен мелким элементам (пункт popmenu, ⋮-кнопка карточки сервера,
+       предупреждающие плашки). Его ЗАБЫЛИ объявить, а `var()` без фолбэка — это «invalid at
+       computed-value time»: свойство молча берёт начальное значение, то есть 0. Одиннадцать
+       мест (2 здесь + 9 инлайновых стилей в panel.js) рисовались с ПРЯМЫМИ углами. */
+    --r-sm:6px; --r-md:var(--r); --r-lg:var(--r2);
+    --font:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";
+    --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  /* Тёмная палитра «Ночь». Два входа: (1) АВТО — системная тема, кроме случая, когда юзер
+     принудительно выбрал светлую (data-theme=light); (2) РУЧНОЙ выбор data-theme=dark.
+     Блок продублирован НАМЕРЕННО: обычный CSS не умеет делить один набор объявлений между
+     @media-условием и селектором по атрибуту, а `light-dark()` (одна строка на переменную)
+     требует свежих движков — панель же открывают со старых Android-WebView/Maxthon, где
+     неизвестная функция обнулила бы ВСЕ цвета. Правишь один блок — правь второй (следит C48).
+     Алиасы прежних имён сюда не переезжают: они объявлены через var() и едут сами. */
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]){
+      --paper:#0e0e10; --card:#17171a; --soft:#202024; --soft2:#2a2a2f;
+      --ink:#eceadf; --ink2:#b3b1a7; --ink3:#93928b;
+      --acc:#27b98c; --acc-deep:#9fe1cb; --acc-soft:#123a30;
+      --pri:#27b98c; --pri-ink:#0e0e10;
+      --g2-ink:#6ba6f8; --g3-ink:#c084fc;
+      --info:#85b7eb; --info-soft:#16283c;
+      --warn:#fac775; --warn-soft:#3d2a0c;
+      --bad:#f0a08e;  --bad-soft:#3d1a12;
+      --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.15);
+      --border-success:#0f6e56;
+      --g1:#2fc493; --g2:#6ba6f8; --g3:#c084fc; --g4:#f0bd6a; --g5:#f08a78;
+      --s1:#27b98c; --s2:#4f93ee; --s3:#d9a447; --s4:#9b84f3; --s5:#e57a66;
+      --mute:#4d4c47; --grid:#26262a;
+      --st-ok:#27b98c; --st-warn:#d9a447; --st-bad:#e57a66;
+      --glow:drop-shadow(0 0 7px currentColor);
+      --mark-ink:#E8E6DD;
+      --mark-glow:drop-shadow(0 0 5px rgba(249,108,0,.6)) drop-shadow(0 0 14px rgba(245,179,0,.26));
+      --mark-glow-big:drop-shadow(0 0 12px rgba(249,108,0,.5)) drop-shadow(0 0 30px rgba(245,179,0,.22));
+      --bone:#2b2b31; --shim:rgba(255,255,255,.06);
+      --h0:#1f2622; --h1:#1c4636; --h2:#1e6b4f; --h3:#25996f; --h4:#4fd1a1;
+      --sh:0 1px 0 rgba(255,255,255,.04) inset, 0 12px 34px -20px rgba(0,0,0,1);
+      --sh2:0 1px 0 rgba(255,255,255,.05) inset, 0 30px 70px -30px rgba(0,0,0,1);
+    }
+  }
+  :root[data-theme=light]{ color-scheme:light }
+  :root[data-theme=dark]{
+    color-scheme:dark;
+    --paper:#0e0e10; --card:#17171a; --soft:#202024; --soft2:#2a2a2f;
+    --ink:#eceadf; --ink2:#b3b1a7; --ink3:#93928b;
+    --acc:#27b98c; --acc-deep:#9fe1cb; --acc-soft:#123a30;
+    --pri:#27b98c; --pri-ink:#0e0e10;
+    --g2-ink:#6ba6f8; --g3-ink:#c084fc;
+    --info:#85b7eb; --info-soft:#16283c;
+    --warn:#fac775; --warn-soft:#3d2a0c;
+    --bad:#f0a08e;  --bad-soft:#3d1a12;
+    --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.15);
+    --border-success:#0f6e56;
+    --g1:#2fc493; --g2:#6ba6f8; --g3:#c084fc; --g4:#f0bd6a; --g5:#f08a78;
+    --s1:#27b98c; --s2:#4f93ee; --s3:#d9a447; --s4:#9b84f3; --s5:#e57a66;
+    --mute:#4d4c47; --grid:#26262a;
+    --st-ok:#27b98c; --st-warn:#d9a447; --st-bad:#e57a66;
+    --glow:drop-shadow(0 0 7px currentColor);
+    --mark-ink:#E8E6DD;
+    --mark-glow:drop-shadow(0 0 5px rgba(249,108,0,.6)) drop-shadow(0 0 14px rgba(245,179,0,.26));
+    --mark-glow-big:drop-shadow(0 0 12px rgba(249,108,0,.5)) drop-shadow(0 0 30px rgba(245,179,0,.22));
+    --bone:#2b2b31; --shim:rgba(255,255,255,.06);
+    --h0:#1f2622; --h1:#1c4636; --h2:#1e6b4f; --h3:#25996f; --h4:#4fd1a1;
+    --sh:0 1px 0 rgba(255,255,255,.04) inset, 0 12px 34px -20px rgba(0,0,0,1);
+    --sh2:0 1px 0 rgba(255,255,255,.05) inset, 0 30px 70px -30px rgba(0,0,0,1);
+  }
+  /* ШТРИХИ «Ночи»: глубина стеклом (градиент по верху карточки), бумага темнее — карточки
+     отделяются не тенью, а светом. Геометрия у тем ОБЩАЯ: тема меняет цвет и глубину, но не
+     раскладку, иначе «авто» на закате перевёрстывало бы страницу. */
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]) .card{
+      background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%),var(--card);
+      border-color:rgba(255,255,255,.08)}
+    :root:not([data-theme=light]) .side{background:#121214}
+  }
+  :root[data-theme=dark] .card{
+    background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%),var(--card);
+    border-color:rgba(255,255,255,.08)}
+  :root[data-theme=dark] .side{background:#121214}
+  /* Секция-группа (`.sect`) — со светом карточки. Своим правилом: блок `.card` сверяет с заглушкой C109. */
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]) .sect{background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%),var(--card);border-color:rgba(255,255,255,.08)}
+  }
+  :root[data-theme=dark] .sect{background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%),var(--card);border-color:rgba(255,255,255,.08)}
+  /* Остальные штрихи «Ночи» из макета (его блок `html[data-theme=dark]`): дверь светится, как карточка; меры, чипы ленты и плитки —
+     полупрозрачным белым поверх бумаги, а не сплошным --soft (сплошной серый в «Ночи» читался заплаткой, 25.09.2026). */
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]) .door{background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%),var(--card);border-color:rgba(255,255,255,.08)}
+    :root:not([data-theme=light]) .gchip{background:rgba(255,255,255,.05)}
+    :root:not([data-theme=light]) .tchip{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.08)}
+    :root:not([data-theme=light]) .tile{background:rgba(255,255,255,.045)}
+    :root:not([data-theme=light]) .meter i{box-shadow:0 0 10px color-mix(in srgb,var(--acc) 55%,transparent)}
+  }
+  :root[data-theme=dark] .door{background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%),var(--card);border-color:rgba(255,255,255,.08)}
+  :root[data-theme=dark] .gchip{background:rgba(255,255,255,.05)}
+  :root[data-theme=dark] .tchip{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.08)}
+  :root[data-theme=dark] .tile{background:rgba(255,255,255,.045)}
+  :root[data-theme=dark] .meter i{box-shadow:0 0 10px color-mix(in srgb,var(--acc) 55%,transparent)}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg-page);color:var(--text-primary);font-family:var(--font);
+       line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:760px;margin:0 auto;padding:20px 16px 40px;display:flex;flex-direction:column;gap:14px}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+  /* КАРТОЧКА — материал макета (`.card.pad`): линия 1 px, тень --sh, поля 14/16/13. Прежние 16/20 без тени были материалом
+     старой панели и оставались на каждом экране, хотя сами экраны переносили по макету (сверка 25.09.2026). */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r2);padding:14px 16px 13px;box-shadow:var(--sh)}
+  /* ЧИП — пилюля макета (`.chip`: 12,5 px, 5/11, радиус 99). Прежде — скруглённый прямоугольник старой панели (13 px, 4/9,
+     радиус 10) на каждом чипе строк списков (сверка 26.09.2026). */
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink2);
+        background:var(--soft);border-radius:99px;padding:5px 11px;white-space:nowrap;
+        font-variant-numeric:tabular-nums}
+  .chip .ti{font-size:15px;color:var(--text-tertiary)}
+  /* МЕРА РЕСУРСА — ДУГА С ИКОНКОЙ ВНУТРИ. Дуга (три четверти круга), а не кольцо: у неё есть
+     видимые начало и конец, поэтому «сколько занято» читается без подписи. Цвет несёт
+     состояние (запас есть / кончается / кончился) и приходит из `meterColor` в panel.js —
+     здесь его нет намеренно, иначе порогов стало бы два. */
+  .gchip{display:inline-flex;align-items:center;gap:8px;padding:5px 13px 5px 5px;border-radius:8px;
+         background:var(--soft);font-size:13px;font-weight:500;white-space:nowrap;
+         font-variant-numeric:tabular-nums;color:var(--ink3)}
+  /* У ЧИСЛА — ШИРИНА ДВУХ РАЗРЯДОВ С ПРОЦЕНТОМ. Меры стоят в шапке прижатыми вправо, и «9%» →
+     «10%» у одной из них сдвигало на разряд ВСЮ строку — на каждом тике статуса, где меняется
+     разрядность (замер 11.09.2026: 14 px на четырёх мерах). Цифры и так моноширинные
+     (tabular-nums), «65%» при 13 px — 29,8 px (замер), отсюда 2,3 em; «100%» шире — единственный
+     случай, когда строка ещё двигается. Та же ширина у кости первого кадра, поэтому кость и число
+     встают в одно место. */
+  .gchip span.t{color:var(--ink);min-width:2.3em}
+  /* Мера, у которой БЕДА не в заполнении (накопитель включён, но не найден): янтарь красит саму
+     меру — фоновую дугу и знак, — а заполнение остаётся пустым. Полная янтарная дуга сказала бы
+     «место кончилось», то есть неправду. ЧИСЛО при этом остаётся чернильным: янтарь на светлой
+     плашке даёт 2,7:1 при 11 px (норма 4,5), и «покрасить всё» превратило бы предупреждение в
+     нечитаемое. Смысл несёт СЛОВО. */
+  .gchip.wr{color:var(--st-warn)}
+  .gauge{position:relative;width:28px;height:28px;flex:none;display:grid;place-items:center}
+  /* Дуга нарисована СРАЗУ в нужной ориентации (см. ARC_D), поэтому поворота у контейнера нет:
+     он был бы третьим местом, знающим геометрию. */
+  .gauge svg.ring{position:absolute;inset:0;width:28px;height:28px}
+  .gauge .ic{width:13px;height:13px;position:relative;stroke-width:2}
+  .badges{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  /* Попап «О роутере» (метрики + подсказки). Триггер — клик по мерам ресурсов в шапке. */
+  .badges.si-open{cursor:pointer}
+  @media (hover:hover){ .badges.si-open:hover{opacity:.82} }
+  /* Группа мер — кнопка (роль и tabindex ставит panel.js), и без своей рамки фокуса она была бы
+     кнопкой, которую с клавиатуры не видно. Тот же вид, что у пунктов навигации. */
+  .badges.si-open:focus-visible{outline:2px solid var(--acc);outline-offset:3px;border-radius:10px}
+  .si-sec{margin-top:16px}
+  .si-sec:first-child{margin-top:0}
+  .si-h{font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+  .si-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:6px 0;border-bottom:.5px solid var(--border-t)}
+  .si-row:last-child{border-bottom:none}
+  .si-l{font-size:13px;color:var(--text-secondary)}
+  .si-v{font-size:13px;font-weight:500;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  /* Составное значение (стандарт Wi-Fi, имя сети) переносится, а не режется краем карточки: на 320 px «Wi-Fi 6 · 802.11ax ·
+     5 ГГц · 160 МГц» уходило за край на 44 px (приёмка 24.09.2026). Куски держит `.kp` (wsKeep в panel.js). */
+  /* Класс — `brk`, а НЕ `wrap`: `.wrap` — каркас страницы (колонка, gap 14px), и с ним значение вставало столбиком из семи строк
+     (замер BE7000 27.09.2026; следит C114). */
+  .si-v.brk{white-space:normal;min-width:0;overflow-wrap:anywhere}
+  .si-v .kp{white-space:nowrap}
+  /* КНОПКИ ШАПКИ («глаз», колокольчик) — геометрия макета (`.iconbtn`): 36 px, скругление 11, плашка — цвет карточки с линией,
+     знак — из спрайта (`.ic.s`). Колокольчик раньше был своим inline-SVG толщиной 2 и 19 px — рядом с «глазом» из спрайта он
+     читался чужим. */
+  .iconbtn{flex:none;display:grid;place-items:center;width:36px;height:36px;padding:0;position:relative;
+           background:var(--card);border:1px solid var(--line);border-radius:11px;
+           color:var(--ink2);cursor:pointer;font-size:16px;line-height:1}
+  @media (hover:hover){ .iconbtn:hover{background:var(--soft);color:var(--ink)} }
+  .iconbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .iconbtn .ti{font-size:19px}
+  /* Счётчик непрочитанных — `.bdg` макета: 17 px, кирпичный с белой цифрой; висит на 4 px за углом кнопки (запас на это держит
+     `padding-right` у .hbtns). */
+  .bell-badge{position:absolute;top:-4px;right:-4px;min-width:17px;height:17px;padding:0 4px;
+    border-radius:99px;background:#c9553a;color:#fff;font-size:10px;font-weight:600;line-height:1;
+    display:grid;place-items:center}
+  .m{background:var(--bg-secondary);border-radius:var(--r-md);padding:10px 12px;min-width:0}
+  .ml{font-size:12px;color:var(--text-tertiary);margin-bottom:3px}
+  .mv{font-size:15px;font-weight:500;color:var(--text-primary)}
+  /* Значения «Протокол»/«Конфиг» в шапке — одна строка с многоточием (длинные имена вроде
+     «interra_ams3_for_awg» распирали плитку/ломали грид на узком экране). padding-right — под ⋮. */
+  #proto,#cfg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:16px}
+  /* Кластер значков (⟳/?) в правом углу подписи плитки: margin-left:auto прижимает вправо
+     (родитель-.ml должен быть flex — задаётся точечно на плитке «Пинг», глобальный .ml не трогаем). */
+  .icls{display:inline-flex;align-items:center;gap:8px;margin-left:auto}
+  .icls .ti{color:var(--text-tertiary)}
+  .cell-kebab{position:absolute;top:8px;right:10px;color:var(--text-tertiary);font-weight:700;line-height:1}
+  /* ПОЛОСА СЕГМЕНТОВ. Раскладка живёт ЗДЕСЬ, а не в инлайновых стилях каждого вызывателя: до
+     10.09.2026 класс `.segbar` был пустой меткой (её читал только медиазапрос), а рядом с ней
+     каждый раз повторялись те же пять свойств — и переключатели экрана «Трафик», написанные
+     без этой пятёрки, встали столбиком. Инлайновые копии у карточки «Трафик» оставлены: они
+     повторяют ровно эти значения и ничего не меняют. */
+  /* …и ВИД — материал `.seg` макета: полоса --soft с полями 4 px, сегменты по содержимому (не растянуты — полоса во всю строку,
+     кнопки слева, как «Тема» и «Язык» макета), выбранный — плашкой карточки с тенью, а не рамкой. */
+  .segbar{display:flex;gap:3px;background:var(--soft);padding:4px;border-radius:12px}
+  .seg{flex:none;display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap;font-size:13.5px;
+       padding:7px 13px;border-radius:9px;color:var(--ink2);cursor:pointer}
+  .seg.on{background:var(--card);color:var(--ink);font-weight:500;box-shadow:var(--sh)}
+  .fc{background:var(--bg-primary);border:.5px solid var(--border-t);border-radius:var(--r-lg);
+      padding:14px 16px;display:flex;align-items:center;gap:12px;min-width:0}
+  .fc>div{min-width:0}   /* текст-блок ярлыка переносится, не распирает карточку (важно при 320px) */
+  .row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  .grid{display:grid;gap:12px}
+  .ti{font-size:22px}
+  .vtoggle{width:52px;height:30px;border-radius:15px;position:relative;flex-shrink:0;transition:background .15s}
+  .vknob{position:absolute;top:3px;width:24px;height:24px;border-radius:50%;background:#fff;transition:left .15s,right .15s}
+  .hero-on{border-color:var(--border-success)}
+  .hero-on .vstatus{color:var(--text-success)}
+  .hero-on .vico{background:var(--bg-success);color:var(--text-success)}
+  .hero-on .vtoggle{background:var(--toggle-on)}
+  .hero-on .vknob{right:3px}
+  .hero-off{border-color:var(--text-warning)}
+  .hero-off .vstatus{color:var(--text-warning)}
+  .hero-off .vico{background:var(--bg-warning);color:var(--text-warning)}
+  .hero-off .vtoggle{background:var(--text-tertiary)}
+  .hero-off .vknob{left:3px}
+  /* Третье состояние шапки: VPN ВКЛЮЧЁН, но несущая не везёт трафик (вердикт сторожа). Цвета —
+     как у hero-off (это тревога), а тумблер ОБЯЗАН остаться во включённом положении: он и
+     предлагает «выключить», и рисовать его выключенным = врать о том, что сделает клик. */
+  .hero-bad{border-color:var(--text-warning)}
+  .hero-bad .vstatus{color:var(--text-warning)}
+  .hero-bad .vico{background:var(--bg-warning);color:var(--text-warning)}
+  .hero-bad .vtoggle{background:var(--toggle-on)}
+  .hero-bad .vknob{right:3px}
+  /* Компактный switch-тумблер (обёртка над checkbox): мастер-флаги блокировки, вкл/выкл источника. */
+  /* ТУМБЛЕР — вид макета (`Tgl`): 52×30, «выкл» — мягкая серая дорожка, ручка с тенью. */
+  .sw{position:relative;display:inline-block;width:52px;height:30px;flex-shrink:0;cursor:pointer;vertical-align:middle}
+  .sw input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+  .sw i{position:absolute;inset:0;border-radius:99px;background:var(--soft2);box-shadow:inset 0 1px 2px rgba(0,0,0,.12);transition:background .15s}
+  .sw i::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .15s}
+  .sw input:checked + i{background:var(--toggle-on)}
+  .sw input:checked + i::after{left:25px}
+  .sw input:disabled{cursor:default} .sw input:disabled+i{opacity:.55}   /* запертый — бледнее, а не как выключенный */
+  /* Фокус с клавиатуры виден и у переключателя: сам input прозрачен, кольцо рисует его дорожка (как у .cb). */
+  .sw input:focus-visible + i{outline:2px solid var(--text-info);outline-offset:2px}
+  /* Кастомный чекбокс (обёртка над native): пресеты списков / категории Zapret / бэкапа —
+     вместо страшного бело-синего браузерного. Зелёный при отметке под цвет тумблеров;
+     галочка чистым CSS (в icon-шрифте панели нет ti-check). JS читает .checked как обычно. */
+  .cb{position:relative;display:inline-block;width:18px;height:18px;flex-shrink:0;cursor:pointer;vertical-align:middle}
+  .cb input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+  .cb i{position:absolute;inset:0;border-radius:5px;background:var(--bg-primary);border:1.5px solid var(--border-s);transition:background .12s,border-color .12s}
+  .cb input:checked + i{background:var(--toggle-on);border-color:var(--toggle-on)}
+  .cb i::after{content:"";position:absolute;left:6px;top:2.5px;width:4.5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);opacity:0;transition:opacity .12s}
+  .cb input:checked + i::after{opacity:1}
+  .cb input:focus-visible + i{outline:2px solid var(--text-info);outline-offset:2px}
+  .vico{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .muted{opacity:.5;pointer-events:none}
+  .seg.click{cursor:pointer}
+  @media (hover:hover){ .seg.click:hover{background:var(--bg-primary)} }
+  .seg.dis{opacity:.4;cursor:not-allowed}
+  /* НА ТЕЛЕФОНЕ полоса сегментов — во всю строку (макет: `.w-phone .seg{width:100%}`). Не влезла — сегменты ПЕРЕНОСЯТСЯ внутри
+     полосы, а не уезжают вбок, как в макете (`overflow-x:auto`): там, где макет нарисован (392 px), всё влезает и вид тот же, а
+     уже 392 прокрутка прятала за край выбранный вариант («Неделя» расписания на 320 px — замер 25.09.2026). Правило — на классе
+     ширины, а не в медиазапросе: ширины каркаса задаёт `w()` в index.html. */
+  html.w-phone .segbar{width:100%;max-width:100%;flex-wrap:wrap}
+  @media (max-width:520px){
+    /* Узкий экран: grid-«портянки» (разделы, метрики шапки) — в 2 столбца. ВАЖНО: minmax(0,1fr),
+       а НЕ 1fr — 1fr = minmax(auto,1fr), где auto = min-content ставит ПОЛ по ширине контента:
+       при 320px длинные ярлыки распирали треки шире вьюпорта → правый столбец «уезжал» за экран
+       (grid blowout). minmax(0,1fr) разрешает трекам сжиматься, контент переносится внутри. */
+    #nav-block .grid, #hero .grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important}
+    /* Шапка: бейджи ресурсов держим СПРАВА на одном уровне с блоком-заголовком (не переносим
+       ВСЮ группу вниз) — ряд не переносится, а сами бейджи внутри своей ячейки могут в 2 строки. */
+    #topbar{flex-wrap:nowrap;align-items:flex-start;gap:8px}
+    #topbar .badges{min-width:0}
+    /* HERO НА ТЕЛЕФОНЕ. Прежние правила («тумблер слева, щит прячем») были про БЕЛУЮ карточку
+       со щитом-иконкой: там тумблер справа от длинного заголовка терялся. У цветной шапки
+       редизайна щита нет вовсе, а тумблер — самый правый и самый крупный элемент строки;
+       `order:-1` уводил его ПЕРЕД заголовком, и «VPN включён» читался как подпись к
+       переключателю. Оставляем порядок разметки, только не даём строке переноситься. */
+    #hero>.row{flex-wrap:nowrap;align-items:center}
+    /* Компактнее карточки-разделы на телефоне (меньше «воздуха», влезает больше). */
+    #nav-block .grid{gap:8px}
+    .fc{padding:11px 12px;gap:9px}
+    .fc .ti{font-size:19px}
+  }
+  button{font-family:inherit;font-size:13px;color:var(--text-primary);background:var(--bg-primary);
+         border:.5px solid var(--border-s);border-radius:var(--r-md);padding:7px 14px;cursor:pointer}
+  @media (hover:hover){ button:hover{background:var(--bg-secondary)} }
+  button:disabled{opacity:.5;cursor:not-allowed}
+  /* РУКА НАД ВСЕМ, ЧТО НАЖИМАЕТСЯ. У <button> курсор задан выше, а элементы управления на <div>/<span> (сегменты `.seg`,
+     плитки выбора, строки-переходы) получали его только своими правилами — и где правила не было, над кнопкой висела стрелка
+     (обход 25.09.2026: 40+ сегментов расписаний, вкладок и фильтров, выпадающие списки, «?»). Правило — страховочная сетка по
+     РОЛИ, и специфичность у неё НУЛЕВАЯ (`:where`): любое явное правило компонента (запертый сегмент `.seg.dis`, запертая
+     плитка, текущий выбор со стрелкой) её перебивает. Прежде «[role=button]:not(…):not(…)» весила как три класса и перебивала
+     `.seg.dis{cursor:not-allowed}` — над запертым периодом «Трафика» висела рука (ревью пачки 3, круг 1). Запертое
+     (`aria-disabled`, `data-na`) руку не получает. */
+  :where([role=button]:not([aria-disabled=true]):not([data-na]),[role=tab],[role=link],[role=switch],[role=checkbox],[role=radio],
+  [role=menuitem],[role=option],[data-go],summary,select,label>input[type=checkbox],label>input[type=radio]){cursor:pointer}
+  /* ЭЛЕМЕНТ УПРАВЛЕНИЯ НЕ ВЫДЕЛЯЕТСЯ КАК ТЕКСТ. Два быстрых касания соседних пунктов нижней навигации (а ещё сегментов, вкладок,
+     чипов) телефон читал как двойное касание и выделял слово с ручками, как перед копированием; долгое нажатие — то же плюс
+     меню «Копировать» на iOS (жалоба 02.10.2026). Сетка — та же, что у руки выше: по РОЛИ, а роли элементам управления панель
+     ставит сама (`wireSeg`, `wireNavKeys`, `mkHelp`). `touch-action:manipulation` — двойное касание не жест масштаба, а два
+     нажатия. Специфичность нулевая (`:where`), явное правило компонента перебьёт. Поля ввода не задеты: они не кнопки.
+     СТРОКИ С ДАННЫМИ (`.lrow`: имя и адрес устройства, SSID, домены, события) — ВЫДЕЛЯЕМЫ, хотя кликабельные несут role=button
+     (`lrowGo`, ~50 мест): их копируют долгим нажатием на телефоне и мышью на ПК (ревью с.95 — первая редакция этого не знала и
+     гасила «Копировать» у IP устройства). Им — только `touch-action`; кнопки ВНУТРИ строки ловит правило выше по своей роли. */
+  :where(button,[role=button],[role=tab],[role=switch],[role=checkbox],[role=radio],[role=menuitem],[role=option],[data-go],summary){
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
+  :where(.lrow){-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
+  .btn-link{font-family:inherit;font-size:13px;color:var(--text-primary);background:var(--bg-primary);
+            border:.5px solid var(--border-s);border-radius:var(--r-md);padding:7px 14px;cursor:pointer;
+            text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+  @media (hover:hover){ .btn-link:hover{background:var(--bg-secondary)} }
+  .srv-ping{font-variant-numeric:tabular-nums;white-space:nowrap}
+  /* ЭКРАН — СТРАНИЦА РАЗДЕЛА, а не слой поверх (шаг 3a переноса). Узел сохранил id и класс `modal`:
+     по ним его находят гарды фоновых циклов (`screenAlive`) и тик колоды («экран открыт — карточек не
+     видно»), и смысл класса `open` прежний — «экран показан». Поверхность — прежняя карточка 600/920:
+     экраны ещё не разложены колодой (это следующие подшаги), и на всю ширину их формы растянулись бы. */
+  .modal{display:none}
+  .modal.open{display:block}
+  .modal-card{background:var(--bg-primary);border:.5px solid var(--border-t);border-radius:var(--r-lg);width:100%;max-width:600px;padding:16px 18px;box-sizing:border-box}
+  /* ПОВЕРХНОСТИ ВНЕ ПАНЕЛИ (шаг 8 переноса, макет `xs-*`): форма входа, окно кода, «Панель удалена». Страница БЕЗ
+     навигации — её в этот момент нет: без сессии гейт не отдаёт данных, после удаления нет сервера. Колонка одна, шириной
+     в карточку мастера (560): страница «до панели» не должна выглядеть панелью без сайдбара. Перекрывает панель ЦЕЛИКОМ
+     (z-index 70), вместе с открытым экраном: полупустая панель под окном читалась бы как поломка; крестика нет — закрыть,
+     не войдя, некуда. Карточку центрует `margin:auto`, а не `align-items:center` колонки: высокая карточка на низком
+     экране при центровке теряет ВЕРХ — прокруткой туда не дотянуться, а поля auto при переполнении сжимаются в ноль.
+     Прокручивает сама страница; панель позади на это время заперта (`bare-on`), иначе у окна две полосы прокрутки, и
+     колесо листало невидимую панель. */
+  .bare{position:fixed;inset:0;z-index:70;background:var(--bg-page);overflow-y:auto;display:flex;flex-direction:column;padding:36px 18px 44px}
+  .bare>.bare-card{margin:auto;width:100%;max-width:560px}
+  html.bare-on,html.bare-on body{overflow:hidden}
+  .bare-card{padding:30px 28px 26px}
+  .bhead{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+  .bhead .mark{width:72px;height:72px}
+  .bhead .bname{font-size:20px;font-weight:500;letter-spacing:.16em}
+  .bh1{margin:0 0 8px;font-size:24px;font-weight:600;letter-spacing:-.02em;line-height:1.25}
+  .bsub{color:var(--ink2);font-size:14px;line-height:1.55}
+  .bare-card .inp{padding:10px 12px;font-size:14px}
+  .bare-card .btn.pri{width:100%;justify-content:center;margin-top:8px;padding:10px 14px}
+  .bchk{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink2);cursor:pointer}
+  .bchk input{width:16px;height:16px;margin:0;flex:none;cursor:pointer}
+  /* Строк отказа ДВЕ: причина и обратный отсчёт паузы — разные сообщения, а счётчик, переписывающий узел раз в секунду,
+     затирал причину («за что меня заперли?»). У причины место держится всегда (кнопка не прыгает на отказе), у отсчёта —
+     только пока он идёт. */
+  .ferr{font-size:12px;color:var(--bad);min-height:17px;margin-top:8px;line-height:1.4}
+  .ferr.lk{min-height:0;margin-top:2px}
+  .ferr.lk:empty{display:none}
+  /* Команда и путь на странице вне панели — моноширинно, но НЕ классом `mono` и не стилем с `font-mono`: оба размывает режим
+     стримера, а здесь секрета нет (команда смены пароля, путь отчёта), и размытая подсказка — это подсказка, которой нет. */
+  .bcmd{font-family:var(--font-mono);font-size:12px;color:var(--ink2)}
+  .cline.bcmd{margin-top:4px;overflow-wrap:normal}
+  .bcmd .nw{white-space:nowrap}   /* перенос — только по `/` и пробелу (cmdHtml): `enodia-|boot` читалось переносом слова */
+  .w-phone .bare{padding:22px 14px 34px}
+  .w-phone .bare-card{padding:22px 18px 20px}
+  .bare-card .inp.tfa-code{font-family:var(--font-mono);font-size:22px;letter-spacing:4px;text-align:center;padding:10px}
+  /* ОКНО КОДА — шесть клеток макета (`pn-login`) поверх НАСТОЯЩЕГО поля: ввод, вставка и автоподстановка идут в поле, клетки только
+     показывают. Поле не прячем `opacity:0` — часть менеджеров паролей невидимые поля пропускает; оно прозрачно цветом. Код
+     восстановления (буквы, дефис, 11 знаков) клетки не вмещают — поле видно как есть (`.free`). Клетки делят ширину: на 320 px
+     шесть по 42 не влезают в карточку. */
+  .codebox{position:relative;display:flex;justify-content:center;margin:16px 0 4px;cursor:text}
+  .codebox .code{display:flex;gap:8px;width:100%;max-width:292px}
+  .codebox .code i{flex:1 1 0;min-width:0;max-width:42px;height:52px;border-radius:12px;border:1px solid var(--line2);background:var(--soft);
+                   display:grid;place-items:center;font-style:normal;font-size:22px;font-family:var(--font-mono);color:var(--ink)}
+  .codebox .code i.on{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+  .codebox:not(.free) .inp.tfa-code{position:absolute;inset:0;width:100%;height:100%;max-width:none;padding:0;border-color:transparent;
+     background:transparent;color:transparent;-webkit-text-fill-color:transparent;caret-color:transparent;box-shadow:none}
+  .codebox:not(.free) .inp.tfa-code::placeholder{color:transparent}
+  .codebox:not(.free) .inp.tfa-code::selection{background:transparent}
+  .codebox.free .code{display:none}
+  /* широкая модалка (тестер ByeDPI — таблица по категориям не влезает в 520px); на узких экранах
+     всё равно width:100% → мобильный адаптив сохраняется (таблица скроллится по X). */
+  .modal.wide .modal-card{max-width:920px}
+  /* СТРОКА СЕРВЕРА — `.lrow` макета (разметка — serverRow/serverCard в panel.js). Справа — метка, бейдж, замер и кнопки ОДНОЙ
+     группой (`.srv-r`), шеврон — последним. Классы `.srv`/`.srv2` вида не несут — это крючки проводки и прогонов. */
+  .srv-r{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px;flex:0 1 auto;min-width:0}
+  .srv-r .badge{white-space:normal;text-align:center}
+  .srv-ping.chip:empty{display:none}
+  .lrow.srv.active,.lrow.srv2.active{cursor:default}
+  .lrow.dis>.grow{opacity:.6}
+  /* Пробел С ОБЕИХ сторон: замер клеится к тексту без своего пробела («salamander· 61 мс» — ревью пачки 2, круг 2). */
+  .lrow .ds .srv-ping:not(:first-child):not(:empty)::before{content:' · '}
+  /* Метка-кнопка («выбрать →»): вид чипа, поведение кнопки — ею строку активируют с клавиатуры. */
+  button.chip{border:0;font:inherit;font-size:12.5px;cursor:pointer}
+  @media (hover:hover){ button.chip:hover{color:var(--ink);background:var(--soft2)} }
+  button.chip:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .srv-chev{flex:none;display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:8px;
+            background:transparent;color:var(--ink3);cursor:pointer}
+  @media (hover:hover){ .srv-chev:hover{color:var(--ink);background:var(--soft)} }
+  .srv-chev:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+  /* Строка сервера — перенос ПО НУЖДЕ, как `lr-fit`: группа справа стоит в строке имени (макет), а под имя уходит, только когда
+     колонке имени осталось меньше предела — иначе имя и адрес Xray сжимались бы в столбик по букве, а у AmneziaWG/Hysteria2 на
+     320 px имени оставалось 34 px (ревью пачки 2, круг 2). Шеврон — у правого края, в какой строке ни оказалась бы группа.
+     Прежде группу уводило под имя правило карточки ≤ 460 px — и на обычной карточке ПК, и на телефоне 392 (сверка 26.09.2026). */
+  .lrow.srv,.lrow.srv2{flex-wrap:wrap;row-gap:6px;position:relative;padding-right:32px}
+  .lrow.srv>.grow,.lrow.srv2>.grow{min-width:min(130px,100%)}
+  .lrow.srv>.srv-r,.lrow.srv2>.srv-r{margin-left:auto}
+  .lrow.srv>.srv-chev,.lrow.srv2>.srv-chev{position:absolute;right:0;top:50%;transform:translateY(-50%)}
+  /* Строка «файл можно перетащить — или нажать» под полем ссылки — она же кнопка выбора (у макета отдельной дропзоны нет);
+     бросок принимает вся карточка добавления (`.dz-area`). */
+  .dz.dz-line{display:block;padding:0;border:0;border-radius:4px;background:none;text-align:left;margin-top:9px;
+              font-size:11.5px;line-height:1.45;color:var(--ink3)}
+  @media (hover:hover){ .dz.dz-line:hover{background:none;color:var(--ink2);text-decoration:underline dotted;text-underline-offset:3px} }
+  .dz.dz-line:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .card.dz-area.over{box-shadow:inset 0 0 0 2px var(--acc);background:var(--acc-soft)}
+  /* Ряд инструментов вкладки Xray: поиск растягивается, кнопки — по своей ширине; на телефоне кнопки уходят строкой ниже. */
+  .srv-tools{display:flex;gap:9px;flex-wrap:wrap;align-items:center;min-width:0}
+  .srv-tools>.inrow{flex:1 1 240px}
+  /* Плавающее меню (⋮) — текстовые действия; вне модалки (position:fixed), поверх неё. */
+  .popmenu{position:fixed;z-index:60;background:var(--bg-primary);border:.5px solid var(--border-s);border-radius:var(--r-md);
+           box-shadow:0 6px 24px rgba(0,0,0,.35);padding:4px;min-width:184px;max-width:280px}
+  .popmenu-item{display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text-primary);
+                font:inherit;font-size:13px;padding:9px 11px;border-radius:var(--r-sm);cursor:pointer;white-space:nowrap}
+  .popmenu-item:focus-visible{background:var(--bg-secondary)} @media (hover:hover){ .popmenu-item:hover{background:var(--bg-secondary)} }
+  .popmenu-item:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+  .popmenu-item.danger{color:var(--text-warning)}
+  /* «Приглушён» в МЕНЮ = «выбрать нельзя, но клик ведёт туда, где это чинится» — и это ПРОТИВОПОЛОЖНО
+     глобальному `.muted` (opacity+pointer-events:none, декоративная заглушка). Общий класс отнимал у
+     пунктов клики: «AmneziaWG · не установлен →» и соседи не открывали НИЧЕГО, человек жал и не получал
+     ни экрана, ни объяснения — ровно жалоба «стоит, а включить нельзя» (AX3600, 15.08.2026). Возвращаем
+     кликабельность явно; специфичность (0,2,0) бьёт глобальный (0,1,0), порядок правил тут ни при чём. */
+  .popmenu-item.muted{color:var(--text-tertiary);opacity:1;pointer-events:auto}
+  .popmenu-cap{font-size:11px;color:var(--text-tertiary);padding:7px 11px 8px;white-space:normal;line-height:1.45;border-bottom:1px solid var(--border-t);margin-bottom:2px}
+  .popmenu-sep{height:1px;background:var(--border-t);margin:4px 6px}
+  /* Заголовок popmenu с «(?)» справа (мокап «Сменить транспорт»): компактная шапка вместо
+     простыни-caption — пояснение прячется за иконкой-подсказкой. */
+  .popmenu-head{display:flex;align-items:center;justify-content:space-between;gap:8px;
+                padding:6px 8px 7px 11px;border-bottom:1px solid var(--border-t);margin-bottom:2px}
+  .popmenu-head b{font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.03em}
+  /* «(?)»-подсказка: кружок «?», раскрывает пояснение по наведению (десктоп) И тапу (мобайл;
+     там native title недоступен). Глиф — литерал «?», в icon-шрифте нужного нет (17-подмножество).
+     Всплывашка — фикс-поз, как popmenu (флип вверх при нехватке места). */
+  .help{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+        flex-shrink:0;border-radius:50%;border:1px solid var(--border-s);background:var(--bg-secondary);
+        color:var(--text-tertiary);font-size:11px;font-weight:700;line-height:1;cursor:pointer;
+        vertical-align:middle}
+  .help.on{background:var(--toggle-on);border-color:var(--toggle-on);color:#fff} @media (hover:hover){ .help:hover{background:var(--toggle-on);border-color:var(--toggle-on);color:#fff} }
+  .help-pop{position:fixed;z-index:70;max-width:264px;background:var(--bg-primary);
+            border:.5px solid var(--border-s);border-radius:var(--r-md);box-shadow:0 6px 24px rgba(0,0,0,.35);
+            padding:9px 12px;font-size:12px;line-height:1.5;color:var(--text-secondary);white-space:normal}
+  /* ОБЩАЯ панель действий экрана: подпись слева, кнопки справа. Носителей три — серверы,
+     гео-категории и менеджер источников (он же на пяти экранах). Имя осталось от серверов, где
+     блок появился первым; ЧЕТВЁРТОЙ копии инлайн-флекса не заводить — именно из-за копий
+     кнопки действий разъехались по экранам и уехали ПОД длинные списки, где их не находили.
+     На узком экране группа кнопок уходит на свою строку и переносит кнопки внутри себя
+     (иначе «Проверить все» вылезал за край модалки на 390px). */
+  .srv-tb{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+  .srv-tb-hint{font-size:12px;color:var(--text-tertiary);flex:1 1 140px;min-width:0}
+  .srv-tb-act{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0}
+  @media(max-width:480px){ .srv-tb-act{flex:1 1 100%;justify-content:flex-start} }
+  /* ПОЛЕ ВВОДА — вид макета (`Fld`/`.inrow`): бумага, рамка 1px, радиус 11, 13.5 px; однострочное шире ~560 px не растягиваем —
+     глазу негде зацепиться за конец строки. Фокус — рамка и мягкий ореол акцента (как у `.f input`). */
+  .inp{font-family:inherit;font-size:13.5px;line-height:inherit;color:var(--ink);background:var(--paper);
+       border:1px solid var(--line2);border-radius:11px;padding:9px 12px;width:100%}
+  input.inp,select.inp{max-width:560px}
+  .inp:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+  /* Дропзона загрузки файлов: клик = выбор, перетаскивание = подсветка (.over) + дроп.
+     Цвета/радиусы — те же CSS-переменные, что и у карточек, чтобы вписаться в тему. */
+  .dz{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;text-align:center;
+      padding:16px 12px;border:1.5px dashed var(--border-s);border-radius:var(--r-md);background:var(--bg-primary);
+      color:var(--text-secondary);font-size:12px;line-height:1.35;cursor:pointer;
+      transition:border-color .15s,background .15s,color .15s}
+  /* Зона бэкапа — `.drop` макета: без значка, прозрачная, с прямыми углами и текстом крупнее. Правила состояний ниже (наведение, заперта,
+     бросок) стоят ПОСЛЕ неё и перебивают её фон — зона по-прежнему отвечает на перетаскивание. */
+  .dz.dz-drop{background:transparent;border-radius:0;border-color:var(--line2);padding:18px 14px;font-size:13px;color:var(--ink2)}
+  @media (hover:hover){ .dz:hover{border-color:var(--text-info);background:var(--bg-secondary)} }
+  @media (hover:hover){ .dz.dz-drop:hover{border-color:var(--acc);background:var(--acc-soft)} }
+  /* Заперта на время чужой операции (импорт бэкапа, пока применяется прошлый): бросок не должен выглядеть приглашением. */
+  .dz[aria-disabled="true"]{opacity:.6;cursor:not-allowed;border-color:var(--border-t);background:none}
+  .dz.over{border-color:var(--text-info);background:var(--bg-success);color:var(--text-success)}
+  .dz svg{opacity:.7;flex-shrink:0}
+  .dz.over svg{opacity:1}
+  .dz .dz-hint{font-size:11px;color:var(--text-tertiary)}
+  .dz.over .dz-hint{color:var(--text-success)}
+  .dz input[type=file]{display:none}
+  .seg[data-ip]{flex:1;cursor:pointer}
+  .seg[data-ip].on{cursor:default}
+  .wf-seg,.gst-seg{flex:1;cursor:pointer}
+  .wf-seg.on,.gst-seg.on{cursor:default}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin .8s linear infinite}
+  /* Мини-крутилка (в строке «обновлено» и в шапке попапа «О роутере») — показывает, что идёт
+     запрос к роутеру ПРЯМО СЕЙЧАС. Тот же паттерн, что у тоста (#toast .sp), но inline. */
+  .mini-sp{display:inline-block;width:11px;height:11px;border-radius:50%;border:2px solid var(--border-t);
+           border-top-color:var(--text-info);animation:spin .8s linear infinite;vertical-align:-1px}
+  /* Пульс «только что обновлено»: значения на миг притухают и разгораются на КАЖДОМ поле статуса
+     (каждые 10 с) — наглядный сигнал «данные живые», даже когда цифры не изменились. Запускается
+     повторно перезапуском анимации (снять класс → reflow → навесить). */
+  @keyframes upd-pulse{from{opacity:.35}to{opacity:1}}
+  .just-upd{animation:upd-pulse .55s ease-out}
+  /* Пока летит запрос статуса — меры ресурсов слегка притушены (видно на медленном роутере).
+     БЕЗ якоря `#topbar`: на телефоне placeChrome() переносит `.badges` в `#phead`. */
+  .badges .gchip{transition:opacity .2s}
+  .badges.refreshing .gchip{opacity:.5}
+  /* Температурная шкала в попапе «О роутере»: как .si-bar, но с порогом троттлинга (тик). */
+  .temp-bar{position:relative;height:6px;border-radius:3px;background:var(--bg-secondary);margin:8px 0 3px}
+  .temp-bar>span{display:block;height:100%;border-radius:3px;transition:width .3s}
+  .temp-tick{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text-tertiary);opacity:.7}
+  #ping-cell{cursor:pointer}
+  @media (hover:hover){ #ping-cell:hover{background:var(--bg-primary)} }
+  .m.tap{cursor:pointer}
+  @media (hover:hover){ .m.tap:hover{background:var(--bg-primary)} }
+  /* Режим стримера: блюрим чувствительные данные для записи видео (чисто визуально —
+     данные НЕ меняются, бэкенд не трогается). Моноширинное = технические идентификаторы
+     (IP/серверы/ifaces/CIDR/домены) ловим одним правилом по подстроке стиля; немоноширинные
+     идентификаторы (имя конфига, hostname, SSID, имена серверов, почта) помечены .sens или
+     адресуются по id. Класс на <body> переживает авто-рефреш и перерисовку модалок.
+     #toast-msg и #log — СВОБОДНЫЙ текст из бэкенда (d.msg): «Xray-конфиг <name> активен»,
+     «Почта сохранена (<user>)», а строка-результат скрипта (action:48) вообще сливает весь
+     stdout — хосты/IP/домены/хендшейки. Разметить .sens внутри нельзя → блюрим элемент
+     целиком (у тоста крутилку/✓/✕ оставляем — это #toast-sp, не #toast-msg). */
+  body.streamer [style*="font-mono"],
+  /* `.mono` — класс редизайна для адресов и табличных чисел. Пока его не было в этом списке,
+     адрес сервера в шапке при включённом «режиме стримера» оставался ЧИТАЕМЫМ:
+     разметка переехала с инлайнового font-mono на класс, а список селекторов знал только
+     инлайновую форму. Правило именно такое и в макете (`.streaming .mono`). */
+  /* `.kw` — моноширинное СЛОВО-КОМАНДА в заметке («awg setconf», «vpn://»): не данные, и пятно посреди фразы только мешало читать. */
+  body.streamer .mono:not(.kw),
+  body.streamer .sens,
+  body.streamer #cfg,
+  body.streamer #nt-user,
+  body.streamer #toast-msg,
+  body.streamer .actlog,
+  body.streamer #log,
+  body.streamer .term,
+  /* QR доступа домой несёт ПРИВАТНЫЙ КЛЮЧ устройства и читается камерой с записи экрана — размытый текст конфига рядом не спасал. */
+  body.streamer .qrbox,
+  body.streamer #nt-to{filter:blur(7px)!important;-webkit-filter:blur(7px)!important;user-select:none}
+  /* Кнопка-знак во включённом состоянии (макет: `.iconbtn.on` — «глаз» стримера). */
+  .iconbtn.on{background:var(--acc-soft);border-color:transparent;color:var(--acc-deep)}
+  /* «Карточки главной» (макет: `WSeg`, `.arrs`): ширина — мелкими пилюлями, порядок — стрелками без рамки. */
+  .wseg{margin-top:7px}
+  .wseg .seg{padding:5px 10px;font-size:12px}
+  .arrs{display:flex;gap:2px;flex:none}
+  /* Тост действий — единый НАГЛЯДНЫЙ индикатор «что-то происходит»: виден везде,
+     в т.ч. ПОВЕРХ модалки (z-index выше .modal=50), куда раньше не доходили ни
+     #busy, ни журнал. Крутилка пока идёт действие, ✓/✕ по результату (авто-скрытие). */
+  #toast{position:fixed;left:50%;top:14px;transform:translateX(-50%) translateY(-14px);z-index:100;
+         max-width:92vw;display:flex;align-items:center;gap:9px;padding:10px 14px;border-radius:var(--r-md);
+         background:var(--bg-primary);border:.5px solid var(--border-s);box-shadow:0 8px 28px rgba(0,0,0,.22);
+         font-size:13px;color:var(--text-primary);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.ok{border-color:var(--border-success)}
+  #toast.err{border-color:var(--text-warning)}
+  #toast .sp{width:15px;height:15px;border-radius:50%;border:2px solid var(--border-t);
+             border-top-color:var(--text-info);animation:spin .8s linear infinite;flex-shrink:0}
+  #toast .mk{font-size:15px;font-weight:700;line-height:1;flex-shrink:0}
+  #toast.ok .mk{color:var(--text-success)}
+  #toast.err .mk{color:var(--text-warning)}
+  #toast-msg{word-break:break-word}
+  /* Сворачивание + перетаскивание главных блоков (#mcards). Состояние (порядок/свёрнутость)
+     в localStorage — как режим стримера, бэкенд не трогаем. Шапка-бар инжектится из JS:
+     [⠿ ручка] [заголовок — виден в свёрнутом] … [↑][↓ перестановка] [▾ шеврон]. */
+  #mcards{display:flex;flex-direction:column;gap:14px}
+  .mc-head{display:flex;align-items:center;gap:6px;margin:-6px -6px 8px;padding:2px 4px}
+  .mcard.collapsed .mc-head{margin-bottom:-6px}
+  .mc-handle{cursor:grab;color:var(--text-tertiary);font-size:14px;line-height:1;user-select:none;padding:2px;flex-shrink:0}
+  .mc-handle:active{cursor:grabbing}
+  .mc-title{font-size:13px;font-weight:500;color:var(--text-secondary);display:none;min-width:0;word-break:break-word}
+  .mcard.collapsed .mc-title{display:block}
+  .mc-chev{margin-left:auto;background:transparent;border:0;color:var(--text-tertiary);font-size:13px;line-height:1;
+           cursor:pointer;padding:4px 7px;border-radius:var(--r-md);transition:transform .15s;flex-shrink:0}
+  @media (hover:hover){ .mc-chev:hover{background:var(--bg-secondary)} }
+  .mcard.collapsed .mc-chev{transform:rotate(-90deg)}
+  /* Кнопки перестановки ↑↓ в шапке: работают и на тач-экранах, где HTML5-drag мёртв. */
+  .mc-arrow{background:transparent;border:0;color:var(--text-tertiary);font-size:13px;line-height:1;
+            cursor:pointer;padding:4px 6px;border-radius:var(--r-md);flex-shrink:0}
+  @media (hover:hover){ .mc-arrow:hover{background:var(--bg-secondary)} }
+  .mc-arrow:disabled{opacity:.28;cursor:default;background:transparent}
+  .mc-up{margin-left:auto}
+  /* Блок «Разделы настроек» — перемещаемый как карточка, но БЕЗ рамки/фона .card
+     (внутри сетка ярлыков .fc сидит на фоне страницы; своя рамка дала бы двойную). */
+  .mcard.nav-block .mc-head{margin:0 0 8px}
+  .mcard.collapsed .mc-body{display:none}
+  .mcard.dragging{opacity:.45}
+  .mcard.drop-before{box-shadow:0 -3px 0 0 var(--text-info)}
+  .mcard.drop-after{box-shadow:0 3px 0 0 var(--text-info)}
+  /* ДВЕ НЕЗАВИСИМЫЕ ПРИЧИНЫ НЕ ПОКАЗЫВАТЬ КАРТОЧКУ, и решает ЛЮБАЯ из них:
+       .mc-off — человек выключил её на экране «Карточки главной» (раскладка на роутере);
+       .mc-na  — роутер этого не умеет (движка нет, ответ старее фичи) — решает панель по ответу.
+     Раньше вторую половину писал инлайновый `style.display`, и он ЗАТИРАЛ бы первую: ответ,
+     ушедший до выключения, возвращался бы после него и включал карточку обратно. `display:none`
+     здесь ещё и выключает опрос — планировщик колоды судит по `offsetParent`. */
+  .mcard.mc-off,.mcard.mc-na{display:none}
+  /* «ДОБАВИТЬ КАРТОЧКУ» — последняя ячейка колоды и единственный путь обратно, когда выключено
+     всё: на пустом «Обзоре» она обязана остаться видимой. Пунктир, а не кнопка: это место, куда
+     карточка встанет, а не действие в ряду действий. */
+  /* ЗНАК И ПОДПИСЬ — РАЗНЫЕ УЗЛЫ (зазор даёт `gap`, а не пробел в тексте): перевод накладывается
+     по ТЕКСТОВЫМ узлам, и «+ Добавить карточку» одной строкой пришлось бы заводить в словарь
+     вместе с плюсом и неразрывным пробелом. */
+  /* Макет: знак ＋ НАД подписью, плитка 96 px. */
+  .addcard{border:1.5px dashed var(--line2);border-radius:var(--r-lg);min-height:96px;
+           display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+           color:var(--ink3);font-size:13.5px;cursor:pointer;
+           background:transparent;transition:border-color .15s,color .15s}
+  @media (hover:hover){ .addcard:hover{border-color:var(--acc);color:var(--acc-deep)} }
+  .addcard:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  /* КОМПАКТНЫЙ переключатель ВНУТРИ строки списка (ширина карточки на экране «Карточки
+     главной»). Обычный `.segbar` тянет сегменты на всю строку — он для переключателя, который
+     ЕСТЬ строка; здесь же он стоит под именем карточки и обязан занимать ровно себя.
+     Специфичность `.segbar.sm .seg` выше, чем у мобильного правила `.segbar .seg`, поэтому на
+     телефоне сегменты тоже остаются компактными, а не разъезжаются по 33 %. */
+  /* Размер у сегментов ОДИН (макет не знает «мелких», кроме пилюль ширины `.wseg`): `.sm` — только «по содержимому», полоса
+     не тянется во всю строку, когда стоит рядом с чем-то (как `.seg` макета внутри `.row`). */
+  .segbar.sm{width:fit-content;max-width:100%;flex-wrap:wrap}
+
+  /* ============================================================================
+     КАРКАС РЕДИЗАЙНА: сайдбар (десктоп/планшет) · таб-бар (телефон) · строка раздела.
+     Перенесено из `local/redesign-proto.html` — там эта раскладка проверена прогоном по
+     всем экранам на трёх ширинах (перелив, срез, контраст). Имена классов НАМЕРЕННО те же,
+     что в макете: сверять панель с макетом глазами и грепом придётся ещё много раз, и
+     переименование ради вкуса сделало бы обе стороны непереводимыми друг в друга.
+
+     ТРИ ШИРИНЫ ЗАДАЁТ КЛАСС НА <html> (`w-desk` · `w-tab` · `w-phone`), а не @media.
+     Причина не в лени: в макете эти классы — переключатель ширины, и правил на них 63.
+     Перенеси мы их в медиазапросы, всякая будущая сверка «макет ↔ панель» превращалась бы
+     в перевод селекторов. Класс ставит инлайновый скрипт в <head> (до первой отрисовки,
+     мигания нет) и обновляет на resize; медиазапросов у каркаса поэтому нет вовсе.
+     ВНУТРИ области контента ширину меряет КОНТЕЙНЕР (#view), а не окно: слева сайдбар, и
+     одно и то же окно даёт разную полезную ширину на десктопе и на телефоне.
+     ============================================================================ */
+  .shell{display:grid;grid-template-columns:248px 1fr;min-height:100vh}
+  .w-phone .shell{grid-template-columns:1fr;min-height:0}
+  /* Сайдбар прилипает к верху и живёт во всю высоту окна: список разделов не должен уезжать
+     вместе с длинным экраном — иначе на «Гео-списках» (тысячи строк) навигации нет вовсе. */
+  .side{border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:2px;
+        background:var(--card);position:sticky;top:0;height:100vh;overflow:auto}
+  .w-phone .side{display:none}
+  .side .brand{padding:4px 10px 16px}
+  .side .sp{flex:1}
+  .snav{display:flex;align-items:center;gap:11px;padding:7px 10px;border-radius:8px;font-size:13.5px;
+        color:var(--ink2);cursor:pointer}
+  .snav .sq{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;color:#fff;flex:none;opacity:.92}
+  @media (hover:hover){ .snav:not(.on):hover{background:var(--soft)} }
+  .snav:focus-visible,.tabbar div:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  /* Базовая подсветка — обычным цветом: `color-mix()` ниже знают не все движки, и без этой
+     строки активный раздел на старом WebView отличался бы только жирностью. */
+  .snav.on{font-weight:500;color:var(--ink);background:var(--soft)}
+  /* Цвет раздела подсветкой, а не заливкой: раздел узнаётся по цвету, но читаемость текста
+     от этого зависеть не должна — отсюда 14 % и обычный --ink сверху. */
+  .snav.on[data-c="1"]{background:color-mix(in srgb,var(--g1) 14%,transparent)}
+  .snav.on[data-c="2"]{background:color-mix(in srgb,var(--g2) 14%,transparent)}
+  .snav.on[data-c="3"]{background:color-mix(in srgb,var(--g3) 14%,transparent)}
+  .snav.on[data-c="4"]{background:color-mix(in srgb,var(--g4) 16%,transparent)}
+  .snav.on[data-c="5"]{background:color-mix(in srgb,var(--g5) 14%,transparent)}
+  .snav.on[data-c="0"]{background:var(--soft)}
+  :root[data-theme=dark] .snav.on{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]) .snav.on{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+  }
+  /* Область контента. Верхняя строка — это ШАПКА, а не первая карточка: от контента её
+     отделяет собственный отступ, иначе чипы ресурсов сидят вплотную к hero и читаются
+     как его часть. Снизу на телефоне место под таб-бар (он fixed и накрыл бы хвост). */
+  .main{padding:16px 22px 26px;display:flex;flex-direction:column;gap:10px;min-width:0}
+  /* Снизу — место под таб-бар (он fixed, 53 px): подвал встаёт в ~8 px над ним, как в макете (его 78 px поля минус 70 наезда). */
+  .w-phone .main{padding:14px 13px calc(56px + env(safe-area-inset-bottom,0px))}
+  .topline{display:flex;align-items:center;gap:14px;min-height:38px;margin-bottom:18px}
+  .topline h2{font-size:20px;font-weight:600;letter-spacing:-.02em;display:flex;align-items:center;gap:9px;min-width:0;margin:0}
+  .topline h2 .sq{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;color:#fff;flex:none}
+  .w-phone .topline h2{font-size:17px}
+  .w-phone .topline h2 .sq{display:none}
+  /* На телефоне кнопки шапки живут в .phead — в topline их быть не должно, иначе они
+     задвоятся и строка снова перестанет быть одной. */
+  /* Строка раздела на телефоне не рисуется: заголовок дублировал бы таб-бар, а всё
+     остальное из неё уже переехало в .phead (см. placeChrome в panel.js). А строка ЭКРАНА
+     (без `top0`) рисуется: имени экрана и дороги к родителю таб-бар не несёт. */
+  .w-phone .topline.top0{display:none}
+  /* СТРОКА ЭКРАНА (шаг 3a, как в макете): вместо квадрата и имени раздела — крошка к родителю,
+     вместо мер ресурсов — имя экрана. Меры — спутник раздела; на экране они только теснили бы имя. */
+  .topline.top0 #scr-back,.topline.top0 #modal-title{display:none}
+  .topline:not(.top0) #sec-h,.topline:not(.top0) .badges{display:none}
+  .topline #modal-title{font-size:16px;font-weight:600;letter-spacing:-.02em;margin:0;min-width:0;overflow-wrap:anywhere;outline:none}
+  #scr-back{flex:none;white-space:nowrap}
+  #sec-h{outline:none}
+  /* padding-right — не отступ ради красоты: счётчик колокольчика висит на 4 px ПРАВЕЕ кнопки, а кнопка последняя в строке. */
+  .hbtns{display:flex;align-items:center;gap:8px;flex:none;padding-right:5px}
+  .back{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink3);cursor:pointer}
+  @media (hover:hover){ .back:hover{color:var(--ink)} }
+  /* ТЕЛЕФОННАЯ ШАПКА. На телефоне сайдбар скрыт, и бренда не остаётся вовсе — знак должен
+     быть виден в ОБЕИХ ширинах; заголовок раздела с телефона убран совсем, его несёт таб-бар. */
+  .phead{display:none}
+  /* ОДНА СТРОКА, как в макете (подача «Моб 1»): знак, кольца БЕЗ чисел, «глаз» и колокольчик; под шапкой — линия. Заголовка раздела здесь нет:
+     его несёт таб-бар внизу. Кольцо без числа — сам индикатор, число открывается в «Роутере» и в подсказке. Кнопки в шапке меньше
+     (32 против 36): они соседи бренда, а не заголовка. */
+  .w-phone .phead{display:flex;flex-wrap:nowrap;align-items:center;gap:9px;padding:2px 2px 10px;
+       border-bottom:1px solid var(--line);margin-bottom:11px}
+  .w-phone .phead .bname{font-size:13.5px}
+  .w-phone .phead .iconbtn{width:32px;height:32px;border-radius:10px}
+  .w-phone .phead .badges{flex:none;flex-wrap:nowrap;gap:6px}
+  /* Меры ресурсов на телефоне. Дуга читается и в 22 px, а вот число рядом с ней 13-м кеглем —
+     нет. Правило на `.w-phone`, а не в медиазапросе, — ширины в этой панели задаются классом
+     (см. `w()` в index.html), и разъехавшиеся пороги дали бы полосу, где шапка уже телефонная,
+     а меры ещё нет. */
+  .w-phone .badges .gchip{font-size:11px;padding:3px 8px 3px 3px;gap:5px}
+  .w-phone .badges .gauge,.w-phone .badges .gauge svg.ring{width:22px;height:22px}
+  /* Кольцо без числа: чип схлопывается до кольца (макет: `.gchip.bare`), подпись — в title. Селектор сильнее строки выше:
+     в самом макете та перебивала `.bare`, и чип оставался 33 px вместо 28 — строка переставала влезать в свои 392. */
+  .w-phone .phead:not(.two) .badges .gchip{padding:3px;gap:0}
+  .w-phone .phead:not(.two) .badges .gchip .t{display:none}
+  /* ХВОСТ РОСЧЕРКА — ЧАСТЬ ЗНАКА. Линия под словом выступает за него на ~1,4 em (пропорция знака, `.bname .uline`, абсолютная — в
+     ширину строки не входит), и в тесной ступени ложилась на первое кольцо: наезд 10 px на 320 (ревью пачки 3). Место под неё —
+     полем слова: выступ минус два зазора вокруг распорки `.grow` плюс 3 px воздуха. Поле входит в ширину строки ⇒ pheadFit меряет
+     ступени уже с ним. */
+  .w-phone .phead .bname{margin-right:calc(1.4em - 15px)}
+  /* ТЕСНО (класс `tight`, ставит pheadFit по ЗАМЕРУ): та же одна строка, но зазоры уже, а поле под росчерк — шире (зазоры его больше
+     не прикрывают); его отыгрывают кольца — плашка у кольца 2 px вместо 3. Замер 25.09.2026 (четыре меры, две кнопки, мобильная
+     эмуляция): на 320 — тесная, росчерк в 4 px от кольца; на 357 и шире — обычная. */
+  .w-phone .phead.tight{gap:3px}
+  .w-phone .phead.tight .bname{margin-right:calc(1.4em - 3px)}
+  .w-phone .phead.tight .brow{gap:6px}
+  .w-phone .phead.tight .badges{gap:2px}
+  .w-phone .phead.tight:not(.two) .badges .gchip{padding:2px}
+  .w-phone .phead.tight .hbtns{gap:4px}
+  /* НЕ ВЛЕЗЛО и тесно (уже 320 px или крупный шрифт системы; класс `two` ставит pheadFit по ЗАМЕРУ): кольца опускаются во вторую строку и получают числа —
+     подача «Моб 2» того же макета. Опускает их `order`, а не переезд узла; вторая строка — от левого края (правое выравнивание
+     читалось бы продолжением кнопок). */
+  .w-phone .phead.two{flex-wrap:wrap}
+  .w-phone .phead.two .hbtns{order:1}
+  .w-phone .phead.two .badges{order:2;flex:1 0 100%;flex-wrap:wrap;justify-content:flex-start}
+  /* ТАБ-БАР. В макете он sticky внутри «устройства»; здесь страница скроллится сама, поэтому
+     fixed — иначе на коротком экране он всплывает посреди пустоты. Шесть колонок = шесть
+     разделов; седьмого пункта тут не будет никогда, «Поддержка» и «Диагностика» живут в
+     «Роутере», а не в главной навигации. */
+  .tabbar{display:none}
+  /* Фон задан ДВАЖДЫ намеренно: `color-mix()` (полупрозрачное стекло) знают не все движки, а
+     на неподдержанном объявление просто отбрасывается — таб-бар остался бы ПРОЗРАЧНЫМ, и
+     контент читался бы сквозь него. Первая строка — сплошной фолбэк. */
+  .w-phone .tabbar{position:fixed;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(6,1fr);gap:2px;
+       background:var(--card);
+       background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(12px);
+       border-top:1px solid var(--line);padding:8px 4px 10px;z-index:5}
+  .tabbar div{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:9.5px;color:var(--ink3);cursor:pointer}
+  .tabbar div.on{color:var(--ink);font-weight:500}
+  .tabbar .ic{width:20px;height:20px}
+  /* ---- знак и локап (сайдбар, телефонная шапка) ---- */
+  /* Знак — ссылка на «Обзор» (index.html): вид локапа не меняется — ни подчёркивания, ни цвета ссылки. */
+  a.brand{display:block;color:inherit;text-decoration:none;cursor:pointer;border-radius:8px;flex:none}
+  a.brand:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .brand .brow{display:flex;align-items:center;gap:9px;min-width:0}
+  .brow .wm2{display:flex;flex-direction:column;min-width:0}
+  .bname{font-size:14.5px;font-weight:600;letter-spacing:.055em;line-height:1.2}
+  .mark{fill:none;flex:none;display:block}
+  /* ЛИНИЯ ПОД СЛОВОМ (символ #lg-uline в index.html) — ребёнок САМОГО слова, а не соседа: тогда
+     её `em` — это кегль слова, а проценты — его ширина, и одна запись служит и сайдбару (14,5 px),
+     и телефонной шапке, и заставке (25 px) без единого замера в JS. Пропорции — из макета
+     (`LINES.b3` в local/redesign-proto.html): длина 1,531 слова, начало на 0,215 слова ДО него.
+     По вертикали: базовая линия слова — на (высота строки + прописная)/2 от верха, то есть на
+     (1,2 + 0,73)/2 = 0,965 em; верх рамки кривой — на 0,455 прописной выше неё (0,633 em), высота
+     рамки — 1,037 прописной (0,757 em). Прописная Inter = 0,73 кегля (замер макета). */
+  .bname{position:relative;display:inline-block}
+  .bname .uline{position:absolute;left:-21.5%;width:153.1%;top:.633em;height:.757em;overflow:visible;pointer-events:none}
+  /* Третье кольцо крупного знака — токеном (разбор у --mark-ink). Селектор ПРОСТОЙ, без темы:
+     с предком он в теневое дерево <use> не проходит. */
+  .cc{stroke:var(--mark-ink)}
+  /* СВЕТ — только в «Ночи», и числа не свои: закрытый канон макета (`.brand.glow .mark`). Ореол
+     рисуется ЗА силуэтом, поэтому плетение он не засвечивает. */
+  .brand.glow .mark{filter:var(--mark-glow)}
+  /* ---- иконки каркаса (спрайт в index.html) ---- */
+  .ic{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+  .ic.s{width:16px;height:16px}
+  .grow{flex:1;min-width:0}
+  /* Адреса, ключи, имена файлов и табличные числа — моноширинным (макет: `.mono`). Класс стоит в разметке давно, а шрифта у него не было:
+     адрес сервера в строке читался обычным текстом. Размытие в режиме стримера — своим правилом выше. */
+  .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+  /* ---- подвал: ссылки проекта и версия ----
+     Ссылки жили в подвале главной и были на виду всегда. В новой структуре их место —
+     подвал сайдбара: за ссылкой на новости в настройки не ходят. */
+  .plinks{display:flex;flex-direction:column;gap:7px;margin-bottom:9px}
+  .plinks a{display:flex;align-items:center;gap:7px;color:var(--ink3);cursor:pointer;text-decoration:none}
+  @media (hover:hover){ .plinks a:hover{color:var(--ink2)} }
+  .sfoot{margin-top:12px;padding:11px 11px 2px;border-top:1px solid var(--line);
+         font-size:11.5px;color:var(--ink3);line-height:1.55}
+  .sfoot .r{display:flex;align-items:center;gap:6px}
+  .sfoot .r.cl{cursor:pointer} @media (hover:hover){ .sfoot .r.cl:hover{color:var(--ink2)} }
+  .sfoot b{font-weight:500;color:var(--ink2)}
+  .sfoot .up{width:6px;height:6px;border-radius:99px;background:var(--acc);flex:none}
+  /* ПОДВАЛ ТЕЛЕФОНА (макет: `pfoot`). Содержимое — ТОТ ЖЕ узел `.sfoot`, переехавший из сайдбара (placeChrome), поэтому его
+     собственная линия и отступы здесь сняты: линию рисует подвал. */
+  .pfoot{display:none}
+  .w-phone .pfoot{display:block;border-top:1px solid var(--line);margin:14px 0 6px;padding:11px 2px 0;
+       font-size:11.5px;color:var(--ink3);line-height:1.55}
+  .pfoot>.sfoot{margin:0;padding:0;border-top:0}
+  .w-phone .pfoot .plinks{flex-direction:row;justify-content:center;gap:16px;margin-bottom:8px}
+  .w-phone .pfoot .r{display:flex;align-items:center;justify-content:center;gap:6px}
+  .w-phone .pfoot b{font-weight:500;color:var(--ink2)}
+  .w-phone .pfoot .up{width:6px;height:6px;border-radius:99px;background:var(--acc);flex:none}
+  /* ---- КОЛОДА ЭКРАНА ----
+     До редизайна КАЖДЫЙ экран был одной вертикальной стопкой, и на 1600 px карточка
+     растягивалась во всю ширину: строка в полтора экрана длиной и километр пустоты справа.
+     Стопка остаётся там, где области мало (телефон, планшет в портрете), а на широкой
+     области карточки идут в колонки. В колонку встают КАРТОЧКИ и СЕКЦИИ, всё остальное
+     (ряд кнопок, заметка, панель вкладок) занимает всю строку — иначе ряд «Сохранить/
+     Удалить» уехал бы во вторую колонку и перестал быть итогом экрана. */
+  #view{container-type:inline-size;container-name:view}
+  /* Значок счётчика на колокольчике намеренно вылезает за угол кнопки — и этих 3 px хватало,
+     чтобы вся область контента получила горизонтальную прокрутку (нашлось прогоном по 45
+     экранам макета, глазами такое не видно). Перелив режем, значку оставляем 6 px. */
+  #view{overflow-x:clip;overflow-clip-margin:6px}
+  .vwrap{display:flex;flex-direction:column;gap:10px}
+  /* Панель вкладки (`.tpane`) — ПРОЗРАЧНАЯ обёртка: без этого карточки вкладки не встают в колонки колоды. Показ и скрытие — по-прежнему
+     инлайновым display:none на самой обёртке. */
+  .vwrap>.tpane:not([hidden]){display:contents}
+  /* Порог взят ЗАМЕРОМ, а не на глаз: планшет 1024 минус сайдбар 248 и поля даёт область
+     715 px, и две колонки по 330 с зазором 10 в неё влезают (670). Порог 760 «с запасом»
+     оставлял планшет одноколоночным — то есть ровно тем, от чего уходим. */
+  @container view (min-width:700px){
+    .vwrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+           grid-auto-flow:row dense;align-items:start;gap:10px}
+    .vwrap>*:not(.card):not(.sect){grid-column:1/-1}
+    .vwrap>.w2{grid-column:span 2}
+    .vwrap>.wfull{grid-column:1/-1}
+    /* Колода из одной-двух карточек над дверями раздела («DNS сейчас»): колонки держим и пустыми — карточка встаёт в одну колонку
+       колоды, как в макете, а не растягивается во всю строку (`auto-fit` схлопнул бы пустые). */
+    .vwrap.fill{grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
+    /* Широкая дверь (макет `.door.wide`: «Журнал действий») — две колонки сетки дверей. */
+    .doors>.door.wide{grid-column:span 2}
+    /* Дети прозрачной панели вкладки — те же правила колоды, что у прямых детей: ряд кнопок и заметка — во всю строку. */
+    .vwrap>.tpane>*:not(.card):not(.sect){grid-column:1/-1}
+    .vwrap>.tpane>.w2{grid-column:span 2}
+    .vwrap>.tpane>.wfull{grid-column:1/-1}
+  }
+  @container view (min-width:1150px){
+    .vwrap{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+  }
+  /* ПЕРЕХОД МЕЖДУ ЭКРАНАМИ служит ОРИЕНТАЦИИ («откуда пришли»), а не украшению: 170 мс и
+     7 px. Всё, что дольше ~200 мс, на панели ощущается задержкой, а не плавностью. */
+  @keyframes vin{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+  @keyframes vinb{from{opacity:0;transform:translateY(-7px)}to{opacity:1;transform:none}}
+  .vwrap{animation:vin .17s ease-out}
+  /* Класс НЕ называть back: .back уже занят хлебной крошкой. */
+  .vwrap.vback{animation-name:vinb}
+  /* Экран на новом адресе появляется так же, как колода раздела; класс ставит navShow (перезапуском —
+     у узла, который уже анимировался, повторное присвоение того же класса ничего не проиграет). */
+  .modal-card.vin{animation:vin .17s ease-out}
+  .modal-card.vback{animation:vinb .17s ease-out}
+  @media (prefers-reduced-motion:reduce){ .vwrap,.modal-card.vin,.modal-card.vback{animation:none} }
+  /* «Обзор» внутри #view: своих полей не задаёт (их даёт .main) и ширину не режет — за
+     читаемость строки отвечает КАРТОЧКА, а не окно: колода ниже разводит карточки по колонкам,
+     и текст внутри каждой всё равно ограничен её шириной. */
+  #view .wrap{padding:0;max-width:none;margin:0}
+  /* КОЛОДА «ОБЗОРА» — те же правила, что у .vwrap (см. каркас), но на своём контейнере:
+     #mcards умеет ещё и перетаскивание со сворачиванием, поэтому остаётся отдельным узлом.
+     Карточка просит две колонки классом .w2 — у «Трафика» в 330 px график превращается в семь
+     палочек без подписей. */
+  @container view (min-width:700px){
+    /* Карточки ОДНОГО РЯДА — одной высоты (макет: `.grid` колоды без align-items, то есть stretch): «начало» оставляло под
+       короткой карточкой дыру до следующего ряда (замечание человека 25.09.2026). Экраны (`.vwrap`) — прежним «начало»: там
+       в колонку встают формы разной природы, и растянутая форма с пустым низом хуже дыры. */
+    #mcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+            grid-auto-flow:row dense;align-items:stretch;gap:10px}
+    #mcards>.w2{grid-column:span 2}
+    #mcards>.wfull{grid-column:1/-1}
+  }
+  @container view (min-width:1150px){
+    #mcards{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+  }
+
+  /* ============================================================================
+     ШАГ 3b ПЕРЕНОСА: РАЗДЕЛ «СОЕДИНЕНИЕ» — ДВЕРИ ВМЕСТО ПЛИТОК, ЭКРАН-КОЛОДА.
+     Геометрия дверей, плиток выбора и строк «ключ — значение» — из макета
+     (`local/redesign-proto.html`: `.door`, `.opt`, `.kv`, `.wt`), цвета — токенами панели.
+     ============================================================================ */
+  /* Раздел с дверями — столбик: сверху карточка «Сейчас» во всю ширину, под ней двери. Разделы без
+     дверей остаются прежней сеткой плиток (класс ставит buildSections) — их очередь в шагах 4–5. */
+  .secbox{display:flex;flex-direction:column;gap:10px}
+  /* ДВЕРЬ — переход в экран, а не карточка с данными: полоса и квадрат несут цвет раздела, как у
+     сайдбара, и дверь читается «туда», а не «вот». Колонок две, пока область шире 700 px (тот же
+     порог, что у колоды экрана), уже — одна: две колонки по 170 px на телефоне рвут описание в столбик. */
+  /* Порядок «сперва столбик, шире — колонки», как у `.vwrap`: браузер без контейнерных запросов (старый WebView)
+     получает раскладку телефона, а не две колонки по 170 px (ревью шага 3b, круг 1). Шире 1150 px — три колонки,
+     как у макета: две двери по 690 px — строка в полэкрана с пустотой справа. */
+  .doors{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+  @container view (min-width:700px){ .doors{grid-template-columns:minmax(0,1fr) minmax(0,1fr)} }
+  @container view (min-width:1150px){ .doors{grid-template-columns:repeat(3,minmax(0,1fr))} }
+  /* Дверь, широкая ТОЛЬКО в двух колонках (макет «Проверка серверов» `wide:1`): девятая дверь раздела стояла бы одна с пустой клеткой
+     справа, а в три колонки девять дверей и так ложатся ровно — там она обычная. */
+  @container view (min-width:700px) and (max-width:1149px){ .doors>.door.wide2{grid-column:span 2} }
+  .door{display:flex;align-items:center;gap:13px;padding:12px 14px;border-radius:var(--r2);background:var(--card);
+        border:1px solid var(--line);box-shadow:var(--sh);cursor:pointer;position:relative;overflow:hidden;min-width:0}
+  @media (hover:hover){ .door:hover{border-color:var(--line2)} }
+  .door:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .door .bar{position:absolute;left:0;top:0;bottom:0;width:4px}
+  .door .sq{width:40px;height:40px;border-radius:13px;display:grid;place-items:center;color:#fff;flex:none}
+  .door .nm{font-size:15px;font-weight:500;letter-spacing:-.01em;color:var(--ink);overflow-wrap:anywhere}
+  .door .ds{font-size:12.5px;color:var(--ink3);margin-top:2px;overflow-wrap:anywhere}
+  .door .chev{color:var(--ink3)}
+  /* ЧИП НЕ ОТНИМАЕТ У ИМЕНИ ДВЕРИ СТРОКУ. Чип — `nowrap`, а имя сжимается (`min-width:0`), и на телефоне длинный чип
+     («установлен частично», «реклама без списков · адреса не в ядре») оставлял имени 0–13 px — по букве в строке (замер
+     ревью шага 6a, круг 2: 320 и 360 px; тот же класс — у «Блокировки» 5c). А сжать сам чип нельзя: на 320 px рядом с
+     именем ему остаётся ~55 px, и слово «установлено» вылезает за его фон. Поэтому имя держит основу, а чип, которому рядом
+     места нет, уходит СВОЕЙ строкой под имя (прижат вправо; части чипа — `<span>` внутри inline-flex — переносятся, а не
+     сжимаются в столбики). Шеврон — поверх, справа по центру: при переносе он иначе уехал бы следом за чипом. */
+  .door{flex-wrap:wrap;row-gap:6px;padding-right:40px}
+  .door>.chev{position:absolute;right:14px;top:50%;margin-top:-8px}
+  .door>.grow{flex:1 1 100px}   /* основа — самое длинное слово имени («Компоненты»): шире — и «3» уходило бы строкой вниз */
+  .door>.chip{margin-left:auto;max-width:100%;white-space:normal;text-align:right;flex-wrap:wrap;justify-content:flex-end}
+  /* «СЕЙЧАС» РАЗДЕЛА — через кого выходим, и две самые частые смены рядом. Кнопки уходят под текст,
+     когда им не хватает строки (телефон), а текст не сжимается в столбик: у него своя основа 220 px. */
+  .cn-now{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
+  .cn-now>.wt{flex-basis:100%;margin-bottom:-4px}   /* подпись — своей строкой над рядом; зазор даёт gap ряда */
+  .cn-now .av{width:44px;height:44px;border-radius:14px;background:var(--acc-soft);color:var(--acc-deep);display:grid;place-items:center;flex:none}
+  .cn-now .grow{flex:1 1 220px}
+  .cn-now .t1{font-size:16px;font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+  .cn-now .t2{font-size:12px;color:var(--ink3);margin-top:2px;overflow-wrap:anywhere}
+  /* КАРТОЧКА РАЗДЕЛА «РОУТЕР» (шаг 6a) — крупные дуги тех же мер, что в шапке (геометрия — ARC_D в panel.js), и четыре
+     факта строкой. Колонки дуг — от ширины: на телефоне две по две (минимум 110 — две колонки влезают и в 320 px: внутри
+     карточки там 237, замер BE7000; у фактов тот же минимум), на широкой — все в ряд (у роутера без накопителя три). Число стоит в проёме дуги снизу — отсюда
+     отрицательный отступ; имя меры — словом под ней, знака у крупной нет. */
+  .arcs{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px}
+  .arc{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:0;color:var(--ink3)}
+  /* Беда не в заполнении (накопитель не найден) — дуга янтарная, довод тот же, что у `.gchip.wr`; а подписи — тёмным
+     янтарём текста: светлый на белом при 10,5 px — 3:1, нечитаемо (тот же довод, что у числа шапки). */
+  .arc.wr{color:var(--st-warn)}
+  .arc.wr .lab,.arc.wr .sub2{color:var(--warn)}
+  .gauge.lg,.gauge.lg svg.ring{width:104px;height:104px}
+  .arc .num{font-size:21px;font-weight:600;letter-spacing:-.02em;margin-top:-30px;color:var(--ink);font-variant-numeric:tabular-nums}
+  .arc .num span{font-size:12px;color:var(--ink3);font-weight:500}
+  .arc .lab{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:600;margin-top:6px}
+  .arc .sub2{font-size:11px;color:var(--ink2);text-align:center;overflow-wrap:anywhere}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:2px;margin-top:12px}
+  .stats .s{padding:8px 10px;min-width:0}
+  .stats .l{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);font-weight:600}
+  .stats .v{font-size:15px;font-weight:500;margin-top:2px;color:var(--ink);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+  .stats .v.wr{color:var(--warn)}
+  .rr-acts{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+  /* «Призрачная» кнопка — второе действие ряда (перезагрузка рядом с «Починить правила»): тот же знак, но другой вес. */
+  .btn.gh{border-color:transparent;background:var(--soft)}
+  /* Ссылка, которую нельзя запереть атрибутом (у <a> нет disabled): занятость — приглушением и глухотой к клику. */
+  .btn-link[aria-disabled="true"]{opacity:.55;pointer-events:none}
+  /* Заголовок карточки — модель и прошивка; точка-разделитель только при прошивке (роутер старше поля её не назвал). */
+  #rr-now>.wt{flex-wrap:wrap}   /* модель и прошивка на 320–360 px — переносом строки, а не двумя столбцами */
+  #rr-fw:not(:empty)::before{content:'· ';}
+  #rr-fw{font-weight:500}
+  /* КНОПКИ РЕДИЗАЙНА. Общее правило `button` ниже — прежней панели, и экраны, которые ещё не
+     перенесены, живут на нём; новая разметка просит вид КЛАССОМ, а не переписывает общий. */
+  /* Межстрочный — от страницы (макет: `button{font:inherit}`): у кнопки браузер ставит свой «normal», и она выходила на 4 px
+     ниже кнопки макета (34 против 38). */
+  .btn{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:11px;border:1px solid var(--line2);
+       background:var(--card);color:var(--ink);font-size:13.5px;line-height:inherit;white-space:nowrap}
+  @media (hover:hover){ .btn:hover{border-color:var(--ink3);background:var(--card)} }
+  /* Кнопка с длинной подписью переносит строку, а не режет край карточки на 320 px («Открыть в приложении на этом устройстве», шаг 7a).
+     Не `.wrap`: это имя каркаса (`#view .wrap{padding:0…}`), и кнопка теряла внутренние отступы (ревью шага 7a). */
+  .btn.brk{white-space:normal;text-align:left}
+  .btn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .btn.sm{padding:5px 10px;font-size:12.5px}
+  /* ЭКРАН-КОЛОДА (`openModal(…, {deck:true})`): у экрана нет своей рамки 600/920 — карточки встают в
+     колонки той же сеткой, что колода раздела (`.vwrap` выше). Появление анимирует рамка экрана
+     (`navShow`), поэтому у колоды внутри своей анимации нет — иначе смена экрана мигала бы дважды. */
+  .modal.deck .modal-card{max-width:none;background:transparent;border:0;padding:0;border-radius:0}
+  #modal-body>.vwrap{animation:none}
+  /* Карточка экрана — сама себе контейнер: в колонке она уже телефона, и внутренние сетки (плитки
+     выбора, строки «ключ — значение») обязаны мерить её, а не окно (разбор — макет, срез 5). */
+  #modal-body>.vwrap>.card{container-type:inline-size;container-name:card;min-width:0}
+  /* Секция и карточки прозрачной панели вкладки — те же контейнеры: строки внутри мерят СВОЮ карточку. */
+  #modal-body>.vwrap>.sect,#modal-body>.vwrap>.tpane>.card,#modal-body>.vwrap>.tpane>.sect{container-type:inline-size;container-name:card;min-width:0}
+  /* Служебная подпись карточки (капсом). Для заголовка с ДАННЫМИ (имя сервера) капс нельзя — он
+     ломает собственные имена; такой заголовок заведём, когда он понадобится экрану. */
+  .wt{font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--ink3);margin-bottom:11px;
+      display:flex;align-items:center;gap:7px}
+  /* Заголовок карточки с ДАННЫМИ (имя сервера, подписки) — обычным регистром (макет: `.ct`); `.wt` — служебная подпись капсом.
+     Только прямой ребёнок карточки: у заголовка колоды (`.chead .ct`) свой вид. */
+  .card>.ct{font-size:14.5px;font-weight:600;letter-spacing:-.01em;color:var(--ink);margin-bottom:11px;
+            display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;min-width:0}
+  .card>.ct .sub{font-size:12px;font-weight:400;color:var(--ink3)}
+  .card>.ct .sub.dotb::before{content:'· '}
+  .card>.ct .sp{flex:1}
+  /* ВКЛАДКИ ЭКРАНА — `Tabs` макета: пилюли, выбранная — тёмная. */
+  .tabs2{display:flex;gap:5px;flex-wrap:wrap;min-width:0}
+  .tabs2 button{background:var(--soft);border:0;padding:7px 13px;border-radius:99px;font:inherit;font-size:13px;color:var(--ink2);cursor:pointer;white-space:nowrap}
+  @media (hover:hover){ .tabs2 button:hover{color:var(--ink)} }
+  .tabs2 button.on{background:var(--ink);color:var(--paper);font-weight:500}
+  .tabs2 button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  /* Вкладки-пилюли на проводке сегментов (wireSeg: роль, фокус, Enter): вид — пилюли, поведение — сегмента. */
+  .tabs2>.seg{flex:none;background:var(--soft);border:0;padding:7px 13px;border-radius:99px;font-size:13px;color:var(--ink2);cursor:pointer;font-weight:400;white-space:nowrap}
+  @media (hover:hover){ .tabs2>.seg:hover{color:var(--ink)} }
+  .tabs2>.seg.on{background:var(--ink);color:var(--paper);font-weight:500;border:0;box-shadow:none}
+  /* Запертая пилюля — без руки: `.tabs2>.seg` (рука) весит как `.seg.dis` и стоит ниже, и перебивала его — над запертым периодом
+     «Трафика» висела рука (ревью пачки 3, круг 2). */
+  .tabs2>.seg.dis{cursor:not-allowed}
+  @media (hover:hover){ .tabs2>.seg.dis:hover{color:var(--ink2);background:var(--soft)} } /* и фон: `.seg.dis:hover{background:transparent}` его снимал */
+  /* СЕКЦИЯ-ГРУППА — `Sect` макета: шапка (знак · имя · число · действия · свёртка), строки под ней. Рамка и фон — как у карточки. */
+  .sect{border-radius:var(--r2);background:var(--card);border:1px solid var(--line);box-shadow:var(--sh);overflow:hidden;min-width:0}
+  .sect>.h{display:flex;align-items:center;gap:10px;padding:13px 17px;cursor:pointer;min-width:0}
+  .sect>.h .nm{font-size:14px;font-weight:500;color:var(--ink);overflow-wrap:anywhere}
+  .sect>.h .cnt{font-size:11.5px;color:var(--ink3);background:var(--soft);border-radius:99px;padding:2px 8px;flex:none;font-variant-numeric:tabular-nums}
+  .sect>.h .si{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;flex:none;background:var(--soft);color:var(--ink2)}
+  .sect>.b{padding:0 17px 9px}
+  .sect:not(.open)>.b{display:none}
+  .sect-tg{flex:none;display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--ink3);cursor:pointer}
+  .sect-tg .ic{transition:transform .15s}
+  .sect.open .sect-tg .ic{transform:rotate(180deg)}
+  @media (hover:hover){ .sect-tg:hover{color:var(--ink);background:var(--soft)} }
+  .sect-tg:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+  /* Действие в шапке или строке карточки — не капс и не заголовок, а кнопка-пилюля (макет: `Act`). */
+  .act{font-size:12.5px;font-weight:500;color:var(--acc-deep);background:var(--acc-soft);border-radius:99px;padding:4px 10px;cursor:pointer;
+       text-transform:none;letter-spacing:0;display:inline-flex;align-items:center;gap:6px;flex:none}
+  button.act{border:0;font-family:inherit;line-height:1.5}
+  .act.mut{color:var(--ink2);background:var(--soft)}
+  .act:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  /* Раскрывашка, которую макет рисует пилюлей-действием (`act mut` «Показать текст конфига», «Показать исходные правила»):
+     поведение и читалка — `<details>`, вид — пилюля, без треугольника (сверка 26.09.2026). */
+  details>summary.act{display:inline-flex;list-style:none;margin-top:9px}
+  details>summary.act::-webkit-details-marker{display:none}
+  /* ПОЛЯ ВВОДА — `Fld`/`.inrow` макета. Шире ~560 px поле читается хуже: глазу негде зацепиться за конец строки. */
+  .f{margin-top:11px}
+  .f:first-child{margin-top:0}
+  .f label{display:block;font-size:12px;color:var(--ink3);margin-bottom:5px}
+  .f input,.f select,.f textarea,.inrow input{width:100%;padding:9px 12px;border-radius:11px;border:1px solid var(--line2);
+    background:var(--paper);color:var(--ink);font:inherit;font-size:13.5px;-webkit-appearance:none;appearance:none}
+  /* Потолок 560 — у ОДНОСТРОЧНЫХ (конец строки глазу нужен рядом); поле списка (`Fld(…,'area')` макета) идёт во всю
+     ширину карточки, моноширинным: в нём домены и адреса, их сверяют посимвольно. */
+  .f input,.f select,.inrow input{max-width:560px}
+  .f textarea{min-height:78px;font-family:var(--font-mono);font-size:12.5px;resize:vertical}
+  .f input:focus,.f select:focus,.f textarea:focus,.inrow input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+  .inrow{display:flex;gap:8px;align-items:center;min-width:0}
+  .inrow input{flex:1;min-width:0;width:auto}
+  .inrow .btn{flex:none}
+  .kv{display:flex;align-items:center;gap:12px;padding:9px 0;min-width:0}
+  .kv+.kv{border-top:1px solid var(--line)}
+  .kv .k{font-size:13.5px;color:var(--ink)}
+  .kv .v{font-size:12.5px;color:var(--ink3);margin-top:1px;overflow-wrap:anywhere}
+  .kv .v b{font-weight:500;color:var(--ink)}
+  /* Сперва две колонки, шире — больше (довод тот же, что у `.doors`): без контейнерных запросов пять плиток по 65 px
+     рвали бы «ядро не умеет NFQUEUE» по слогам. */
+  .opt{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+  .opt .o{padding:13px 11px;border-radius:var(--r);border:1.5px solid var(--line);background:var(--card);cursor:pointer;text-align:center;min-width:0}
+  @media (hover:hover){ .opt .o:hover{border-color:var(--line2)} }
+  .opt .o:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .opt .o .oi{display:grid;place-items:center;height:22px;color:var(--ink2)}
+  .opt .o .t{font-size:13.5px;font-weight:500;margin-top:7px;color:var(--ink);overflow-wrap:anywhere}
+  .opt .o .d{font-size:11px;color:var(--ink3);margin-top:2px;line-height:1.35;overflow-wrap:anywhere}
+  .opt .o.on{border-color:var(--acc);background:var(--acc-soft);cursor:default}
+  .opt .o.on .oi,.opt .o.on .t,.opt .o.on .d{color:var(--acc-deep)}
+  /* Выбран, но не готов: плитка выделена как текущая, а клик ведёт туда, где его чинят, — это кнопка, а не метка. */
+  .opt .o.on.bad{cursor:pointer}
+  /* Недоступный вариант — не бледный (прозрачность роняет подпись ниже нормы контраста), а без рамки
+     выбора: у него своя дорога (поставить компонент, добавить сервер), и подпись её называет. */
+  .opt .o.na{background:var(--soft);border-color:transparent}
+  /* …но ВЫБРАННАЯ недоступная — всё-таки выбрана: `.o.na` стоит ниже `.o.on` при равной специфичности и
+     съедал рамку с фоном выбора. Человек нажимал плитку «Категория или список» и не видел, что нажал
+     (менялась только карточка внизу). Первое место, где «недоступно» и «выбрано» пересеклись, — конструктор. */
+  .opt .o.on.na{border-color:var(--acc);background:var(--acc-soft);cursor:pointer}
+  @container card (min-width:441px){ .opt{grid-template-columns:repeat(4,minmax(0,1fr))} .opt.c5{grid-template-columns:repeat(3,minmax(0,1fr))} }
+  /* Порог пяти колонок — по ЛИСТУ макета (`.sheet` 640 ⇒ содержимое карточки 606): макет рисует конструктор пятью плитками
+     в ряд, а прежний порог 621 давал на том же листе три и вторым рядом две. */
+  @container card (min-width:600px){ .opt.c5{grid-template-columns:repeat(5,minmax(0,1fr))} }
+  /* Плитки с ДЛИННЫМ описанием («Отключить VPN» / «Удалить всё») на узкой карточке — друг под другом (макет): в две колонки
+     по 150 px описание рвалось на семь-восемь строк (сверка 26.09.2026). */
+  @container card (max-width:440px){ .opt.lng{grid-template-columns:minmax(0,1fr)} }
+  /* Строка «ключ — значение» с кнопкой — перенос ПО НУЖДЕ, как `lr-fit`: кнопка стоит справа и переносится ТЕКСТ (макет `.kv`);
+     вниз она уходит, только когда колонке текста осталось меньше предела. Прежде на карточке ≤ 340 px кнопка уходила под текст
+     всегда («Сменить», «Выйти» доступа к панели на телефоне; сверка 26.09.2026). */
+  .kv{flex-wrap:wrap;row-gap:6px}
+  .kv>.grow{min-width:min(120px,100%)}
+  .kv>.grow+*{margin-left:auto}
+  @container card (max-width:300px){ .opt,.opt.c5{grid-template-columns:minmax(0,1fr)} }
+
+  /* ============================================================================
+     ШАГ 3c-1 ПЕРЕНОСА: «СЕРВЕРЫ» КОЛОДОЙ, СВОИ ЭКРАНЫ У ПОДПИСОК И ВЫХОДОВ.
+     ============================================================================ */
+  /* Выбор из двух (запасной путь выхода) — две плитки при любой ширине карточки: правило `.opt` шире 441 px
+     даёт четыре колонки, и две плитки заняли бы половину ряда с пустотой справа. */
+  @container card (min-width:441px){ .opt.c2{grid-template-columns:repeat(2,minmax(0,1fr))} }
+  /* Заголовок карточки С ДЕЙСТВИЕМ: подпись `.wt` капсом, кнопка — своим узлом справа. Кнопка внутри `.wt`
+     унаследовала бы капс («ОБНОВИТЬ ВСЕ»), а у данных рядом с подписью (счётчик серверов) его быть не должно. */
+  .whead{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;margin-bottom:11px;min-width:0}
+  .whead>.wt{margin:0;flex:1 1 auto;min-width:0}
+  .whead .sub-cnt{font-size:12px;color:var(--ink3)}
+  /* Ряд действий под содержимым карточки; `.grow` отодвигает опасное действие вправо — подальше от частых. */
+  .acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px;min-width:0}
+  .acts>.grow{flex:1 1 0}
+  .btn.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+  @media (hover:hover){ .btn.bad:hover{border-color:var(--bad)} }
+  /* Заперта — СЕРЫМ, не прозрачностью (макет `.btn[aria-disabled]`): полупрозрачный белый на зелёном давал 2,2:1, а «нельзя
+     нажать» читается и так. */
+  .btn[disabled]{background:var(--soft2)!important;color:var(--ink2)!important;border-color:transparent!important;box-shadow:none;opacity:1;cursor:default}
+  /* Мелкая строка пояснения внутри карточки — `<div class="tiny" style="margin-top:9px">` макета (так он рисует подпись под
+     управлением в 35 местах из 70): кегль и цвет `.tiny`, отступ 9. Прежде — кегль `.kv .v` (12,5) и отступ 10. */
+  .cline{font-size:12px;color:var(--ink3);line-height:1.5;margin-top:9px;overflow-wrap:anywhere}
+  .cline:first-child{margin-top:0}
+  /* КАРТОЧКА «ТРАФИК» (макет: `tHead` + `ChartLine`): итог крупно, подпись мелко в одну строку с ним, если влезает. */
+  .thead{display:flex;align-items:baseline;gap:4px 12px;flex-wrap:wrap;min-width:0}
+  .thead .big{font-size:22px;font-weight:600;letter-spacing:-.02em;color:var(--ink);font-variant-numeric:tabular-nums}
+  .thead .tiny{min-width:0}
+  /* ГРАФИК-ЛИНИЯ (макет: `.chart`, `.axis-t`, `.lab-t`, `.lab-m`, `.legend`, `.lg`). */
+  svg.lchart{display:block;overflow:visible;width:100%;height:auto;margin-top:8px}
+  .lchart .axis-t{font-size:10.5px;fill:var(--ink3);font-variant-numeric:tabular-nums}
+  .lchart .lab-t{font-size:11.5px;fill:var(--ink);font-weight:600}
+  .lchart .lab-m{font-size:10.5px;fill:var(--ink3)}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px}
+  .lg{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2)}
+  .lg i{width:10px;height:10px;border-radius:3px;display:block}
+  .lg.ln i{width:16px;height:3px;border-radius:2px}
+  /* ПЛИТКИ-ПОКАЗАТЕЛИ экрана «Трафик» (макет: `.tiles`/`.tile`/`.delta`, Л6): число ведёт, искра сопровождает; дельта окрашена только
+     там, где «больше» = «лучше» (доля туннеля). */
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .tile{background:var(--soft);border-radius:var(--r);padding:11px 13px 9px;position:relative;overflow:hidden;min-width:0}
+  .tile .cap{font-size:10.5px;color:var(--ink3);letter-spacing:.07em;text-transform:uppercase;font-weight:600;margin-bottom:5px}
+  .tile .val{font-size:22px;font-weight:600;letter-spacing:-.02em;line-height:1.1;font-variant-numeric:tabular-nums}
+  .tile .val small{font-size:11.5px;font-weight:500;color:var(--ink2);margin-left:3px;letter-spacing:0}
+  .tile .trow{display:block;margin-top:5px;font-size:11.5px;color:var(--ink3)}
+  .tile .trow .delta{margin-right:6px}
+  .tile svg{margin-top:7px;display:block}
+  .delta{display:inline-flex;align-items:center;gap:3px;font-size:11.5px;font-weight:600;border-radius:999px;padding:1px 7px;background:var(--card);white-space:nowrap}
+  .delta.up{color:var(--acc-deep)} .delta.dn{color:var(--bad)} .delta.nt{color:var(--ink2)}
+  /* Прорисовка графика (макет: `.draw`, `.fadein`, `.pulse`, `.glow`) — только у первого кадра узла, см. drawLineChart. */
+  @keyframes lc-draw{to{stroke-dashoffset:0}}
+  @keyframes lc-fade{from{opacity:0}to{opacity:1}}
+  @keyframes lc-pulse{0%{r:4;opacity:.9}70%{r:11;opacity:0}100%{r:11;opacity:0}}
+  .lchart .draw{stroke-dasharray:2400;stroke-dashoffset:2400;animation:lc-draw 1.1s cubic-bezier(.3,.6,.2,1) forwards}
+  .lchart .fadein{animation:lc-fade .8s .25s both}
+  .lchart .pulse{animation:lc-pulse 2s ease-out infinite}
+  .lchart .glow{filter:var(--glow)}
+  @media (prefers-reduced-motion:reduce){ .lchart .draw,.lchart .fadein,.lchart .pulse{animation:none;stroke-dashoffset:0} }
+  /* Вертикаль дня и подсказка-панель графика (макет: `.xh`, `.ctip`) — одна на панель, её ведёт lcTip. */
+  .lchart .xh{stroke:var(--ink3);stroke-width:1;opacity:0;pointer-events:none}
+  .lchart .xh.on{opacity:.6}
+  .ctip{position:fixed;z-index:95;pointer-events:none;background:var(--card);color:var(--ink);border:1px solid var(--line2);
+        border-radius:10px;box-shadow:var(--sh);padding:9px 11px;font-size:12px;min-width:150px;opacity:0;transition:opacity .12s}
+  .ctip.on{opacity:1}
+  .ctip .th{font-weight:600;margin-bottom:5px}
+  .ctip .tr{display:flex;align-items:center;gap:7px;margin-top:3px}
+  .ctip .tr i{width:9px;height:9px;border-radius:3px;flex:none}
+  .ctip .tr .g{flex:1;color:var(--ink2)}
+  .ctip .tr b{font-weight:600;font-variant-numeric:tabular-nums}
+  .ctip .tw{margin-top:6px;color:var(--text-warning);font-size:11.5px;max-width:220px}
+  /* Вкладки «Серверов» и «Проверить все» — одной строкой над карточками; на узком экране кнопка уходит строкой ниже. */
+  .srv-top{display:flex;flex-wrap:wrap;align-items:center;gap:9px;min-width:0}
+  /* Поле ссылки и её кнопка — одним рядом; дропзона ниже. */
+  .lnkrow{display:flex;gap:8px;margin:0 0 10px;min-width:0}
+  .lnkrow>input{flex:1 1 auto;min-width:0}
+  /* Чипы быстрой привязки выхода — кнопки: переключают привязку на роутере, и с клавиатуры обязаны работать сами. */
+  .xchips{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
+  .xchips>button.chip{border:0;font:inherit;font-size:12.5px;padding:5px 11px;cursor:pointer}
+  .xchips>button.chip:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  /* Переключатель расписания подписок — сегменты `wireSeg`, как у «Трафика». */
+  .segbar.sched{flex-wrap:wrap}
+
+  /* ============================================================================
+     ШАГ 3c-2 ПЕРЕНОСА: «РЕЖИМ И РЕЗЕРВИРОВАНИЕ», «BYEDPI», «ZAPRET» КОЛОДОЙ.
+     ============================================================================ */
+  /* Три режима сторожа — три плитки в ряд, как только карточка шире 441 px: правило `.opt` дало бы четыре колонки и пустоту. */
+  @container card (min-width:441px){ .opt.c3{grid-template-columns:repeat(3,minmax(0,1fr))} }
+  /* Строки блока «Сейчас»: главное утверждение — темнее пояснений, предупреждение — янтарным (как `.note2.warn`). */
+  .cline.lead{color:var(--ink2)}
+  .cline.wr,.kv .v.wr,.kv .v .wr{color:var(--warn)}   /* .kv .v .wr — предупреждение ЧАСТЬЮ строки (строка состояния категории «Блокировки») */
+  /* ГЛАВНАЯ КНОПКА ЭКРАНА (сохранить стратегию, запустить проверку) — как в макете: белый на `--pri`, а не на `--acc`
+     (4,9:1 против 3,4 — расчёт в блоке токенов). Наведение не имеет права вернуть ей фон обычной кнопки. */
+  .btn.pri{background:var(--pri);border-color:transparent;color:var(--pri-ink);font-weight:500}
+  @media (hover:hover){ .btn.pri:hover{background:var(--pri);border-color:transparent} }
+  /* Поле аргументов демона — подпись над ним тем же цветом, что пояснения карточки. */
+  /* Подпись поля — НАД полем всегда (`.f label` макета: 12 px, зазор 5). Поле — блоком: строчное вставало В СТРОКУ с подписью,
+     как только карточка была шире «подпись + 560 px» («Новый пароль», «Сервер SMTP», «Домен», подтверждение удаления — на ПК;
+     сверка 26.09.2026). */
+  .dsfld{display:block;margin-top:10px;font-size:12px;color:var(--ink3)}
+  .dsfld>input,.dsfld>select,.dsfld>textarea{display:block;margin-top:5px}
+  /* Шаг 5a («Сеть»): выбор резолвера — рядом с кнопкой, как поле ссылки (`.lnkrow>input`), а не во всю ширину с кнопкой под ним. */
+  .lnkrow>select{flex:1 1 auto;min-width:0}
+  /* Два поля рядом — `.f2` макета (две равные колонки), но по ширине КАРТОЧКИ: в узкой колонке — друг под другом. */
+  .f2{display:grid;grid-template-columns:minmax(0,1fr);gap:0 10px}
+  @container card (min-width:441px){ .f2{grid-template-columns:minmax(0,1fr) minmax(0,1fr)} }
+  /* СОБЫТИЕ ЖУРНАЛА НА ЭКРАНЕ «СОБЫТИЯ» (шаг 7b) — `<details>`: summary — та же строка `.lrow`, что у «Обзора», под ней полный
+     текст события (многострочный — развёрнутыми строки превратили бы список в простыню). Маркер браузера прячем: стрелку даёт `.chev`. */
+  .evd+.evd{border-top:1px solid var(--line)}
+  .evd>summary{list-style:none;cursor:pointer}
+  .evd>summary::-webkit-details-marker{display:none}
+  @media (hover:hover){ .evd>summary:hover .nm{color:var(--acc-deep)} }
+  .evd>summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:6px}
+  .evd>summary .chev{transition:transform .15s}
+  .evd[open]>summary .chev{transform:rotate(90deg)}
+  @media (prefers-reduced-motion:reduce){ .evd>summary .chev{transition:none} }
+  .evd-tx{font-size:12.5px;line-height:1.5;color:var(--ink2);white-space:pre-wrap;overflow-wrap:anywhere;padding:0 0 11px 18px}
+  /* Таблица результатов проверки — разметка макета: широкая прокручивается внутри карточки, а не всей страницей. */
+  .tbl{overflow-x:auto;margin-top:11px;-webkit-overflow-scrolling:touch}
+  .tbl table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:520px}
+  .tbl th{font-size:10.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:0 10px 7px 0;white-space:nowrap}
+  .tbl td{padding:7px 10px 7px 0;border-top:1px solid var(--line);vertical-align:middle}
+  .tbl th.c,.tbl td.c{text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .tbl tr.on td{background:var(--acc-soft)}
+  /* Категория в десинке: крестик — кнопка (снимает действие на роутере), с клавиатуры тоже. */
+  .chip.zp-cat{display:inline-flex;align-items:center;gap:6px}
+  .chip.zp-cat .n{font-weight:400}
+  .zp-cat-off{border:0;background:transparent;color:inherit;font:inherit;padding:0 2px;cursor:pointer;line-height:1}
+  .zp-cat-off:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+  /* Строка с тумблером не переносится никогда: тумблер узкий, и отдельной строкой под текстом он читался бы как переключатель
+     следующего абзаца (замер на BE7000, 392 px). */
+  .kv.swrow{flex-wrap:nowrap} .kv.swrow>.grow{min-width:0}
+  /* «Положение» и «Возврат» режима резервирования: строки вердикта — внутри значения, первая без верхнего отступа. */
+  .kv.fo-kv .v>.cline:first-child{margin-top:0}
+  /* Строка транспорта Zapret — текст с точкой и неразрывная кнопка: на узкой карточке текст сжимался до 50 px и рвал слова
+     посередине (замер 320 px, ревью шага 3c-2, круг 3). Кнопка уходит под текст, с отступом точки. */
+  @container card (max-width:340px){ .lrow.zp-tr{flex-wrap:wrap} .lrow.zp-tr>.grow{flex-basis:calc(100% - 18px)} .lrow.zp-tr>.btn{margin-left:18px} }
+
+  /* ============================================================================
+     ШАГ 3c-3 ПЕРЕНОСА: «ДОСТУП ДОМОЙ», ЭКРАН УСТРОЙСТВА И «ПРОВЕРКА СЕРВЕРОВ» КОЛОДОЙ.
+     ============================================================================ */
+  /* Несколько предупреждений в одной карточке — плашки с зазором, а не слитым столбом. */
+  .card>.note2+.note2{margin-top:9px}
+  /* QR и действия с конфигом — рядом; на узкой карточке действия уходят под код. Код — на белом при любой теме: тёмная подложка
+     у QR ломает чтение камерой части телефонов, а у SVG свои 320 px — в узкой карточке он сжимается, а не переливается. */
+  .vs-qr{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 16px;margin-top:12px;min-width:0}
+  .vs-qr>.grow{flex:1 1 200px;min-width:0}
+  .vs-qr .acts{margin-top:0}
+  .qrbox{background:#fff;padding:10px;border-radius:10px;line-height:0;max-width:100%;box-sizing:border-box}
+  .qrbox svg{max-width:100%;height:auto}
+  /* Коды восстановления второго фактора (шаг 7a) — сеткой, по коду в ячейке: их переписывают на бумагу и сверяют глазами,
+     и строка через запятую в колонку не ложится. Ширина ячейки — под код вида `xxxxx-xxxxx` моноширинным. */
+  .codes{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:7px;margin-top:11px;min-width:0}
+  /* Поле КОРОТКОГО значения — код второго фактора, порт HTTPS — по ширине значения, а не строки: на широком экране поле в 900 px
+     под шесть цифр читается как «сюда вставить что-то длинное» (замер глазами на BE7000, 1600 px, шаг 7a). */
+  .lnkrow.code>input{flex:0 1 260px;letter-spacing:1px}
+  /* Число с кнопкой («MTU», «потолок памяти») — узкое поле рядом с «Применить», как в макете, а не во всю колонку. */
+  .lnkrow.num>input{flex:0 1 206px}
+  /* Командная строка консоли — поле до потолка 560, «Выполнить» у правого края; на узкой карточке кнопка встаёт под поле (макет). */
+  .lnkrow.con{justify-content:space-between;flex-wrap:wrap}
+  .lnkrow.con>input{flex:1 1 280px}
+  .codes>span{background:var(--soft);border-radius:var(--r-sm);padding:7px 10px;text-align:center;font-size:14px;letter-spacing:.5px}
+  .vs-txt{margin-top:10px;min-width:0}
+  .vs-txt summary{font-size:12.5px;color:var(--ink3);cursor:pointer}
+  .vs-txt pre{font-family:var(--font-mono);font-size:11px;line-height:1.5;background:var(--soft);border-radius:var(--r);padding:10px;margin:8px 0 0;white-space:pre-wrap;word-break:break-all}
+  /* Строка «ключ — значение» сразу под сегментами — со своей чертой: правило `.kv+.kv` её не даёт, соседа-строки у неё нет. */
+  .kv.sep{border-top:1px solid var(--line);margin-top:10px}
+
+  /* ============================================================================
+     ШАГ 4a ПЕРЕНОСА: «МАРШРУТИЗАЦИЯ» — СТРАНИЦА ПРАВИЛ (`rpShow`), ГРУППЫ, ОБЩИЙ СПИСОК.
+     Геометрия — из макета (`rt`: `.split`, `.sect`, `.dir`, `.badge`, `.lad`), цвета — токенами панели.
+     ============================================================================ */
+  .rp,.rp-main,.rp-aside,.rp-pane,.rp-list{display:flex;flex-direction:column;gap:10px;min-width:0}
+  .rp{gap:12px}
+  .rp-top{display:flex;flex-wrap:wrap;align-items:center;gap:9px;min-width:0}
+  .rp-top .btn .ic{width:16px;height:16px}
+  .rp-sc .seg{display:inline-flex;align-items:center;gap:6px}
+  .rp-sc .seg .n{font-size:11px;color:var(--ink3)}
+  .rp-sc .seg .n:empty{display:none}
+  #rp-selbtn.on{border-color:var(--acc);background:var(--acc-soft);color:var(--acc-deep)}
+  /* Колонка правил и боковина — рядом, только когда области хватает на обе: боковина 314 px (макет), колонке правил
+     нужна строка «имя · бейдж · чип · убрать». Уже — столбиком, боковина под правилами. */
+  .rp-split{display:flex;flex-direction:column;gap:13px;min-width:0}
+  .rp-main{gap:12px}
+  .rp-aside{gap:13px}
+  @container view (min-width:900px){
+    .rp-split{display:grid;grid-template-columns:minmax(0,1fr) 314px;align-items:start}
+    /* Боковина рядом с колонкой — липкая (макет: `.sticky`): «Что победит» и лестница нужны, пока листаешь длинный список. Но
+       она ВЫШЕ экрана ноутбука (ответ проверялки, лестница из девяти ступеней, источники), и липкая без своей прокрутки прятала
+       низ до конца списка устройств (ревью пачки 3, круг 1) ⇒ потолок — окно, остальное листается внутри. Поля — место тени
+       карточек: прокрутка обрезает всё за краем. Прокрутку страницы боковина не запирает (`overscroll-behavior` не ставим): долистав
+       её до конца, колесо листает страницу дальше. */
+    .rp-aside{position:sticky;top:10px;max-height:calc(100vh - 20px);overflow-y:auto;
+      padding:4px 6px 14px;margin:-4px -6px -14px}
+  }
+  /* Широкая область — колонки 1.4 : 1, как у макета (`#view .split`): боковина 314 px на 1600 давала «Что победит» столбиком
+     из поля, кнопки и подписей, а у колонки правил — километр пустоты справа. */
+  @container view (min-width:1150px){ .rp-split{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr)} }
+  /* Карточка страницы — сама себе контейнер: правила `.kv`/`.opt` мерят карточку, а не окно (как у колоды экрана). */
+  .rp .card,.rp .sect{container-name:card;container-type:inline-size;min-width:0}
+  .rp-addrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+  .rp-addrow>input{flex:1 1 220px;min-width:0}
+  .rp-addrow>.segbar{flex:none}
+  /* «Что победит» — строка «для кого и на какой порт». Поле порта фиксированной ширины: рядом с ним
+     ещё выбор устройства и пара сегментов, и на 392 px растягивающийся порт съедал бы их обоих. */
+  .rq-who{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:9px;font-size:12px;color:var(--ink3)}
+  .rq-who>select{flex:1 1 150px;min-width:0;font-size:12.5px;text-overflow:ellipsis}
+  .rq-who.stack>select{flex-basis:100%}
+  .rq-who>input{flex:none;width:74px;text-align:center}
+  .rq-who>select{font-size:13.5px}
+  #rq-card>.inrow{margin-bottom:2px}
+  /* Подпись справа в шапке карточки — строчными (макет: `.tiny` без капса). */
+  .wt>.sp{flex:1}
+  .wt .wt-r{font-size:12px;font-weight:400;color:var(--ink3);text-transform:none;letter-spacing:0}
+  #rq-out{margin-top:4px}
+  /* Список адресов имени — складной: у крупного сайта их полдесятка, и одинаковые строки уводили бы
+     соседнюю карточку за край экрана. Заголовок складки выглядит как обычная подпись строки. */
+  .rq-adrs>summary{cursor:pointer;margin:9px 0 2px;font-size:11.5px;color:var(--ink3);line-height:1.45}
+  .rq-adrs[open]>summary{color:var(--ink2)}
+  #rq-out .lrow+.lrow{border-top:1px solid var(--line)}
+  /* Импорт правил (шаг 4d-3): выход чужого конфига — подписью «имя · состав» и выбором ПОД ней во всю ширину; выходы — сеткой в две
+     колонки на широкой карточке (макет: `.f2` из `Fld`, сверка 26.09.2026). Выбор в одной строке с именем съедал имя тега на 392 px,
+     а длинная подпись выхода («десинк-выход «…» — напрямую, без VPN») обрезалась ровно на слове, которое отличает её от соседней. */
+  .ri-tags{display:grid;grid-template-columns:minmax(0,1fr);gap:0 14px}
+  @container card (min-width:620px){ .ri-tags{grid-template-columns:minmax(0,1fr) minmax(0,1fr)} }
+  .ri-tag{padding:9px 0 4px;min-width:0}
+  .ri-tag>.lrow{padding:0}
+  .ri-tag>select{width:100%;max-width:none;margin-top:6px;font-size:12.5px;text-overflow:ellipsis}
+  .ri-more>summary{cursor:pointer;margin-top:9px;font-size:12px;color:var(--ink3);line-height:1.45}
+  .ri-more[open]>summary{color:var(--ink2)}
+  .ri-list{font-size:11.5px;color:var(--ink2);line-height:1.55;max-height:200px;overflow:auto;margin-top:6px;overflow-wrap:anywhere}
+  .ri-list.mono,.ri-raw{font-family:var(--font-mono)}
+  .ri-raw{font-size:11px;line-height:1.45;white-space:pre;overflow:auto;max-height:320px;margin-top:6px;padding:8px 10px;background:var(--soft);border-radius:8px;color:var(--ink2)}
+  #ri-raw{width:100%;box-sizing:border-box;font-family:var(--font-mono);font-size:11.5px;resize:vertical}
+  #rp-bulk{margin-top:12px}
+  #rp-bulk .bf-pane,#rp-bulk-f{margin-top:10px}
+  /* Секция правил страницы и экрана устройства — общая `.sect` (макет: `Sect`), её правила — у подписок выше. */
+  /* НАПРАВЛЕНИЕ ПРАВИЛА — чипом с точкой: «куда» читается столбцом справа, не читая строк (макет: `.dir`). */
+  /* Чип без вида («по правилам», «наследует») — прозрачный, чернилами, как `.dir` макета; серая пилюля с рамкой — это `.dirc`
+     («Напрямую»). Прежде оба были серыми — «по правилам» читалось как «напрямую» (сверка 26.09.2026). */
+  .dir{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;padding:6px 12px;border-radius:99px;
+       border:1px solid transparent;white-space:nowrap;flex:none;max-width:100%}
+  .dir>span{overflow:hidden;text-overflow:ellipsis}
+  .dir i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+  .dir.vpn{background:var(--acc-soft);color:var(--acc-deep);border-color:color-mix(in srgb,var(--acc) 40%,transparent)}
+  .dir.dirc{background:var(--soft);color:var(--ink2);border-color:var(--line2)}
+  .dir.des{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+  .dir.blk{background:var(--bad-soft);color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,transparent)}
+  /* Выход — цвет по номеру (`exitColor`), тот же, что у выхода в разрезе трафика; текст — чернилами (контраст). */
+  .dir.ex{--xc:var(--g5);background:color-mix(in srgb,var(--xc) 14%,transparent);color:var(--ink);border-color:color-mix(in srgb,var(--xc) 45%,transparent)}
+  .dir.ex i{background:var(--xc)}
+  /* «Как работает правило» — по доменам (зависит от резолвера роутера) или по адресам (работает у любого устройства). */
+  .badge{font-size:10px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;border-radius:99px;padding:2px 7px;
+         background:var(--soft);color:var(--ink2);white-space:nowrap}
+  .badge.dns{background:var(--warn-soft);color:var(--warn)}
+  /* Бейджи-ПОМЕТКИ обычным регистром (макет): `inh` — сведение со стороны (срок подписки — дата провайдера), `ram` — цена гео-категории
+     в оперативной памяти (оранжевый = «это стоит памяти», у каждой скачанной категории). */
+  .badge.inh{background:var(--info-soft);color:var(--info);text-transform:none;letter-spacing:0;font-weight:500;font-size:11px}
+  .badge.ram{background:var(--warn-soft);color:var(--warn);text-transform:none;letter-spacing:0}
+  .lrow .rp-ck{width:16px;height:16px;margin:0;flex:none;cursor:pointer}
+  .lrow .rp-mac{font-size:11px;font-weight:400;color:var(--ink3)}
+  /* На узкой карточке MAC в строке не показываем (макет его не рисует вовсе): он уводил строку в четыре линии, а сверить его можно
+     на экране устройства, куда строка и ведёт. На широкой он остаётся — ради заметки «сверяйте по MAC». */
+  @container card (max-width:440px){ .lrow .rp-mac{display:none} }
+  /* Панель пачки — липнет к низу окна: список бывает длинным, и «Убрать выбранные» не должна убегать вверх. */
+  .rp-bar{position:sticky;bottom:10px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;border-radius:var(--r);
+          background:var(--card);border:1px solid var(--line2);box-shadow:var(--sh);font-size:13px;z-index:2}
+  /* На телефоне низ окна занимает таб-бар (фиксирован, ~55 px и выше по слою) — панель пачки встаёт над ним, а не под него. */
+  .w-phone .rp-bar{bottom:calc(76px + env(safe-area-inset-bottom,0px))}
+  .rp-devtop{display:flex;flex-wrap:wrap;align-items:center;gap:9px;min-width:0}
+  .rp-devtop>.tiny{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+  /* «Весь остальной трафик» — строкой макета: имя и пояснение, чип, «Настроить». */
+  .rp-oth{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
+  /* Основа имени — 180 px, а не ноль: с нулевой основой перенос не случался НИКОГДА, и на телефоне 320 чип пути с «Настроить»
+     сжимали имя и строку «куда идёт сейчас» до 34 px (замер, ревью пачки 3). Теперь где не влезает — чип и кнопка второй строкой. */
+  .rp-oth>.grow{flex:1 1 180px}
+  .rp-oth .nm{font-size:14.5px;font-weight:500;color:var(--ink)}
+  .rp-oth .tiny{margin-top:2px}
+  .rp-bulk-note{margin-top:9px}
+  /* Тело секции правил — строки со своими чертами; пустое тело («своих адресов нет») — тем же отступом. */
+  .rp-sect>.b>.lempty{padding:4px 0 6px}
+  /* Лестница «кто кого перебивает» — нумерованные ступени (макет: `.lad`). */
+  .lad{counter-reset:l}
+  .lad .s{display:flex;gap:11px;padding:7px 0;font-size:12.5px;color:var(--ink2);line-height:1.4}
+  .lad .s+.s{border-top:1px solid var(--line)}
+  .lad .s::before{counter-increment:l;content:counter(l);width:19px;height:19px;border-radius:6px;background:var(--soft2);
+                  display:grid;place-items:center;font-size:11px;color:var(--ink3);flex:none}
+  .lad .s b{color:var(--ink);font-weight:500}
+
+  /* ============================================================================
+     ШАГ 4b ПЕРЕНОСА: ЭКРАН УСТРОЙСТВА КОЛОДОЙ (шапка, вкладки «Маршрут · Порты · Что запрашивает»).
+     Геометрия шапки — из макета (`rt-dev`), цвета — токенами панели.
+     ============================================================================ */
+  /* Вкладка — атрибут `hidden` у карточек (они остаются прямыми детьми колоды, и правила ширины `.w2`/`.wfull` к ним
+     применяются). Авторское `display` у карточки перебило бы `hidden` браузера — правило явное. */
+  .vwrap>[hidden]{display:none}
+  /* ЛИСТ — экран-форма в одну узкую колонку (конструктор правила; `.sheet` макета). Колода растянула бы три шага на всю
+     ширину окна, и плитка «Сайты» стала бы полосой в треть экрана. Карточка листа — сама себе контейнер, как у колоды. */
+  .sheet{width:100%;max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:13px}
+  .sheet>.card{container-type:inline-size;container-name:card;min-width:0}
+  /* Дверь невозможной клетки конструктора на узкой карточке — своей строкой: иначе ряд переносился посередине, и «Создать»
+     оставалась одна слева внизу, ниже и левее «Отмены». */
+  @container card (max-width:440px){ .rn-acts>.rn-door{flex:1 1 100%} }
+  .dv-top{display:flex;align-items:flex-start;gap:13px;min-width:0}
+  /* Экран сервера (шапка — та же, что у устройства): на узкой карточке «Сделать активным» уходит строкой ниже, а не сжимает имя и
+     строку протокола в столбик (замер 392 px на BE7000); вкладки «Форма / Сырой» — по ширине текста, «Сырой JSON» не рвётся. */
+  #srv-head .dv-top, .dv-top.dv-act{flex-wrap:wrap}
+  #srv-head .dv-top>.grow, .dv-top.dv-act>.grow{min-width:180px}
+  #ed-tabs{flex:none}
+  #ed-tabs .seg{white-space:nowrap}
+  .dv-top .av{width:46px;height:46px;border-radius:15px;background:var(--soft);color:var(--ink2);display:grid;place-items:center;flex:none}
+  .dv-top .av .ic{width:22px;height:22px}
+  .dv-top>.grow{flex:1;min-width:0}
+  .dv-nm{font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--ink);overflow-wrap:anywhere}
+  .dv-meta{font-size:12.5px;color:var(--ink3);margin-top:3px;overflow-wrap:anywhere}
+  /* «онлайн» — текстом, поэтому глубокий акцент (контраст ≥ 4,5:1), а не цвет меры `--st-ok`. */
+  .dv-on{color:var(--acc-deep)}
+  /* Что с адресом — текст и действие справа; на узкой карточке кнопка уходит под текст (у текста своя основа). */
+  .dv-pin{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:12px;font-size:12.5px;color:var(--ink3);line-height:1.5;min-width:0}
+  .dv-pin>.grow{flex:1 1 260px;min-width:0}
+  .dv-wsd{margin-top:10px;min-width:0}
+  .dv-wsd summary{font-size:12.5px;color:var(--ink3);cursor:pointer}
+  .dv-wsd[open] summary{margin-bottom:4px}
+  .dv-tabs{margin-top:14px}
+  /* Протокол и направление порт-правила — рядом в строку (макет), на узкой карточке второй переходит ниже. */
+  .dv-prow{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px;min-width:0}
+  .dv-form{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);min-width:0}
+  .dv-presets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px;font-size:12.5px;color:var(--ink3)}
+  /* Узел чипа своего правила (его перерисовывают факты статуса поверх строки) — без своей коробки: чип остаётся пунктом строки. */
+  .dv-c{display:contents}
+  /* Строка «что запрашивает» — адрес, чип и до трёх кнопок; в узкой карточке кнопки и чип уходят под адрес, а не сжимают его. */
+  .dw-acts{display:flex;flex-wrap:wrap;gap:6px;flex:none}
+  @container card (max-width:520px){ .lrow.dw-r{flex-wrap:wrap} .lrow.dw-r>.grow{flex:1 1 calc(100% - 20px)} }
+  .dw-st{margin-top:0;margin-bottom:10px}
+  .dw-f{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:7px;min-width:0}
+  .dw-fl{font-size:12px;color:var(--ink3);min-width:78px}
+  .dw-fs{margin-bottom:8px}
+  /* Лестница одного устройства: ступень, что забирает весь остальной трафик, — подсвечена; не дошедшие и не заданные —
+     приглушены цветом (не прозрачностью: она роняет подпись ниже нормы контраста). */
+  .lad .s.off,.lad .s.off b{color:var(--ink3)}
+  .lad .s.win::before{background:var(--acc-soft);color:var(--acc-deep)}
+  .lad .s.win b{color:var(--acc-deep)}
+
+  /* ============================================================================
+     ШАГ 4c ПЕРЕНОСА: «ГЕО-СПИСКИ» КОЛОДОЙ (`rt-geo`). Геометрия — из макета (`rt-geo`), цвета — токенами панели.
+     ============================================================================ */
+  /* Мелкая подпись рядом с управлением (подпись сегментов, страница выдачи, «апстрим …»). В макете это `.tiny`;
+     в панели такой единицы не было — заводим ОДНУ, а не четвёртый инлайновый `font-size:11px`. */
+  .tiny{font-size:12px;color:var(--ink3);line-height:1.5}
+  /* Строка каталога: заголовок строкой списка, под ним — сегменты действия, ряд выхода и причина. Своя коробка нужна,
+     потому что `.lrow` — это ОДНА строка, а у категории их до четырёх, и разделитель обязан идти по ВСЕЙ строке. */
+  /* Карточка экрана — сама себе контейнер (как у страницы раздела и у колоды): правила `.kv`/`.opt`/`.segbar` мерят
+     КАРТОЧКУ, а не окно. Без этого боковина на узком экране считала бы себя широкой. */
+  .geo-split .card{container-name:card;container-type:inline-size;min-width:0}
+  /* Строка сети экрана «Wi-Fi и подсети» (`.wf-i`, шаг 5b) — та же коробка «строка + сегменты действия под ней», что у
+     категории: вторая копия правил разошлась бы с первой на первой же правке отступа. */
+  .geo-i,.wf-i{padding:4px 0 9px}
+  .geo-i+.geo-i,.wf-i+.wf-i{border-top:1px solid var(--line)}
+  .geo-i>.lrow,.wf-i>.lrow{padding-bottom:6px}
+  .geo-i>.lrow+.tabs2,.wf-i>.lrow+.tabs2{margin-top:0}
+  .wf-i>.tiny{margin:0 0 7px}
+  /* Станция, которая давно молчит (таблица драйвера помнит ушедших): имя и цифры приглушены — не «сейчас». */
+  .wf-stale{opacity:.7}
+  /* Выключенная категория (их в каталоге тысяча) — тише включённой: имя и описание приглушены, чип не рисуется вовсе. */
+  .geo-i:not(.on)>.lrow .nm{font-weight:400;color:var(--ink2)}
+  .geo-acts{margin-top:2px}
+  .geo-slotrow{display:flex;align-items:center;gap:7px;margin-top:6px;min-width:0;flex-wrap:wrap}
+  .geo-i .geo-why .cline,.geo-i .geo-dsy>div{margin-top:7px}
+  /* Пустой узел чипа (у выключенной категории его нет) не занимает отступ строки: `gap` у `.lrow` даёт ему 11 px, и
+     на тысяче выключенных строк это отъедало ширину описания. */
+  .geo-i .geo-c:empty{display:none}
+  /* Источник и отбор — подпись слева, сегменты следом; на узкой карточке подпись встаёт над ними. */
+  .geo-bar{display:flex;align-items:center;gap:9px;margin-bottom:9px;min-width:0;flex-wrap:wrap}
+  /* Отборы, источник, действие категории и «через» — вкладки-пилюли макета (`Tabs`), а не сегменты в треке (сверка 26.09.2026);
+     счёт на выбранной (тёмной) пилюле — её цветом: серый на тёмном не читался бы. */
+  .geo-bar .seg .n{color:var(--ink3)}
+  .geo-bar .tabs2>.seg.on .n{color:inherit;opacity:.7}
+  .geo-search{margin:10px 0 0}
+  input.inp.geo-search{max-width:none}   /* поиск каталога — во всю ширину карточки (макет), а не потолок однострочного поля */
+  .geo-listwrap{margin-top:12px}
+  .geo-chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:2px}
+  .geo-pg{justify-content:center;gap:14px}
+  .prow{display:flex;align-items:center;gap:10px;margin:10px 0 5px;min-width:0}
+
+  /* ============================================================================
+     HERO РЕДИЗАЙНА (шаг 2 переноса). Перенесено из макета; геометрия и цвета — оттуда.
+     ============================================================================ */
+  /* ТОКЕНЫ ПЕРЕОПРЕДЕЛЕНЫ ВНУТРИ HERO, а не переписаны у каждого потомка. Причина
+     механическая: половина подписей в шапке красится ИЗ JS инлайновым `color:var(--text-…)`
+     (возраст рукопожатия, пинг, строка IP), а на цветном фоне бумажный «--text-warning»
+     (тёмный янтарь) читается как грязь. Переопределение на самом .hero подставляется в те же
+     var() при вычислении — ни одну строку panel.js трогать не пришлось, и новые тоже будут
+     работать. Это же и есть смысл алиасов из блока токенов выше. */
+  /* ЦВЕТА ГРАДИЕНТОВ — МАКЕТ, КОНТРАСТ — ТЕКСТОМ (решение человека 26.09.2026). Замер 10.09.2026 (WCAG 2.1): светлая точка
+     градиента макета `#1fa37a` даёт с белым 3,19:1, янтарь `#c9902f` — 2,79:1; прежде панель темнила сам фон (#0d7757, 5,54:1),
+     и шапка выходила темнее макета. Теперь фон — как в макете, а читаемость держит ТЕКСТ: подписи в полную силу (без выцветания
+     .85/.72 макета), мелкий текст — полужирный, у всего текста шапки лёгкая тень, которая отделяет буквы от светлой части
+     градиента. Крупный заголовок (26/600) проходит и так — норма для крупного 3:1. */
+  .hero{position:relative;padding:20px 22px;border-radius:var(--r2);color:#fff;
+        background:linear-gradient(135deg,#1fa37a,#12775a 62%,#0f6149);text-shadow:0 1px 2px rgba(0,0,0,.28);
+        --text-primary:#fff; --text-secondary:#fff; --text-tertiary:#fff;
+        --text-warning:#ffe3ab; --text-success:#d6f7e8; --text-info:#e3efff; --text-danger:#ffd3c7;
+        --bg-secondary:rgba(255,255,255,.14); --bg-warning:rgba(255,255,255,.18);
+        --border-t:rgba(255,255,255,.24); --border-s:rgba(255,255,255,.34)}
+  .hero.warn{background:linear-gradient(135deg,#c9902f,#8a5a12 62%,#6d4610)}
+  .hero.off{background:linear-gradient(135deg,#6f6e68,#4a4a45 62%,#3a3a36)}
+  .w-phone .hero{padding:17px 15px}
+  /* overflow у hero НЕ прячем: иначе всплывашка «сменить протокол» обрезается его же рамкой.
+     Декоративные круги вынесены в свой слой .deco — режет их он, а не сам hero. */
+  .hero .deco{position:absolute;inset:0;overflow:hidden;border-radius:var(--r2);pointer-events:none}
+  .hero .deco::before{content:"";position:absolute;top:-70px;right:-40px;width:230px;height:230px;border-radius:50%;background:rgba(255,255,255,.10)}
+  .hero .deco::after{content:"";position:absolute;bottom:-110px;right:60px;width:190px;height:190px;border-radius:50%;background:rgba(255,255,255,.07)}
+  .hero .in{position:relative}
+  .hero h1{font-size:26px;font-weight:600;letter-spacing:-.03em;margin:0}
+  .w-phone .hero h1{font-size:22px}
+  .hero .sub{font-size:13.5px;font-weight:500;margin-top:3px}
+  /* Ряд индикаторов НАД шапкой. `:has()` знают не все движки, поэтому пустой ряд гасим не
+     им, а тем, что оба индикатора скрыты инлайновым display:none — сам ряд при этом занимает
+     только зазор; margin даём снизу, чтобы при погашенных индикаторах он не отрывал hero. */
+  .hinds{display:flex;gap:8px;flex-wrap:wrap}
+  .hinds:empty{display:none}
+  .hero .st{display:flex;gap:22px;margin-top:16px;flex-wrap:wrap}
+  .hero .st .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600;display:flex;align-items:center;gap:4px}
+  .hero .st .v{font-size:15px;font-weight:500;margin-top:2px}
+  .hero #ping-cell{cursor:pointer}
+  /* Тумблер: положение задаёт JS классом .off на САМОМ тумблере, а не цвет шапки — состояние
+     «поднят, но не везёт» тревожно фоном и включено тумблером одновременно. */
+  .hero .vtoggle{width:52px;height:30px;border-radius:99px;background:rgba(255,255,255,.30);
+        box-shadow:inset 0 1px 2px rgba(0,0,0,.14)}
+  .hero .vtoggle .vknob{right:3px;left:auto;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+  .hero .vtoggle.off{background:rgba(0,0,0,.22)}
+  .hero .vtoggle.off .vknob{left:3px;right:auto}
+  /* ПОЛОЖЕНИЕ НЕИЗВЕСТНО (статус не ответил ни разу): ручки нет вовсе. И «вкл», и «выкл» были бы
+     утверждением о намерении человека, которого без статуса никто не знает (разбор в fail()). */
+  .hero .vtoggle.unk{background:rgba(0,0,0,.22)}
+  .hero .vtoggle.unk .vknob{visibility:hidden}
+  /* ---- ЖИВАЯ СКОРОСТЬ в hero (шаг 2j переноса) ----
+     Геометрия — из макета (`.hlive`/`.lsrc`), КОНТРАСТ — по правилу шапки выше, а не по макету:
+     там выбранный чип был полупрозрачным БЕЛЫМ с белым текстом (он осветляет и без того светлый
+     фон — та же беда, что у быстрых кнопок, 2,9:1 при норме 4,5). Здесь, как у `.qbtn`, выбор
+     ЗАТЕМНЯЕТ: невыбранный — прозрачный с рамкой (подпись .92 → 4,9:1 на самой светлой точке
+     зелёного), выбранный — тёмная подложка и полный белый (8,7:1). Видимость — классом `.on`:
+     панель сама решает, когда туннель «везёт» (heroLiveShow), атрибут `hidden` здесь перебил бы
+     собственный `display` блока. */
+  .hlive{display:none;margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.18)}
+  .hlive.on{display:block}
+  .hlive .cap2{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;
+               font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+  .hlive .hl-cap{opacity:.9}
+  .hlive .hl-one{opacity:.9;text-transform:none;letter-spacing:0;font-weight:500}
+  .hlive .hl-one:empty{display:none}
+  /* `.lsrc` — ОБЩИЙ класс чипов источника (так в макете: он же у плитки «Сейчас» на светлой
+     карточке), а белое-на-зелёном — вариант ШАПКИ `.onhero`. Повесь мы цвета шапки на голый
+     `.lsrc`, первый же перенос чипов на карточку дал бы белый текст на белом. */
+  .lsrc{display:inline-flex;gap:4px;flex-wrap:wrap}
+  .lsrc button{font:inherit;font-size:11.5px;font-weight:500;text-transform:none;letter-spacing:0;line-height:1.4;
+               padding:3px 10px;border-radius:99px;cursor:pointer}
+  .lsrc.onhero button{background:transparent;border:1px solid rgba(255,255,255,.3);color:rgba(255,255,255,.92)}
+  @media (hover:hover){ .lsrc.onhero button:hover{background:rgba(0,0,0,.14)} }
+  .lsrc.onhero button.on{background:rgba(0,0,0,.28);border-color:rgba(255,255,255,.55);color:#fff;font-weight:600}
+  .lsrc.onhero button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .hl-row{display:flex;align-items:center;gap:12px}
+  /* `min-width:0` ОБЯЗАТЕЛЕН: без него картинка шириной в прошлый кадр не даёт колонке сжаться при
+     сужении окна, и числа справа уезжают за край шапки. */
+  .hl-ch{flex:1;min-width:0;height:56px}
+  .hl-ch svg{display:block;width:100%;height:56px;overflow:visible}
+  .hl-v{display:flex;flex-direction:column;align-items:flex-end;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .hl-v b{font-size:17px;font-weight:600}
+  .hl-v span{font-size:12px;opacity:.9;margin-top:1px}
+  .w-phone .hl-v b{font-size:15px}
+  /* ПУЛЬС НА КОНЦЕ ЛИНИИ — «это сейчас». Масштабом, а не анимацией радиуса: `r` как CSS-свойство
+     знают не все движки, а `transform` с `fill-box` — все. Кто просит меньше движения, пульса не
+     видит вовсе: точка остаётся, мигание уходит. */
+  .hl-pulse{transform-box:fill-box;transform-origin:center;animation:hlpulse 2s ease-out infinite}
+  @keyframes hlpulse{0%{transform:scale(1);opacity:.9}70%{transform:scale(2.6);opacity:0}100%{transform:scale(2.6);opacity:0}}
+  @media (prefers-reduced-motion:reduce){ .hl-pulse{animation:none;opacity:0} }
+  /* «Ночь»: hero глубже и со свечением — в тёмной теме карточки отделяет свет, а не тень.
+     Красится ТОЛЬКО штатное состояние: у .warn и .off свой цвет, и он одинаков в обеих темах
+     (тревога не должна менять оттенок от времени суток). Блок продублирован намеренно —
+     как и палитра выше (следит C48). Скелетон (`.skl`) из правила исключён: до ответа статуса
+     «штатного состояния» ещё нет, и зелёное свечение утверждало бы именно его. */
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]) .hero:not(.warn):not(.off):not(.skl){
+      background:linear-gradient(135deg,#0e7357,#0a5642 58%,#083f31);
+      box-shadow:0 0 0 1px rgba(39,185,140,.22), 0 26px 70px -28px rgba(39,185,140,.55)}
+  }
+  :root[data-theme=dark] .hero:not(.warn):not(.off):not(.skl){
+    background:linear-gradient(135deg,#0e7357,#0a5642 58%,#083f31);
+    box-shadow:0 0 0 1px rgba(39,185,140,.22), 0 26px 70px -28px rgba(39,185,140,.55)}
+  /* ---- быстрые кнопки протокола и сервера ---- */
+  .quick{display:flex;gap:8px;margin-top:15px;flex-wrap:wrap;position:relative}
+  /* Кнопки «Протокол / Сервер» — светлой плашкой, как в макете (решение человека 26.09.2026: цвета шапки — макета, контраст держит
+     текст — тень `.hero`). Прежде плашка была ЗАТЕМНЯЮЩЕЙ: на светлом фоне белый текст на светлой плашке давал 4,04:1 (замер
+     10.09.2026), тень текста шапки возвращает читаемость. */
+  .qbtn{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border-radius:99px;cursor:pointer;
+        background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.22);font-size:13px;font-weight:500;color:#fff;
+        max-width:100%;min-width:0}
+  @media (hover:hover){ .qbtn:hover{background:rgba(255,255,255,.24)} }
+  .qbtn[aria-disabled="true"],.vtoggle[aria-disabled="true"]{cursor:default !important;opacity:.7}
+  /* Фокус на цветной шапке — белый, как у чипов источника скорости (.lsrc.onhero): акцентный зелёный на зелёном не виден. */
+  .qbtn:focus-visible,#ping-go:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  /* Рамка — на обёртке, а не на иконке: иконка крутится, пока идёт проба, и рамка крутилась бы вместе с ней. */
+  #ping-go{display:inline-flex;border-radius:4px}
+  .qbtn .lb{font-weight:400}
+  .qbtn>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .qbtn .csub{font-size:11px;opacity:.9}
+  .qbtn .csub:empty{display:none}
+
+  /* ============================================================================
+     ЛЕНТА ТЕХНИЧЕСКОГО СОСТОЯНИЯ под hero (шаг 2d переноса).
+     ============================================================================
+     ПРАВИЛО НАПОЛНЕНИЯ (из макета): чип висит ПОСТОЯННО, если это ответ на частый вопрос
+     (DNS — «куда уходят мои запросы», MTU — первое, чем диагностируют «работает, но медленно»),
+     и появляется ТОЛЬКО при отклонении, если это настройка (IPv6, доп-выходы). Иначе лента
+     превращается в приборную панель ради красоты, а лишние чипы гасят нужные.
+     Пустая лента прячется САМА (`:empty`) — как и ряд индикаторов над шапкой. */
+  .techbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .techbar:empty{display:none}
+  .tchip{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:99px;
+         background:var(--card);border:1px solid var(--line);font-size:12.5px;color:var(--ink3);
+         cursor:pointer;box-shadow:var(--sh);white-space:nowrap;max-width:100%;min-width:0}
+  @media (hover:hover){ .tchip:hover{border-color:var(--line2)} }
+  /* Значение и адрес — ФЛЕКС-ЭЛЕМЕНТЫ, поэтому многоточие на них работает (флекс блокирует
+     элементы): у чипа `white-space:nowrap`, и без обрезки длинное имя резолвера распирало бы
+     страницу вбок — а горизонтальной прокрутки у панели быть не должно. */
+  .tchip b,.tchip .mono{overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .tchip b{font-weight:500;color:var(--ink)}
+  /* Тревожный чип — ТЕМИ ЖЕ токенами, что пилюли над шапкой (`#exit-ind`): у панели один
+     янтарь на все предупреждения, и второго набора цветов заводить нельзя. Рамку при этом
+     снимаем: на янтарной плашке она читается как обводка, а не как край чипа. */
+  .tchip.wr{background:var(--bg-warning);border-color:transparent;color:var(--text-warning)}
+  .tchip.wr b{color:var(--text-warning)}
+  .tchip .dot{width:7px;height:7px;border-radius:50%;background:var(--st-ok);flex-shrink:0}
+  .tchip .dot.off{background:var(--ink3)}
+  .w-phone .tchip{font-size:12px;padding:5px 10px}
+  /* Подсветка группы, к которой чип ленты привёл человека: экран «Настройки» длинный, и без
+     метки прокрутка к середине читается как «страница просто открылась не сверху». */
+  .setfocus{outline:2px solid var(--acc);outline-offset:5px;border-radius:6px}
+
+  /* ============================================================================
+     ПЕРВЫЙ КАДР: ЗАСТАВКА И СКЕЛЕТОН (шаг 2k переноса).
+     ============================================================================
+     ПОРЯДОК КАДРОВ: заставка (статикой, пока едет panel.js) → разметка со СКЕЛЕТОНОМ → данные.
+     Скелетон — не украшение и не вертушка: вертушка говорит «жди», скелетон — «вот что здесь
+     будет». И он обязан быть ЧЕСТНЫМ: всё, что до ответа роутера показывать неоткуда (цвет и
+     тумблер шапки, числа мер, чипы ленты, строки карточек), становится «костью», а не нулём,
+     прочерком или вчерашним значением.
+     СНИМАЕТСЯ ОН ПО ОБЛАСТЯМ, и каждую снимает ответ СВОЕГО источника: шапку и меры — статус,
+     ленту — исход всех трёх её источников (секция, статус, настройки), карточку — её загрузчик. Общий класс на всю страницу, снятый первым же
+     ответом, открыл бы «загрузка…» в карточках, которые приезжают на секунду позже. */
+  .splash{position:fixed;top:0;right:0;bottom:0;left:0;z-index:90;display:flex;align-items:center;justify-content:center;
+          background:var(--paper);transition:opacity .42s ease, visibility 0s .42s}
+  .splash.off{opacity:0;visibility:hidden}
+  /* Строка `sp-slow` выставляет себе visibility:visible анимацией — внутри скрытого слоя она осталась бы доступной
+     курсору и читалке до удаления узла (независимое ревью шага 2k, круг 18). Без анимации её скрывает базовое правило. */
+  .splash.off .sp-slow{animation:none}
+  /* СТРАХОВКА «СКРИПТ ЕСТЬ, А СТРАНИЦЫ НЕТ» — СТРОКОЙ, А НЕ СНЯТИЕМ. Снимает заставку panel.js; едет он
+     долго (медленный канал) или упал, не собрав страницу (`_bootDone`), — под заставкой скелетон,
+     который без скрипта «загружается» вечно, и открыть его значило бы сказать «загружаю» навсегда
+     (первая редакция шага так и делала — найдено независимым ревью). Поэтому через 10 с заставка
+     остаётся и говорит, что делать; скрипт, пришедший позже, уберёт её вместе со строкой. Скрипт не
+     пришёл ВОВСЕ или он от прошлой версии — сразу ловит строчная страховка в конце index.html (плашка
+     `#mixwarn`). `forwards` без `backwards`: до срока правило не действует вовсе. */
+  .splash .sp-slow{position:absolute;left:0;right:0;bottom:14%;padding:0 22px;text-align:center;
+          font-size:13px;line-height:1.5;color:var(--ink2);visibility:hidden;animation:sp-slow 0s linear 10s forwards}
+  @keyframes sp-slow{to{visibility:visible}}
+  /* Видна одна из двух: язык до скрипта знает только кэш в <head> (`lang` на <html>). */
+  html[lang=en] .splash .sp-slow[lang=ru],html:not([lang=en]) .splash .sp-slow[lang=en]{display:none}
+  /* Знак НАД словом, 120 px — единственное место панели, где он идёт крупно и где уместен
+     свет: ни фавикона, ни монохрома рядом нет. Композиция — макета (`.splash .brand.big`) и
+     заставки мастера: установка и панель — один продукт, и первый кадр у них один. */
+  .splash .brand{display:flex;flex-direction:column;align-items:center;gap:15px}
+  /* Класса `glow` у бренда заставки НЕТ намеренно: `.brand.glow .mark` (свет шапки, 5/14 px) сильнее
+     этого правила по специфичности и молча подменял крупный ореол мелким (найдено независимым ревью). */
+  .splash .mark{width:120px;height:120px;filter:var(--mark-glow-big)}
+  .splash .bname{font-size:25px;font-weight:500;letter-spacing:.16em}
+  /* На телефоне 120 px съели бы полэкрана, а заставка — не витрина. */
+  .w-phone .splash .mark{width:88px;height:88px}
+  .w-phone .splash .bname{font-size:21px}
+  @media (prefers-reduced-motion:reduce){ .splash{transition:none} }
+
+  /* БЛИК — одна бегущая полоса поверх костей области. `transform`, а не `background-position`:
+     первое браузер двигает без перерисовки, а скелетон живёт ровно тогда, когда страница и так
+     собирается. Кто просит меньше движения, получает неподвижные кости. */
+  @keyframes sklshim{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+
+  /* ---- ШАПКА ДО ПЕРВОГО ОТВЕТА СТАТУСА ----
+     Нейтральная карточка вместо цвета: цвет шапки — ФАКТ (норма · тревога · выключено), и до
+     ответа его нет. Текст остаётся ровно один — заголовок «Загрузка статуса…» с подписью: он и
+     говорит, что происходит, если роутер медлит дольше заставки. Токены «белое на цветном»,
+     которые переопределяет .hero, возвращаем к бумажным — иначе подписи были бы белыми на белом. */
+  /* Край — ВНУТРЕННЕЙ тенью, а не рамкой: рамка добавила бы кости 2 px высоты, и всё под шапкой
+     съезжало бы на них в момент ответа (поймано замером сдвигов, 11.09.2026). */
+  .hero.skl{background:var(--card);box-shadow:inset 0 0 0 1px var(--line), var(--sh);color:var(--ink);
+            --text-primary:var(--ink); --text-secondary:var(--ink2); --text-tertiary:var(--ink3)}
+  /* Слой .deco с кругами — украшение ЦВЕТНОЙ шапки; в скелетоне он несёт блик (и режет его
+     своими скруглёнными краями — у самой шапки overflow открыт ради всплывашек). */
+  .hero.skl .deco{z-index:1}
+  /* ИНЕРТНА ДО ОТВЕТА: тумблер, протокол и сервер действуют по состоянию роутера, а его ещё нет —
+     клик по кости тумблера уходил бы в «включить VPN» без вопроса (гард — ещё и в vpnToggle). */
+  .hero.skl .in{pointer-events:none}
+  .hero.skl .deco::before{display:none}
+  .hero.skl .deco::after{top:0;right:0;bottom:0;left:0;width:auto;height:auto;border-radius:0}
+  /* КОСТИ — сами узлы данных, а не нарисованные поверх фигуры: так кость стоит ровно там и ровно
+     той формы, где через миг будет значение, на любой ширине. !important — потому что часть
+     этих узлов красит опрос статуса ИНЛАЙНОВЫМ стилем (возраст рукопожатия, строка IP). */
+  .hero.skl .qbtn,.hero.skl .vtoggle,.hero.skl .hlive,.hero.skl #updated{
+            background:var(--bone)!important;border-color:transparent!important;box-shadow:none!important;border-radius:8px}
+  .hero.skl .qbtn>*,.hero.skl .vtoggle>*,.hero.skl .hlive>*,.hero.skl #updated>*{visibility:hidden}
+  .hero.skl .st .v,.hero.skl #updated{color:transparent!important}
+  /* Дети значений со СВОИМ цветом (метка «CDN» у пинга — инлайновый янтарь) прозрачность родителя не
+     наследуют и горели бы поверх кости, если пинг ответил раньше статуса (независимое ревью). */
+  .hero.skl .st .v>*{visibility:hidden}
+  .hero.skl .st .v{background:var(--bone);border-radius:6px;min-width:4.5em}
+  /* `nowrap` обязателен: в этот узел опрос статуса пишет «◌ обновление…» ещё ДО ответа, и в узкой
+     кости текст переносился на вторую строку — кость выходила на 16 px выше данных (замер). */
+  .hero.skl #updated{width:8em;margin-left:auto;white-space:nowrap;overflow:hidden}
+
+  /* ---- МЕРЫ РЕСУРСОВ до ответа статуса: дуга и так пустая (фон .18), число — кость ---- */
+  .badges.skl .gchip .t{color:transparent;background:var(--bone);border-radius:5px}
+
+  /* ---- ЛЕНТА до своего первого ответа: два чипа-кости (DNS и MTU — постоянные чипы ленты) ----
+     Рисует их CSS, разметки у них нет: лента перерисовывается целиком, и чужие узлы в ней
+     пришлось бы вычищать. Правило стоит НИЖЕ `.techbar:empty` намеренно — при равной силе
+     побеждает позднее, а пустая лента в скелетоне прятаться не должна. Высота — ЗАМЕР живого
+     чипа (32,8 px; на телефоне 30), ширины — типичные DNS и MTU. */
+  .techbar.skl{display:flex}
+  .techbar.skl::before,.techbar.skl::after{content:'';display:block;height:32.8px;border-radius:99px;background:var(--bone)}
+  .techbar.skl::before{width:240px} .techbar.skl::after{width:128px}
+  /* На телефоне кости — ДОЛЯМИ и в ОДИН ряд: 240 + 8 + 128 px в 349 px ленты не влезали, кость всегда
+     была в два ряда (68 px), а лента из одного чипа — 30 px, и колода прыгала вверх на каждой загрузке
+     (найдено независимым ревью, замер). Минимум из кэша кость ТОЛЬКО удлиняет — поэтому сама она
+     обязана быть не выше самой короткой ленты; второй ряд, если он был, держит кэш. */
+  .w-phone .techbar.skl::before,.w-phone .techbar.skl::after{height:30px}
+  .w-phone .techbar.skl::before{width:56%} .w-phone .techbar.skl::after{width:30%}
+
+  /* ---- КАРТОЧКИ КОЛОДЫ до своего первого ответа ----
+     Заголовок у кости НАСТОЯЩИЙ (его строит тот же `cardHead`, что и у данных), строки — кости.
+     Высоту тела panel.js ставит по ПРОШЛОМУ кадру этой карточки (кэш), лишние строки режет
+     overflow: без этого карточки, приезжающие вразнобой, двигали бы колоду под читающим. */
+  .mcard.skl .mc-body{position:relative;overflow:hidden}
+  .mcard.skl .mc-body::after{content:'';position:absolute;top:0;bottom:0;left:0;width:100%;pointer-events:none}
+  /* БЛИК КОСТЕЙ — ОДИН на шапку и карточки, и одно правило «меньше движения» (системная настройка
+     доступности, а не пожелание): две копии разошлись бы при первой правке одной из них. */
+  .hero.skl .deco::after,.mcard.skl .mc-body::after{
+            background:linear-gradient(100deg,transparent 20%,var(--shim) 50%,transparent 80%);
+            animation:sklshim 1.4s ease-in-out infinite}
+  @media (prefers-reduced-motion:reduce){ .hero.skl .deco::after,.mcard.skl .mc-body::after{animation:none;opacity:0} }
+  /* Строка-кость повторяет `.lrow` (имя + пояснение, ~58 px), ширины чередуются — ряд одинаковых
+     полос читается как узор, а не как список. */
+  .skr{padding:12px 0}
+  .skr+.skr{border-top:1px solid var(--line)}
+  .skr span{display:block;height:13px;width:46%;border-radius:6px;background:var(--bone)}
+  .skr span+span{margin-top:10px;height:10px;width:72%}
+  .skr:nth-child(3n) span{width:34%} .skr:nth-child(3n) span+span{width:58%}
+  .skr:nth-child(3n+1) span+span{width:64%}
+  /* У «Трафика» разметка своя, статическая (переключатели — рабочие и в скелетоне), поэтому
+     кости у него — его же узлы значений, как у шапки. */
+  /* `!important` у цвета — как у шапки: `#tr-foot` красит ИНЛАЙНОВЫЙ стиль разметки, и «меряю…»
+     проступало поверх кости (снято глазами на BE7000). `#tr-rate` цвет лишь наследует от строки
+     заголовка, ему хватило бы и обычного правила — общий список держит кости одной строкой. */
+  .mcard.skl #tr-total,.mcard.skl #tr-foot{color:transparent!important;background:var(--bone);border-radius:6px}
+  .mcard.skl #tr-total{min-width:5em;display:inline-block}
+  .mcard.skl #tr-foot{width:72%}
+  .mcard.skl #tr-chart{background:var(--bone);border-radius:8px}
+
+  /* ============================================================================
+     СТРОКА СПИСКА (.lrow) — ОБЩИЙ ПРИМИТИВ карточек и экранов (шаг 2e переноса).
+     ============================================================================
+     ЗАЧЕМ ОТДЕЛЬНЫМ ПРИМИТИВОМ, а не инлайновыми стилями, как у прежних карточек. Форма
+     «точка/знак · имя · пояснение · значение справа · шеврон» повторяется в макете ДВАДЦАТЬ
+     с лишним раз (выходы, устройства, события, подписки, серверы, источники, гео), и в панели
+     она уже живёт четырьмя НЕЗАВИСИМЫМИ копиями с разными отступами и размерами шрифта —
+     `.srv`, строки правил, строки устройств, журнал. Пятая копия на каждую новую карточку
+     означала бы, что «список в панели» выглядит по-разному на соседних экранах.
+     ИМЕНА КЛАССОВ — РОВНО КАК В МАКЕТЕ (`.lrow`, `.nm`, `.ds`, `.av`, `.pipe`): сверять
+     экран-в-экран придётся ещё много раз, а разъехавшиеся имена делают обе стороны
+     непереводимыми друг в друга. Разделитель — у СОСЕДА (`.lrow+.lrow`), поэтому у первой и
+     последней строки нет висящих линий, а карточка не обязана знать, сколько в ней строк. */
+  .lrow{display:flex;align-items:center;gap:11px;padding:9px 0;min-width:0}
+  .lrow+.lrow{border-top:1px solid var(--line)}
+  .lrow.cl{cursor:pointer}
+  @media (hover:hover){ .lrow.cl:hover .nm{color:var(--acc-deep)} }
+  .lrow.cl:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:6px}
+  /* `min-width:0` на растягивающейся ячейке ОБЯЗАТЕЛЕН: без него длинное имя устройства
+     распирает флекс-строку шире карточки (у флекс-элемента min-width:auto), и на 375 px
+     появляется горизонтальная прокрутка страницы. */
+  .lrow .grow{flex:1;min-width:0}
+  /* Строка с ДЕЙСТВИЕМ справа (плашка + кнопка: кандидат накопителя, движок на накопителе). Плашка и кнопка не сжимаются, и в
+     узкой карточке колонка имени схлопывалась до 6 px на 320 и до 60 px в колоде на 1024 (ревью шага 6b, круг 2) — узкой
+     карточке имя с описанием своей строкой, действие под ними. */
+  @container card (max-width:440px){ .lrow.lr-act{flex-wrap:wrap;row-gap:8px} .lrow.lr-act>.grow{flex:1 1 100%} }
+  /* Строка с ЧИПОМ справа — перенос ПО НУЖДЕ (`lr-fit`): у колонки имени нижний предел, и правая часть (чип факта, счёт,
+     шеврон) уходит второй строкой вправо, только когда рядом ей нет места. Длинное имя выхода в чипе («ютуб через апрет»,
+     148 px) схлопывало имя группы до 55 px на 320 (обход пачки 4); перенос ВСЕГДА (`lr-act`) уводил бы вниз и короткий
+     чип, а макет ставит его рядом. Поле слева у второй строки — `margin-left:auto` первого соседа колонки: в первой строке
+     свободное место забирает сама колонка (`flex:1`), и поле там нулевое. */
+  .lrow.lr-fit{flex-wrap:wrap;row-gap:6px}
+  /* Предел 96 — от 320: у содержимого строки 232, и короткий чип («в VPN», «выключена») с точкой, зазорами и полем шеврона
+     помещается рядом с колонкой 96, а длинный («ютуб через апрет», 148) — нет и уходит вниз (обход пачки 4, круг 1). */
+  .lrow.lr-fit>.grow{min-width:min(96px,100%)}
+  .lrow.lr-fit>.grow+*{margin-left:auto}
+  /* Шеврон строки-перехода — у правого края АБСОЛЮТОМ (как у `.door`): флексом он переносился ОДИН, когда чип ещё влез, а ему
+     места уже нет («Ютуб максимум · в VPN» на 320 — шеврон второй строкой слева). Поле справа = шеврон 15 + зазор строки 11:
+     в одну строку геометрия та же, что у флекса. */
+  .lrow.cl.lr-fit{position:relative;padding-right:26px}
+  .lrow.cl.lr-fit>.chev{position:absolute;right:0;top:50%;transform:translateY(-50%)}
+  /* Перенос длинного имени БЕЗ ПРОБЕЛОВ (hostname устройства, имя выхода) — двумя свойствами:
+     `overflow-wrap:anywhere` понимают свежие движки, `word-break:break-word` — старые
+     Android-WebView, с которых панель тоже открывают (там же живёт остальная разметка
+     панели: `.mc-title`, `.evd-tx`). Без переноса имя в 60 символов даёт горизонтальную
+     прокрутку страницы на 320 px. */
+  .lrow .nm{font-size:14px;font-weight:500;letter-spacing:-.01em;display:flex;align-items:center;gap:7px;flex-wrap:wrap;color:var(--ink);overflow-wrap:anywhere;word-break:break-word}
+  .lrow .ds{font-size:12px;color:var(--ink3);margin-top:2px;overflow-wrap:anywhere;word-break:break-word}
+  /* Ссылка внутри подписи строки («страница проекта» у готового списка) — цветом подписи, подчёркиванием, а не синевой браузера. */
+  .lrow .ds a{color:inherit;text-decoration:underline;text-decoration-color:var(--line2);text-underline-offset:2px}
+  @media (hover:hover){ .lrow .ds a:hover{color:var(--ink)} }
+  /* Предупреждение ЧАСТЬЮ описания («частично», «не хватит места», «недоступен») — цветом, на ЛЮБОМ экране. Было тремя
+     правилами под свои экраны (импорт, сети, гео), и четвёртый («Где лежит каждый движок») остался серым (ревью шага 6b, круг 2). */
+  .ds .wr{color:var(--warn)}
+  .lrow .av{width:34px;height:34px;border-radius:11px;background:var(--soft);display:grid;place-items:center;flex:none;font-size:15px;color:var(--ink2)}
+  .lrow .dot{width:7px;height:7px;border-radius:50%;background:var(--st-ok);flex:none}
+  .lrow .dot.warn{background:var(--st-warn)} .lrow .dot.off{background:var(--ink3)} .lrow .dot.bad{background:var(--st-bad)}
+  .lrow .chev{color:var(--ink3);flex:none;font-size:15px}
+  /* Пустой список — НЕ пустая карточка: «выходов нет» и «событий нет» — это ответы, и у них
+     свой вид, иначе карточка читается как «не загрузилось». */
+  .lempty{font-size:12.5px;color:var(--ink3);padding:4px 0 2px}
+  /* Варианты чипа (акцент · тревога · беда). База `.chip` объявлена выше и остаётся нейтральной:
+     цвет здесь несёт СОСТОЯНИЕ, а не украшение, и берётся из тех же токенов, что у пилюль. */
+  .chip.acc{background:var(--acc-soft);color:var(--acc-deep);font-weight:500}
+  .chip.sm{font-size:10px;padding:1px 6px;vertical-align:1px}
+  .chip.wr{background:var(--warn-soft);color:var(--warn)}
+  .chip.bd{background:var(--bad-soft);color:var(--bad)}
+  /* Чип, который появляется и пропадает на месте (перемена в строке «Компонентов»): `display` класса перебивает атрибут. */
+  .chip[hidden]{display:none}
+  /* «КОМПОНЕНТЫ» (шаг 6c). Версия — мелко рядом с именем; вес — со знаком плана справа: «+» ставим (цвет сведений), «−»
+     снимаем (цвет «освободит»), без знака — просто вес. Вес не переносится: «+ 5.00 МБ» разорванным не читается. */
+  .pk-ver{font-size:11.5px;font-weight:400;color:var(--ink3);letter-spacing:0}
+  .pk-sz{font-size:12px;color:var(--ink3);font-variant-numeric:tabular-nums;flex:none;white-space:nowrap}
+  .pk-sz.in{color:var(--text-info)} .pk-sz.ok{color:var(--text-success)}
+  .pk-chg{display:flex;flex-wrap:wrap;gap:6px}
+  .pk-res{font-size:11px;font-weight:400;color:var(--ink3)}
+  .si-v.wr{color:var(--warn)}
+  /* «Обновление»: установленная версия — крупно, это ответ на главный вопрос экрана. */
+  .lrow .nm.upd-big{font-size:17px;font-weight:600}
+  /* Строка ПРОГРЕССА («идёт установка», «идёт обновление») — в одну строку с многоточием: она меняется раз в 2 с, и перенос то в
+     одну, то в три строки двигал всё ниже на 54 px — кнопки уплывали из-под пальца (замер 320 px, ревью шага 6c, круг 1). */
+  .lrow .ds.one{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* ШАГ 6d: «О РОУТЕРЕ», «БЭКАП», «ПОДДЕРЖКА», «КОНСОЛЬ», «УДАЛЕНИЕ» КОЛОДОЙ. Шапка «О роутере» — знак, имя с версией и две
+     кнопки; на узкой карточке кнопки уходят под текст, а текст не сжимается в столбик (своя основа 220 px — довод макета: в
+     320 px знак и кнопки оставляли тексту 40 px). */
+  .si-hd{display:flex;align-items:center;gap:14px 16px;flex-wrap:wrap;min-width:0}
+  .si-hd>.grow{flex:1 1 220px;min-width:0}
+  .si-mark{width:56px;height:56px;flex:none}
+  /* Словесный знак рядом со знаком — как в шапке макета (`.wmi`): капс, разрядка, 19/500. */
+  .si-t{font-size:19px;font-weight:500;letter-spacing:.1em;line-height:1;color:var(--ink);overflow-wrap:anywhere}
+  /* Подпись-данные рядом со словом (точка монтирования, имя интерфейса, имя сети) — без капса подписи карточки. */
+  .wt .sub,.lrow .nm .sub{text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink3)}
+  /* Полоса ресурса между строками «ключ — значение». */
+  .card>.meter{margin:2px 0 6px}
+  /* ШКАЛА ТЕМПЕРАТУРЫ: фон — зоны «норма → внимание → предел» (стопы считает panel.js из порогов роутера), серым поверх — ещё не
+     достигнутое, риска — порог троттлинга. Анимации нет: карточка перерисовывается каждые 5 секунд, и рост заново раздражал бы. */
+  .thermo{position:relative;height:8px;border-radius:99px;margin:6px 0 0;overflow:hidden}
+  .thermo>i{position:absolute;top:0;bottom:0;right:0;background:var(--soft2)}
+  .thermo>b{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--ink);opacity:.6}
+  .thermo-sc{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 8px;font-size:11px;color:var(--ink3);margin:5px 0 4px}
+  /* ВЫВОД КОНСОЛИ — плашка терминала в обеих темах (так он читается привычно; цвет смысла не несёт), прокрутка — внутри плашки,
+     а не всей страницей; длинная строка переносится, а не раздвигает карточку. Фокус — чтобы листать вывод с клавиатуры. */
+  .term{background:#14140f;color:#d6f5c8;border-radius:var(--r);padding:11px 13px;margin:0;font-family:var(--font-mono);font-size:12px;
+        line-height:1.6;white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:52vh;min-height:96px}
+  .term:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  #con-note{margin:0}
+  /* ЖУРНАЛ ДЕЙСТВИЙ — одна коробка на карточку «Обзора» и экран `pn-log` (шаг 7b): строки рисует модель `ACT_LOG`. Не консоль
+     (`.term`): это подписи действий панели и ответы роутера, их цвет несёт смысл — удалось, не удалось, просто сказано. */
+  .actlog{max-height:170px;overflow-y:auto;font-family:var(--font-mono);font-size:12px;line-height:1.55;color:var(--text-secondary);
+          background:var(--bg-secondary);border-radius:var(--r-md);padding:8px 10px}
+  .actlog.tall{max-height:min(60vh,560px);min-height:96px}
+  .actlog:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .al-r{white-space:pre-wrap;word-break:break-word}
+  .al-r.ok{color:var(--text-success)} .al-r.bad{color:var(--text-warning)}
+  /* Ссылка-скачивание в виде кнопки («Скачать настройки», бэкап перед удалением): вид кнопки, а не подчёркнутой ссылки. */
+  a.btn{text-decoration:none;cursor:pointer}
+  /* ПОЛОСА ДОЛИ. Цвет заполнения приходит из `meterColor` (единственный владелец порогов
+     «запас есть / кончается / кончился»), поэтому своих порогов здесь нет. */
+  .meter{height:7px;border-radius:4px;background:var(--soft2);overflow:hidden}
+  .meter i{display:block;height:100%;border-radius:99px;background:var(--acc)}
+  /* ПОЛОСА ДОЛЕЙ («Куда идёт трафик»): несколько кусков на 100 %, цвет — у выхода. От `.meter`
+     отличается тем, что кусков МНОГО и они не про «запас», поэтому и порогов у неё нет.
+     Фон виден только пока доли не сошлись в 100 % (минимальная ширина тонкого куска). */
+  .tstack{display:flex;gap:2px;height:12px;border-radius:4px;overflow:hidden;background:var(--soft2);margin:2px 0 6px}
+  .tstack i{display:block;height:100%}
+  /* МЕТКА ВЫХОДА В СТРОКЕ — тот же цвет, что и кусок полосы над ней: связь «строка ↔ доля»
+     читается взглядом, без легенды. Ставится вместо точки состояния (`.dot`): состояние — вопрос
+     соседней карточки, здесь речь только об объёме. */
+  .lrow .pipe{width:26px;height:4px;border-radius:2px;flex:none}
+  /* У СТРОКИ БЕЗ ЧИСЛА МЕТКА ПОЛАЯ. Полный цвет обещает кусок в полосе над списком, а у выхода,
+     который считать нечем, куска там нет и быть не может — глаз ищет его и не находит. Полая
+     метка говорит «этот выход в долях не участвует» без единого слова. */
+  .lrow .pipe.na{background:transparent!important;box-shadow:inset 0 0 0 1.5px currentColor;opacity:.55}
+  /* Подпись под списком — про ИСТОЧНИК числа, а не про список. Отделена линией, чтобы не
+     читалась как ещё одна строка. */
+  .lfoot{font-size:11px;color:var(--ink3);margin-top:9px;padding-top:8px;border-top:1px solid var(--line)}
+  /* ДЕЙСТВИЕ В ЗАГОЛОВКЕ КАРТОЧКИ («Все выходы», «Все события», «Очистить» у журнала). Переход
+     на экран или безвредное своё действие карточки: вид мягкий, чтобы не спорить с главной
+     кнопкой внизу экрана. Действию, которое что-то меняет на роутере, здесь не место. */
+  .cact{font-size:12.5px;font-weight:500;color:var(--ink2);background:var(--soft);border-radius:99px;
+        padding:4px 10px;cursor:pointer;white-space:nowrap;border:0;font-family:inherit}
+  @media (hover:hover){ .cact:hover{background:var(--soft2);color:var(--ink)} }
+  /* Акцентное действие (макет: `Act` без `mut`) — у «Трафика». */
+  .cact.acc{color:var(--acc-deep);background:var(--acc-soft)}
+  /* Наведение: фон — `--pri`, а НЕ `--acc`. Белый на `--acc` даёт 3,4:1 (это записано прямо
+     в блоке токенов, там же `--pri` объявлен на шаг глубже ради 4,9), а подпись здесь мелкая
+     и полужирная — норма 4,5. Тот же расчёт, что у главной кнопки панели. */
+  @media (hover:hover){ .cact.acc:hover{background:var(--pri);color:var(--pri-ink)} }
+  .cact:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  /* ПЛАШКА-ОБЪЯСНЕНИЕ (`.note2`, имя РОВНО как в макете) — «почему цифра такая» рядом с цифрой,
+     а не под вопросиком: читают это ровно тогда, когда смотрят на данные. Вариант несёт СМЫСЛ:
+     info — «вот как мы это считаем», warn — «а вот здесь считать нечем». Пары цвет/фон взяты
+     из блока токенов целиком (не смешивая), там же и замерен их контраст. */
+  .note2{padding:11px 13px;border-radius:var(--r);background:var(--soft);font-size:12.5px;line-height:1.55;color:var(--ink2)}
+  .note2.warn{background:var(--warn-soft);color:var(--warn)}
+  .note2.info{background:var(--info-soft);color:var(--info)}
+  /* ПЕРЕХОД ВНУТРИ ТЕКСТА (плашка «Транспорта»: «дополнительным выходом» → экран выходов) — подчёркнутые слова макета цветом текста
+     вокруг. Кнопка, а не <a>: у перехода нет адреса, его ведёт `data-cact`; рамку и фон общей кнопки снимаем. */
+  .ilink{display:inline;padding:0;margin:0;border:0;border-radius:0;background:none;font:inherit;color:inherit;
+         text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+  @media (hover:hover){ .ilink:hover{background:none;text-decoration-thickness:2px} }
+  .ilink:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:3px}
+  .note2.bad{background:var(--bad-soft);color:var(--bad)}
+  .note2 b{font-weight:600}
+  /* Сегмент переключателя достижим с клавиатуры (role и tabindex ему выдаёт `wireSeg`) — значит
+     обязан показывать фокус: иначе он «доступен» только на бумаге. */
+  .seg:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  /* Выключенный сегмент («этот роутер так не умеет») — тот же `.dis`, что у кнопок. */
+  @media (hover:hover){ .seg.dis:hover{background:transparent} }
+  /* Заголовок карточки колоды: [знак · имя … своё … действие]. Разметку строит ОДИН хелпер
+     `cardHead` в panel.js у ВСЕХ карточек, включая статические («Трафик», «Журнал действий» —
+     через слот `data-chead`): иначе они разойдутся кеглем при первой же правке. */
+  /* ПЕРЕНОС ЗАГОЛОВКА — ТОЛЬКО ПО ЗАКАЗУ: у `.ct` база 0 (`flex:1`), и имя с действием строку не
+     переполняют никогда; новую строку открывает лишь `data-line` с базой 100%. */
+  .chead{display:flex;flex-wrap:wrap;align-items:center;gap:8px;row-gap:2px;margin-bottom:10px;min-width:0}
+  /* Имя — служебная подпись капсом (макет: `.wt` у карточек колоды); за заголовок карточку перетаскивают (мышью). */
+  .chead .ct{font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--ink3);flex:1;min-width:0;display:flex;align-items:center;gap:6px}
+  @media (hover:hover) and (pointer:fine){ .mcard .chead{cursor:grab} .mcard .chead button{cursor:pointer} }
+  .chead [data-sub]{color:var(--text-tertiary)}
+  .chead [data-line]{flex-basis:100%;min-width:0;font-size:12px;color:var(--text-tertiary)}

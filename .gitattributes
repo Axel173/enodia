@@ -1,0 +1,60 @@
+# Файлы, уезжающие на роутер (busybox sh), — СТРОГО с LF в рабочей копии.
+# CRLF ломает shebang (#!/bin/sh с \r) и `. notify.conf` (source значений с \r).
+# Эти правила гарантируют LF независимо от глобального core.autocrlf на машине,
+# поэтому при редактировании и заливке (WinSCP/base64) скрипты не сломаются.
+*.sh                  text eol=lf
+*.conf                text eol=lf
+web/cgi-bin/*         text eol=lf
+web/htmlwrap          text eol=lf
+*.yaml                text eol=lf
+*.yml                 text eol=lf
+notify.conf.example   text eol=lf
+iplist.conf.example   text eol=lf
+awg.conf.example      text eol=lf
+# Маркеры версии/манифест уезжают на роутер и парсятся busybox (gh-update.sh) — LF.
+VERSION               text eol=lf
+update-manifest.txt   text eol=lf
+# Хеши релиза (публичный репо): читает busybox-awk на роутере и `sha256sum -c` на Linux. CRLF
+# здесь особенно опасен — сумма считается по БАЙТАМ, и файл с \r разошёлся бы с git-блобом,
+# который отдаёт raw.githubusercontent (обновление молча начало бы отказывать).
+SHA256SUMS            text eol=lf
+# Baked-каталоги гео (geo-*-catalog.txt) и прочие *.txt-payload уезжают на роутер и читаются busybox
+# (reader делает tr -d '\r', но канон payload = LF; git иначе ругается «LF will be replaced by CRLF»).
+*.txt                 text eol=lf
+# Статика веб-панели (тоже на роутер): HTML/CSS/JS — LF, шрифт-иконки — бинарь.
+# JS появился здесь 2026-07-17, когда логику панели вынесли из index.html в assets/panel.js:
+# без правила git (autocrlf=true) вернул бы файлу CRLF при первом же checkout — на роутере
+# это не смертельно (JS парсится и с CRLF, а --push всё равно жмёт CRLF→LF), но ломает
+# канон «payload = LF» и наши проверки `tr -cd '\r' | wc -c` = 0.
+*.html                text eol=lf
+*.css                 text eol=lf
+*.js                  text eol=lf
+*.woff2               binary
+
+# Бинарники под роутер (ELF/UPX) — НИКОГДА не трогать text-конверсией (иначе порча).
+*.user                binary
+
+# .ps1 намеренно НЕ трогаем: он работает на ПК как есть (UTF-8 BOM важен для
+# PowerShell 5 на ру-Windows), пусть остаётся под глобальным core.autocrlf.
+# .bat — CRLF ЯВНО (ревью ветки релиза, круг 2): cmd на LF-батнике спотыкается о метки
+# и `if`, а core.autocrlf — свойство МАШИНЫ. В индексе блоб с LF, и «Code → Download ZIP»
+# у GitHub (git archive на сервере без autocrlf) отдавал сломанный лаунчер; атрибут
+# конвертирует и рабочую копию, и архив. BOM атрибут не добавляет (cmd его читает командой).
+*.bat                 text eol=crlf
+
+# Python-порт ПК-стороны (enodia.py) и mac/linux-лаунчер (enodia-setup.command) запускаются
+# и на Unix → СТРОГО LF (CRLF в shebang .command ломает запуск; .py чище кроссплатформенно).
+*.py                  text eol=lf
+*.command             text eol=lf
+# Манифест зависимостей ПК-стороны: читают uv/pip на macOS и Linux. Правила на *.toml не
+# было вовсе — ровно поэтому requirements.txt приехал в репо с CRLF при живом «*.txt eol=lf»
+# (внешний аудит 18.08.2026): без правила git отдаёт файл по core.autocrlf машины.
+*.toml                text eol=lf
+# Списки и таблицы стендов (dev/bb-lane.list, dev/bin-versions.tsv) читает sh под WSL/busybox: CRLF рабочего
+# дерева (core.autocrlf после checkout) дал «несуществующий стенд» — имя с CR на конце (с.99, 05.10.2026).
+*.list                text eol=lf
+*.tsv                 text eol=lf
+# Страница мастера установки. На роутер НЕ едет (живёт на ПК), но правило то же: файл
+# отдаётся локальным http-сервером и правится теми же инструментами, что и роутерные —
+# разъехавшиеся переводы строк в одном дереве стоят дороже, чем польза от их разнобоя.
+wizard/*.html         text eol=lf

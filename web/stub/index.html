@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Накопитель не найден · Enodia</title>
+<!--
+  Заглушка режима полной установки на накопитель. Её поднимает boot.sh, когда код и настройки
+  живут на внешнем накопителе, а самого накопителя сейчас нет. Без неё человек видит мёртвый
+  адрес и решает, что сломалась панель.
+  ТРЕБОВАНИЯ: ни одного внешнего запроса (роутер может быть без интернета) и никакого CGI —
+  страница статическая, её отдаёт uhttpd без авторизации, потому что показывать нечего, кроме
+  причины. Оба языка на экране сразу: выбор языка живёт в настройках панели, а панели нет.
+  ОДИН ФАЙЛ: boot.sh переливает на /data (20 МБ на всё) ровно index.html, а стили, шрифты и спрайт
+  панели лежат на том самом накопителе, которого нет. Поэтому всё внутри: разметка — страницы вне
+  панели (`bareCard` в panel.js, макет `xs-stub`), знак — та же геометрия, что `lg-mark` панели
+  (сверяет C45), цвета — ТЕ ЖЕ токены обеих тем, что в panel.css (сверяет C109: разъедутся — заглушка
+  станет чужой страницей). Шрифт системный: Inter лежит на накопителе, а тащить его на флеш ради
+  редкого состояния — не по бюджету. Тема — только системная: ручной выбор «Вида» тоже живёт в панели.
+-->
+<style>
+:root {
+  color-scheme: light dark;
+  --paper:#f5f5f7; --card:#ffffff;
+  --ink:#22221f; --ink2:#5d5c57; --ink3:#6f6e67;
+  --info:#185fa5; --info-soft:#e5eefa;
+  --line:rgba(0,0,0,.08);
+  --mark-ink:#2C2C2A;
+  --r:10px; --r2:12px;
+  --sh:0 1px 2px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:#0e0e10; --card:#17171a;
+    --ink:#eceadf; --ink2:#b3b1a7; --ink3:#93928b;
+    --info:#85b7eb; --info-soft:#16283c;
+    --line:rgba(255,255,255,.07);
+    --mark-ink:#E8E6DD;
+    --sh:0 1px 0 rgba(255,255,255,.04) inset, 0 12px 34px -20px rgba(0,0,0,1);
+  }
+}
+* { box-sizing:border-box; }
+body {
+  margin:0; background:var(--paper); color:var(--ink); line-height:1.5; -webkit-font-smoothing:antialiased;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+/* Колонка — как у страниц вне панели: карточку центрует margin:auto (высокая карточка на низком экране
+   не теряет верх), ширина — карточка мастера. */
+.bare { min-height:100vh; display:flex; flex-direction:column; padding:36px 18px 44px; }
+/* Материал карточки — панельный `.card` (линия 1 px, скругление, тень; сверяет C109): с 25.09.2026 у панели линия 1 px и тень, а
+   заглушка оставалась с .5 px и плоской — страница, которую не узнать (ревью пачки 3). */
+.card { margin:auto; width:100%; max-width:560px; background:var(--card); border:1px solid var(--line); border-radius:var(--r2); padding:30px 28px 26px; box-shadow:var(--sh); }
+.bhead { display:flex; align-items:center; gap:14px; margin-bottom:18px; }
+.mark { width:72px; height:72px; flex:none; display:block; fill:none; }
+.cc { stroke:var(--mark-ink); }
+.bname { font-size:20px; font-weight:500; letter-spacing:.16em; }
+h1 { margin:0 0 8px; font-size:24px; font-weight:600; letter-spacing:-.02em; line-height:1.25; }
+.bsub { color:var(--ink2); font-size:14px; line-height:1.55; margin:0; }
+ol { margin:14px 0 12px; padding-left:22px; font-size:14px; line-height:1.6; }
+li { padding-left:4px; }
+.note { padding:11px 13px; border-radius:var(--r); background:var(--info-soft); color:var(--info); font-size:12.5px; line-height:1.55; }
+.bsep { border-top:1px solid var(--line); margin:16px 0 12px; }
+.ben { color:var(--ink3); font-size:12.5px; line-height:1.55; margin:0; }
+.ben b { color:var(--ink2); font-weight:600; }
+@media (max-width:759px) { .bare { padding:22px 14px 34px; } .card { padding:22px 18px 20px; } }
+/* СТЕКЛО «НОЧИ» — последним: при равной специфичности побеждает поздний, и правило выше базового `.card` не применялось
+   вовсе (карточка плоская, граница .07 — ревью шага 8a). C109 сверяет и значения, и то, что оно стоит ПОСЛЕ базового. */
+@media (prefers-color-scheme: dark) {
+  .card { background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,0) 42%),var(--card); border-color:rgba(255,255,255,.08); }
+}
+</style>
+</head>
+<body>
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+<symbol id="lg-mark" viewBox="0 0 64 64" fill="none" stroke-linecap="round" stroke-linejoin="round"><g transform="translate(-2.75 0)"><defs><filter id="enmarkbl" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.1"/></filter></defs><mask id="enmark0"><rect width="64" height="64" fill="#fff"/><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark0)"><circle cx="43" cy="32" r="15" fill="none" stroke="#F96C00" stroke-width="5"/><mask id="enmark0s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="43" cy="32" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark0s)"><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g><mask id="enmark1"><rect width="64" height="64" fill="#fff"/><circle cx="43" cy="32" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark1)"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#F5B300" stroke-width="5"/><mask id="enmark1s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark1s)"><circle cx="43" cy="32" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g><mask id="enmark2"><rect width="64" height="64" fill="#fff"/><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark2)"><circle cx="26.5" cy="22.47" r="15" fill="none" class="cc" stroke-width="5"/><mask id="enmark2s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark2s)"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g></g></symbol>
+</svg>
+<main class="bare">
+<div class="card">
+  <div class="bhead" aria-hidden="true"><svg class="mark" viewBox="0 0 64 64"><use href="#lg-mark"/></svg><span class="bname">ENODIA</span></div>
+  <h1>Накопитель не найден</h1>
+  <p class="bsub">Система установлена на внешний накопитель, а он сейчас недоступен. Роутер при этом работает
+     как обычно — без VPN и без обхода блокировок.</p>
+  <ol>
+    <li>Вставьте накопитель в USB-порт роутера.</li>
+    <li>Панель поднимется сама — сразу или в течение минуты.</li>
+    <li>Обновите эту страницу.</li>
+  </ol>
+  <div class="note">Если накопитель вставлен, попробуйте вынуть и вставить его снова: файловая система могла
+     остаться помеченной как «грязная» после отключения питания.</div>
+  <div class="bsep"></div>
+  <p class="ben" lang="en"><b>Storage device not found.</b> This system is installed on an external drive, which is
+     currently unavailable. The router itself keeps working — without VPN and without unblocking. Plug the drive
+     into the router's USB port: the panel comes back on its own within a minute. Then reload this page. If the drive is
+     already plugged in, unplug it and plug it back in: its file system may have been left marked dirty after a power loss.</p>
+</div>
+</main>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# Зависимости ПК-стороны enodia.py (кроссплатформенный порт).
+# Python 3 уже стоит для Шага 1 (xmir-patcher). Установка: pip install -r requirements.txt
+#
+# paramiko — in-process SSH (пароль/байты/UTF-8 нативно на всех ОС; host-key через
+#            AutoAddPolicy → ключ после ребута роутера принимается сам, без known_hosts).
+# keyring  — хранение пароля root в системном хранилище (Windows Credential Manager =
+#            DPAPI, macOS Keychain, Linux Secret Service). Нет backend → фолбэк chmod-600 файл.
+paramiko>=2.9
+keyring>=21

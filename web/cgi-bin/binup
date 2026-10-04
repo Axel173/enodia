@@ -1,0 +1,95 @@
+#!/bin/sh
+# cgi-bin/binup — ЗАГРУЗКА БИНАРЯ С КОМПЬЮТЕРА: установка компонента без доступа к GitHub (решение пользователя 30.09.2026).
+# EOL строго LF.
+#
+#  POST ?token=<CSRF>&name=<имя>   тело = сам файл (`bin/<арка>/<имя>.user` из архива проекта) как есть, без кодировки.
+#       → {"ok":true,"name":"xray","msg":"…"} | {"ok":false,"name":"xray","msg":"причина"}
+#
+# ПОЧЕМУ ТЕЛО «КАК ЕСТЬ», А НЕ ФОРМОЙ (как у импорта бэкапа): 8-МБ xray в base64 — 11 МБ в переменной шелла, которую busybox
+# держит целиком, да ещё разбор формы по той же строке. Сырое тело идёт потоком `head -c` прямо в файл. Токен и имя — в строке
+# запроса: своих заголовков uhttpd в CGI не передаёт.
+# ПРОВЕРЯЕТ И КЛАДЁТ ВЛАДЕЛЕЦ — gh-update.sh bin-stage (манифест проекта: размер и sha256 сборки своей арки); ставит файл обычная
+# установка компонента («Компоненты») тем же fetch_bin, что и закачка с GitHub. Здесь — только приём: гейт, токен, лимит, времянка.
+TOKFILE=/tmp/enodia-panel-token
+# 2FA-гейт (totp.sh) — тем же блоком, что у остальных CGI (разбор — в cgi-bin/status и cgi-bin/backup). Каталоги — у cgi-paths.sh:
+# uhttpd не передаёт CGI своё окружение, а в раскладке «всё на накопителе» литералы указывают в пустоту (C62).
+_cgid=${0%/web/cgi-bin/*}; [ "$_cgid" = "$0" ] && _cgid=
+if [ -n "$_cgid" ] && [ -f "$_cgid/cgi-paths.sh" ]; then . "$_cgid/cgi-paths.sh"; fi
+ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
+ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
+if [ -f "$ENODIA_DIR/totp.sh" ]; then
+	TOTP_LIB=1; . "$ENODIA_DIR/totp.sh"
+	# Судим по способности, а не по наличию: totp.sh старее формы входа пропускал всё (разбор — в cgi-bin/backup).
+	command -v pw_verify >/dev/null 2>&1 || {
+		echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+		echo "Cache-Control: no-store"; echo ""
+		printf '{"ok":false,"need_login":true,"msg":"totp.sh старее формы входа (обновите панель)"}\n'; exit 0; }
+	totp_gate_deny
+else   # НЕТ totp.sh — ОТКАЗ, А НЕ ПРОПУСК: двери-Basic больше нет, пускать некому (разбор — в totp.sh, «Гейт»)
+	echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+	echo "Cache-Control: no-store"; echo ""
+	printf '{"ok":false,"need_login":true,"msg":"totp.sh не установлен (обновите панель)"}\n'; exit 0
+fi
+
+# jesc — ЕДИНСТВЕННЫЙ конвейер «текст → строка внутри JSON» (json-lib.sh); шим — как у остальных CGI.
+if [ -f "$ENODIA_DIR/json-lib.sh" ]; then . "$ENODIA_DIR/json-lib.sh"; fi
+command -v jesc >/dev/null 2>&1 || {
+	jtrim() { cat; }
+	jesc() { tr -d '\033\r' | sed 's/\[[0-9;]*m//g' | tr '\n\t' '  ' | cut -c1-"$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+}
+
+echo "Content-Type: application/json; charset=utf-8"
+echo "Cache-Control: no-store"
+echo ""
+len=${CONTENT_LENGTH:-0}
+case "$len" in ''|*[!0-9]*) len=0 ;; esac
+# Потолок — с запасом над крупнейшим бинарём проекта (xray ~8 МБ): тело ложится в ОЗУ, и «загрузить гигабайт» не должно
+# означать «забить /tmp роутера».
+LIMIT=25165824
+# РАННИЙ ОТКАЗ ДОЧИТЫВАЕТ ТЕЛО (в пределах потолка): ответ, отданный посреди недочитанных восьми мегабайт, uhttpd может закончить
+# сбросом соединения — и панель вместо «неверный токен» с повтором по свежему токену показала бы «роутер не ответил» (ревью с.88).
+_rd=0
+fail() {
+	if [ "$_rd" = 0 ] && [ "$REQUEST_METHOD" = POST ] && [ "$len" -gt 0 ] && [ "$len" -le "$LIMIT" ]; then head -c "$len" > /dev/null 2>&1; fi
+	printf '{"ok":false,"msg":"%s"}\n' "$1"; exit 0
+}
+[ "$REQUEST_METHOD" = POST ] || fail "только POST"
+qs() { printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep "^$1=" | head -n 1 | cut -d= -f2-; }
+tok=$(qs token); name=$(qs name)
+echo "$tok" | grep -qE '^[0-9a-f]+$' || fail "нет токена"
+{ [ -s "$TOKFILE" ] && [ "$tok" = "$(cat "$TOKFILE")" ]; } || fail "неверный токен (перезагрузите панель)"
+# `op=clear` — убрать всё принятое (кнопка «Убрать» панели; тело пустое). Владелец — gh-update.sh bin-unstage.
+if [ "$(qs op)" = clear ]; then
+	[ -f "$ENODIA_DIR/gh-update.sh" ] || fail "нет gh-update.sh — обновите панель"
+	sh "$ENODIA_DIR/gh-update.sh" bin-unstage >/dev/null 2>&1
+	printf '{"ok":true,"msg":"загруженные файлы убраны"}\n'; exit 0
+fi
+case "$name" in ''|*[!a-z0-9-]*) fail "имя компонента не по форме" ;; esac
+{ [ "$len" -gt 0 ] && [ "$len" -le "$LIMIT" ]; } || fail "пустой или слишком большой файл (больше 24 МБ) — это не бинарь проекта"
+[ -f "$ENODIA_DIR/gh-update.sh" ] || fail "нет gh-update.sh — обновите панель"
+# Времянки ОБОРВАННЫХ приёмов: uhttpd, потеряв клиента (закрыли вкладку, моргнул Wi-Fi), бьёт CGI SIGKILL — `trap` молчит, и до
+# 24 МБ тела оставались бы в ОЗУ до ребута (ревью с.88). Держатель — в имени (pid): чей процесс мёртв, тот и убран; свой не трогаем.
+# Только СВОИ каталоги (наш uid, 0700 — так их заводит mktemp -d, не симлинк): `rm -rf` по дереву, которое завёл чужой процесс, — дверь
+# для подмены вложенного каталога симлинком посреди обхода (ревью с.88, круг 2).
+_me=$(id -u 2>/dev/null)
+for _bd in /tmp/enodia-binup-*.*; do
+	[ -d "$_bd" ] && [ ! -L "$_bd" ] || continue
+	[ "$(stat -c '%u %a' "$_bd" 2>/dev/null)" = "$_me 700" ] || continue
+	_bp=${_bd#/tmp/enodia-binup-}; _bp=${_bp%%.*}
+	case "$_bp" in ''|*[!0-9]*) continue ;; esac
+	[ "$_bp" = "$$" ] && continue
+	[ -d "/proc/$_bp" ] || rm -rf "$_bd"
+done
+tmp=$(mktemp -d "/tmp/enodia-binup-$$.XXXXXX" 2>/dev/null) || fail "нет места в /tmp"
+head -c "$len" > "$tmp/f" 2>/dev/null; _rd=1
+got=$(stat -c %s "$tmp/f" 2>/dev/null)
+[ "$got" = "$len" ] || { rm -rf "$tmp"; fail "файл пришёл не целиком (${got:-0} из $len байт) — повторите"; }
+res=$(sh "$ENODIA_DIR/gh-update.sh" bin-stage "$name" "$tmp/f" 2>/dev/null | tail -n 1)
+rm -rf "$tmp"
+case "$res" in
+	# Потолок 600, как у status-json (ревью ветки, круг 2): отказ «файл из архива другой версии» кончается ВЕРСИЕЙ нужного архива —
+	# ради неё он и написан, а на 300 байтах длинные имена (https-dns-proxy, amneziawg-go) обрезали её целиком.
+	OK:*) printf '{"ok":true,"name":"%s","msg":"%s"}\n' "$name" "$(printf '%s' "${res#OK: }" | jesc 600)" ;;
+	FAIL:*) printf '{"ok":false,"name":"%s","msg":"%s"}\n' "$name" "$(printf '%s' "${res#FAIL: }" | jesc 600)" ;;
+	*) printf '{"ok":false,"name":"%s","msg":"роутер не ответил на приём файла (старая сборка gh-update.sh?)"}\n' "$name" ;;
+esac

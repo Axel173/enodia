@@ -1,0 +1,31 @@
+# Манифест ПК-стороны для uv/pip. Появился по просьбе тестера (18.08.2026): он ставил утилиту
+# с macOS через uv и обошёлся `uv add -r requirements.txt` — то есть держал в голове то, что
+# файл должен сказать сам.
+#
+# ЗАЧЕМ НЕ ПАКЕТ. `enodia.py` — однофайловый скрипт, а не библиотека: ставить в site-packages
+# нечего, устанавливается он копированием архива. Поэтому `package = false` — uv готовит
+# окружение с зависимостями и НЕ пытается собрать колесо (иначе `uv run` требует build-backend
+# и падает на пустом дереве пакетов).
+#
+# ЗАВИСИМОСТИ ДУБЛИРУЮТСЯ с requirements.txt СОЗНАТЕЛЬНО: pip-путь из README (`pip install -r
+# requirements.txt`) обязан работать на голой Windows без uv, а uv-путь — без чтения README.
+# Чтобы копии не разъехались, их сверяет проверка C35 в dev/check-consistency.ps1 (там же
+# сверяется version с PROJECT_VERSION в enodia.py).
+
+[project]
+name = "enodia"
+version = "1.0.0"
+description = "Enodia — установщик и управляющая утилита для роутеров Xiaomi (панель AmneziaWG/Xray/Hysteria2/ByeDPI/Zapret)"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "paramiko>=2.9",
+    "keyring>=21",
+]
+
+[project.urls]
+Homepage = "https://github.com/Axel173/enodia"
+License = "https://github.com/Axel173/enodia/blob/main/LICENSE"
+
+[tool.uv]
+package = false

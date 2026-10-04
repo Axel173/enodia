@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enodia — панель роутера</title>
+<!--
+  Enodia — веб-панель управления VPN на роутере Xiaomi, отдаётся вторым uhttpd
+  со своей формой входа (cgi-bin/login). ФАЗА 1: ЖИВОЙ статус через /cgi-bin/status (read-only). Кнопки
+  управления (VPN вкл/выкл, смена транспорта/сервера) пока НЕактивны — Фаза 2,
+  они пойдут через существующие безопасные скрипты с санитизацией ввода.
+
+  Заметки:
+   - Иконки — ЛОКАЛЬНЫЕ (assets/icons.css + icons.woff2, subset Tabler только под
+     используемые ~17 глифов, 4 КБ). Никаких внешних CDN → страница корректно грузится
+     при мёртвом WAN (на роутере нет гарантии интернета; DNS там SPOF).
+   - Цвета — CSS-переменные :root + тёмная тема: авто (prefers-color-scheme) ИЛИ
+     принудительно атрибутом data-theme=light|dark на <html> (экран «Вид» раздела «Панель»).
+-->
+<!-- Фавикон = ЗНАК Enodia T1 (local/logo-t1-ui.svg), а НЕ упрощённая иконка: у иконки кольца
+     стоят так тесно, что честного плетения там нет ни при какой маске (замер 30.08.2026), а у
+     знака тройного перекрытия лент НОЛЬ. Правило канона «ниже ~71 px ставим иконку» выведено
+     для версии С ПРОСВЕТОМ; цветной идёт без шва, и плетение несёт граница цвета — она живёт в
+     любом размере. Совпадение с каноном сверяет C45. ИНЛАЙНОМ, а не файлом: отдельный
+     ассет тянет за собой ?v=<CODE>, update-manifest, REQUIRED_FILES и проверку сборки —
+     цена, которую платить рано. Переедет в общий ассет вместе с редизайном, когда знак
+     понадобится ещё и в шапке. @media внутри SVG чтут не все браузеры (Chrome фавиконный
+     prefers-color-scheme игнорирует) ⇒ на тёмной вкладке тёмное кольцо тусклое, а знак
+     держат два тёплых. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%20width='64'%20height='64'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'%20role='img'%20aria-label='Enodia'%3E%3Cstyle%3E.cc{stroke:%232C2C2A}@media%20(prefers-color-scheme:dark){.cc{stroke:%23E8E6DD}}%3C/style%3E%3Cg%20transform='translate(-2.75%200)'%3E%3Cdefs%3E%3Cfilter%20id='enmarkbl'%20x='-40%25'%20y='-40%25'%20width='180%25'%20height='180%25'%3E%3CfeGaussianBlur%20stdDeviation='1.1'/%3E%3C/filter%3E%3C/defs%3E%3Cmask%20id='enmark0'%3E%3Crect%20width='64'%20height='64'%20fill='%23fff'/%3E%3Ccircle%20cx='26.5'%20cy='22.47'%20r='15'%20fill='none'%20stroke='%23000'%20stroke-width='5.24'/%3E%3C/mask%3E%3Cg%20mask='url(%23enmark0)'%3E%3Ccircle%20cx='43'%20cy='32'%20r='15'%20fill='none'%20stroke='%23F96C00'%20stroke-width='5'/%3E%3Cmask%20id='enmark0s'%20maskUnits='userSpaceOnUse'%20x='0'%20y='0'%20width='64'%20height='64'%3E%3Ccircle%20cx='43'%20cy='32'%20r='15'%20fill='none'%20stroke='%23fff'%20stroke-width='5'/%3E%3C/mask%3E%3Cg%20mask='url(%23enmark0s)'%3E%3Ccircle%20cx='26.5'%20cy='22.47'%20r='15'%20fill='none'%20stroke='%23000'%20stroke-width='9.04'%20opacity='0.42'%20filter='url(%23enmarkbl)'/%3E%3C/g%3E%3C/g%3E%3Cmask%20id='enmark1'%3E%3Crect%20width='64'%20height='64'%20fill='%23fff'/%3E%3Ccircle%20cx='43'%20cy='32'%20r='15'%20fill='none'%20stroke='%23000'%20stroke-width='5.24'/%3E%3C/mask%3E%3Cg%20mask='url(%23enmark1)'%3E%3Ccircle%20cx='26.5'%20cy='41.53'%20r='15'%20fill='none'%20stroke='%23F5B300'%20stroke-width='5'/%3E%3Cmask%20id='enmark1s'%20maskUnits='userSpaceOnUse'%20x='0'%20y='0'%20width='64'%20height='64'%3E%3Ccircle%20cx='26.5'%20cy='41.53'%20r='15'%20fill='none'%20stroke='%23fff'%20stroke-width='5'/%3E%3C/mask%3E%3Cg%20mask='url(%23enmark1s)'%3E%3Ccircle%20cx='43'%20cy='32'%20r='15'%20fill='none'%20stroke='%23000'%20stroke-width='9.04'%20opacity='0.42'%20filter='url(%23enmarkbl)'/%3E%3C/g%3E%3C/g%3E%3Cmask%20id='enmark2'%3E%3Crect%20width='64'%20height='64'%20fill='%23fff'/%3E%3Ccircle%20cx='26.5'%20cy='41.53'%20r='15'%20fill='none'%20stroke='%23000'%20stroke-width='5.24'/%3E%3C/mask%3E%3Cg%20mask='url(%23enmark2)'%3E%3Ccircle%20cx='26.5'%20cy='22.47'%20r='15'%20fill='none'%20class='cc'%20stroke-width='5'/%3E%3Cmask%20id='enmark2s'%20maskUnits='userSpaceOnUse'%20x='0'%20y='0'%20width='64'%20height='64'%3E%3Ccircle%20cx='26.5'%20cy='22.47'%20r='15'%20fill='none'%20stroke='%23fff'%20stroke-width='5'/%3E%3C/mask%3E%3Cg%20mask='url(%23enmark2s)'%3E%3Ccircle%20cx='26.5'%20cy='41.53'%20r='15'%20fill='none'%20stroke='%23000'%20stroke-width='9.04'%20opacity='0.42'%20filter='url(%23enmarkbl)'/%3E%3C/g%3E%3C/g%3E%3C/g%3E%3C/svg%3E">
+<!-- ?v= обязателен и здесь: icons.css — единственный подресурс, который был ВНЕ инварианта
+     кэш-бастера (и вне проверки build-dev-archive.ps1), хотя кэшируется браузером ровно так же.
+     Цена всплыла на этой же правке: добавьте в него класс — и правка часами не доезжает. -->
+<link rel="stylesheet" href="assets/icons.css?v=100000">
+<script>
+  /* Тема из localStorage-кэша — ДО первого кадра (в <head>, не в общем скрипте внизу):
+     истина живёт на роутере (.prefs theme), но её fetch асинхронный, и страница успела бы
+     мигнуть светлой. Значение перезапишет loadPrefs(), если на роутере другое. */
+  try{ var _th=localStorage.getItem('enodia_theme');
+       if(_th==='light'||_th==='dark') document.documentElement.setAttribute('data-theme',_th); }catch(e){}
+  /* Язык — тем же приёмом и по той же причине: до panel.js накладной перевод не работает, а
+     заставке (её строка «грузится дольше обычного») и читалке язык нужен с первого кадра.
+     `lang` на <html> потом держит applyLang (истина — на роутере, .prefs lang). */
+  try{ if(localStorage.getItem('enodia_lang')==='en') document.documentElement.setAttribute('lang','en'); }catch(e){}
+  /* ТРИ ШИРИНЫ КАРКАСА — классом на <html>, и ставится он ЗДЕСЬ, до первой отрисовки:
+     сделайте это в panel.js внизу страницы — и панель успеет мигнуть десктопной раскладкой
+     на телефоне. Пороги: телефон < 760 (сайдбар не влезает вовсе), планшет < 1280 (сайдбар
+     + две колонки карточек), выше — десктоп. Внутри области контента ширину меряет
+     КОНТЕЙНЕР #view, а не окно: слева сайдбар, и одно окно даёт разную полезную ширину. */
+  (function(){ var d=document.documentElement;
+    function w(){ var x=window.innerWidth||1280, c=x<760?'w-phone':(x<1280?'w-tab':'w-desk');
+      if(d.getAttribute('data-w')!==c){ d.setAttribute('data-w',c);
+        d.classList.remove('w-phone','w-tab','w-desk'); d.classList.add(c); } }
+    w(); window.addEventListener('resize', w);
+  })();
+</script>
+<!-- Стили и логика вынесены в assets/panel.css / assets/panel.js.
+     ?v=<CODE> ОБЯЗАТЕЛЕН и обязан совпадать с CODE в VERSION: uhttpd отдаёт статику с
+     ETag/Last-Modified, но БЕЗ Cache-Control -> браузер кэширует подресурсы эвристически
+     (~10% возраста файла) и после деплоя способен часами держать СТАРЫЙ panel.js рядом с
+     новым index.html = «панель сломалась на ровном месте». Смена ?v= рвёт этот кэш.
+     Бампится вместе с CODE (build-dev-archive.ps1 синкает и проверяет). -->
+<link rel="stylesheet" href="assets/panel.css?v=100000">
+<!-- БЕЗ JAVASCRIPT ПАНЕЛИ НЕТ ВОВСЕ: заставку снимает скрипт, и она висела бы вечно, а её строка через
+     10 с просила бы «обновить страницу» — неправда (независимое ревью шага 2k, круг 5). Каркас без
+     скрипта — кости, которые никто не снимет. Показываем одно: что нужно включить (плашка в <body>). -->
+<noscript><style>.splash,.shell{display:none!important}</style></noscript>
+</head>
+<body>
+<h2 class="sr-only">Enodia — веб-панель управления VPN на роутере Xiaomi: живой статус подключения, протокол, серверы и разделы настроек.</h2>
+
+<!-- СПРАЙТ КАРКАСА. Иконки разделов, подвала и «назад» — инлайновым SVG, а не
+     иконочным шрифтом: icons.woff2 — SUBSET ровно под 17 старых глифов, и каждая
+     новая иконка требовала бы пересборки шрифта. Символы скопированы из макета
+     `local/redesign-proto.html` дословно — это и есть набор редизайна.
+     Корень НЕ display:none, а нулевой по размеру: в скрытом через display:none SVG
+     Chrome не применяет МАСКУ к группе с фильтром (замер), и знак теряет плетение. -->
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></symbol>
+  <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H14a3.5 3.5 0 0 0 0-7h-4a3.5 3.5 0 0 1 0-7h5.5"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M12 18h.01M9.2 14.8a4 4 0 0 1 5.6 0M6.3 11.9a8 8 0 0 1 11.4 0M3.5 9a12 12 0 0 1 17 0"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol>
+  <!-- Флеш роутера и внешний накопитель стоят В ШАПКЕ РЯДОМ, и знаки у них обязаны различаться
+       С ОДНОГО ВЗГЛЯДА: две меры с одинаковой иконкой читаются как один показатель, у которого
+       почему-то два числа. В макете обе были цилиндрами разной высоты — на живом роутере в 13 px
+       они неотличимы (замер 10.09.2026), поэтому у накопителя знак СВОЙ: съёмная флешка. -->
+  <symbol id="i-disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="i-usb" viewBox="0 0 24 24"><rect x="8" y="6.5" width="13" height="11" rx="2"/><rect x="2.5" y="9" width="5.5" height="6" rx="1"/><path d="M12 9.5v5M16 9.5v5"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></symbol>
+  <symbol id="i-life" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/><path d="M14.5 9.5L18 6M9.5 9.5L6 6M14.5 14.5L18 18M9.5 14.5L6 18"/></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 4v11M8 11l4 4 4-4M5 19h14"/></symbol>
+  <symbol id="i-mega" viewBox="0 0 24 24"><path d="M18 8a3 3 0 0 1 0 6M5 9h4l7-4v14l-7-4H5a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2z"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20s-7-4.5-7-9.5A4 4 0 0 1 12 7a4 4 0 0 1 7 3.5c0 5-7 9.5-7 9.5z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <!-- Двери раздела «Соединение» и плитки экрана «Транспорт» (шаг 3b переноса). -->
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/></symbol><symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M4 5.5C2.8 6.9 2 12 2 12s3.5 6 10 6c2 0 3.7-.6 5.2-1.4M9.6 6.2A9.9 9.9 0 0 1 12 6c6.5 0 10 6 10 6s-1 1.7-2.8 3.2"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3.5 3.5l17 17"/></symbol><symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/></symbol><symbol id="i-bell" viewBox="0 0 24 24"><path d="M10 5a2 2 0 1 1 4 0a7 7 0 0 1 4 6v3a4 4 0 0 0 2 3H4a4 4 0 0 0 2-3v-3a7 7 0 0 1 4-6"/><path d="M9 17v1a3 3 0 0 0 6 0v-1"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2 6M20 5v6h-6"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-router" viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="8" rx="2"/><path d="M7 17h.01M11 17h.01M17 8a5 5 0 0 0-5-5M15 8a3 3 0 0 0-3-3M12 13V8"/></symbol>
+  <symbol id="i-dev" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 18h2"/></symbol>
+  <symbol id="i-at" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9-9-9z"/><circle cx="8" cy="8" r="1.4"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+  <!-- Порт-правила устройства (шаг 4b переноса) — знак из макета. -->
+  <symbol id="i-hash" viewBox="0 0 24 24"><path d="M5 9h14M5 15h14M10 4L8 20M16 4l-2 16"/></symbol>
+  <!-- Двери раздела «Роутер» (шаг 6a переноса): консоль и удаление — знаки из макета. -->
+  <symbol id="i-term" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></symbol>
+  <!-- «Перезагрузить роутер» — свой знак: рядом «Починить правила» со стрелкой, и два одинаковых знака читались одним действием. -->
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8M6.3 6.8a8 8 0 1 0 11.4 0"/></symbol>
+  <symbol id="lg-icon" viewBox="0 0 64 64" fill="none"><g transform="translate(-3.15 0)"><circle cx="25.7" cy="21.09" r="14" stroke="currentColor" stroke-width="8.4"/><circle cx="25.7" cy="42.91" r="14" stroke="#F5B300" stroke-width="8.4"/><circle cx="44.6" cy="32" r="14" stroke="#F96C00" stroke-width="8.4"/><mask id="lg-icon-i1ip" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#000"/><circle cx="44.6" cy="32" r="14" fill="none" stroke="#fff" stroke-width="8.4"/></mask><circle cx="25.7" cy="21.09" r="14" stroke="currentColor" stroke-width="8.4" mask="url(#lg-icon-i1ip)"/></g></symbol>
+  <!-- ЗНАК КРУПНО (заставка). Геометрия — КАНОН `local/logo-t1-ui.svg` байт-в-байт по нутру, и
+       сверяет её C45 (как и фавикон выше, и шапку мастера). Третье кольцо красится классом `.cc`
+       через ТОКЕН `--mark-ink`: символ живёт в теневом дереве <use>, селектор с предком туда не
+       проходит, а наследуемая переменная — проходит (замер мастера 31.08.2026). -->
+  <symbol id="lg-mark" viewBox="0 0 64 64" fill="none" stroke-linecap="round" stroke-linejoin="round"><g transform="translate(-2.75 0)"><defs><filter id="enmarkbl" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.1"/></filter></defs><mask id="enmark0"><rect width="64" height="64" fill="#fff"/><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark0)"><circle cx="43" cy="32" r="15" fill="none" stroke="#F96C00" stroke-width="5"/><mask id="enmark0s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="43" cy="32" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark0s)"><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g><mask id="enmark1"><rect width="64" height="64" fill="#fff"/><circle cx="43" cy="32" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark1)"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#F5B300" stroke-width="5"/><mask id="enmark1s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark1s)"><circle cx="43" cy="32" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g><mask id="enmark2"><rect width="64" height="64" fill="#fff"/><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#000" stroke-width="5.24"/></mask><g mask="url(#enmark2)"><circle cx="26.5" cy="22.47" r="15" fill="none" class="cc" stroke-width="5"/><mask id="enmark2s" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><circle cx="26.5" cy="22.47" r="15" fill="none" stroke="#fff" stroke-width="5"/></mask><g mask="url(#enmark2s)"><circle cx="26.5" cy="41.53" r="15" fill="none" stroke="#000" stroke-width="9.04" opacity="0.42" filter="url(#enmarkbl)"/></g></g></g></symbol>
+  <!-- ЛИНИЯ ПОД СЛОВОМ — локап «как в hero», выбран 26.08.2026. Кривая ТА САМАЯ, что снята с hero
+       (`local/measure-hero-line.py`, коэффициенты HERO_Y в мастере и макете), и записана она ОДНОЙ
+       кубической Безье: при контрольных X = 0, ⅓, ⅔, 1 координата X линейна по параметру, то есть
+       это ровно кривая, которую мастер и макет сэмплируют по 24 точкам после замера слова в JS.
+       Здесь замера нет вовсе — и линия стоит уже в ПЕРВОМ кадре, до panel.js: ширину и сдвиг
+       задаёт CSS в долях слова (`.bname .uline`), высоту — прописная кегля. `preserveAspectRatio`
+       растягивает кривую, `vector-effect` держит толщину 1,1 px при любом растяжении.
+       Y в высотах ПРОПИСНОЙ вниз от базовой: от 0,327 до 0,582 и вверх до −0,455. Числа сверяет C45. -->
+  <symbol id="lg-uline" viewBox="0 -.455 1 1.037" preserveAspectRatio="none" overflow="visible"><path d="M0 .327C.33333 .668 .66667 .875 1 -.455" fill="none" stroke="#F5B300" stroke-width="1.1" stroke-linecap="round" vector-effect="non-scaling-stroke"/></symbol>
+</svg>
+
+<!-- ЗАСТАВКА (шаг 2k переноса). СТАТИКОЙ, а не из panel.js, — и в этом весь её смысл: пока
+     1,7 МБ скрипта едут и разбираются, браузер уже рисует ЭТУ разметку. Без заставки
+     человек видел сырую страницу: зелёную шапку «Загрузка статуса…» с тумблером во «включено»
+     (цвет и положение — ФАКТЫ, которых ещё никто не спрашивал), колоду в заводском порядке и
+     плитки разделов, которые скрипт вот-вот разнесёт по местам.
+     Снимает её panel.js по первому ответу статуса (вилка 0,6…2,5 с — разбор у SPLASH_MIN).
+     ТЕКСТА В НОРМЕ НЕТ: «что сейчас происходит» после неё говорит шапка-скелетон. Текст есть на два
+     случая, и оба — «скрипт есть, а страницы нет»: канал медленный (скрипт ещё едет) или скрипт упал,
+     не собрав страницу, — через 10 с CSS (`sp-slow`) показывает, что делать; скрипт, пришедший позже,
+     уберёт строку вместе с заставкой. Скрипт не пришёл ВОВСЕ или он от прошлой версии — это ловит
+     сразу строчная страховка внизу страницы (плашка `#mixwarn`). Язык строки — из кэша в <head> (`lang` на <html>): перевод
+     до скрипта не работает, поэтому пары две, и видна одна. Для читалки знак — оформление
+     (`aria-hidden` у бренда), а строка — нет: до 10 с она скрыта и не читается, после — это
+     единственный совет, и прятать его от читалки нельзя (независимое ревью, круг 2). -->
+<div class="splash" id="splash">
+  <div class="brand" aria-hidden="true"><svg class="mark" viewBox="0 0 64 64"><use href="#lg-mark"/></svg><span class="bname">ENODIA<svg class="uline"><use href="#lg-uline"/></svg></span></div>
+  <div class="sp-slow" lang="ru">Панель грузится дольше обычного. Если так и останется — обновите страницу.</div>
+  <div class="sp-slow" lang="en">The panel is taking longer than usual. If it stays like this, reload the page.</div>
+</div>
+<!-- Без JavaScript язык выбрать нечем (его ставит скрипт в <head>), поэтому плашка ДВУЯЗЫЧНАЯ целиком;
+     переводу панели здесь делать нечего: при включённом скрипте содержимое noscript — не узлы, а сырой
+     текст разметки, и обход перевода NOSCRIPT пропускает. -->
+<noscript><div style="padding:15vh 16px 0"><div style="max-width:520px;margin:0 auto;padding:18px 20px;border-radius:12px;font-size:14px;line-height:1.55;background:var(--warn-soft,#faeeda);color:var(--warn,#8a5a12)">
+  <p lang="ru" style="margin:0 0 8px">Панели нужен JavaScript: без него она не может ни о чём спросить роутер. Включите JavaScript для этой страницы и обновите её.</p>
+  <p lang="en" style="margin:0">The panel needs JavaScript: without it, it cannot ask the router anything. Enable JavaScript for this page and reload it.</p>
+</div></div></noscript>
+
+<!-- КАРКАС РЕДИЗАЙНА. Разделов ШЕСТЬ, и они статичны — разметка сайдбара и таб-бара живёт
+     здесь, а не собирается в JS: список не зависит ни от чего на роутере, а innerHTML на
+     каждый переход убивал бы узлы (и обработчики) без нужды. JS только помечает активный
+     раздел и раскладывает по ним экраны. -->
+<div class="shell">
+  <aside class="side" id="side">
+    <!-- Локап — ТОТ ЖЕ, что на заставке (линия под словом, в «Ночи» — свет): бренд, показанный
+         крупно и через секунду мелко по-другому, читается как два разных знака.
+         Знак — ССЫЛКА НА «ОБЗОР» (просьба человека 25.09.2026: логотип в углу ведёт на главную — так устроен почти любой сайт,
+         и рука тянется к нему с любого экрана). Ссылкой, а не кнопкой: Enter и «открыть в новой вкладке» даёт сам браузер,
+         а переход ведёт общий обработчик `data-go` (wireNav) — адрес и история те же, что у пункта «Обзор». -->
+    <a class="brand glow" href="#ov" data-go="ov" title="На главную"><div class="brow"><svg class="mark" width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><use href="#lg-icon"/></svg><div class="wm2"><span class="bname">ENODIA<svg class="uline" aria-hidden="true"><use href="#lg-uline"/></svg></span></div></div></a>
+      <div class="snav" data-go="ov" data-c="0"><span class="sq" style="background:var(--ink3)"><svg class="ic s" aria-hidden="true"><use href="#i-grid"/></svg></span>Обзор</div>
+      <div class="snav" data-go="cn" data-c="1"><span class="sq" style="background:var(--g1)"><svg class="ic s" aria-hidden="true"><use href="#i-globe"/></svg></span>Соединение</div>
+      <div class="snav" data-go="rt" data-c="2"><span class="sq" style="background:var(--g2)"><svg class="ic s" aria-hidden="true"><use href="#i-route"/></svg></span>Маршрутизация</div>
+      <div class="snav" data-go="nw" data-c="3"><span class="sq" style="background:var(--g3)"><svg class="ic s" aria-hidden="true"><use href="#i-wifi"/></svg></span>Сеть</div>
+      <div class="snav" data-go="rr" data-c="4"><span class="sq" style="background:var(--g4)"><svg class="ic s" aria-hidden="true"><use href="#i-cpu"/></svg></span>Роутер</div>
+      <div class="snav" data-go="pn" data-c="5"><span class="sq" style="background:var(--g5)"><svg class="ic s" aria-hidden="true"><use href="#i-sliders"/></svg></span>Панель</div>
+    <div class="sp"></div>
+    <div class="snav" data-go="rr-support"><span class="sq" style="background:var(--soft2);color:var(--ink2)"><svg class="ic s" aria-hidden="true"><use href="#i-life"/></svg></span>Поддержка</div>
+    <div class="snav" data-go="rr-diag"><span class="sq" style="background:var(--soft2);color:var(--ink2)"><svg class="ic s" aria-hidden="true"><use href="#i-dl"/></svg></span>Диагностика</div>
+    <!-- Ссылки проекта жили в подвале ГЛАВНОЙ и были на виду всегда. Здесь они остаются на
+         виду и не занимают места в содержании экрана. -->
+    <div class="sfoot">
+      <div class="plinks">
+        <a href="https://t.me/+tfMLMVKG03FhMGYy" target="_blank" rel="noopener"><svg class="ic s" aria-hidden="true"><use href="#i-mega"/></svg>Новости проекта</a>
+        <a href="https://github.com/Axel173/enodia#donate" target="_blank" rel="noopener"><svg class="ic s" aria-hidden="true"><use href="#i-heart"/></svg>Поддержать проект</a>
+      </div>
+      <div class="r" id="sfoot-ver">версия <b id="ver-num">…</b></div>
+    </div>
+  </aside>
+  <main class="main">
+    <!-- ПЛАШКА «СОБРАНО ИЗ РАЗНЫХ ВЕРСИЙ». Показывает её только строчная страховка внизу страницы (скрипт
+         панели не пришёл или остался от прошлой версии). Стили — ИНЛАЙНОМ и с запасными значениями
+         намеренно: при таком наборе и panel.css может быть чужим, а плашка обязана читаться. Текст
+         ставит та же страховка — по языку страницы (перевод в этот момент не работает). -->
+    <div id="mixwarn" role="alert" style="display:none;margin:0 0 12px;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.5;background:var(--warn-soft,#faeeda);color:var(--warn,#8a5a12)"></div>
+    <!-- ТЕЛЕФОННАЯ ШАПКА: на телефоне сайдбара нет, и знак должен быть виден в обеих ширинах. Знак 22 px (макет: brandHtml(22)) —
+         соседи бренда в одной строке с ним: кольца ресурсов, «глаз» и колокольчик. Та же ссылка на «Обзор», что в сайдбаре. -->
+    <div class="phead" id="phead"><a class="brand glow" href="#ov" data-go="ov" title="На главную"><div class="brow"><svg class="mark" width="22" height="22" viewBox="0 0 64 64" aria-hidden="true"><use href="#lg-icon"/></svg><div class="wm2"><span class="bname">ENODIA<svg class="uline" aria-hidden="true"><use href="#lg-uline"/></svg></span></div></div></a><div class="grow"></div></div>
+    <!-- id=topbar сохранён НАМЕРЕННО: по нему panel.js находит саму строку раздела (заголовок,
+         переезд шапки на телефон в placeChrome). А вот меры ресурсов ищутся по `.badges` БЕЗ
+         этого якоря: на телефоне их узел переезжает в `#phead`, и селектор с `#topbar`
+         переставал их находить молча. -->
+    <!-- СТРОКА РАЗДЕЛА ИЛИ СТРОКА ЭКРАНА (шаг 3a). `top0` — верхний уровень: квадрат и имя раздела,
+         меры ресурсов. Без него — экран: крошка к родителю (#scr-back) и имя экрана (#modal-title,
+         его пишет openModal). Класс переключает один владелец — paintNav в panel.js. -->
+    <div class="topline top0" id="topbar">
+      <span class="back" id="scr-back" role="link" tabindex="0"><svg class="ic s" aria-hidden="true"><use href="#i-back"/></svg><span id="scr-back-t"></span></span>
+      <h2 id="sec-h" tabindex="-1"><span class="sq" id="sec-sq" style="background:var(--ink3)"><svg class="ic s" aria-hidden="true"><use href="#i-grid"/></svg></span><span id="sec-name">Обзор</span></h2>
+      <div class="grow"><h2 id="modal-title" tabindex="-1"></h2></div>
+      <!-- МЕРЫ РЕСУРСОВ — ДУГИ, а не текст: цвет отвечает на «есть ли запас» раньше, чем
+           прочитано число, и три-четыре меры рядом сравниваются взглядом. Сама дуга рисуется
+           из panel.js (`gaugeInit`): её геометрия — одна константа на весь проект (ARC_D и
+           ARC_LEN связаны радиусом), и вторая копия в разметке разъехалась бы молча.
+           Значения остаются в узлах с ПРЕЖНИМИ id (`cpu`/`ram`/`rom`) — в них пишет опрос
+           статуса, а подробности (сколько именно мегабайт) живут в подсказке и в «О роутере».
+           Накопитель — четвёртая мера, и она появляется, только когда он ВКЛЮЧЁН: у роутера
+           без флешки её нет вовсе, а «включён, но не найден» — янтарная дуга, а не пустота.
+           `skl` — СКЕЛЕТОН ПЕРВОГО КАДРА: числа до ответа статуса — «…», и читаются они как
+           «что-то сломалось», а не «ещё не спросили». Снимает класс первый ответ статуса
+           (`firstFrame` в panel.js), и больше он не возвращается. -->
+      <div class="badges skl" aria-busy="true">
+        <span class="gchip" title="Загрузка ЦП"><span class="gauge" data-g="cpu" data-ic="i-cpu"></span><span class="t" id="cpu">…</span></span>
+        <span class="gchip" title="ОЗУ"><span class="gauge" data-g="ram" data-ic="i-grid"></span><span class="t" id="ram">…</span></span>
+        <span class="gchip" title="Флеш роутера"><span class="gauge" data-g="rom" data-ic="i-disk"></span><span class="t" id="rom">…</span></span>
+        <span class="gchip" id="gc-store" title="Внешний накопитель" style="display:none"><span class="gauge" data-g="store" data-ic="i-usb"></span><span class="t" id="store">…</span></span>
+      </div>
+      <div class="hbtns">
+        <!-- «Глаз» — режим стримера, как в макете (`hbtns`: глаз и колокольчик — одна пара на обе шапки, на телефоне узел переезжает
+             в #phead целиком). Писатель режима один — setStreamer; вид кнопки рисует applyStreamer.
+             МЕНЮ «☰» ЗДЕСЬ БОЛЬШЕ НЕТ (25.09.2026): в исходном макете шапка — ровно «глаз» и колокольчик, а меню пришло из прежней
+             панели и было вписано в макет вдогонку — наоборот тому, как договорились («панель = макет»). Оба его пункта живут на
+             своих местах: «Скачать диагностику» — «Диагностика» в сайдбаре и в «Роутере», «Перезагрузить роутер» — ряд «Роутера». -->
+        <button id="btn-streamer" class="iconbtn" type="button" aria-pressed="false" title="Режим стримера — скрыть адреса и имена" aria-label="Режим стримера"><svg class="ic s" aria-hidden="true"><use href="#i-eye"/></svg></button>
+        <button id="bell" class="iconbtn" type="button" title="События роутера" aria-label="События роутера" style="position:relative">
+          <svg class="ic s" aria-hidden="true"><use href="#i-bell"/></svg>
+          <span id="bell-badge" class="bell-badge" style="display:none">0</span>
+        </button>
+      </div>
+      <!-- Модель и прошивка сюда больше не выводятся (их место — «О роутере»), но узлы живы:
+           в них пишет `t('model')`/`t('fw')`, а попап «О роутере» берёт из них подпись. -->
+      <span id="model" hidden>Xiaomi</span><span id="fw" hidden></span>
+    </div>
+    <div id="view">
+    <div class="wrap" id="scr-ov">
+
+  <!-- HERO. Цветная шапка вместо белой карточки: это единственное место панели, где видно
+       СОСТОЯНИЕ целиком, и цвет несёт его быстрее подписи. Три вида фона — норма, тревога
+       (.warn) и «выключено» (.off); тумблер красится ОТДЕЛЬНО, потому что он про НАМЕРЕНИЕ:
+       в состоянии «поднят, но не везёт» фон тревожный, а тумблер обязан остаться включённым —
+       человек ничего не выключал, и клик по нему должен ВЫКЛЮЧАТЬ, а не «включать» включённое.
+       Id-шники сохранены все до одного: в них пишет опрос статуса, и переезд разметки не должен
+       превращаться в переписывание половины panel.js.
+       `skl` — СКЕЛЕТОН ДО ПЕРВОГО ОТВЕТА СТАТУСА. Цвет шапки и положение тумблера — ФАКТЫ, и
+       рисовать их, пока роутер ещё не спрошен, значит утверждать то, чего никто не знает: зелёная
+       шапка с тумблером во «включено» и надписью «Загрузка статуса…» — это «VPN включён», сказанное
+       наугад. Поэтому в скелетоне шапка нейтральная, данные — «кости», а текст остаётся ровно
+       один: заголовок, который и говорит, что происходит. -->
+  <!-- ДВА ИНДИКАТОРА живут ОТДЕЛЬНО от состояния несущей: они про другое и гаснут сами.
+       Стоят НАД шапкой, на бумаге, а не внутри неё — и это не вкус, а ЗАМЕР: внутри hero их
+       янтарь на зелёном давал 2,5:1 при 11 px (нужно 4,5), потому что фон плашки —
+       полупрозрачный белый поверх зелёного, а не бумажный `--bg-warning`. В макете они тоже
+       над шапкой.
+       РЯД СКРЫТ С ПЕРВОГО КАДРА (`display:none`), а показывает его опрос статуса — только когда
+       горит хоть один индикатор. Раньше он стоял видимым до ответа статуса и держал над шапкой
+       зазор колонки в 14 px, а ответ его гасил — и вся страница под ним прыгала вверх ровно в тот
+       момент, когда человек начинал её читать (замер 11.09.2026). Индикатор — редкость, пустота —
+       норма: первый кадр обязан рисовать норму. -->
+  <div class="hinds" style="display:none"><span id="support-ind" role="button" tabindex="0" title="Открыт удалённый доступ разработчику — нажмите, чтобы закрыть" style="display:none;align-items:center;gap:5px;background:var(--bg-warning);color:var(--text-warning);font-size:11px;font-weight:500;padding:3px 9px;border-radius:999px;white-space:nowrap;cursor:pointer"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="9"/><path d="M15 15l3.35 3.35"/><path d="M9 15l-3.35 3.35"/><path d="M5.65 5.65l3.35 3.35"/><path d="M18.35 5.65l-3.35 3.35"/></svg>поддержка активна</span>
+        <span id="exit-ind" role="button" tabindex="0" title="Дополнительный выход включён, но его несущая не поднялась — привязанные сайты идут запасным путём. Нажмите, чтобы открыть «Дополнительные выходы»" style="display:none;align-items:center;gap:5px;background:var(--bg-warning);color:var(--text-warning);font-size:11px;font-weight:500;padding:3px 9px;border-radius:999px;white-space:nowrap;cursor:pointer"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><path d="M12 9v4"/><path d="M12 16h.01"/><path d="M10.36 3.59 2.26 17.12A1.91 1.91 0 0 0 3.9 20h16.21a1.91 1.91 0 0 0 1.63-2.88L13.64 3.6a1.91 1.91 0 0 0-3.28 0z"/></svg><span>выход не работает</span></span></div>
+  <!-- ЭЛЕМЕНТЫ УПРАВЛЕНИЯ ШАПКИ до первого ответа — inert (метка data-skl-inert: её снимает sklOff вместе со скелетоном):
+       Tab не встаёт на кости, Enter на «пинге» не зовёт пробу без сервера. Заголовок «Загрузка статуса…» НЕ inert — его
+       читалка обязана слышать (ревью приёмки, круги 1–2). -->
+  <div id="hero" class="hero skl" aria-busy="true">
+    <div class="deco"></div>
+    <div class="in">
+      <div class="row">
+        <div class="grow">
+          <h1 id="vpn-title">Загрузка статуса…</h1>
+          <div class="sub" id="vpn-sub">Запрашиваю состояние у роутера</div>
+        </div>
+        <div id="vtoggle" class="vtoggle" role="button" tabindex="0" inert data-skl-inert aria-label="Включить или выключить VPN" style="cursor:pointer"><div class="vknob"></div></div>
+      </div>
+      <!-- БЫСТРАЯ СМЕНА ПРОТОКОЛА И СЕРВЕРА прямо в шапке: это два самых частых действия, и
+           раньше они были плитками, неотличимыми от справочных «Рукопожатие»/«Пинг». -->
+      <div class="quick" inert data-skl-inert>
+        <div class="qbtn" id="proto-cell" role="button" tabindex="0" aria-haspopup="menu" aria-expanded="false" title="Сменить транспорт"><span class="lb">Протокол</span><span id="proto">…</span><svg class="ic s" aria-hidden="true"><use href="#i-down"/></svg></div>
+        <div class="qbtn" id="cfg-cell" role="button" tabindex="0" aria-haspopup="menu" aria-expanded="false" title="Выбрать сервер / конфиг"><span class="lb">Сервер</span><span id="cfg">…</span><span id="cfg-sub" class="csub"></span><svg class="ic s" aria-hidden="true"><use href="#i-down"/></svg></div>
+      </div>
+      <div class="st" inert data-skl-inert>
+        <div><div class="l">Рукопожатие</div><div class="v" id="hs">…</div></div>
+        <div id="ping-cell" title="Клик — проверить пинг ещё раз"><div class="l">Пинг <span class="icls"><span id="ping-go" role="button" tabindex="0" aria-label="Проверить пинг ещё раз"><i class="ti ti-refresh" id="ping-ref" style="font-size:11px" aria-hidden="true"></i></span><span id="ping-help"></span></span></div><div class="v" id="ping">…</div></div>
+        <!-- «СЕГОДНЯ» И «ВНЕШНИЙ IP» — четыре числа шапки, как в макете. Прежняя строка «адрес провайдера → выход» ушла в них: выход — это
+             «Внешний IP» (он же в подсказке называет адрес у провайдера), а адрес сервера — подсказкой пинга. Внешний IP виден, только пока
+             туннель везёт: иначе это адрес провайдера, и он читался бы как «выход». -->
+        <div id="today-cell" title="Весь трафик роутера за сегодня"><div class="l">Сегодня</div><div class="v" id="h-today">…</div></div>
+        <div id="eip-cell" style="display:none"><div class="l">Внешний IP</div><div class="v mono" id="h-eip">…</div></div>
+      </div>
+      <!-- ЖИВАЯ СКОРОСТЬ (шаг 2j переноса): «панель дышит» — линия трафика за пять минут прямо в
+           шапке. Видна ТОЛЬКО пока туннель везёт (класс `.on` ставит heroLiveShow по статусу).
+           Чипы — настоящие кнопки: выбор источника это вид, и он в один тап. Числа — текстом рядом
+           с картинкой, а не в ней (разбор у liveSvg в panel.js).
+           МЕСТО — ПОД СТРОКОЙ АДРЕСОВ, а не над ней (макет её не знает): адреса отвечают на тот же
+           вопрос, что статы («куда я подключён»), и должны стоять с ними; живая скорость — свой
+           раздел с разделителем. Поставленная выше, она зажимала строку адресов у своего дна —
+           проверено глазами на BE7000, стрелка адресов читалась осью графика. -->
+      <div class="hlive" id="hlive" inert data-skl-inert>
+        <div class="cap2"><span class="hl-cap">Сейчас</span>
+          <span class="lsrc onhero" id="hlive-src" role="group" aria-label="Что измерять"><button type="button" data-lsrc="tun" aria-pressed="false">через туннель</button><button type="button" data-lsrc="direct" aria-pressed="false">напрямую</button><button type="button" data-lsrc="all" aria-pressed="false">всего</button></span>
+          <span class="hl-one" id="hlive-one"></span>
+        </div>
+        <div class="hl-row">
+          <div class="hl-ch" id="hlive-ch" title="за последние пять минут"></div>
+          <div class="hl-v"><b id="hlive-rx">…</b><span id="hlive-tx">меряю…</span></div>
+        </div>
+      </div>
+      <div id="updated" style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:8px">…</div>
+    </div>
+  </div>
+
+  <!-- ЛЕНТА ТЕХНИЧЕСКОГО СОСТОЯНИЯ. Наполняет её panel.js (набор чипов зависит от того, что
+       ответил роутер), поэтому здесь только пустой контейнер: своей разметки у чипов нет и
+       писать в них по id никто не должен — лента перерисовывается целиком.
+       `skl` — два чипа-«кости» до исхода ВСЕХ ТРЁХ источников ленты — её секции, статуса и
+       настроек (`techSettle`; рисует кости CSS, разметки у них нет). Без них лента появлялась через
+       секунду после шапки и сдвигала всю колоду вниз на свою высоту. -->
+  <div class="techbar skl" id="techbar" aria-busy="true"></div>
+
+  <div id="mcards">
+  <!-- «Куда идёт трафик» — первая карточка колоды: вопрос «через кого я сейчас хожу» человек
+       задаёт раньше, чем «сколько накопилось за месяц». Разметки здесь нет по той же причине,
+       что и у остальных карточек колоды: набор строк зависит от того, сколько у роутера
+       выходов, и строит его panel.js (paintFlow) по ответу cgi-bin/traffic.
+       КЛАСС `skl` У КАРТОЧЕК КОЛОДЫ — СКЕЛЕТОН ДО ИХ ПЕРВОГО ОТВЕТА. Кости строит panel.js
+       (`cardSkel`: настоящий заголовок карточки + строки-заглушки высотой ПРОШЛОГО кадра), а
+       снимает класс только `cardFilled` — общий выход всех, кто пишет тело карточки, — ответом или
+       честным «роутер не ответил». Карточка без своего ответа роутера (журнал действий) класса не носит. -->
+  <div class="card mcard skl" data-card="flow" data-title="Куда идёт трафик">
+    <div class="lempty">загрузка…</div>
+  </div>
+  <!-- «ТРАФИК» — КАК В МАКЕТЕ (`Card('Трафик', tHead()+ChartLine({compact}))`): итог за неделю крупно, под ним «через туннель и доля · пик»,
+       ниже — линия с заливкой по дням (весь трафик серым, туннель акцентом) и легенда. Переключателей источника и окна, плиток периодов и
+       живой скорости в карточке нет: разрезы и окна — на экране «Трафик» («Подробно»), живая скорость — в шапке. Ширина — одна колонка.
+       Заголовок — общий `cardHead` (слот `data-chead`); `tr-foot` — строка под итогом, она же нота «не удалось получить». -->
+  <div class="card mcard skl" id="card-traffic" data-card="traffic" data-title="Трафик">
+    <div data-chead></div>
+    <div class="thead"><div class="big" id="tr-total">…</div><div class="tiny" id="tr-foot">Накопление трафика…</div></div>
+    <svg id="tr-chart" class="lchart" viewBox="0 0 600 170" role="img" aria-label="График трафика по дням"></svg>
+    <div class="legend"><span class="lg ln"><i style="background:var(--g1)"></i>Через туннель</span><span class="lg ln"><i style="background:var(--mute)"></i>Весь трафик</span></div>
+  </div>
+
+  <!-- КАРТОЧКИ КОЛОДЫ (шаг 2e переноса). Разметки у них здесь НЕТ — только пустая коробка с
+       именем: содержимое целиком строит panel.js по ответу роутера (набор строк зависит от
+       того, что ответили), а заголовок — общий хелпер `cardHead`. Держать статический каркас
+       и рисовать в него по id значило бы вести разметку в двух местах — за это в проекте уже
+       платили на мерах ресурсов и на ленте состояния.
+       `data-title` обязателен: он же становится подписью СВЁРНУТОЙ карточки.
+       А ВОТ `id` У НИХ НЕТ — И ЭТО ВАЖНО. Пространство `id="card-*"` уже занято ПЛИТКАМИ
+       «Разделов настроек» (`card-devices`, `card-servers`, …), которые каркас разносит по
+       разделам через `getElementById`. Карточка колоды с таким же id забирала бы вызов себе
+       и УЕЗЖАЛА в раздел вместо плитки — поймано на живом BE7000 сразу после заливки:
+       «Устройства в сети» исчезли с «Обзора», а «Маршрутизация» получила пустую карточку.
+       Колода адресуется `data-card` — это и есть её идентичность (в нём же живёт раскладка). -->
+  <div class="card mcard skl" data-card="exits" data-title="Дополнительные выходы">
+    <div class="lempty">загрузка…</div>
+  </div>
+  <!-- «Подписки» стоят рядом с выходами, а не в разделе «Соединение»: вопрос «сколько ещё
+       работает» задают КАРТОЧКЕ чаще, чем открывают раздел, — и ответ на него меняется сам
+       собой, без единого действия человека. -->
+  <div class="card mcard skl" data-card="subs" data-title="Подписки">
+    <div class="lempty">загрузка…</div>
+  </div>
+  <div class="card mcard w2 skl" data-card="devices" data-title="Устройства в сети">
+    <div class="lempty">загрузка…</div>
+  </div>
+  <div class="card mcard skl" data-card="events" data-title="События">
+    <div class="lempty">загрузка…</div>
+  </div>
+  <div class="card mcard skl" data-card="ram" data-title="Что занимает память">
+    <div class="lempty">загрузка…</div>
+  </div>
+
+  <!-- Журнал действий — такая же карточка колоды, как «Трафик»: у неё появляются ручка
+       перетаскивания, стрелки и сворачивание, а порядок едет на роутер вместе с остальными.
+       Раньше он стоял ОТДЕЛЬНО внизу страницы и в раскладке не участвовал вовсе. -->
+  <div class="card mcard" id="card-log" data-card="log" data-title="Журнал действий">
+    <!-- Заголовок КАРТОЧКИ, а не полосы-ручки: `.mc-title` в шапке колоды скрыт намеренно (он
+         виден только у свёрнутой). Слот тот же, что у «Трафика»: оболочку строит `cardHead`,
+         а «Очистить» — СВОЁ действие карточки, не переход, поэтому живёт в слоте со своим id
+         (слушатель вешается раньше, чем строится оболочка, и переезжает вместе с узлом). -->
+    <div data-chead>
+      <button data-act id="btn-logclear" type="button" class="cact">Очистить</button>
+    </div>
+    <!-- Строки рисует модель журнала (`ACT_LOG` в panel.js): та же запись идёт и на экран «Журнал действий» раздела «Панель». -->
+    <div id="log" class="actlog" data-actlog></div>
+  </div>
+  <!-- «Добавить карточку» — НЕ карточка колоды: у неё нет `data-card`, поэтому её не двигают,
+       не сворачивают и не выключают, а `setupCards` не оборачивает её шапкой. Место — всегда
+       последняя ячейка (за этим следит addcardLast: расстановка карточек перемещает узлы в
+       конец). Это же единственный путь обратно, если человек выключил ВСЕ карточки. -->
+  <div class="addcard" role="button" tabindex="0" data-cact="cards"><svg class="ic s" aria-hidden="true"><use href="#i-plus" xlink:href="#i-plus"/></svg><span>Добавить карточку</span></div>
+  </div>
+
+  <div class="row" style="gap:9px;justify-content:flex-start">
+    <!-- Как в макете (`Btns` «Обзора»): «Починить правила» и «Скачать логи» со знаками; режим стримера — «глазом» в шапке. -->
+    <button id="btn-repair" class="btn" type="button"><svg class="ic s" aria-hidden="true"><use href="#i-refresh"/></svg><span>Починить правила</span></button>
+    <a id="btn-diag" class="btn gh btn-link" href="/cgi-bin/diag?full=1" download title="Скачать архив: состояние роутера и все логи, включая системный (ключи не попадают, маскировка частичная — просмотрите перед отправкой)"><svg class="ic s" aria-hidden="true"><use href="#i-dl"/></svg><span class="t">Скачать логи</span></a>
+    <span id="busy" style="font-size:12px;color:var(--text-tertiary)"></span>
+  </div>
+
+  <div id="nav-block" class="mcard nav-block" data-card="nav" data-title="Разделы настроек">
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+    <!-- ДВЕРИ РАЗДЕЛА «СОЕДИНЕНИЕ» (шаг 3b переноса) вместо плиток. Id прежние: по ним panel.js вешает
+         переход (`wireCard`) и пишет подписи (`card-mode-sub`) и видимость (`card-byedpi`), а раздел
+         собирает `buildSections` по SEC_TILES. Дверь — <div role="button">: Enter и пробел ей даёт wireCard.
+         Двери «Подписки» и «Дополнительные выходы» пока ведут туда, где эти списки живут сегодня, —
+         на «Серверы» (своих экранов у них ещё нет, `cardGo`). -->
+    <div class="door" id="card-transport" role="button" tabindex="0"><span class="bar" style="background:var(--g1)"></span><span class="sq" style="background:var(--g1)"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg></span><div class="grow"><div class="nm">Транспорт</div><div class="ds">чем выходим: 5 движков, что установлено</div></div><span class="chip acc" id="card-transport-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-servers" role="button" tabindex="0"><span class="bar" style="background:var(--g1)"></span><span class="sq" style="background:var(--g1)"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg></span><div class="grow"><div class="nm">Серверы и конфиги</div><div class="ds">awg · xray · hy2 · импорт ссылок и QR</div></div><span class="chip" id="card-servers-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-subs" role="button" tabindex="0"><span class="bar" style="background:var(--g1)"></span><span class="sq" style="background:var(--g1)"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></span><div class="grow"><div class="nm">Подписки</div><div class="ds">пулы vless:// · автообновление по расписанию</div></div><span class="chip" id="card-subs-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-exits" role="button" tabindex="0"><span class="bar" style="background:var(--g2)"></span><span class="sq" style="background:var(--g2)"><svg class="ic" aria-hidden="true"><use href="#i-route"/></svg></span><div class="grow"><div class="nm">Дополнительные выходы</div><div class="ds">второй и третий путь наружу для части трафика</div></div><span class="chip" id="card-exits-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-mode" role="button" tabindex="0"><span class="bar" style="background:var(--g1)"></span><span class="sq" style="background:var(--g1)"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></span><div class="grow"><div class="nm">Режим и резервирование</div><div class="ds" id="card-mode-sub">—</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <!-- ДВЕРИ РАЗДЕЛА «СЕТЬ» (шаг 5a переноса). Id `card-wifi` и `card-blocking` прежние (по ним вешает переход
+         wireCard); «Шифрованный DNS», «Свои имена» и «Параметры сети» — новые экраны, до шага 5a они жили внутри
+         «Настроек». Чипы — ФАКТЫ роутера: у DNS — чем шифруется сейчас (опрос ленты `tech`), у своих имён — сколько
+         их (спрашивает показ раздела, `nwShow`); нет ответа — чипа нет. -->
+    <div class="door" id="card-wifi" role="button" tabindex="0"><span class="bar" style="background:var(--g3)"></span><span class="sq" style="background:var(--g3)"><svg class="ic" aria-hidden="true"><use href="#i-wifi"/></svg></span><div class="grow"><div class="nm">Wi-Fi и подсети</div><div class="ds">сети, гостевая, кто как подключён</div></div><span class="chip" id="card-wifi-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-dns" role="button" tabindex="0"><span class="bar" style="background:var(--g3)"></span><span class="sq" style="background:var(--g3)"><svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg></span><div class="grow"><div class="nm">Шифрованный DNS</div><div class="ds">DoH и DoT · что видит провайдер</div></div><span class="chip acc" id="card-dns-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-hosts" role="button" tabindex="0"><span class="bar" style="background:var(--g3)"></span><span class="sq" style="background:var(--g3)"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg></span><div class="grow"><div class="nm">Свои имена</div><div class="ds">домен → адрес вручную для всей сети</div></div><span class="chip" id="card-hosts-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-vpnsrv" role="button" tabindex="0"><span class="bar" style="background:var(--g1)"></span><span class="sq" style="background:var(--g1)"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg></span><div class="grow"><div class="nm">Доступ домой</div><div class="ds">подключиться к роутеру снаружи</div></div><span class="chip" id="card-vpnsrv-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door wide2" id="card-checks" role="button" tabindex="0"><span class="bar" style="background:var(--g1)"></span><span class="sq" style="background:var(--g1)"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></span><div class="grow"><div class="nm">Проверка серверов</div><div class="ds">автопроверка, тест скорости, балансер</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <!-- ДВЕРИ РАЗДЕЛА «ПАНЕЛЬ» (шаг 7a переноса) вместо плиток «Уведомления» и «Настройки». «Настроек» больше нет: DNS, сеть,
+         проверка серверов, списки и удаление разошлись по разделам раньше, а доступ и вид — свои экраны. Чипы — ФАКТЫ роутера:
+         у доступа — главное о входе (спрашивает показ раздела, `pnShow`), у событий — непрочитанные (то же число, что у колокольчика). -->
+    <div class="door" id="card-access" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg></span><div class="grow"><div class="nm">Доступ к панели</div><div class="ds">HTTPS, вход снаружи, пароль, второй фактор</div></div><span class="chip" id="card-access-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-view" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg></span><div class="grow"><div class="nm">Вид</div><div class="ds">тема, язык, карточки главной, режим стримера</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-notify" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-mail"/></svg></span><div class="grow"><div class="nm">Уведомления</div><div class="ds">письма о падении VPN и уходе на резерв</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-events" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-bell"/></svg></span><div class="grow"><div class="nm">События</div><div class="ds">что происходило с роутером</div></div><span class="chip acc" id="card-events-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door wide" id="card-actlog" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg></span><div class="grow"><div class="nm">Журнал действий</div><div class="ds">что делали в панели в этой вкладке</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-packages" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-cpu"/></svg></span><div class="grow"><div class="nm">Компоненты</div><div class="ds">какие движки стоят · установка и снятие</div></div><span class="chip" id="card-packages-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <!-- СКРЫТА: публичный репозиторий заморожен ⇒ апдейтеру нечего предлагать (защита от
+         даунгрейда всё равно откажет — там версия старее нашей), а кнопка «Проверить
+         обновления» отвечала бы «обновлений нет» на живом канале. Разметку и openUpdate НЕ
+         удаляем: вернуть дверь = снять display:none. Идиома та же, что у card-byedpi ниже. -->
+    <div class="door" id="card-update" role="button" tabindex="0" style="display:none"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></span><div class="grow"><div class="nm">Обновление</div><div class="ds">версия и обновление скриптов</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <!-- Место и память — свои экраны (шаг 6b): раньше жили внутри «Компонентов» и «О роутере». Чип двери места — только
+         «накопитель не найден» (его ставит опрос статуса): заполнение и так на дуге над дверями. -->
+    <div class="door" id="card-disk" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-usb"/></svg></span><div class="grow"><div class="nm">Место и накопитель</div><div class="ds">что занимает флеш · вынос на накопитель · чистка</div></div><span class="chip wr" id="card-disk-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-ram" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-grid"/></svg></span><div class="grow"><div class="nm">Память и процессы</div><div class="ds">кто ест оперативную память · наше и прошивка</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-byedpi" role="button" tabindex="0" style="display:none"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-zap"/></svg></span><div class="grow"><div class="nm">ByeDPI</div><div class="ds">десинк через socks · стратегии и проверка</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-zapret" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-zap"/></svg></span><div class="grow"><div class="nm">Zapret</div><div class="ds">десинк напрямую · nfqws · пулы категорий</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-blocking" role="button" tabindex="0"><span class="bar" style="background:var(--g3)"></span><span class="sq" style="background:var(--g3)"><svg class="ic" aria-hidden="true"><use href="#i-ban"/></svg></span><div class="grow"><div class="nm">Блокировка</div><div class="ds">реклама и трекеры · вредоносные адреса</div></div><span class="chip" id="card-blocking-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-tune" role="button" tabindex="0"><span class="bar" style="background:var(--g3)"></span><span class="sq" style="background:var(--g3)"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg></span><div class="grow"><div class="nm">Параметры сети</div><div class="ds">IPv6, MTU туннеля, память туннеля</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-backup" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-disk"/></svg></span><div class="grow"><div class="nm">Бэкап настроек</div><div class="ds">выгрузить и восстановить</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-diag" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-dl"/></svg></span><div class="grow"><div class="nm">Диагностика</div><div class="ds">архив состояния и логов для разбора</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-support" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-life"/></svg></span><div class="grow"><div class="nm">Режим поддержки</div><div class="ds">временный доступ разработчику</div></div><span class="chip" id="card-support-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-console" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-term"/></svg></span><div class="grow"><div class="nm">Консоль</div><div class="ds">командная строка роутера</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-info" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-router"/></svg></span><div class="grow"><div class="nm">О роутере</div><div class="ds">модель, платформа, ядро, время работы</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <div class="door" id="card-uninstall" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></span><div class="grow"><div class="nm">Удаление</div><div class="ds">отключить или снять систему полностью</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+  </div>
+  </div>
+
+</div>
+    <!-- Экран раздела. Атрибута `hidden` здесь НЕТ намеренно: у `.vwrap` собственный
+         `display:flex`, а авторский стиль сильнее правила браузера `[hidden]` — узел
+         был бы помечен скрытым и при этом ВИДЕН. Показ и скрытие делает paintSec()
+         через `style.display`, и это единственный владелец. -->
+    <div class="vwrap" id="scr-sec" style="display:none"></div>
+    <!-- ЭКРАН — СТРАНИЦА РАЗДЕЛА (шаг 3a), а не слой поверх панели. id `modal`/`modal-body` сохранены:
+         по ним экран находят все open*-функции и гарды фоновых циклов. Своей шапки с крестиком у
+         экрана больше нет — имя и крошка к родителю живут в строке раздела (#modal-title, #scr-back). -->
+    <div id="modal" class="modal" role="region" aria-labelledby="modal-title">
+      <div class="modal-card"><div id="modal-body"></div></div>
+    </div>
+    <!-- СМЕШАННЫЙ НАБОР ФАЙЛОВ (ревью шага 3a): прежний panel.js (ствол main) на старте БЕЗУСЛОВНО вешает
+         обработчик на #modal-close. Доехал новый index.html, а panel.js нет — без этого узла прежний скрипт
+         падает уже после своего маркера, страховка ниже молчит, и заставка остаётся навсегда. Узел скрыт и
+         ничего не делает; держит его C104 (узлы, которые прежний panel.js берёт без проверки). -->
+    <button id="modal-close" type="button" hidden tabindex="-1" aria-hidden="true"></button>
+    </div>
+    <!-- ПОДВАЛ ТЕЛЕФОНА (макет: `pfoot`) — ссылки проекта и версия под любым экраном. Своей разметки у него нет: на телефоне
+         сюда ПЕРЕЕЗЖАЕТ подвал сайдбара (`.sfoot`, placeChrome в panel.js) — версию пишет один узел, и копии не разъедутся. -->
+    <div class="pfoot" id="pfoot"></div>
+    <!-- ТАБ-БАР телефона. Шесть колонок = шесть разделов; седьмого пункта здесь не будет:
+         «Поддержка» и «Диагностика» живут в «Роутере», а не в главной навигации. -->
+    <nav class="tabbar" id="tabbar">
+    <div data-go="ov"><svg class="ic s" aria-hidden="true"><use href="#i-grid"/></svg>Обзор</div>
+    <div data-go="cn"><svg class="ic s" aria-hidden="true"><use href="#i-globe"/></svg>Соединение</div>
+    <div data-go="rt"><svg class="ic s" aria-hidden="true"><use href="#i-route"/></svg>Маршруты</div>
+    <div data-go="nw"><svg class="ic s" aria-hidden="true"><use href="#i-wifi"/></svg>Сеть</div>
+    <div data-go="rr"><svg class="ic s" aria-hidden="true"><use href="#i-cpu"/></svg>Роутер</div>
+    <div data-go="pn"><svg class="ic s" aria-hidden="true"><use href="#i-sliders"/></svg>Панель</div>
+    </nav>
+  </main>
+</div>
+
+<div id="toast" role="status" aria-live="polite"><span id="toast-sp" class="sp"></span><span id="toast-msg"></span></div>
+
+
+<script src="assets/panel.js?v=100000"></script>
+<!-- СТРАХОВКА ОТ СМЕШАННОГО НАБОРА ФАЙЛОВ (шаг 2k, найдено независимым ревью, круг 4). Этот скрипт
+     исполняется СТРОГО после panel.js (скрипты без async идут по порядку) и смотрит на его маркер.
+     Маркера нет — скрипт панели не пришёл, не разобрался или ОСТАЛСЯ ОТ ПРОШЛОЙ ВЕРСИИ (обновление
+     доехало не полностью: index.html новый, panel.js старый). Старый скрипт заставку и кости снимать
+     не умеет, и панель была бы закрыта навсегда; «обновить страницу» тоже не спасает — браузер держит
+     подресурс по новому ?v= со СТАРЫМИ байтами. Поэтому здесь: заставку и кости долой (старая панель
+     работает, как работала до шага, и обновление можно повторить из неё), а плашка говорит, что делать.
+     Медленный скрипт сюда не попадает — эта строка ждёт его загрузки.
+     Прокрутку браузер при перезагрузке ВОССТАНАВЛИВАЕТ (замер на железе: перезагрузились с 400 px —
+     плашка на −386 px), а перезагружают страницу как раз оттуда, где были. Плашка наверху страницы
+     осталась бы за краем экрана, и человек видел бы «обновление не применилось» без объяснения ⇒ в
+     этом режиме страница открывается сверху. Режим прокрутки живёт в ЗАПИСИ ИСТОРИИ: переживает
+     перезагрузку, а pushState разделов копирует его дальше, — поэтому целая панель возвращает его
+     назад, иначе починившаяся вкладка так и не восстанавливала бы прокрутку (независимое ревью, круг 5).
+     Читалке плашка объявляется ПОСЛЕ загрузки: текст, стоявший в живой области с первого кадра, она
+     читает по порядку, как обычный, а замена текстового узла — это изменение, и `role=alert` его
+     объявит (то же ревью). Логику страховки исполняет стенд local/index-fallback-test.js. -->
+<script>
+  (function(){
+    var sr=('scrollRestoration' in history), ff=window.__enodiaFirstFrame|0;
+    // Маркер — УРОВЕНЬ контракта с разметкой (разбор у маркера в panel.js). inert элементов управления шапки (метка
+    // data-skl-inert) снимает sklOff скрипта уровня 2 и выше; скрипт, который его не знает, — и не пришедший, и ПРОШЛЫЙ (уровень 1:
+    // маркер есть, заставку и кости он снимает сам), — оставил бы шапку глухой к щелчку и Tab навсегда (ревью приёмки, круги 2–3).
+    if(ff<2){ var n=document.querySelectorAll('[data-skl-inert]'); for(var j=0;j<n.length;j++){ n[j].removeAttribute('inert'); n[j].removeAttribute('data-skl-inert'); } }
+    if(ff){
+      try{ if(sr && history.scrollRestoration==='manual') history.scrollRestoration='auto'; }catch(e){}
+      return;
+    }
+    var s=document.getElementById('splash'); if(s && s.parentNode) s.parentNode.removeChild(s);
+    var k=document.querySelectorAll('.skl');
+    for(var i=0;i<k.length;i++){ k[i].classList.remove('skl'); k[i].removeAttribute('aria-busy'); }
+    var m=document.getElementById('mixwarn'); if(!m) return;
+    var msg = (document.documentElement.getAttribute('lang')==='en')
+      ? 'The panel loaded incompletely: its script did not arrive or is left from a previous version (the update did not arrive in full). Reload the page bypassing the cache (Ctrl+Shift+R); if that does not help, repeat the update.'
+      : 'Панель загрузилась не полностью: её скрипт не пришёл или остался от прошлой версии (обновление доехало не целиком). Обновите страницу без кэша (Ctrl+Shift+R); не поможет — повторите обновление.';
+    m.textContent=msg; m.style.display='';
+    try{ if(sr) history.scrollRestoration='manual'; }catch(e){}
+    window.scrollTo(0,0);
+    window.addEventListener('load', function(){ setTimeout(function(){ m.textContent=msg; }, 400); });
+  })();
+</script>
+</body>
+</html>

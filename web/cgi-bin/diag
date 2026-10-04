@@ -1,0 +1,64 @@
+#!/bin/sh
+# cgi-bin/diag — выгрузка диагностического СРЕЗА (логи + состояние) ФАЙЛОМ из веб-панели.
+# Зеркало ПК-действия DiagDump: гоняет dump.sh, который САМ redact-ит ключи и публичные
+# IP (артефакт безопасно шарить). Read-only. Отдаётся как text-вложение; за HTTP-Basic, как
+# вся панель. EOL строго LF (CGI исполняется по shebang).
+# 2FA-гейт (totp.sh) — см. разбор в cgi-bin/status. Срез несёт состояние роутера целиком,
+# поэтому гейт стоит ДО его сборки, а не только перед отдачей.
+# uhttpd НЕ ПЕРЕДАЁТ CGI своё окружение (замер на железе 01.09.2026 пробным CGI: все ENODIA_*
+# пусты), а в режиме «всё на накопителе» литералы указывают в пустоту — панель отвечала бы
+# «ничего не установлено» на живой системе, а ГЕЙТ ВТОРОГО ФАКТОРА ниже просто не находил бы
+# totp.sh и молча пропускал запрос. Каталог кода знаем бесплатно из $0, остальное разбирает
+# cgi-paths.sh: второй копии этого рассуждения в проекте быть не должно.
+_cgid=${0%/web/cgi-bin/*}; [ "$_cgid" = "$0" ] && _cgid=
+if [ -n "$_cgid" ] && [ -f "$_cgid/cgi-paths.sh" ]; then . "$_cgid/cgi-paths.sh"; fi
+# СВОЁ ОБЪЯВЛЕНИЕ — ПОСЛЕ ИСТОЧНИКА (разбор в cgi-bin/backup, следит C62): раньше литерал флеша
+# выигрывал у cgi-paths.sh, и в раскладке `full` кнопка «Диагностика» отвечала «dump.sh не найден
+# — обнови скрипты» при живом dump.sh (замер 02.09.2026), а гейт 2FA молча пропускал запрос.
+ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
+if [ -f "$ENODIA_DIR/totp.sh" ]; then
+	TOTP_LIB=1; . "$ENODIA_DIR/totp.sh"
+	# СУДИМ ПО СПОСОБНОСТИ, А НЕ ПО НАЛИЧИЮ. totp.sh СТАРЕЕ формы входа сорсится успешно, но его
+	# гейт при выключенном 2FA пропускал всё — а uhttpd к этому моменту уже поднят БЕЗ `-c`, то
+	# есть панель отдавала бы данные и ДЕЙСТВИЯ без пароля. Признак эпохи — pw_verify (его же
+	# спрашивает cgi-bin/login).
+	command -v pw_verify >/dev/null 2>&1 || {
+		echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+		echo "Cache-Control: no-store"; echo ""
+		printf '{"ok":false,"need_login":true,"msg":"totp.sh старее формы входа (обновите панель)"}\n'; exit 0; }
+	totp_gate_deny
+else   # НЕТ totp.sh — ОТКАЗ, А НЕ ПРОПУСК: двери-Basic больше нет, пускать некому (разбор — в totp.sh, «Гейт»)
+	echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+	echo "Cache-Control: no-store"; echo ""
+	printf '{"ok":false,"need_login":true,"msg":"totp.sh не установлен (обновите панель)"}\n'; exit 0
+fi
+ts=$(date +%Y%m%d-%H%M%S 2>/dev/null)
+case "$ts" in ''|*[!0-9-]*) ts=diag ;; esac
+
+# ?full=1 — АРХИВ (.tar.gz): срез + логи подсистем + системный лог роутера (в т.ч. ротированный
+# на флеш, он единственный переживает перезагрузку) + kernel panic. Именно его качает кнопка
+# панели: на «почему роутер ребутнулся ночью» текстовый срез не отвечает в принципе.
+# Сборку и МАСКИРОВКУ целиком делает dump.sh (верб archive) — здесь только заголовки и
+# гейт: своей копии логики CGI не держит, иначе перечень файлов и redact разъедутся с дампом.
+# Поток идёт из tar в сокет напрямую, как в cgi-bin/backup, — на флеш ничего не пишем.
+if [ -f "$ENODIA_DIR/dump.sh" ]; then
+	case "$QUERY_STRING" in
+	*full=1*)
+		echo "Content-Type: application/gzip"
+		echo "Content-Disposition: attachment; filename=enodia-diag-$ts.tar.gz"
+		echo "Cache-Control: no-store"
+		echo ""
+		sh "$ENODIA_DIR/dump.sh" archive 2>/dev/null
+		exit 0 ;;
+	esac
+fi
+
+echo "Content-Type: text/plain; charset=utf-8"
+echo "Content-Disposition: attachment; filename=enodia-diag-$ts.txt"
+echo "Cache-Control: no-store"
+echo ""
+if [ -f "$ENODIA_DIR/dump.sh" ]; then
+	sh "$ENODIA_DIR/dump.sh" 2>&1
+else
+	echo "dump.sh не найден на роутере — обновите скрипты роутера: переустановите панель с компьютера (enodia.py)."
+fi

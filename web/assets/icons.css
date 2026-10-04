@@ -1,0 +1,19 @@
+@font-face{font-family:"tabler-icons";font-style:normal;font-weight:400;src:url("icons.woff2") format("woff2")}
+.ti{font-family:"tabler-icons"!important;font-style:normal;font-weight:400;font-variant:normal;text-transform:none;line-height:1;display:inline-block;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+.ti-router:before{content:"\eb18"}
+.ti-cpu:before{content:"\ef8e"}
+.ti-server-2:before{content:"\f07c"}
+.ti-database:before{content:"\ea88"}
+.ti-shield-check:before{content:"\eb22"}
+.ti-shield-off:before{content:"\ecf8"}
+.ti-world:before{content:"\eb54"}
+.ti-chevron-right:before{content:"\ea61"}
+.ti-devices:before{content:"\eb87"}
+.ti-list-search:before{content:"\eea9"}
+.ti-wifi:before{content:"\eb52"}
+.ti-mail:before{content:"\eae5"}
+.ti-refresh:before{content:"\eb13"}
+.ti-brand-telegram:before{content:"\ec26"}
+.ti-heart:before{content:"\eabe"}
+.ti-flask:before{content:"\ebd2"}
+.ti-list:before{content:"\eb6b"}

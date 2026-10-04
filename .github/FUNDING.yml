@@ -1,0 +1,10 @@
+# Кнопка «Sponsor» в шапке репозитория (её включает галочка Settings → Features → Sponsorships).
+# GitHub Sponsors (строка github:) не подключён — только свои ссылки (custom:, до четырёх).
+# Последняя ведёт к разделу «Поддержать автора» в README: там все кошельки и реферальные VPS.
+# Якорь — свой английский `<a id="donate">` у заголовка, а не авто-якорь GitHub из кириллицы: тот в
+# боковой панели и при копировании ссылки превращается в %D0%BF…, а `donate` один на обе версии README.
+# Имя репозитория меняется вместе со ссылками README при переносе.
+custom:
+  - https://web.tribute.tg/d/LtA
+  - https://t.me/tribute/app?startapp=dLtA
+  - https://github.com/Axel173/enodia#donate

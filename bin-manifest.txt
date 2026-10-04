@@ -1,0 +1,27 @@
+# bin-manifest.txt — что лежит в bin/<арка>/: РАЗМЕР (байты), ВЕРСИЯ и SHA256 каждого бинаря.
+# Генерится dev/build-bin-manifest.ps1 из реальных файлов; правки руками затрутся.
+# Едет В ПОДПИСАННОМ пакете кода: с его sha256 роутер сверяет каждый бинарь (gh-update.sh fetch-bin/bin-stage/bin-status).
+# Формат: имя<TAB>арка<TAB>байты<TAB>версия<TAB>sha256   (# — комментарий)
+#
+# Размер тут = размер СЖАТОГО UPX файла в репо, т.е. ровно то, что займёт /data после
+# установки (на роутер кладётся байт-в-байт, не распаковывая).
+amneziawg-go	arm64	1023240	v3.1.20260814	932ea5bc2c8da716dc1a825bc3e4978616719304226207c2f668781fe0b036e9
+amneziawg-go	armv7	1028928	v3.1.20260814	d1226b6517e25e0b61058124f46ec6e0ff9378e234a5bdf3f974fccc90ef5432
+awg	arm64	139300	v3.1.20260812	68a2405d10469fffbd08ed790d71af869473c655e2de09d622fab4624f47e195
+awg	armv7	152180	v3.1.20260812	c8643601ddb6fbf19f297dcae8121a0efa4113bc92ad3a8af7fad6d2256c56b0
+byedpi	arm64	138376	0.17.3	b9a7c62a33c60400833b9f6906cd1c19c4b886f535fa6379c72095bd15319cda
+byedpi	armv7	64244	0.17.3	0feace0f804dcce9c22c5fbf93aadb072e0144adf3a49966f38e1d17b3c8349e
+dot-proxy	arm64	307088	1.4	e530a709dbc01462e7ec610c3e2de59cfccbc780291945e52457c647ece18df2
+dot-proxy	armv7	307348	1.4	5309428414fed74cdc17ec148acc9b03500f4b91b6cdc64506030c82f111d1d8
+hev	arm64	157404	2.17.1	d7fcab12668647debaf14f0a4bd626f7d420218c9d9fcd43cfe6336490fcd12d
+hev	armv7	134820	2.17.1	0def92423626a12faa6ad4d9af227612f4e2ec59788c625c74d378f46e71bf2f
+https-dns-proxy	arm64	635576	own-2026-08-31	07a020e60f0bcfc75db4d24582e2421e18bd5288941f63ecd675cf9507ccaa95
+https-dns-proxy	armv7	630000	own-2026-08-31	751c0e47e7bcaa9c7840e930730d50ec839d33e4068f758edc7dd8e1487aec09
+hysteria	arm64	5240976	v2.12.2	bb819a1f482c86eb5eea942d690d0e31f64cb766bed6a9ba0cd2d10cbd199f8b
+hysteria	armv7	5198796	v2.12.2	561096278ea834e6be84b1844c505e560af5274e052dec388014474235d6b6b1
+nfqws	arm64	125444	v72.13	75fc3d6352eb9ebf510dfa470797c5ea079c475755ae3c0a79b1e9aaaf0c37a6
+nfqws	armv7	121688	v72.13	a6281e65fdd74f1d72be2b6b86c4b8c068c275fd3ae35abe520921fb551d3058
+panel-tls	arm64	295816	own-2026-08-31	3be1640ecdb5842d3ee9753bbe43bdf7dc3b22b1a78e3537a0d3c954bbd0ff8b
+panel-tls	armv7	295200	own-2026-08-31	396166a3c7ed7e29e6c1b0ba76cb02252f53273cbb85209eca97819843ed080e
+xray	arm64	8175020	26.7.28	b0aa44408498ae0eeae46d82fdbb8f15c9f7967bfb8a182459f37752c48e176f
+xray	armv7	7992848	26.7.28	0ce7e57df044451da2bf42f45d3bde33143f8ca645f7538cc268c019f8dd6130

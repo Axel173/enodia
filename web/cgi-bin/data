@@ -1,0 +1,1488 @@
+#!/bin/sh
+# cgi-bin/data — READ-ONLY данные для карточек панели (Устройства / Сайты / Wi-Fi /
+# Уведомления). Один CGI на 4 раздела, секция выбирается ?section=<имя> в QUERY_STRING.
+# Зовётся GET-ом из панели (за HTTP-Basic). Ничего не меняет — только читает
+# DHCP-лизы, хранилища apply-bypass, dnsmasq-конфиг доменов, hostapd и флаги notify.
+# Управляющие действия — отдельный cgi-bin/action (POST + CSRF-токен).
+#
+# Имя секции берём из фиксированного белого списка (case) → инъекция невозможна,
+# QUERY_STRING нигде в shell-команду не попадает.
+# 2FA-гейт (totp.sh) — см. разбор в cgi-bin/status.
+# uhttpd НЕ ПЕРЕДАЁТ CGI своё окружение (замер на железе 01.09.2026 пробным CGI: все ENODIA_*
+# пусты), а в режиме «всё на накопителе» литералы указывают в пустоту — панель отвечала бы
+# «ничего не установлено» на живой системе, а ГЕЙТ ВТОРОГО ФАКТОРА ниже просто не находил бы
+# totp.sh и молча пропускал запрос. Каталог кода знаем бесплатно из $0, остальное разбирает
+# cgi-paths.sh: второй копии этого рассуждения в проекте быть не должно.
+_cgid=${0%/web/cgi-bin/*}; [ "$_cgid" = "$0" ] && _cgid=
+if [ -n "$_cgid" ] && [ -f "$_cgid/cgi-paths.sh" ]; then . "$_cgid/cgi-paths.sh"; fi
+if [ -f "$ENODIA_DIR/totp.sh" ]; then
+	TOTP_LIB=1; . "$ENODIA_DIR/totp.sh"
+	# СУДИМ ПО СПОСОБНОСТИ, А НЕ ПО НАЛИЧИЮ. totp.sh СТАРЕЕ формы входа сорсится успешно, но его
+	# гейт при выключенном 2FA пропускал всё — а uhttpd к этому моменту уже поднят БЕЗ `-c`, то
+	# есть панель отдавала бы данные и ДЕЙСТВИЯ без пароля. Признак эпохи — pw_verify (его же
+	# спрашивает cgi-bin/login).
+	command -v pw_verify >/dev/null 2>&1 || {
+		echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+		echo "Cache-Control: no-store"; echo ""
+		printf '{"ok":false,"need_login":true,"msg":"totp.sh старее формы входа (обновите панель)"}\n'; exit 0; }
+	totp_gate_deny
+else   # НЕТ totp.sh — ОТКАЗ, А НЕ ПРОПУСК: двери-Basic больше нет, пускать некому (разбор — в totp.sh, «Гейт»)
+	echo "Status: 403 Forbidden"; echo "Content-Type: application/json; charset=utf-8"
+	echo "Cache-Control: no-store"; echo ""
+	printf '{"ok":false,"need_login":true,"msg":"totp.sh не установлен (обновите панель)"}\n'; exit 0
+fi
+echo "Content-Type: application/json; charset=utf-8"
+echo "Cache-Control: no-store"
+echo ""
+
+D=${ENODIA_DIR:-/data/usr/app/enodia}
+DS=${ENODIA_STATE:-/data/usr/app/enodia-state}
+DB=${ENODIA_BIN:-/data/usr/app/enodia-bin}
+EXCLUDE_CHAIN=VPN_EXCLUDE
+FORCE_CHAIN=VPN_FORCE
+
+# ГДЕ ЛЕЖИТ БИНАРЬ — спрашиваем store-lib, своей копии знания тут нет. С внешним накопителем
+# половина бинарей живёт НЕ в $D, и проверки вида `-x "$DB/nfqws"` начинали отвечать «не
+# установлен» о работающем компоненте: карточка Zapret рисовала «поставь nfqws» при живом
+# десинке, «Серверы» просили бинарь у готового xray. Ответ обязан быть ОДИН на весь проект —
+# он в store-lib.sh, и CGI не исключение (в `.sh` эта библиотека подключена везде).
+# Сорсить ТОЛЬКО под `[ -f ]`: провалившийся `.` в busybox ash — фатальная ошибка спецбилтина,
+# шелл выходит НА МЕСТЕ, и шим ниже стал бы мёртвым кодом (см. карту проекта).
+if [ -f "$D/store-lib.sh" ]; then . "$D/store-lib.sh"; fi
+command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$D/$1"; }
+
+# КОМУ ПРИНАДЛЕЖИТ АДРЕС — тоже не наше знание: аренды, neighbor, privacy-MAC и снимок «для кого
+# заводили правило» живут в lease-lib.sh. Без библиотеки (старая установка, неполный payload)
+# секция устройств обязана работать ровно как раньше — отсюда шимы-пустышки: новые поля просто
+# не появятся, а список останется прежним.
+if [ -f "$D/lease-lib.sh" ]; then . "$D/lease-lib.sh"; fi
+command -v owner_get     >/dev/null 2>&1 || owner_get()     { return 1; }
+# Правила по портам: какая строка действует, нормализованная форма портов и «адрес ли источник» — port-lib.sh, тот же разбор, по
+# которому apply-bypass.sh ставит цепочку. Подключаем ЗДЕСЬ, до секций: им пользуются и список устройств, и сами правила.
+command -v ip_owner_now  >/dev/null 2>&1 || ip_owner_now()  { return 1; }
+if [ -f "$D/port-lib.sh" ]; then . "$D/port-lib.sh"; fi
+command -v lease_ip_of_mac >/dev/null 2>&1 || lease_ip_of_mac() { return 1; }
+# Шим ПУСТОЙ (не «ошибка»): устройства без аренды — надстройка над списком, и без библиотеки он
+# обязан остаться прежним, а не пропасть целиком.
+command -v neigh_pairs   >/dev/null 2>&1 || neigh_pairs()   { return 0; }
+command -v mac_is_random >/dev/null 2>&1 || mac_is_random() { return 1; }
+# У ЭТОГО шима код 0 («адрес местный»), а не 1, как у соседей: он гейтит ПРЕДУПРЕЖДЕНИЕ, и без
+# библиотеки «не смог проверить» обязано читаться как «претензий нет». Верни он 1 — панель после
+# неполного обновления пометила бы «адрес не из вашей сети» КАЖДОЕ устройство.
+command -v ip_is_local   >/dev/null 2>&1 || ip_is_local()   { return 0; }
+
+# jesc <лимит> — «текст роутера → строка внутри JSON» (json-lib.sh, одна копия на проект).
+# Здесь этот конвейер был скопирован ЧЕТЫРЕЖДЫ и в прежнем, дефектном виде: обрезка шла ПОСЛЕ
+# экранирования (на границе мог остаться нечётный `\` — сломанный JSON ВСЕГО ответа), `cut -c`
+# резал БАЙТАМИ по кириллице, а сырой TAB никто не снимал. Цена не теоретическая: сводка
+# подписок (.subs-last) на трёх подписках была 263 байта из тогдашнего лимита 300 — четвёртая обрывала
+# сообщение посреди буквы (с 24.09.2026 сводку режет по записи сам писатель — subs-lib.sh::sub_sum_cut).
+# Шим = ПРЕЖНЕЕ поведение файла, если либа не доехала.
+if [ -f "$D/json-lib.sh" ]; then . "$D/json-lib.sh"; fi
+command -v jesc >/dev/null 2>&1 || {
+	jesc() { tr -d '\033\r' | sed 's/\[[0-9;]*m//g' | tr '\n\t' '  ' | cut -c1-"$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+}
+# Данные (имена сетей) — jtxt; прежняя копия либы его не знает — ведём себя как раньше, через jesc.
+command -v jtxt >/dev/null 2>&1 || jtxt() { jesc "$1"; }
+
+# section=<имя> из QUERY_STRING (uhttpd кладёт его в env). Берём ровно поле section.
+sec=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^section=' | head -1 | cut -d= -f2)
+
+# --- Устройства: DHCP-лизы + режим каждого (split / bypass / force) ----------
+emit_devices() {
+	# Аренды читаем ЧЕРЕЗ ПЕРЕМЕННУЮ, а не литералом в шести местах: путь у dnsmasq один, но
+	# стенд (dev/devices-static-test.sh) обязан уметь подсунуть свой файл — иначе список
+	# устройств проверяется только на живом роутере. Имя переменной — то же, что у lease-lib.sh.
+	LEASES=${LEASE_FILE:-/tmp/dhcp.leases}
+	# ОДИН АДРЕС — ОДНА СТРОКА. Источников ШЕСТЬ (аренды · соседи без аренды · три хранилища
+	# режимов · порт-правила · правила по адресам), и каждый следующий обязан пропускать уже
+	# напечатанное. Раньше каждый цикл сверялся ПО-СВОЕМУ (awk по арендам плюс grep по чужим
+	# хранилищам), и адрес, лежащий сразу в двух хранилищах, печатался дважды.
+	SEEN=" "
+	seen_add() { SEEN="$SEEN$1 "; }
+	# Кавычки вокруг `$1` в ШАБЛОНЕ обязательны: строка вида `192.168.31.*`, вписанная в хранилище
+	# руками, иначе стала бы маской и молча съела бы из списка всю подсеть (стенд ловит).
+	seen_has() { case "$SEEN" in *" $1 "*) return 0 ;; esac; return 1; }
+	# «Онлайн» = пара IP|MAC есть в neighbor-таблице (lladdr, не FAILED/INCOMPLETE, недавно виден).
+	# DHCP-лиз живёт до истечения аренды → без этого список копит офлайн-устройства.
+	# Сверяем И MAC, а не только IP: устаревший лиз (устройство ушло, IP занял другой; или тот же
+	# хост сменил Wi-Fi→Ethernet и получил новый IP с другим MAC) иначе красился бы «онлайн» и
+	# тащил чужое/старое имя — ровно тот баг, когда имя в панели не совпадает с родной мордой.
+	# MAC — В НИЖНИЙ РЕГИСТР: аренды и neigh печатают строчными, но сравнивается эта пара с MAC из
+	# neigh_pairs (там tolower обязателен по той же причине), и разъехаться регистром им нельзя.
+	NEIGH=" $(ip neigh show 2>/dev/null | awk '/lladdr/ && $NF!="FAILED" && $NF!="INCOMPLETE"{print $1"|"tolower($5)}' | tr '\n' ' ') "
+	is_online() { case "$NEIGH" in *" $1|$2 "*) echo true ;; *) echo false ;; esac; }
+	# РЕЖИМ АДРЕСА — общий ответ для аренд и для устройств без аренды: копия этой лестницы
+	# (bypass → desync перебивает его → force → keep) разъехалась бы с первой же правкой
+	# приоритетов, а показывает она ровно то, что делает ядро.
+	dev_mode() {   # $1 = ip; результат в mode/keep/fslot (busybox: `local` нет, имена общие)
+		mode=split; keep=false
+		grep -qxF "$1" "$DS/.bypass-ips"  2>/dev/null && mode=bypass
+		# «Целиком в десинк» = напрямую + nfqws по источнику. Проверяем ПОСЛЕ bypass и
+		# перебиваем его: у такого устройства ACCEPT в VPN_EXCLUDE тоже стоит (это и есть
+		# прямой путь режима), но строки в .bypass-ips движок не держит — режим ОДИН.
+		grep -qxF "$1" "$DS/.desync-ips" 2>/dev/null && mode=desync
+		# .fullvpn-ips: строка `IP` (основной туннель) либо `IP<TAB>sN` (доп-выход) —
+		# сверяем ПЕРВОЕ ПОЛЕ, иначе привязанное к выходу устройство читалось бы «раздельно».
+		fslot=$(awk -F'\t' -v want="$1" '$1==want{print $2; exit}' "$DS/.fullvpn-ips" 2>/dev/null)
+		awk -F'\t' -v want="$1" '$1==want{f=1} END{exit f?0:1}' "$DS/.fullvpn-ips" 2>/dev/null && mode=force
+		case "$fslot" in s[234]) ;; *) fslot="" ;; esac
+		# keep = «мимо VPN, но ручные правила действуют» (цепочка VPN_KEEP). Осмысленно
+		# ТОЛЬКО при mode=bypass — движок сам чистит строку при снятии выреза.
+		[ "$mode" = bypass ] && grep -qxF "$1" "$DS/.keep-vpn-ips" 2>/dev/null && keep=true
+		return 0   # `[ … ] && grep` последней командой = rc=1 у всей функции
+	}
+	# СТАРЫЕ АРЕНДЫ. Телефоны ходят с рандомизированным MAC: переподключился → новый MAC → новая
+	# аренда с ДРУГИМ адресом, а прежняя живёт в файле до конца срока (lan — 12 часов). В списке
+	# одно устройство двоилось, и родная морда Xiaomi (она смотрит на живые ассоциации) показывала
+	# только новый адрес — отсюда вечное «в панели один IP, в морде другой». Признак старой
+	# аренды: есть аренда с ТЕМ ЖЕ именем и БОЛЬШИМ сроком истечения. Имя «*» (клиент его не
+	# прислал) сравнивать не с чем — такие строки не помечаем. Два прохода по одному файлу:
+	# первый собирает максимум срока на имя, второй печатает адреса отставших.
+	STALE_IPS=" $(awk 'NR==FNR{if($4!="*" && $1+0>m[$4]) m[$4]=$1+0; next} $4!="*" && $1+0<m[$4]{print $3}' "$LEASES" "$LEASES" 2>/dev/null | tr '\n' ' ') "
+	# Закреплённые адреса (dhcp-static.sh) — читаем персист напрямую: он и есть истина, а запуск
+	# скрипта ради одного столбца на каждый перерисованный список стоил бы дороже самого списка.
+	PIN_IPS=" $(cut -f2 "$DS/.dhcp-static" 2>/dev/null | tr '\n' ' ') "
+	# СТОКОВЫЕ РЕЗЕРВАЦИИ (родная морда Xiaomi, `/etc/config/dhcp`). У тестера их 100+, и без
+	# этого столбца панель писала «адрес может уехать после переподключения» про адрес,
+	# закреплённый НАВСЕГДА, и предлагала кнопку, которая обязана упереться в дубль `dhcp-host`.
+	# Спрашиваем ВЛАДЕЛЬЦА (dhcp-static.sh stock) — разбор чужого формата живёт в одном месте.
+	# Один запуск на весь список: в dev_extra его звать нельзя, там сто устройств = сто форков.
+	# MAC приводим к нижнему регистру ОДИН раз (UCI пишет их прописными, наш norm_mac — строчными).
+	STOCK_TSV=$(sh "$D/dhcp-static.sh" stock 2>/dev/null | tr 'A-Z' 'a-z')
+	STOCK_IPS=" $(printf '%s
+' "$STOCK_TSV" | cut -f2 | tr '
+' ' ') "
+	STOCK_PAIRS=" $(printf '%s
+' "$STOCK_TSV" | tr '	' '=' | tr '
+' ' ') "
+	# СВОИ ИМЕНА (dev-names.sh) — метка ПАНЕЛИ по MAC: у Алисы и IoT имени в аренде нет вовсе. Спрашиваем ВЛАДЕЛЬЦА (`list`) и
+	# ОДИН раз на весь список, как `dhcp-static.sh stock` выше: разбор персиста у него один, и руками правленый файл (CR, таб,
+	# кавычка, MAC прописными) приезжает сюда уже чистым — в JSON его строки уходят как есть. Ищем подстрокой «⏎mac⇥» — без
+	# форка на каждое из сотни устройств.
+	DN_NL='
+'
+	DN_TAB=$(printf '\t')
+	DEVNAMES="$DN_NL$(sh "$D/dev-names.sh" list 2>/dev/null)$DN_NL"
+	dn_of() {   # $1 mac строчными → своё имя или пусто (в _dno)
+		_dno=""
+		[ -n "$1" ] || return 0
+		case "$DEVNAMES" in
+			*"$DN_NL$1$DN_TAB"*) _dno=${DEVNAMES#*"$DN_NL$1$DN_TAB"}; _dno=${_dno%%"$DN_NL"*} ;;
+		esac
+		return 0
+	}
+	# Хвост полей, общий для ВСЕХ четырёх мест печати устройства (аренды + три подбора из
+	# хранилищ): второй копии этой арифметики заводить нельзя — поля разъедутся между списками.
+	dev_extra() {   # $1 ip, $2 mac (пусто = спросим сеть), $3 online (true|false)
+		_xmac="$2"
+		[ -n "$_xmac" ] || _xmac=$(ip_owner_now "$1" 2>/dev/null)
+		_xst=false
+		[ "$3" = true ] || case "$STALE_IPS" in *" $1 "*) _xst=true ;; esac
+		case "$PIN_IPS" in *" $1 "*) _xpin=true ;; *) _xpin=false ;; esac
+		case "$STOCK_IPS" in *" $1 "*) _xpst=true ;; *) _xpst=false ;; esac
+		# Адрес, который сток закрепил ЗА ЭТИМ MAC. Может отличаться от нынешнего (устройство ещё
+		# не переполучило аренду) — предлагать закрепление всё равно нельзя: dnsmasq получит второй
+		# `dhcp-host` на тот же MAC. Подстрокой, без форка на устройство.
+		_xsip=""
+		if [ -n "$_xmac" ]; then
+			case "$STOCK_PAIRS" in
+				*" $_xmac="*) _xsip=${STOCK_PAIRS#*" $_xmac="}; _xsip=${_xsip%% *} ;;
+			esac
+		fi
+		_xrnd=false
+		[ -n "$_xmac" ] && mac_is_random "$_xmac" && _xrnd=true
+		# ПРАВИЛО ЗАВОДИЛИ ДЛЯ ДРУГОГО УСТРОЙСТВА. Строка в .ip-owner появляется только при
+		# заведении правила по адресу; если нынешний владелец адреса — другой MAC, то политика
+		# осталась на адресе, а не на устройстве: у прежнего её больше нет, у нынешнего она чужая.
+		_xlost=false; _xom=""; _xoh=""; _xon=""
+		_xrow=$(owner_get "$1" 2>/dev/null)
+		if [ -n "$_xrow" ]; then
+			_xom=$(printf '%s' "$_xrow" | cut -f1)
+			_xoh=$(printf '%s' "$_xrow" | cut -f2 | tr -d '"\\')
+			if [ -n "$_xom" ] && [ -n "$_xmac" ] && [ "$_xom" != "$_xmac" ]; then
+				_xlost=true
+				_xon=$(lease_ip_of_mac "$_xom" 2>/dev/null)   # куда переехало прежнее устройство (пусто = его сейчас нет)
+			fi
+		fi
+		# АДРЕС НЕ ИЗ ЭТОЙ СЕТИ. Ловится после импорта бэкапа с ДРУГОГО роутера: правило
+		# приезжает вместе с настройками, а адрес там из чужой локалки ⇒ не сработает никогда.
+		# Ответ у владельца (lease-lib), считать подсети здесь нельзя — разъедутся.
+		_xfor=false
+		ip_is_local "$1" || _xfor=true
+		# Своё имя — по MAC устройства (у строки без MAC — владельца адреса: ip_owner_now выше), и у ПРЕЖНЕГО владельца адреса
+		# тоже: заметка «правило заводилось для …» обязана звать его тем же именем, что и весь список.
+		dn_of "$_xmac"; _xal=$_dno
+		dn_of "$_xom"; _xoa=$_dno
+		printf ',"stale":%s,"pinned":%s,"rand":%s,"owner_lost":%s,"owner_mac":"%s","owner_host":"%s","owner_alias":"%s","owner_now":"%s","foreign":%s,"pinned_stock":%s,"stock_ip":"%s","alias":"%s"' \
+			"$_xst" "$_xpin" "$_xrnd" "$_xlost" "$_xom" "$_xoh" "$_xoa" "$_xon" "$_xfor" "$_xpst" "$_xsip" "$_xal"
+	}
+	printf '{"devices":['
+	first=1
+	if [ -f "$LEASES" ]; then
+		while read -r _exp mac ip host _rest; do
+			[ -n "$ip" ] || continue
+			dev_mode "$ip"
+			[ "$host" = "*" ] && host=""
+			host=$(printf '%s' "$host" | tr -d '"\\')
+			[ "$first" -eq 1 ] || printf ','
+			first=0
+			onl=$(is_online "$ip" "$mac")
+			seen_add "$ip"
+			printf '{"ip":"%s","mac":"%s","host":"%s","mode":"%s","online":%s,"keep":%s,"fslot":"%s"%s}' "$ip" "$mac" "$host" "$mode" "$onl" "$keep" "$fslot" "$(dev_extra "$ip" "$mac" "$onl")"
+		done < "$LEASES"
+	fi
+	# УСТРОЙСТВО БЕЗ АРЕНДЫ: адрес прописан НА САМОМ устройстве. Список строился ТОЛЬКО из аренд
+	# dnsmasq, а телевизор/NAS/камера со статикой аренду не берёт НИКОГДА — такого устройства в
+	# панели не было вовсе: ни увидеть, ни завести на него правило (жалоба тестера 04.09.2026 —
+	# телевизор по кабелю со статическим адресом; на нашем BE7000 в тот же день замерено ТРИ
+	# таких клиента из пятнадцати). Роутер о них знает — по ARP, и разбор этой таблицы живёт у
+	# ВЛАДЕЛЬЦА (lease-lib.sh::neigh_pairs): формат строки один и тот же для нас и для склейки
+	# Wi-Fi-станций, второй копии быть не должно. Нет библиотеки (старая установка, неполный
+	# payload) — шим выше вернёт пусто, и список останется ровно прежним.
+	# Через ФАЙЛ, а не пайп: `while … | read` ушёл бы в подшелл и потерял и `first`, и SEEN.
+	NBSRC=/tmp/.enodia-nb-src.$$
+	neigh_pairs > "$NBSRC" 2>/dev/null
+	while IFS="$(printf '\t')" read -r ip mac; do
+		[ -n "$ip" ] || continue
+		seen_has "$ip" && continue
+		dev_mode "$ip"
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		seen_add "$ip"
+		# «Онлайн» спрашиваем У ТОГО ЖЕ ОТВЕТЧИКА, что и для аренд, хотя строка и пришла из
+		# neighbor: печатать здесь `true` литералом значило бы завести ВТОРОЙ ответ на вопрос
+		# «в сети ли устройство» — и он разошёлся бы с первым, стоит фильтрам разъехаться.
+		# Имени нет и взяться ему неоткуда (его сообщает клиент в DHCP-запросе, а этот клиент
+		# DHCP не спрашивал) — панель подпишет устройство MAC-адресом.
+		onl=$(is_online "$ip" "$mac")
+		printf '{"ip":"%s","mac":"%s","host":"","mode":"%s","online":%s,"keep":%s,"fslot":"%s","nolease":true%s}' "$ip" "$mac" "$mode" "$onl" "$keep" "$fslot" "$(dev_extra "$ip" "$mac" "$onl")"
+	done < "$NBSRC"
+	rm -f "$NBSRC"
+	# Офлайн-устройства: IP, что лежат в хранилищах bypass/force, но которых нет
+	# в текущих лизах — чтобы их можно было вернуть в раздельный режим из панели.
+	for pair in "bypass:$DS/.bypass-ips" "force:$DS/.fullvpn-ips" "desync:$DS/.desync-ips"; do
+		m=${pair%%:*}; f=${pair#*:}
+		[ -f "$f" ] || continue
+		# IFS=TAB: у .fullvpn-ips вторым полем может стоять доп-выход (`IP<TAB>sN`), у
+		# .bypass-ips второго поля нет — переменная просто останется пустой.
+		while IFS="$(printf '\t')" read -r ip fslot; do
+			[ -n "$ip" ] || continue
+			seen_has "$ip" && continue
+			seen_add "$ip"
+			keep=false
+			[ "$m" = bypass ] && grep -qxF "$ip" "$DS/.keep-vpn-ips" 2>/dev/null && keep=true
+			case "$fslot" in s[234]) ;; *) fslot="" ;; esac
+			[ "$first" -eq 1 ] || printf ','
+			first=0
+			printf '{"ip":"%s","mac":"","host":"","mode":"%s","online":false,"keep":%s,"fslot":"%s"%s}' "$ip" "$m" "$keep" "$fslot" "$(dev_extra "$ip" "" false)"
+		done < "$f"
+	done
+	# Устройства, у которых ЕСТЬ правило по портам, но нет ни DHCP-лиза, ни строки в
+	# bypass/force-хранилищах: без этого правило живёт на роутере, а в панели его негде
+	# увидеть и снять (та же дыра, что цикл выше закрывает для офлайн-вырезов). Уникальные
+	# src — через временный файл, а не пайп: `while … | read` ушёл бы в подшелл и потерял
+	# флаг first (тем же приёмом пользуются циклы выше — `done < файл`).
+	if [ -s "$DS/.port-rules" ]; then
+		PRSRC=/tmp/.enodia-pr-src.$$
+		cut -f1 "$DS/.port-rules" 2>/dev/null | sort -u > "$PRSRC"
+		while read -r ip; do
+			[ -n "$ip" ] || continue
+			[ "$ip" = any ] && continue
+			# Устройство — только из АДРЕСА: строку с источником «ANY», «10.0.0», «300.1.1.1» (бэкап, ручная правка) панель
+			# показывает «битой» на «Весь роутер» и снимает там, а устройством её не открыть. И в printf ниже значение уходит
+			# сырым — мусор вроде кавычки ломал бы весь ответ.
+			if command -v port_src_ok >/dev/null 2>&1; then port_src_ok "$ip" || continue
+			else case "$ip" in *[!0-9.]*) continue ;; esac; fi
+			seen_has "$ip" && continue
+			seen_add "$ip"
+			[ "$first" -eq 1 ] || printf ','
+			first=0
+			printf '{"ip":"%s","mac":"","host":"","mode":"split","online":false,"keep":false,"fslot":""%s}' "$ip" "$(dev_extra "$ip" "" false)"
+		done < "$PRSRC"
+		rm -f "$PRSRC"
+	fi
+	# То же для устройств, у которых есть ТОЛЬКО правила по адресам (ни лиза, ни выреза, ни
+	# порт-правила): иначе правило живёт на роутере, а снять его в панели негде — устройства
+	# в списке нет. Та же дыра, что закрывают два цикла выше.
+	DRSRC=/tmp/.enodia-dr-src.$$
+	sh "$D/groups.sh" dev-list 2>/dev/null | cut -f1 | sort -u > "$DRSRC"
+	if [ -s "$DRSRC" ]; then
+		while read -r ip; do
+			[ -n "$ip" ] || continue
+			seen_has "$ip" && continue
+			seen_add "$ip"
+			[ "$first" -eq 1 ] || printf ','
+			first=0
+			printf '{"ip":"%s","mac":"","host":"","mode":"split","online":false,"keep":false,"fslot":""%s}' "$ip" "$(dev_extra "$ip" "" false)"
+		done < "$DRSRC"
+	fi
+	rm -f "$DRSRC"
+	# Правила по портам (цепочка VPN_PORTS, хранилище .port-rules: src⇥proto⇥порты⇥куда).
+	# Отдаём ВСЕ разом вместе с устройствами: экран портов открывается из этой же карточки,
+	# и второй запрос ради трёх строк не нужен — панель отбирает свои по src.
+	printf '],"ports":['
+	pf=1
+	if [ -s "$DS/.port-rules" ]; then
+		# ДЕЙСТВУЕТ ЛИ строка — тот же разбор, по которому apply-bypass.sh ставит цепочку (port-lib.sh, подключён вверху):
+		# «443,99999» или «500-100» из бэкапа или ручной правки ядро пропускает, и панель обязана сказать
+		# «не действует», а не рисовать чип пути. Строку всё равно отдаём — её надо видеть и снять.
+		PTAB=$(printf '\t'); PCR=$(printf '\r')
+		# `|| [ -n "$psrc" ]`: последняя строка без перевода строки (ручная правка) иначе терялась ЗДЕСЬ, хотя цепочка её ставит —
+		# правило действует, а в панели его нет (ревью пачки 3, круг 3). `\r` из Блокнота срезаем тем же приёмом, что port-lib.sh.
+		while IFS="$PTAB" read -r psrc pproto ppts pdir || [ -n "$psrc" ]; do
+			pdir=${pdir%"$PCR"}
+			[ -n "$pdir" ] || continue
+			# Порты — в нормализованной форме, общей с цепочкой и ключом удаления (port-lib.sh): «443, 80» из
+			# ручной правки действует в ядре — и без нормализации фильтр ниже её отсеивал (действует, а не видно).
+			if command -v port_list_norm >/dev/null 2>&1; then ppts=$(port_list_norm "$ppts"); fi
+			# страховка на случай правки файла руками: в JSON уходит только безопасный
+			# набор символов (цифры/буквы/точка/запятая/дефис), всё прочее пропускаем
+			case "$psrc$pproto$ppts$pdir" in *[!0-9a-zA-Z.,-]*) continue ;; esac
+			pok=true
+			if command -v port_line_ok >/dev/null 2>&1; then port_line_ok "$psrc" "$pproto" "$ppts" "$pdir" || pok=false; fi
+			[ "$pf" -eq 1 ] || printf ','
+			pf=0
+			printf '{"src":"%s","proto":"%s","ports":"%s","dir":"%s","ok":%s}' "$psrc" "$pproto" "$ppts" "$pdir" "$pok"
+		done < "$DS/.port-rules"
+	fi
+	# Правила устройства по адресам назначения (цепочка VPN_DEV; хранит groups.sh — группа с
+	# непустым src). Отдаём тем же запросом и тоже ВСЕ разом: панель отбирает свои по src.
+	# Направление переводим в словарь панели (vpn|direct|block|sN) — он общий с порт-правилами.
+	#
+	# conf=true — домен назван ipset-строкой ещё и ВНЕ групп (гео, одиночные домены, пул zapret).
+	# Раньше это означало «одно из двух правил мертво» (dnsmasq применяет к домену РОВНО ОДНУ
+	# строку), теперь строки склеивает dns-merge.sh и работают ОБА — флаг остался справкой о том,
+	# что домен ведёт себя не только по этому правилу. Сам файл-агрегат из поиска ИСКЛЮЧЁН: он
+	# производный и присутствует ровно у конфликтных доменов, то есть отвечал бы сам себе.
+	printf '],"devrules":['
+	df=1
+	DRTAB=$(printf '\t')
+	sh "$D/groups.sh" dev-list 2>/dev/null > /tmp/.enodia-devrules.$$
+	# Домены ЧУЖИХ подсистем собираем ОДНИМ проходом, а не грепом на каждое правило: рядом лежат
+	# доменный пул десинка (десятки тысяч строк) и многомегабайтный conf гео-блокировки, а карточка
+	# устройств перерисовывается часто — N правил давали бы N полных сканов флеша.
+	# Строка dnsmasq может нести НЕСКОЛЬКО доменов (`ipset=/a.com/b.com/set` — так пишет установщик
+	# для списка re-filter), поэтому раскладываем ВСЕ поля между первым и последним «/»: анкор на
+	# первый домен видел бы только его, и для соседей подсказка молчала бы. Регистр — вниз (dnsmasq
+	# сравнивает имена без учёта регистра).
+	DRDOM=/tmp/.enodia-devconf.$$
+	DRCONF=""
+	for _dc in /tmp/dnsmasq.d/*.conf /etc/dnsmasq.d/*.conf; do
+		[ -f "$_dc" ] || continue
+		# Свои файлы исключаем: 10-groups.conf — источник самих этих правил, 00-ipset-merge.conf —
+		# производный агрегат, он присутствует ровно у конфликтных доменов и отвечал бы сам себе.
+		case "${_dc##*/}" in 10-groups.conf|00-ipset-merge.conf) continue ;; esac
+		DRCONF="$DRCONF $_dc"
+	done
+	: > "$DRDOM"
+	# shellcheck disable=SC2086 # список путей должен разъехаться по аргументам
+	[ -n "$DRCONF" ] && awk -F/ '/^ipset=\//{for(i=2;i<NF;i++) if($i!="") print tolower($i)}' \
+		$DRCONF 2>/dev/null | sort -u > "$DRDOM"
+	while IFS="$DRTAB" read -r dsrc dval ddir dslot; do
+		[ -n "$dval" ] || continue
+		case "$dsrc$dval$ddir$dslot" in *[!0-9a-zA-Z./_-]*) continue ;; esac
+		case "$ddir" in
+			vpn)    [ "${dslot:-0}" = 0 ] && ddir=vpn || ddir="s$dslot" ;;
+			bypass) ddir=direct ;;
+			block)  ddir=block ;;
+			*)      continue ;;
+		esac
+		dconf=false
+		if ! echo "$dval" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'; then
+			grep -qxF "$(printf '%s' "$dval" | tr 'A-Z' 'a-z')" "$DRDOM" 2>/dev/null && dconf=true
+		fi
+		[ "$df" -eq 1 ] || printf ','
+		df=0
+		printf '{"src":"%s","val":"%s","dir":"%s","conf":%s}' "$dsrc" "$dval" "$ddir" "$dconf"
+	done < /tmp/.enodia-devrules.$$
+	rm -f /tmp/.enodia-devrules.$$ "$DRDOM"
+	# Есть ли ЧЕМ десинкать: режим «целиком в десинк» предлагать нельзя, пока ответа нет — он
+	# означал бы просто «мимо VPN», а подпись обещала бы обход блокировок. Панель по этому флагу
+	# прячет сегмент (и оставляет его видимым, если режим уже включён — иначе человек не смог бы
+	# его снять после удаления Zapret).
+	# Признаков ДВА, и бинаря МАЛО: на ядре 4.4 (AX3600) nfqws приезжает бутстрапом, а NFQUEUE в
+	# ядре вырезан ⇒ `src-wire` молча не встаёт, устройство остаётся выведенным из туннеля БЕЗ
+	# десинка — ровно тот худший режим, о котором предупреждает шапка rebuild_desync. Второй
+	# признак спрашиваем у плагина (verb nfq-ok, проба кэширована), rc=2 = старая копия не знает
+	# верба ⇒ НЕ сужу (та же идиома, что в emit_zapret ниже и в transport.sh).
+	dsr=false
+	if [ -x "$(bin_path nfqws)" ]; then
+		dsr=true
+		if [ -f "$D/zapret.sh" ]; then
+			sh "$D/zapret.sh" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ] || dsr=false
+		fi
+	fi
+	# КТО СПРАШИВАЕТ. Лестница ядра считается ДЛЯ ИСТОЧНИКА, и по умолчанию человек спрашивает про
+	# устройство, с которого открыл панель, — его адрес знает только сервер (REMOTE_ADDR). Без этого
+	# поля проверялка «что победит» заставляла бы выбирать устройство руками на каждый вопрос.
+	# Не dotted-quad (клиент по IPv6, обратный прокси) — пустое поле: панель тогда не гадает.
+	you=${REMOTE_ADDR:-}
+	case "$you" in *[!0-9.]*) you="" ;; esac
+	# ЗА TLS-ПОРТОМ ДО CGI ДОЕЗЖАЕТ АДРЕС ТЕРМИНАТОРА, то есть сам роутер (та же грабля, что у ключа
+	# счётчика неудач входа в totp.sh). Его трафик в mangle PREROUTING не ходит вовсе, и «лестница для
+	# этого устройства» была бы ни о ком — гасим поле, пусть панель не гадает.
+	if [ -n "$you" ]; then
+		# Имя моста — у владельца (router-lib.sh::lan_if), но библиотеку ради одной строки не сорсим:
+		# этот CGI зовёт ОПРОС панели. Шим — той же формы, что у dump.sh и heal.sh.
+		_lif=$(command -v lan_if >/dev/null 2>&1 && lan_if || echo br-lan)   # lan-lit: шим без router-lib.sh
+		_lanip=$(ip -4 addr show "$_lif" 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2; exit}')
+		case "$you" in 127.*) you="" ;; "$_lanip") you="" ;; esac
+	fi
+	printf '],"you":"%s","desync_ready":%s}\n' "$you" "$dsr"
+}
+
+# --- Сайты: пользовательские домены (dnsmasq) + bypass-dst (сайты мимо VPN) ----
+# Хранилище CIDR (по строке на адрес) → элементы JSON-массива. Скобки печатает вызывающий:
+# так один хелпер обслуживает и "dst", и "vdst", не зная про них ничего.
+emit_cidr_file() {
+	_f=1
+	[ -f "$1" ] || return 0
+	while read -r c; do
+		[ -n "$c" ] || continue
+		c=$(printf '%s' "$c" | tr -d '"\\')
+		[ "$_f" -eq 1 ] || printf ','
+		_f=0
+		printf '"%s"' "$c"
+	done < "$1"
+}
+
+emit_sites() {
+	printf '{"domains":['
+	first=1
+	CUSTOM=/etc/dnsmasq.d/enodia-custom.conf
+	# Миграция/страховка персиста: /etc = ramfs, enodia-custom.conf стирается на ребуте.
+	# Если персиста на /data ещё нет, а живой conf непуст — засеваем его СЕЙЧАС (пока
+	# домены на месте), чтобы heal.sh восстановил их после следующего ребута.
+	[ -f "$DS/.enodia-custom.conf" ] || { [ -s "$CUSTOM" ] && cp "$CUSTOM" "$DS/.enodia-custom.conf" 2>/dev/null; }
+	# Направление берём из ИМЕНИ СЕТА в строке: enodia_list = в VPN, enodia_bypass = мимо VPN (domain.sh
+	# держит оба в одном файле). Отдавать домены скопом нельзя — уведённый мимо показался бы в
+	# списке «через VPN». Объект {name,dir}; старый формат (голая строка) панель больше не ждёт —
+	# читатель тут ровно один (openSites), и он обновляется вместе с этим файлом.
+	if [ -f "$CUSTOM" ]; then
+		for e in $(sed -n 's|^ipset=/\([^/]*\)/\(.*\)$|\1:\2|p' "$CUSTOM" 2>/dev/null); do
+			d=$(printf '%s' "${e%%:*}" | tr -d '"\\')
+			[ -n "$d" ] || continue
+			[ "${e##*:}" = enodia_bypass ] && dir=bypass || dir=vpn
+			[ "$first" -eq 1 ] || printf ','
+			first=0
+			printf '{"name":"%s","dir":"%s"}' "$d" "$dir"
+		done
+		# Заблокированные ОДИНОЧНЫЕ домены: domain.sh block пишет пару address=/дом/0.0.0.0 + /::;
+		# берём ТОЛЬКО строку 0.0.0.0 (иначе домен задвоится). dir=block → карточка «Сайты» покажет
+		# их отдельной секцией, снять — тем же domain_del (domain.sh remove режет обе address-строки).
+		for d in $(sed -n 's|^address=/\([^/]*\)/0\.0\.0\.0$|\1|p' "$CUSTOM" 2>/dev/null); do
+			d=$(printf '%s' "$d" | tr -d '"\\')
+			[ -n "$d" ] || continue
+			[ "$first" -eq 1 ] || printf ','
+			first=0
+			printf '{"name":"%s","dir":"block"}' "$d"
+		done
+	fi
+	# Два списка адресов — «мимо VPN» (.bypass-dst) и «в VPN» (.vpn-dst) — читаются одинаково,
+	# отличается только файл: у адреса те же три состояния, что у домена (см. apply-bypass.sh).
+	printf '],"dst":['
+	emit_cidr_file "$DS/.bypass-dst"
+	printf '],"vdst":['
+	emit_cidr_file "$DS/.vpn-dst"
+	# Время последнего УДАЧНОГО обновления списков IP. Якорей ДВА, потому что путей
+	# обновления два, и каждый метит СВОЙ файл:
+	#   .iplist.count               — кроновый iplist-update.sh (05:00 и на буте);
+	#   lists/tunnel-cidr/.snapshot — движок lists-update.sh, т.е. кнопка «Обновить»
+	#                                 в панели и любая правка реестра источников.
+	# Берём СВЕЖАЙШИЙ из двух: пока смотрели только на первый, ручное обновление шло
+	# мимо якоря и панель писала «3 дн назад» СРАЗУ ПОСЛЕ успешной перекачки (поймано
+	# 27.08.2026: пул пересобран, ipset 3548→3544, подпись — от последнего крона).
+	# Оба стампа честны ОДИНАКОВО: ставятся только на РЕАЛЬНОМ применении пула, а
+	# fallback-из-снимка не трогает ни один. Поле ts в sources.tsv для этого не годится
+	# — оно тикает и на ПРОВАЛЕ закачки, т.е. подписало бы неудачу как свежий апдейт.
+	mt=0
+	for _ipf in "$DS/.iplist.count" "$DS/lists/tunnel-cidr/.snapshot"; do
+		_ipt=$(stat -c %Y "$_ipf" 2>/dev/null)
+		case "$_ipt" in ''|*[!0-9]*) _ipt=$(date -r "$_ipf" +%s 2>/dev/null) ;; esac
+		case "$_ipt" in ''|*[!0-9]*) _ipt=0 ;; esac
+		if [ "$_ipt" -gt "$mt" ]; then mt=$_ipt; fi
+	done
+	now=$(date +%s); case "$now" in ''|*[!0-9]*) now=0 ;; esac
+	printf '],"iplist_updated":%s,"now":%s}\n' "$mt" "$now"
+}
+
+# --- Wi-Fi: по ОДНОЙ записи на ЖИВОЙ iface + мосты + правила сетей не в эфире + гостевая ------------
+# Группировку по SSID делает ФРОНТ (busybox awk на этом роутере без рабочих index()/split() — не
+# полагаемся на него вовсе; чистый sh-цикл). «Какая сеть на каком wlN» и «что в эфире» — только у
+# wifi-lib.sh: прежде секция читала hostapd-конфы сама и отдавала выключенные сети как работающие
+# (конф `hostapd-wl2.conf` от выключенного третьего радио лежал рядом с живыми — замер BE7000 22.09.2026).
+#
+# ifaces  — живые интерфейсы: сеть, режим ИЗ ЯДРА (physdev в VPN_EXCLUDE / VPN_FORCE), мост, диапазон по
+#           частоте драйвера, скрытая ли, служебная ли сеть связи mesh-узлов (секция uci `bh_*` стока Xiaomi);
+# bridges — подсеть каждого моста, который встретился (и гостевого, если он есть);
+# offair  — строки хранилищ правил, чьей сети сейчас НЕТ в эфире: правило хранится и встанет само, когда сеть
+#           появится, — но панель обязана его показать и дать снять (иначе снять можно только по SSH).
+#           why: off — сеть есть в настройках Wi-Fi (выключена, радио не поднято), gone — сети с таким именем
+#           нет вовсе (переименовали; legacy-имя интерфейса, которого больше нет);
+# guest*  — режим гостевой ПОДСЕТИ (он живёт правилом по подсети, а не по интерфейсу), есть ли её мост, её
+#           сети в эфире (имена — для узнавания: у стока CN это «小米共享WiFi_…», а не «гостевая»).
+emit_wifi() {
+	if [ -f "$D/wifi-lib.sh" ]; then . "$D/wifi-lib.sh"; fi
+	# Шимы прежней копии библиотеки: секция беднее (без мостов, диапазонов и правил вне эфира), но живая.
+	command -v wifi_ssid_of     >/dev/null 2>&1 || wifi_ssid_of()     { return 1; }
+	command -v wifi_live_ifaces >/dev/null 2>&1 || wifi_live_ifaces() { ls -1 /sys/class/net 2>/dev/null | grep '^wl[0-9]'; }
+	command -v wifi_bridge_of   >/dev/null 2>&1 || wifi_bridge_of()   { return 1; }
+	command -v wifi_bridge_net  >/dev/null 2>&1 || wifi_bridge_net()  { return 1; }
+	command -v wifi_band_of     >/dev/null 2>&1 || wifi_band_of()     { return 1; }
+	command -v wifi_hidden_of   >/dev/null 2>&1 || wifi_hidden_of()   { return 1; }
+	command -v wifi_uci_sec_of  >/dev/null 2>&1 || wifi_uci_sec_of()  { return 1; }
+	command -v wifi_table       >/dev/null 2>&1 || wifi_table()       { return 0; }
+	command -v wifi_key_state   >/dev/null 2>&1 || wifi_key_state()   { echo live; }
+	# iface'ы мимо VPN (physdev ACCEPT в VPN_EXCLUDE) → строка " wl16 wl17 ".
+	byp=" $(iptables -t mangle -S "$EXCLUDE_CHAIN" 2>/dev/null | \
+		sed -n 's/.*--physdev-in \([A-Za-z0-9_-][A-Za-z0-9_-]*\).*/\1/p' | tr '\n' ' ') "
+	# iface'ы ЦЕЛИКОМ в VPN (physdev в VPN_FORCE) — зеркало byp для 3-го режима.
+	frc=" $(iptables -t mangle -S "$FORCE_CHAIN" 2>/dev/null | \
+		sed -n 's/.*--physdev-in \([A-Za-z0-9_-][A-Za-z0-9_-]*\).*/\1/p' | tr '\n' ' ') "
+	gp=false; [ -e /sys/class/net/br-guest ] && gp=true
+	# ЧТО ГОВОРИТ ХРАНИЛИЩЕ о каждом живом интерфейсе — у его владельца (apply-bypass.sh if-states), одним вызовом на ответ.
+	# Прежний движок верба не знает — печатает подсказку, в которой нет строк «wlN<TAB>…»: поле просто пустое.
+	ifst=$(sh "$D/apply-bypass.sh" if-states 2>/dev/null)
+	# ПОДЦЕПЛЕНЫ ЛИ ПРАВИЛА ВООБЩЕ — строка `@wired` того же ответа движка; нет строки (прежний движок) — null, «не знаем».
+	wired=$(printf '%s\n' "$ifst" | awk -F'\t' '$1=="@wired"{print $2; exit}')
+	case "$wired" in 1) wired=true ;; 0) wired=false ;; *) wired=null ;; esac
+	# Одна выгрузка uci на весь ответ (разбор цены — у wifi-lib.sh::wifi_uci_show).
+	WIFI_UCI=$(uci show wireless 2>/dev/null)
+	# КАКОЙ МОСТ — ДОМАШНЯЯ СЕТЬ, говорит владелец (router-lib.sh::lan_if): панель подписывает подсеть по роли, а не по имени.
+	if [ -f "$D/router-lib.sh" ]; then . "$D/router-lib.sh"; fi
+	lan=$(command -v lan_if >/dev/null 2>&1 && lan_if 2>/dev/null)
+	printf '{"lan":"%s","wired":%s,"ifaces":[' "$lan" "$wired"
+	first=1; brs=" "; gssid=""; glive=0
+	for ifc in $(wifi_live_ifaces); do
+		ssid=$(wifi_ssid_of "$ifc" 2>/dev/null)
+		# Движок НЕ ответил про интерфейс (прежний без верба, прежняя wifi-lib) — `null`, а не пустая строка: пусто значит
+		# «в хранилище ничего», и панель объявила бы расхождение у каждой сети с правилом (ревью шага 5b, круг 2).
+		st=$(printf '%s\n' "$ifst" | awk -F'\t' -v i="$ifc" '($1"")==(i""){print "=" $2; exit}')
+		case "$st" in =bypass|=force|=both) st="\"${st#=}\"" ;; =) st='""' ;; *) st=null ;; esac
+		bp=false; case "$byp" in *" $ifc "*) bp=true ;; esac
+		fp=false; case "$frc" in *" $ifc "*) fp=true ;; esac
+		br=$(wifi_bridge_of "$ifc" 2>/dev/null); band=$(wifi_band_of "$ifc" 2>/dev/null)
+		hid=false; wifi_hidden_of "$ifc" && hid=true
+		mesh=false; case "$(wifi_uci_sec_of "$ifc" 2>/dev/null)" in wireless.bh_*) mesh=true ;; esac
+		[ -n "$br" ] && case "$brs" in *" $br "*) : ;; *) brs="$brs$br " ;; esac
+		# Имя гостевой — без ведущих/хвостовых пробелов и без повторов: две VAP (2.4/5 ГГц) обычно с одним именем.
+		if [ "$br" = br-guest ]; then
+			s=$(printf '%s' "$ssid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+			[ -n "$s" ] && case ", $gssid, " in *", $s, "*) : ;; *) gssid="${gssid:+$gssid, }$s" ;; esac
+		fi
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '{"ifc":"%s","ssid":"%s","bypassed":%s,"forced":%s,"st":%s,"br":"%s","band":"%s","hidden":%s,"mesh":%s}' \
+			"$ifc" "$(printf '%s' "$ssid" | jtxt 200)" "$bp" "$fp" "$st" "$br" "$band" "$hid" "$mesh"
+	done
+	printf '],"bridges":['
+	[ "$gp" = true ] && case "$brs" in *" br-guest "*) : ;; *) brs="${brs}br-guest " ;; esac
+	first=1
+	for br in $brs; do
+		net=$(wifi_bridge_net "$br" 2>/dev/null)
+		[ "$first" -eq 1 ] || printf ','
+		first=0
+		printf '{"br":"%s","net":"%s"}' "$br" "$net"
+	done
+	printf '],"offair":['
+	# Таблица интерфейсов — ОДИН проход на все строки хранилищ (разбор цены у wifi_table).
+	WIFI_TAB=$(wifi_table 2>/dev/null)
+	first=1
+	for pair in "bypass:$DS/.bypass-ifaces" "force:$DS/.fullvpn-ifaces"; do
+		m=${pair%%:*}; f=${pair#*:}
+		[ -s "$f" ] || continue
+		while IFS= read -r k || [ -n "$k" ]; do
+			[ -n "$k" ] || continue
+			st=$(wifi_key_state "$k" 2>/dev/null)
+			case "$st" in off|gone) : ;; *) continue ;; esac
+			[ "$first" -eq 1 ] || printf ','
+			first=0
+			printf '{"key":"%s","mode":"%s","why":"%s"}' "$(printf '%s' "$k" | jtxt 200)" "$m" "$st"
+		done < "$f"
+	done
+	printf ']'
+	# В ЭФИРЕ ЛИ ГОСТЕВАЯ — по ФАКТУ: порты её моста (у выключенного Wi-Fi гостевой их нет). Не «сколько наших wlN опознали»:
+	# прежняя копия wifi-lib не знает мостов, и «не нашёл» читалось бы «Wi-Fi гостевой выключен» (ревью шага 5b, круг 1).
+	glive=0
+	# Порты-Wi-Fi (`wl*`): проводной порт в гостевом мосту не делает её Wi-Fi включённым (ревью шага 5b, круг 2).
+	if [ "$gp" = true ]; then for p in /sys/class/net/br-guest/brif/wl*; do [ -e "$p" ] && glive=$((glive + 1)); done; fi
+	# ПОДСЕТЬ, НА КОТОРУЮ ДЕЙСТВУЕТ ПРАВИЛО ГОСТЕВОЙ, — у владельца правила (apply-bypass.sh, GUEST_SUBNET): панель сверяет её с
+	# подсетью моста, и расхождение — «режим на её устройства не действует», а не молчаливый чип.
+	gn=$(sed -n 's/^GUEST_SUBNET=\([0-9./]*\).*/\1/p' "$D/apply-bypass.sh" 2>/dev/null | head -1)
+	[ -n "$gn" ] || gn=192.168.33.0/24
+	# Режим гостевой подсети.
+	if   [ -f "$DS/.fullvpn-guest" ]; then g=force
+	elif [ -f "$DS/.bypass-guest" ] || ip rule show 2>/dev/null | grep -qF "from $gn lookup main"; then g=bypass
+	else g=split; fi
+	printf ',"guest":"%s","guest_present":%s,"guest_ssid":"%s","guest_live":%s,"guest_rule":"%s"}\n' "$g" "$gp" "$(printf '%s' "$gssid" | jtxt 400)" "$glive" "$gn"
+}
+
+# --- Уведомления: включены? настроены (есть SMTP_PASS)? + текущие поля (БЕЗ пароля)
+# для префилла формы. Пароль НЕ отдаём наружу — только флаг has_pass.
+emit_notify() {
+	en=true;  [ -f "$DS/.notify-off" ] && en=false
+	cf=false
+	if [ -s "$DS/notify.conf" ] && grep -q '^SMTP_PASS=.' "$DS/notify.conf" 2>/dev/null; then cf=true; fi
+	host=$(sed -n 's/^SMTP_HOST=//p' "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
+	port=$(sed -n 's/^SMTP_PORT=//p' "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
+	tls=$(sed -n  's/^SMTP_TLS=//p'  "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
+	user=$(sed -n 's/^SMTP_USER=//p' "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
+	mto=$(sed -n  's/^MAIL_TO=//p'   "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
+	# «О ЧЁМ ПИСАТЬ» — поводы называет РОУТЕР (events.sh — владелец классов и файла выбора), панель лишь подписывает их
+	# словами. Роутер старше (нет верба `classes`) — поля нет вовсе: панель скажет это, а не нарисует пустой выбор.
+	cl=''
+	if [ -f "$D/events.sh" ]; then
+		cl=$(sh "$D/events.sh" classes 2>/dev/null | awk '$1 ~ /^[a-z]+$/ && ($2 == "on" || $2 == "off") { printf "%s{\"id\":\"%s\",\"mail\":%s}", (n++ ? "," : ""), $1, ($2 == "on" ? "true" : "false") }')
+	fi
+	[ -n "$cl" ] && cl=",\"classes\":[$cl]"
+	printf '{"enabled":%s,"configured":%s,"smtp_host":"%s","smtp_port":"%s","smtp_tls":"%s","smtp_user":"%s","mail_to":"%s"%s}\n' \
+		"$en" "$cf" "${host:-smtp.yandex.ru}" "${port:-465}" "${tls:-auto}" "$user" "$mto" "$cl"
+}
+
+# --- Режим VPN: авто-failover (две оси) + full-tunnel («весь трафик через VPN»). -
+emit_settings() {
+	m=$(cat "$DS/.failover-mode" 2>/dev/null | tr -d ' \r\n');     [ -n "$m" ] || m=sticky
+	e=$(cat "$DS/.failover-escalate" 2>/dev/null | tr -d ' \r\n'); [ -n "$e" ] || e=cross
+	fh=$(cat "$DS/.failover-home" 2>/dev/null | tr -d ' \r\n"\\')
+	# ДОМ — ЭТО ДВА УРОВНЯ, и панель обязана показать оба: домашний СЕРВЕР (.failover-home,
+	# был здесь всегда) и домашний ТРАНСПОРТ (.transport-home). Второй пишет ТОЛЬКО ручной выбор
+	# (`transport.sh switch <t> --home`), и до 09.09.2026 его не отдавала ни одна секция: режим
+	# «резерв + возврат» был включён, сторож честно возвращал — а узнать, КУДА он вернётся и
+	# задан ли дом вообще, из панели было нельзя. Пустой `transport_home` — законное состояние
+	# («дом не задан»), а не ошибка: тогда возвращается только сервер.
+	th=$(cat "$DS/.transport-home" 2>/dev/null | tr -d ' \r\n"\\')
+	tc=$(cat "$DS/.transport" 2>/dev/null | tr -d ' \r\n"\\')
+	# ВЫКЛЮЧЕННЫЙ ТУМБЛЕР БЬЁТ ВЕСЬ БЛОК ВОЗВРАТА: сторож с `.vpn-off` выходит из тика раньше
+	# любых проверок, значит никакого «вернётся, когда оживёт» не произойдёт. Без этого признака
+	# экран рапортовал бы «сейчас роутер дома» при выключенном VPN — то есть благополучие там,
+	# где ничего не работает.
+	vo=false; [ -f "$DS/.vpn-off" ] && vo=true
+	ft=false; [ -f "$DS/.full-tunnel" ] && ft=true
+	printf '{"failover_mode":"%s","failover_escalate":"%s","failover_home":"%s","transport_home":"%s","transport":"%s","vpn_off":%s,"full_tunnel":%s}\n' "$m" "$e" "$fh" "$th" "$tc" "$vo" "$ft"
+}
+
+# `emit_iplist`/`section=iplist` УДАЛЕНЫ (15.08.2026). Секцию завёл 314cf41, а менеджер источников
+# (a27f466) перевёл экран на реестр категорий и перестал её запрашивать — функция осталась висеть
+# и НИКТО в репо её не звал. Держать её было вредно вдвойне: читала легаси-`iplist.conf` (источник
+# давно не там) и считала размер набора через `Number of entries:`, которого у ipset на ядре 4.4
+# НЕТ вовсе — то есть на AX3600 отвечала бы нулём. Возраст списков панель берёт из `iplist_updated`
+# в общей секции, размеры — у `lists-lib.sh::ipset_count`. Второй копии не заводить.
+
+# --- Протоколы и обновления: что УСТАНОВЛЕНО (бинари), готово к активации, версия,
+# свободно на /data + прогресс фоновой смены набора (proto-install.sh). Без сети. -----
+emit_update() {
+	# awg «установлен» = ОБА бинаря (демон amneziawg-go И CLI awg) — как have_awg в
+	# proto-install / transport_ready. Иначе комбо «AmneziaWG + …» врало «установлен» при
+	# половинной установке (демон есть, CLI нет), пока карточка серверов честно писала
+	# «нужен бинарь/конфиг» → видимый рассинхрон. [[awg-ready-needs-both-binaries]]
+	ia=false; [ -x "$(bin_path amneziawg-go)" ] && [ -x "$(bin_path awg)" ] && ia=true
+	ix=false; [ -x "$(bin_path xray)" ]        && ix=true
+	ih=false; [ -x "$(bin_path hysteria)" ]    && ih=true
+	ib=false; [ -x "$(bin_path byedpi)" ]      && ib=true
+	iz=false; [ -x "$(bin_path nfqws)" ]       && iz=true   # zapret (ортогональный транспорт, alt-ось не занимает) — для add-on строки
+	ready=$(sh "$D/transport.sh" list 2>/dev/null); rj=""
+	for r in $ready; do rj="$rj${rj:+,}\"$r\""; done
+	vn=$(sed -n 's/^VERSION=//p' "$D/VERSION" 2>/dev/null | head -1 | tr -d '"\\ \r')
+	vc=$(sed -n 's/^CODE=//p' "$D/VERSION" 2>/dev/null | head -1 | tr -d ' \r'); case "$vc" in ''|*[!0-9]*) vc=0 ;; esac
+	dline=$(df "$D" 2>/dev/null | tail -1)   # том — по ПУТИ каталога, не по литералу /data (C50)
+	dfree=$(echo "$dline" | awk 'NF>=5 && $(NF-4)+0>0{printf "%d",$(NF-2)/1024}')
+	st=$(cat "$DS/.proto-install.state" 2>/dev/null | tr -d ' \r\n'); [ -n "$st" ] || st=IDLE
+	# RUNNING отдаём, ТОЛЬКО когда движок подтверждает живого держателя. Осиротевший статус
+	# (ребут или OOM посреди операции) иначе оставлял бы панель в вечном «идёт установка»: она
+	# держит поллинг и блокирует кнопки, пока видит RUNNING. Гард стоит форк и только в этом случае.
+	# Код движка различаем: 1 = «не идёт» (гасим RUNNING), 2 = СТАРАЯ копия скрипта, которая
+	# верба не знает — тогда прежнее поведение (отдаём статус как есть). Обновление пофайловое,
+	# и пара «новый data + старый packages.sh» реальна: инверсия `!` тут стирала бы прогресс
+	# установки у всех, кто обновился наполовину.
+	# «Не идёт» — это ИТОГ, КОТОРЫЙ ПРОЧЁЛ САМ ДВИЖОК, а не наш IDLE: между нашим чтением RUNNING и его чтением операция успевает
+	# кончиться (OK/FAIL), и прежний IDLE здесь давал опросу «Компоненты: не удалось» при «готово» в журнале — около 1,5 % операций
+	# (замер BE7000: busy ~30 мс при опросе раз в 2 с; ревью шага 6c, круг 1). RUNNING в ЕГО ответе при коде 1 — сирота ⇒ IDLE.
+	if [ "$st" = RUNNING ] && [ -f "$D/packages.sh" ]; then
+		_bj=$(sh "$D/packages.sh" busy 2>/dev/null); _bc=$?
+		if [ "$_bc" = 1 ]; then
+			st=$(printf '%s' "$_bj" | sed -n 's/.*"state":"\([A-Z]*\)".*/\1/p')
+			case "$st" in ''|RUNNING) st=IDLE ;; esac
+		fi
+	fi
+	# Последняя строка лога фоновой установки (для polling) — JSON-эскейп.
+	# Потолок 600: итог отказа с причиной 429 весит ~330 байт (разбор у packages.sh::cmd_op_json).
+	msg=$(printf '%s' "$(tail -n 1 "$DS/.proto-install.log" 2>/dev/null)" | jesc 600)   # printf: перевод строки ушёл бы хвостовым пробелом
+	printf '{"installed":{"awg":%s,"xray":%s,"hy2":%s,"byedpi":%s},"zapret_installed":%s,"ready":[%s],"version":"%s","code":%s,"disk_free":%s,"install_state":"%s","install_msg":"%s"}\n' \
+		"$ia" "$ix" "$ih" "$ib" "$iz" "$rj" "${vn:-?}" "$vc" "${dfree:-0}" "$st" "$msg"
+}
+
+# --- ByeDPI: текущие десинк-аргументы (.byedpi-args или авто-дефолт) + состояние. -----
+# args  — что СЕЙЧАС в .byedpi-args (пусто, если файла нет = авто); default — авто-набор из
+# плагина (DEFAULT_ARGS); isdefault — используется ли авто; active — byedpi несёт трафик;
+# installed — есть ли бинарь. Питает карточку «ByeDPI (десинк)».
+# --- Пул проб браузер-свипа: ЕДИНСТВЕННЫЙ источник того, что меряет свип. --------
+# Хранится построчно `url⇥w⇥h` в $DS/.probe-pool[-s<id>|-zapret] (per-цель, решение Р2 дизайна):
+# пул проб обязан быть ПОДМНОЖЕСТВОМ пула цели, иначе проба меряет чужой маршрут.
+# Цели ТРИ и стор у каждой свой: основная несущая byedpi (пусто) · доп-выход (2|3|4) ·
+# карточка Zapret (`zapret` — общий nfqws транспорта и всех zapret-выходов). Общий стор у
+# byedpi-несущей и Zapret был бы сюрпризом: правишь пул в одной карточке — меняется в другой.
+# w/h — эталон размера с калибровки (0 = ещё не калибровано); по нему свип ловит заглушку.
+# ВИД пробы (грузим картинку и сверяем размер / просто устанавливаем соединение) в сторе НЕ
+# хранится: он однозначно выводится из самой ссылки (путь на картинку = строгая проба, всё
+# остальное = проба соединения). Держать его отдельной колонкой значило бы завести второй
+# источник истины и ждать, когда он разъедется с тем, что видит панель. У проб по соединению
+# w/h всегда 0 — размера у opaque-ответа нет и не должно быть.
+emit_probes() {
+	pf="$DS/.probe-pool"
+	case "$1" in '') ;; zapret) pf="$DS/.probe-pool-zapret" ;; *) pf="$DS/.probe-pool-s$1" ;; esac
+	pu=""
+	while IFS="$(printf '\t')" read -r _u _w _h; do
+		[ -n "$_u" ] || continue
+		_uj=$(printf '%s' "$_u" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		pu="$pu${pu:+,}{\"u\":\"$_uj\",\"w\":${_w:-0},\"h\":${_h:-0}}"
+	done <<EOF
+$(cat "$pf" 2>/dev/null | tr -d '\r')
+EOF
+	printf '{"slot":"%s","urls":[%s]}\n' "$1" "$pu"
+}
+
+# КАНДИДАТЫ пула проб = домены, которые РЕАЛЬНО едут через проверяемый десинк (`slots.sh
+# domains`, единый источник — его же читает byedpi-test.sh): 0/пусто = основная несущая,
+# 2|3|4 = доп-выход, zapret = общий nfqws. Это ЕДИНСТВЕННЫЙ источник проб — вшитых наборов
+# в панели больше нет: они не были связаны с тем, что идёт через десинк, и давали таблицу,
+# где все стратегии одинаковы. Пусто = доменов в этом пуле нет (только CIDR или вовсе ничего) —
+# панель так и скажет, а свип честно откажется идти.
+emit_probe_cands() {
+	pd=""
+	while read -r _d; do
+		[ -n "$_d" ] || continue
+		pd="$pd${pd:+,}\"$_d\""
+	done <<EOF
+$(sh "$D/slots.sh" domains "${1:-0}" 24 2>/dev/null | tr -d '\r')
+EOF
+	printf '{"slot":"%s","domains":[%s]}\n' "$1" "$pd"
+}
+
+# «А ЭТОТ домен вообще едет через десинк?» — вопрос ОТДЕЛЬНЫЙ от probe_cands: у основного выхода
+# почти всё метится по CIDR (iplist_set — тысячи подсетей opencck), доменов у этих сетей нет
+# ВООБЩЕ ⇒ по одному реестру такой сайт выглядит «чужим», хотя честно едет через десинк. Ответ
+# даёт ЯДРО: slots.sh route резолвит имя и делает ipset test по сетам цели. ok=0 — спросить не
+# вышло (не резолвится / битое имя): панель тогда молчит, а не пугает ложным «мимо».
+emit_probe_route() {
+	_rr=$(sh "$D/slots.sh" route "${1:-0}" "$2" 2>/dev/null | head -1)
+	_rv=$(printf '%s' "$_rr" | cut -f1)
+	_ri=$(printf '%s' "$_rr" | cut -f2)
+	_rs=$(printf '%s' "$_rr" | cut -f3)
+	case "$_rv" in
+		hit)  printf '{"ok":1,"hit":1,"ip":"%s","set":"%s"}\n' "$_ri" "$_rs" ;;
+		miss) printf '{"ok":1,"hit":0,"ip":"%s","set":""}\n' "$_ri" ;;
+		# why нужен панели: «домен не резолвится» и «спросить не вышло» — РАЗНЫЕ вердикты,
+		# первый означает мёртвую ссылку, а не жертву плохой стратегии.
+		*)    printf '{"ok":0,"hit":0,"ip":"","set":"","why":"%s"}\n' "${_rv:-fail}" ;;
+	esac
+}
+
+emit_byedpi() {
+	# $1 = id ДОП-ВЫХОДА (2|3|4) или пусто = основная несущая byedpi. У выхода своя стратегия
+	# (.byedpi-args-s<id>, читает transport-byedpi.sh slot_desync_args), а библиотека пресетов и
+	# авто-набор ОБЩИЕ — ciadpi один и тот же, разнести их значило бы держать две копии каталога.
+	# active для выхода = «выход включён» (несёт трафик своего пула), а не «byedpi активный транспорт».
+	sl="$1"
+	af="$DS/.byedpi-args"; [ -n "$sl" ] && af="$DS/.byedpi-args-s$sl"
+	isdef=true; args=""
+	if [ -s "$af" ]; then
+		args=$(grep -vE '^[[:space:]]*#' "$af" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')
+		[ -n "$args" ] && isdef=false
+	fi
+	def=$(sh "$D/transport-byedpi.sh" defaults 2>/dev/null | tr -d '\r')
+	# Своей стратегии у ВЫХОДА нет ⇒ он наследует ОБЩУЮ (.byedpi-args), а не заводскую —
+	# так решает slot_desync_args. Отдаём это отдельным полем, иначе панель показывала бы
+	# «авто (заводская)» там, где реально работает подобранная человеком общая стратегия.
+	inh=""
+	if [ -n "$sl" ] && [ "$isdef" = true ] && [ -s "$DS/.byedpi-args" ]; then
+		inh=$(grep -vE '^[[:space:]]*#' "$DS/.byedpi-args" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')
+	fi
+	active=false
+	if [ -n "$sl" ]; then
+		# Heredoc (не пайп): while в пайпе — сабшелл, active бы не долетел до printf.
+		while IFS="$(printf '\t')" read -r _si _st _rest; do
+			[ "$_si" = "$sl" ] && [ "$_st" = byedpi ] && active=true
+		done <<EOF
+$(sh "$D/slots.sh" list-enabled 2>/dev/null)
+EOF
+	else
+		cur=$(cat "$DS/.transport" 2>/dev/null | tr -d ' \r\n'); [ "$cur" = byedpi ] && active=true
+	fi
+	inst=false; [ -x "$(bin_path byedpi)" ] && inst=true
+	aj=$(printf '%s' "$args" | sed 's/\\/\\\\/g; s/"/\\"/g')
+	dj=$(printf '%s' "$def"  | sed 's/\\/\\\\/g; s/"/\\"/g')
+	hj=$(printf '%s' "$inh"  | sed 's/\\/\\\\/g; s/"/\\"/g')
+	# Курированная библиотека пресетов (label|args) из плагина → JSON-массив для выпадашки/тестера.
+	# busybox без awk split — режем по первому '|' параметром-расширением. Heredoc (не пайп) →
+	# $pj копится в основном шелле.
+	pj=""
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		plbl=${line%%|*}; pargs=${line#*|}
+		plbl=$(printf '%s' "$plbl" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		pargs=$(printf '%s' "$pargs" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		pj="$pj${pj:+,}{\"label\":\"$plbl\",\"args\":\"$pargs\"}"
+	done <<EOF
+$(sh "$D/transport-byedpi.sh" presets 2>/dev/null | tr -d '\r')
+EOF
+	printf '{"args":"%s","default":"%s","inherit":"%s","isdefault":%s,"active":%s,"installed":%s,"presets":[%s]}\n' "$aj" "$dj" "$hj" "$isdef" "$active" "$inst" "$pj"
+}
+
+# --- Zapret (десинк-direct): вкл/выкл, стратегия nfqws, категории, пресеты. ----------
+# on — zapret ЯВЛЯЕТСЯ АКТИВНЫМ ТРАНСПОРТОМ (.transport=zapret; комментарий про .zapret-on устарел
+# с переводом zapret в транспорты и правился 09.09.2026); live — ЖИВ ЛИ ДЕСИНК ВООБЩЕ (тот же
+# nfqws поднимают доп-выходы и устройства «целиком в десинк», владелец ответа — zapret.sh wired);
+# args — .zapret-args (пусто = дефолт); default — DEFAULT_ARGS из zapret.sh;
+# installed — есть ли бинарь nfqws (zapret — ОРТОГОНАЛЬНЫЙ транспорт: в SELECTABLE/transport.list
+# есть, но единственную alt-ось не занимает); back — куда вернуться при выключении (первый готовый
+# не-zapret транспорт, пусто = туннелей нет → прямой режим); cats — выбранные категории;
+# categories/presets — для UI. Питает карточку «Zapret (десинк направо)».
+emit_zapret() {
+	af="$DS/.zapret-args"; isdef=true; args=""
+	if [ -s "$af" ]; then
+		args=$(grep -vE '^[[:space:]]*#' "$af" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')
+		[ -n "$args" ] && isdef=false
+	fi
+	def=$(sh "$D/zapret.sh" defaults 2>/dev/null | tr -d '\r')
+	# zapret теперь ТРАНСПОРТ: «вкл» = он активная несущая (.transport=zapret), а не старый
+	# параллельный флаг ON_FLAG (он же теперь двигается вместе с .transport через up/down).
+	on=false;  [ "$(cat "$DS/.transport" 2>/dev/null | tr -d ' \r\n')" = zapret ] && on=true
+	# «ДЕСИНК ЖИВ ВООБЩЕ» — ОТДЕЛЬНЫЙ вопрос от «zapret это транспорт»: тот же nfqws поднимают
+	# zapret-ВЫХОД и устройства «целиком в десинк». Панель без этого поля гасила кнопку свипа и
+	# писала «применится при включении» при ЖИВОМ демоне. Владелец ответа — плагин (`wired`);
+	# rc=2 (старая копия скрипта) — не сужу, беру прежний признак `on`.
+	live=false
+	sh "$D/zapret.sh" wired >/dev/null 2>&1; rcw=$?
+	case "$rcw" in 0) live=true ;; 2) live=$on ;; esac
+	inst=false; [ -x "$(bin_path nfqws)" ] && inst=true
+	# УМЕЕТ ЛИ ЭТОТ РОУТЕР десинк ВООБЩЕ (ядро/iptables с NFQUEUE). Бинарь на месте и правил ноль —
+	# ровно тот случай, где карточка предлагала кнопку, гасящую туннель ради транспорта, который
+	# здесь не встанет (AX3600, ядро 4.4 без libxt_NFQUEUE). Ответ — у плагина (verb nfq-ok, проба
+	# кэширована), второй копии пробы не заводим. Верб не знает (rc=2, старая копия zapret.sh) —
+	# НЕ сужу: прежнее поведение байт-в-байт, как в transport_ready.
+	nfq=true
+	if [ "$inst" = true ]; then
+		sh "$D/zapret.sh" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ] || nfq=false
+	fi
+	# Куда вернуть при выключении zapret — первый готовый не-zapret транспорт (приоритет list:
+	# awg→xray→hy2→byedpi). Пусто = туннелей нет (zapret был единственным обходом) → off=прямой режим.
+	back=$(sh "$D/transport.sh" list 2>/dev/null | grep -vx zapret | head -1)
+	case "$back" in awg|xray|hy2|byedpi) ;; *) back="" ;; esac
+	# выбранные категории одной строкой (ключи) — для короткой подписи в шапке блока
+	selcats=$(sh "$D/zapret.sh" categories 2>/dev/null | awk -F'|' '{printf "%s ",$1}' | sed 's/ *$//')
+	aj=$(printf '%s' "$args"   | sed 's/\\/\\\\/g; s/"/\\"/g')
+	dj=$(printf '%s' "$def"    | sed 's/\\/\\\\/g; s/"/\\"/g')
+	scj=$(printf '%s' "$selcats" | sed 's/\\/\\\\/g; s/"/\\"/g')
+	# Категории «в десинк» {k,l,n} — ВЫБРАННЫЕ в гео (вшитой таблицы больше нет, sel не нужен: в
+	# списке только то, что человек включил). n = адресов/доменов в категории по данным гео.
+	cj=""
+	while IFS='|' read -r ck cl cs; do
+		[ -n "$ck" ] || continue
+		clx=$(printf '%s' "$cl" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		case "$cs" in ''|*[!0-9]*) cs=0 ;; esac
+		cj="$cj${cj:+,}{\"k\":\"$ck\",\"l\":\"$clx\",\"n\":$cs}"
+	done <<EOF
+$(sh "$D/zapret.sh" categories 2>/dev/null | tr -d '\r')
+EOF
+	# пресеты {label,args} — как у byedpi
+	pj=""
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		plbl=${line%%|*}; pargs=${line#*|}
+		plbl=$(printf '%s' "$plbl" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		pargs=$(printf '%s' "$pargs" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		pj="$pj${pj:+,}{\"label\":\"$plbl\",\"args\":\"$pargs\"}"
+	done <<EOF
+$(sh "$D/zapret.sh" presets 2>/dev/null | tr -d '\r')
+EOF
+	# Прогресс фоновой до/переустановки или удаления nfqws (zapret.sh install/remove) — для polling.
+	ist=$(cat "$DS/.zapret-install.state" 2>/dev/null | tr -d ' \r\n'); [ -n "$ist" ] || ist=IDLE
+	imsg=$(tail -n 1 "$DS/.zapret-install.log" 2>/dev/null | jesc 300)
+	printf '{"on":%s,"live":%s,"installed":%s,"nfq":%s,"back":"%s","args":"%s","default":"%s","isdefault":%s,"cats":"%s","categories":[%s],"presets":[%s],"install_state":"%s","install_msg":"%s"}\n' \
+		"$on" "$live" "$inst" "$nfq" "$back" "$aj" "$dj" "$isdef" "$scj" "$cj" "$pj" "$ist" "$imsg"
+}
+
+# read_subs_last — отметка последнего прогона подписок (.subs-last = «ts⇥ok|fail⇥сводка») в
+# sl_ts/sl_ok/sl_msg. ОДНА копия разбора на два потребителя (экран «Подписки» + прогресс
+# кнопки ⟳): вторая копия неизбежно разъехалась бы по эскейпу кавычек.
+read_subs_last() {
+	sl_ts=0; sl_ok=false; sl_msg=""
+	[ -s "$DS/.subs-last" ] || return 0
+	TAB=$(printf '\t')
+	sl_ts=$(cut -d"$TAB" -f1 "$DS/.subs-last" 2>/dev/null | tr -cd '0-9')
+	[ "$(cut -d"$TAB" -f2 "$DS/.subs-last" 2>/dev/null)" = ok ] && sl_ok=true
+	# Потолок — тот же, что у писателя (subs-update.sh::sub_sum_cut 1000): меньший обрезал бы уже целые записи посреди слова.
+	# `jtxt`, а не `jesc`: в сводке — МЕТКИ подписок, то есть данные, и `jesc` вырезал бы из «Speed [50m]» «код цвета» `[50m`
+	# (разбор — в шапке json-lib.sh; ревью приёмки, круг 1). Перевод строки в конце записи — вон ДО jtxt: тот делает из него пробел,
+	# и сводка уходила бы с пробелом на конце (круг 2); хвостового пробела самого писателя нет — его снимает sub_sum_cut (круг 3).
+	sl_msg=$(cut -d"$TAB" -f3- "$DS/.subs-last" 2>/dev/null | tr -d '\n' | jtxt 1000)
+	[ -n "$sl_ts" ] || sl_ts=0
+	# Возраст считает РОУТЕР: обе точки отсчёта из одних часов, поэтому разность честна даже при
+	# несинхронизированных часах (RTC нет). Панель считала его от `Date.now()` браузера — при этом
+	# ровно тремя абзацами ниже, в emit_subs_run, записано, почему так нельзя. -1 = прогона не было.
+	sl_age=-1
+	# clock-raw: НЕ через age_since. `.subs-last` лежит на /data и ребут ПЕРЕЖИВАЕТ, поэтому его
+	# возраст законно больше аптайма — кламп из clock-lib соврал бы «обновлено только что» про
+	# прогон трёхдневной давности. Скачок часов даёт тут лишь неточную подпись, а не решение.
+	[ "${sl_ts:-0}" -gt 0 ] && { sl_age=$(( $(date +%s) - sl_ts )); [ "$sl_age" -ge 0 ] || sl_age=0; }
+}
+
+# --- Идёт ли ПРЯМО СЕЙЧАС обновление подписок + итог последнего прогона. Лёгкий опрос для
+# прогресса кнопки ⟳ (панель обновляет подписки роутерным путём, а он фоновый и небыстрый:
+# ~20-30 с на подписку). Ради двух полей дёргать весь emit_prefs незачем.
+# «Идёт» = ЖИВ pid из лока subs-update.sh. Лок общий у cron и панели ⇒ прогресс видно и тогда,
+# когда прогон затеял cron, а человек в этот момент нажал ⟳ (его запуск лок просто отбросит).
+# Сравнивать ts с часами БРАУЗЕРА нельзя (у роутера нет RTC) — панель ловит СМЕНУ ts.
+emit_subs_run() {
+	run=false
+	p=$(cat /tmp/enodia-subs-update.lock/pid 2>/dev/null | tr -cd '0-9')
+	[ -n "$p" ] && [ -d "/proc/$p" ] && run=true
+	read_subs_last
+	printf '{"running":%s,"ts":%s,"ok":%s,"msg":"%s"}\n' "$run" "${sl_ts:-0}" "$sl_ok" "$sl_msg"
+}
+
+# --- КАРТОЧКА «ПОДПИСКИ»: сколько ещё работает каждая. Три источника в одном ответе: реестр
+# (метка), конфиги (сколько серверов) и `.sub-info` (что подписка сообщила о себе заголовком
+# `subscription-userinfo` — владелец разбора subs-lib.sh).
+# СПИСОК СПРАШИВАЕМ У РОУТЕРА (`subs-update.sh list` — «tag⇥метка⇥серверов»), а не считаем сами:
+# счёт по ВЛАДЕЛЬЦУ (длиннейший подходящий тег, ОБА семейства конфигов) уже написан там, и вторая
+# копия разошлась бы с первой на первом же теге-префиксе («liberty» ⊂ «liberty-vpn») — ровно та
+# грабля, за которую в этом проекте уже платили картой имён.
+# ВОЗРАСТ СЧИТАЕТ РОУТЕР — точнее, панель считает его от НАШЕГО `now`: у роутера нет RTC, и от
+# часов браузера свежая закачка выглядела бы вчерашней (тот же довод, что у секции событий).
+emit_subs() {
+	now=$(date +%s 2>/dev/null | tr -cd '0-9'); [ -n "$now" ] || now=0
+	# Движка подписок у роутера нет (скрипты старее фичи) — карточки не будет ВОВСЕ. Пустой
+	# список означал бы «подписок нет», а это разные ответы.
+	if [ ! -f "$D/subs-update.sh" ]; then
+		printf '{"now":%s,"engine":false,"subs":[]}\n' "$now"; return
+	fi
+	TAB=$(printf '\t')
+	out=""
+	# Список кормим ЦИКЛУ ЧЕРЕЗ heredoc, а не через свой файл в /tmp: труба сделала бы цикл
+	# подоболочкой (накопленный `out` умер бы вместе с ней), а СВОЙ временный файл пришлось бы
+	# снимать и на обрыве — панель закрывает соединение, CGI получает сигнал, и EXIT-ловушка на
+	# busybox не срабатывает. Временный файл heredoc'а ведёт сам шелл, и сирот он не оставляет.
+	while IFS="$TAB" read -r tag label n || [ -n "$tag" ]; do
+		# «подписок нет» — человеческая строка того же верба (у неё нет ни TAB, ни числа):
+		# машинному читателю она не адресована, и счётчик её отсеивает.
+		case "$n" in ''|*[!0-9]*) continue ;; esac
+		tag=$(printf '%s' "$tag" | tr -cd 'a-z0-9-')
+		[ -n "$tag" ] || continue
+		# `jtxt`, а не `jesc`: метка — ДАННЫЕ человека, и `jesc` вырезал бы из «Speed [50m]» «код цвета» (ревью приёмки, круг 3; тот же
+		# довод, что у читателя сводки в read_subs_last).
+		label=$(printf '%s' "$label" | jtxt 64)
+		ok=0; er=0; hv=0; up=0; dn=0; tt=0; ex=0
+		# Вложенный `while read` со СВОИМ перенаправлением: `grep | read` — подоболочка, и все
+		# семь полей умерли бы вместе с ней. Форков при этом не тратится ни одного.
+		if [ -f "$DS/.sub-info" ]; then
+			while IFS="$TAB" read -r k a1 a2 a3 a4 a5 a6 a7 || [ -n "$k" ]; do
+				[ "$k" = "$tag" ] || continue
+				ok=$a1; er=$a2; hv=$a3; up=$a4; dn=$a5; tt=$a6; ex=$a7
+			done < "$DS/.sub-info"
+		fi
+		# Числа проходят ДВА сита. Первое — цифры: иначе поле уехало бы в JSON голым текстом и
+		# сломало разбор ВСЕГО ответа, а не одной строки. Второе — ведущие нули: `007` это цифры,
+		# но в JSON НЕ число (стандарт их запрещает). Снимаем их ТЕКСТОМ, а не арифметикой:
+		# `$((0070))` у шелла ВОСЬМЕРИЧНОЕ, то есть 56 — тихо ДРУГОЕ число, и провайдер,
+		# приславший `total=0070`, получил бы от нас чужой остаток.
+		case "$ok" in ''|*[!0-9]*) ok=0 ;; *) z=${ok%%[!0]*}; ok=${ok#$z}; [ -n "$ok" ] || ok=0 ;; esac
+		case "$er" in ''|*[!0-9]*) er=0 ;; *) z=${er%%[!0]*}; er=${er#$z}; [ -n "$er" ] || er=0 ;; esac
+		case "$up" in ''|*[!0-9]*) up=0 ;; *) z=${up%%[!0]*}; up=${up#$z}; [ -n "$up" ] || up=0 ;; esac
+		case "$dn" in ''|*[!0-9]*) dn=0 ;; *) z=${dn%%[!0]*}; dn=${dn#$z}; [ -n "$dn" ] || dn=0 ;; esac
+		case "$tt" in ''|*[!0-9]*) tt=0 ;; *) z=${tt%%[!0]*}; tt=${tt#$z}; [ -n "$tt" ] || tt=0 ;; esac
+		case "$ex" in ''|*[!0-9]*) ex=0 ;; *) z=${ex%%[!0]*}; ex=${ex#$z}; [ -n "$ex" ] || ex=0 ;; esac
+		z=${n%%[!0]*}; n=${n#$z}; [ -n "$n" ] || n=0
+		case "$hv" in 1) hv=true ;; *) hv=false ;; esac
+		out="$out${out:+,}{\"tag\":\"$tag\",\"label\":\"$label\",\"srv\":$n,\"ok\":$ok,\"err\":$er,\"have\":$hv,\"up\":$up,\"down\":$dn,\"total\":$tt,\"expire\":$ex}"
+	done <<EOF
+$(sh "$D/subs-update.sh" list 2>/dev/null)
+EOF
+	printf '{"now":%s,"engine":true,"subs":[%s]}\n' "$now" "$out"
+}
+
+# --- Настройки панели (.prefs, key=value): пока только «проверка серверов». Расширяемо: новый
+# ключ = строка чтения тут + ветка валидации в action verb set_pref. Дефолты — если ключа нет. -
+emit_prefs() {
+	P="$DS/.prefs"
+	eg=$(grep '^egress_url=' "$P" 2>/dev/null | head -1 | cut -d= -f2-)
+	[ -n "$eg" ] || eg="https://1.1.1.1/cdn-cgi/trace"    # IP-литерал: работает без DNS (грабля ядра 4.4)
+	so=$(grep '^sort_after_test=' "$P" 2>/dev/null | head -1 | cut -d= -f2-)
+	case "$so" in 1|true) so=true ;; *) so=false ;; esac
+	dd=$(grep '^del_dead_after_test=' "$P" 2>/dev/null | head -1 | cut -d= -f2-)
+	case "$dd" in 1|true) dd=true ;; *) dd=false ;; esac
+	# Раздельный резолв рунета — отдельный флаг-файл .split-runet (его читает dns-split.sh/heal).
+	sr=false; [ -f "$DS/.split-runet" ] && sr=true
+	# MTU туннеля (awg0): персист-оверрайд .tun-mtu, иначе текущий MTU awg0, иначе ДЕФОЛТ ПРОЕКТА.
+	# Дефолт — 1376 (AWG_MTU_DEFAULT в awg_setup.sh и transport-awg.sh), а не 1420: у нативного
+	# .conf строки MTU= нет никогда, а ядерные 1420 + S4-padding дают наружу до 1495 — на пути с
+	# PMTU 1450 крупные пакеты дохнут (замерено 1420 → 36 КБ/с против 1376 → 8.5 МБ/с при живом
+	# хендшейке). Прежний фолбэк 1420 срабатывал у ВСЕХ, у кого awg0 не поднят (xray/hy2/byedpi/
+	# zapret), и «Применить» в панели записывало в .tun-mtu ровно то значение, от которого лечили.
+	tm=$(cat "$DS/.tun-mtu" 2>/dev/null | tr -cd '0-9')
+	[ -n "$tm" ] || tm=$(ip link show awg0 2>/dev/null | grep -o 'mtu [0-9]*' | awk '{print $2}')   # not-wan: MTU СВОЕЙ несущей, вопрос не про аплинк
+	[ -n "$tm" ] || tm=1376
+	i6=false; [ -f "$DS/.ipv6-block" ] && i6=true
+	# Детект РЕАЛЬНОГО провайдерского IPv6-аплинка (не стоковый ULA) — чтобы панель контекстно
+	# подсказала, актуален ли тумблер «IPv6 клиентам» (dual-stack) или это no-op (сток без v6).
+	# Логика — в net-tune.sh (единый владелец IPv6), тут только сурфейсим факт. Нет скрипта → false.
+	u6=false
+	[ -f "$D/net-tune.sh" ] && [ "$(sh "$D/net-tune.sh" detect 2>/dev/null | grep '^uplink=' | cut -d= -f2)" = 1 ] && u6=true
+	# Потолок кучи демонов AmneziaWG (.go-memlimit). Своей арифметики у панели нет: режим,
+	# ДЕЙСТВУЮЩЕЕ значение и объём ОЗУ считает net-tune.sh — он единственный владелец правила
+	# (иначе экран и реальный запуск демона разошлись бы). value=0 значит «потолок не ставится».
+	gm_mode=auto; gm_val=0; gm_tot=0
+	if [ -f "$D/net-tune.sh" ]; then
+		gm_i=$(sh "$D/net-tune.sh" memlimit-info 2>/dev/null)
+		gm_mode=$(printf '%s\n' "$gm_i" | grep '^mode=' | cut -d= -f2- | tr -cd 'a-z')
+		gm_val=$(printf '%s\n' "$gm_i" | grep '^value=' | cut -d= -f2- | tr -cd '0-9')
+		gm_tot=$(printf '%s\n' "$gm_i" | grep '^total=' | cut -d= -f2- | tr -cd '0-9')
+	fi
+	case "$gm_mode" in off|manual|auto) : ;; *) gm_mode=auto ;; esac
+	[ -n "$gm_val" ] || gm_val=0
+	[ -n "$gm_tot" ] || gm_tot=0
+	# Автопроверка серверов (интервал в минутах, 0=выкл) — чисто клиентский таймер панели, но храним
+	# в .prefs, чтобы значение переживало перезагрузку страницы и синхронизировалось между устройствами.
+	ap=$(grep '^autoping_min=' "$P" 2>/dev/null | head -1 | cut -d= -f2- | tr -cd '0-9')
+	[ -n "$ap" ] || ap=0
+	# Тема панели (auto|light|dark) — клиентское оформление, но храним тут, чтобы выбор
+	# ехал за юзером на все его устройства. Мусор в файле → auto (панель = как в системе).
+	th=$(grep '^theme=' "$P" 2>/dev/null | head -1 | cut -d= -f2- | tr -cd 'a-z')
+	case "$th" in light|dark) : ;; *) th=auto ;; esac
+	# Язык панели (ru|en) — клиентская локализация (словарь + DOM-перевод в index.html), но храним
+	# тут, чтобы выбор ехал за юзером на все устройства (как тема). Мусор/пусто → ru (дефолт проекта).
+	lg=$(grep '^lang=' "$P" 2>/dev/null | head -1 | cut -d= -f2- | tr -cd 'a-z')
+	case "$lg" in en) : ;; *) lg=ru ;; esac
+	# Источник живой скорости в шапке (tun|direct|all) — вид, но едет за юзером, как тема.
+	# Нет ключа/мусор → tun: шапка про VPN, и первым вопросом к ней идёт «что сейчас в туннеле».
+	lv=$(grep '^live_src=' "$P" 2>/dev/null | head -1 | cut -d= -f2- | tr -cd 'a-z')
+	case "$lv" in direct|all) : ;; *) lv=tun ;; esac
+	# Балансер (авто-выбор лучшего сервера поверх автопинга) — решение принимает панель по кэшу
+	# пингов, переключение идёт штатным set_*_server. Off по умолчанию: сам меняет несущую.
+	bl=$(grep '^balancer=' "$P" 2>/dev/null | head -1 | cut -d= -f2-)
+	case "$bl" in 1|true) bl=true ;; *) bl=false ;; esac
+	# Периодичность обновления списков (iplist + adblock/ipblock) — маркер .update-interval (истина,
+	# его пишет update-sched.sh). Нет маркера = прежнее поведение установщика (ежедневно 5:00) = daily.
+	ui=$(tr -cd 'a-z0-9' < "$DS/.update-interval" 2>/dev/null)
+	case "$ui" in off|6h|12h|weekly) : ;; *) ui=daily ;; esac
+	# Автообновление ПОДПИСОК (headless, subs-update.sh по cron). Дефолт off: на прежних
+	# установках подписки обновлялись только из панели, менять это молча нельзя. Плюс отметка
+	# последнего прогона (.subs-last = «ts⇥ok|fail⇥сводка») — панель показывает «обновлено N назад».
+	# [ -f ] перед чтением: без него на установке БЕЗ маркера busybox пишет «can't open …» в
+	# stderr (в лог uhttpd) на каждый опрос настроек — шум, который потом ищут как ошибку.
+	si=off; [ -f "$DS/.subs-interval" ] && si=$(tr -cd 'a-z0-9' < "$DS/.subs-interval" 2>/dev/null)
+	case "$si" in 6h|12h|daily|weekly) : ;; *) si=off ;; esac
+	read_subs_last
+	# Есть ли вообще подписки — панель прячет блок, пока их нет (прогрессивное раскрытие).
+	sn=0; [ -s "$DS/.subs" ] && sn=$(grep -c . "$DS/.subs" 2>/dev/null); [ -n "$sn" ] || sn=0
+	eg=$(printf '%s' "$eg" | sed 's/\\/\\\\/g; s/"/\\"/g')
+	printf '{"egress_url":"%s","sort_after_test":%s,"del_dead_after_test":%s,"split_runet":%s,"tun_mtu":%s,"ipv6_block":%s,"ipv6_uplink":%s,"go_memlimit":{"mode":"%s","value":%s,"total":%s},"autoping_min":%s,"theme":"%s","lang":"%s","live_src":"%s","balancer":%s,"update_interval":"%s","subs_interval":"%s","subs_count":%s,"subs_last":{"ts":%s,"age":%s,"ok":%s,"msg":"%s"}}\n' "$eg" "$so" "$dd" "$sr" "$tm" "$i6" "$u6" "$gm_mode" "$gm_val" "$gm_tot" "$ap" "$th" "$lg" "$lv" "$bl" "$ui" "$si" "$sn" "${sl_ts:-0}" "${sl_age:--1}" "$sl_ok" "$sl_msg"
+}
+
+# Разбор вывода `dns_now` (doh-lib.sh): строка `ключ=значение` → значение, готовое для JSON.
+# `tr -d '\r\n'` ПЕРЕД jesc ОБЯЗАТЕЛЕН: jesc превращает перевод строки в ПРОБЕЛ, и поле
+# приезжало в панель с хвостовым пробелом — адрес резолвера выглядел «испорченным» (та же
+# грабля уже ловилась на `.doh-custom-url`). Секций-потребителей две (doh и tech), и разбор у
+# них обязан быть один: иначе экран DNS и лента «Обзора» показали бы один адрес по-разному.
+dns_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | tr -d '\r\n' | jesc 160; }
+# То же для ЧИСЛА (doh-lib.sh::doh_health_state): в JSON оно едет без кавычек, поэтому мусор, пустота и
+# отсутствие ключа (библиотека старее секции) — это `-1` «нет такого состояния», а не битый JSON у панели.
+# Отрицательные значения у владельца ровно два: -1 и -2.
+dns_num() {
+	_dnn=$(printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1 | tr -d '\r\n')
+	case "$_dnn" in -1|-2) : ;; ''|*[!0-9]*) _dnn=-1 ;; esac
+	printf '%s' "$_dnn"
+}
+
+# --- Шифрованный DNS (DoH): состояние локального https_dns_proxy для экрана «Шифрованный DNS» раздела «Сеть».
+# Источник — doh-lib.sh (supervise + каталог резолверов). Нет либы (старая установка/до
+# вендоринга бинаря) → отдаём выключенное/не-установленное состояние (карточка честно скажет
+# «бинарь не установлен»), НЕ падаем. on = тумблер (.doh-on, показываем даже без бинаря);
+# installed = есть бинарь; running = демон жив. Каталог резолверов — из либы (whitelist).
+emit_doh() {
+	on=false; installed=false; running=false; res=cloudflare; nid=""
+	auto=true; auto_active=false; proto=doh; dot_inst=false; cust=""; custips=""
+	list="cloudflare google quad9 adguard nextdns custom"
+	if [ -f "$D/doh-lib.sh" ]; then
+		ENODIA_DIR="$D"; . "$D/doh-lib.sh"
+		[ "$(cat "$DS/.doh-on" 2>/dev/null | tr -d ' \r\n')" = on ] && on=true
+		# auto = РАЗРЕШЁН ли авто-режим (pref, деф. вкл — читаем файл, не doh_auto: та ещё и бинарь
+		# требует, а галка в панели должна показывать выбор пользователя и без бинаря).
+		[ "$(cat "$DS/.doh-auto" 2>/dev/null | tr -d ' \r\n')" = off ] && auto=false
+		# auto_active = авто-режим ПРЯМО СЕЙЧАС держит DNS (тумблер выкл, транспорт прямой)
+		command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active && auto_active=true
+		# installed = бинарь АКТИВНОГО протокола (гейтит реальное шифрование); dot_installed —
+		# отдельно, чтобы панель могла подсказать «поставь бинарь» ДО переключения на DoT.
+		doh_installed && installed=true
+		command -v doh_proto >/dev/null 2>&1 && proto=$(doh_proto)
+		[ -x "$(bin_path dot-proxy)" ] && dot_inst=true
+		doh_running && running=true
+		res=$(doh_resolver_name)
+		nid=$(cat "$DS/.doh-nextdns-id" 2>/dev/null | tr -cd 'a-f0-9')
+		l=$(doh_resolver_list 2>/dev/null); [ -n "$l" ] && list="$l"
+		# Свой резолвер: показываем ЧТО СОХРАНЕНО (иначе поле при каждом открытии экрана пустое, и
+		# человек не видит, куда сейчас ходит его DNS) + якоря — единственное место, где видно,
+		# что адрес чужого сервера мы вообще знаем. Через jesc: строка едет внутрь JSON.
+		# tr -d перед jesc ОБЯЗАТЕЛЕН: файл кончается переводом строки, jesc превращает его в
+		# пробел, и поле в панели возвращалось с хвостовым пробелом (косметика, но заметная —
+		# человек видит свой адрес «испорченным»). У списка адресов перевод строки — разделитель.
+		cust=$(cat "$DS/.doh-custom-url" 2>/dev/null | tr -d '\r\n' | jesc 300)
+		custips=$(cat "$DS/.doh-custom-ips" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//' | jesc 120)
+	fi
+	# ЧЕМ РОУТЕР РЕЗОЛВИТ ПРЯМО СЕЙЧАС. Считает РОУТЕР, панель только печатает: экран отвечал
+	# на «какой резолвер ВЫБРАН» (пикер показывает Cloudflare даже при выключенном тумблере) и
+	# молчал про «какой РАБОТАЕТ» — человек честно не понимал, куда уходят его запросы
+	# (спрошено 31.08.2026). Разбор живого конфига dnsmasq переехал к владельцу DNS-пути
+	# (doh-lib.sh::dns_now): ровно тот же вопрос задаёт лента «Обзора», и два разбора одного
+	# файла разошлись бы молча. cur_src — КЛАСС пути (doh|ours|stock), фразу подбирает панель.
+	# Нет либы (старая/частичная установка) — ответа НЕТ (пустой cur_src), и панель тогда просто
+	# не печатает строку: выдумывать вердикт из воздуха хуже, чем промолчать.
+	cur_src=""; cur_dns=""; cur_via=""
+	if command -v dns_now >/dev/null 2>&1; then
+		_dn=$(dns_now)
+		cur_src=$(dns_field "$_dn" src); cur_dns=$(dns_field "$_dn" addr); cur_via=$(dns_field "$_dn" via)
+	fi
+	# ЗДОРОВЬЕ СЛОЯ (уведён ли резолвер мимо туннеля, карантин авто-режима, промахи) — у владельца
+	# (doh-lib.sh::doh_health_state), здесь только разбор. Нет функции (библиотека старее секции) —
+	# `-1`/`false`, то есть «такого состояния нет», и панель промолчит, а не выдумает.
+	h_untun=false; h_uage=-1; h_retun=-1; h_cool=-1; h_miss=-1; h_mmax=-1; h_dfb=false; h_dfba=-1; h_dfbr=-1; h_bail=-1
+	if command -v doh_health_state >/dev/null 2>&1; then
+		_hs=$(doh_health_state)
+		[ "$(dns_num "$_hs" untun)" = 1 ] && h_untun=true
+		h_uage=$(dns_num "$_hs" untun_age); h_retun=$(dns_num "$_hs" retun_in); h_cool=$(dns_num "$_hs" cool)
+		h_miss=$(dns_num "$_hs" miss); h_mmax=$(dns_num "$_hs" miss_max)
+		# Выбран DoT, а шифрует DoH: порт 853 этим путём не проходит (doh-lib.sh::doh_dot_fallback).
+		[ "$(dns_num "$_hs" dotfb)" = 1 ] && h_dfb=true
+		h_dfba=$(dns_num "$_hs" dotfb_age); h_dfbr=$(dns_num "$_hs" dotfb_retry)
+		# Пауза ручного DoH после неудачной перепроводки (doh-lib.sh::doh_rearm_due): секунд до попытки сторожа, -1 — паузы нет.
+		h_bail=$(dns_num "$_hs" bail_in)
+	fi
+	# ЧЕМ ШИФРУЕТ ПРОКСИ СЕЙЧАС — `proto_now` (плитки экрана рисуют ВЫБОР — `proto`). Библиотека старше переезда — выбор и есть факт.
+	proto_now=$proto
+	command -v doh_proto_now >/dev/null 2>&1 && proto_now=$(doh_proto_now)
+	# КОНФЛИКТ С РАЗДЕЛЬНЫМ РЕЗОЛВОМ РУНЕТА — у владельца (dns-split.sh conflict, машинный 0/1): при обоих
+	# тумблерах `server=/ru/…` специфичнее общего апстрима, и имена .ru/.рф/.su уходят к Яндексу ОТКРЫТЫМ 53-м
+	# мимо прокси. Верб был заведён «для панели», а панель его не спрашивала — экран шифрованного DNS молчал
+	# об открытых именах. Нет скрипта — конфликта не бывает (до него рунет не резолвился отдельно).
+	split_conflict=false
+	[ -f "$D/dns-split.sh" ] && [ "$(sh "$D/dns-split.sh" conflict 2>/dev/null)" = 1 ] && split_conflict=true
+	# РАЗДЕЛЬНЫЙ РЕЗОЛВ ВКЛЮЧЁН — второй вопрос «что видит провайдер»: имена .ru/.рф/.su уходят к Яндексу открытым
+	# 53-м и при DoH, и в туннеле. Отвечает владелец (dns-split.sh status), а не наша сверка файла-флага.
+	# Программа DoH отдельно от «установлен» (тот про АКТИВНЫЙ протокол): при выбранном DoT без https-dns-proxy
+	# плитка DoH иначе обещала бы переключение, которое роутер отвергнет.
+	split_on=false
+	[ -f "$D/dns-split.sh" ] && [ "$(sh "$D/dns-split.sh" status 2>/dev/null)" = on ] && split_on=true
+	doh_bin=false
+	[ -x "$(bin_path https-dns-proxy)" ] && doh_bin=true
+	arr=$(printf '%s' "$list" | awk '{for(i=1;i<=NF;i++) printf "%s\"%s\"", (i>1?",":""), $i}')
+	# installing/install_msg — фоновая доустановка бинарей по воздуху (верб doh_fetch_bin). Панель
+	# по ним крутит кнопку и показывает прогресс; msg = последняя строка лога (там же и причина
+	# неудачи, если сеть не дала). Кавычки/бэкслеши режем — строка едет в JSON без эскейпа.
+	# Источник — ОБЩИЕ файлы движка компонентов (.proto-install.{state,log}): кнопка теперь зовёт
+	# packages.sh, а не свой fetch-bin, и своего лога у неё больше нет.
+	# ЧЬЯ операция — отвечает движок (`packages.sh busy`: идёт ли и что в плане), а не свой разбор pid-файла: он один на
+	# ЛЮБУЮ операцию движка, и установка Xray из «Компонентов» читалась экраном как «ставится DoT» (ревью шага 5a, круг 2).
+	# `installing` — идёт операция, ставящая связку doh; `pkg_busy` — движок занят (любой операцией: он откажет в новой);
+	# строка лога — только когда последняя операция НАША (при провале в ней причина), иначе это строка про чужой протокол.
+	# Движок старее плана (нет `ins`) — чья операция, неизвестно: `installing` false, строки нет, `pkg_busy` честный.
+	installing=false; pkg_busy=false; imsg=""; pmine=0
+	pb=$(sh "$D/packages.sh" busy doh 2>/dev/null); pbc=$?
+	pb=$(printf '%s' "$pb" | grep '^{' | tail -1)
+	case "$pb" in *'"running":true'*) pkg_busy=true ;; esac
+	case "$pb" in *'"mine":true'*) pmine=1 ;; esac
+	# rc=2 — СТАРАЯ копия движка, верба busy не знает (обновление пофайловое): прежний признак по pid-файлу, как у секции
+	# install и web-ui.sh; чья операция — неизвестно, поэтому только «занят».
+	if [ "$pbc" = 2 ] && [ -f /tmp/enodia-proto-install.pid ] && [ -d "/proc/$(cat /tmp/enodia-proto-install.pid 2>/dev/null)" ]; then pkg_busy=true; fi
+	[ "$pkg_busy" = true ] && [ "$pmine" = 1 ] && installing=true
+	[ "$pmine" = 1 ] && [ -f "$DS/.proto-install.log" ] && imsg=$(tail -n1 "$DS/.proto-install.log" 2>/dev/null | jesc 160)
+	printf '{"on":%s,"auto":%s,"auto_active":%s,"installed":%s,"dot_installed":%s,"proto":"%s","proto_now":"%s","running":%s,"installing":%s,"pkg_busy":%s,"install_msg":"%s","resolver":"%s","nextdns_id":"%s","custom_url":"%s","custom_ips":"%s","cur_src":"%s","cur_dns":"%s","cur_via":"%s","untun":%s,"untun_age":%s,"retun_in":%s,"cool":%s,"miss":%s,"miss_max":%s,"dotfb":%s,"dotfb_age":%s,"dotfb_retry":%s,"bail_in":%s,"split_conflict":%s,"split_on":%s,"doh_bin":%s,"resolvers":[%s]}\n' \
+		"$on" "$auto" "$auto_active" "$installed" "$dot_inst" "$proto" "$proto_now" "$running" "$installing" "$pkg_busy" "$imsg" "$res" "$nid" "$cust" "$custips" "$cur_src" "$cur_dns" "$cur_via" "$h_untun" "$h_uage" "$h_retun" "$h_cool" "$h_miss" "$h_mmax" "$h_dfb" "$h_dfba" "$h_dfbr" "$h_bail" "$split_conflict" "$split_on" "$doh_bin" "$arr"
+}
+
+# --- ЛЕНТА ТЕХНИЧЕСКОГО СОСТОЯНИЯ «Обзора» (техбар): факты, которые меняются САМИ, без участия
+# человека, и потому не годятся ни в `prefs` (кэш на загрузку страницы), ни в `status` (горячий
+# путь: его поллит каждая открытая вкладка раз в 10 с, а DNS-путь и MTU несущей так часто не
+# меняются). Отдельная секция и отдельный таймер панели (60 с) — та же схема, что у строки IP.
+# ЧЕГО ЗДЕСЬ НЕТ И БЫТЬ НЕ ДОЛЖНО: IPv6 и MTU-НАСТРОЙКА живут в `prefs` (это намерение человека),
+# число доп-выходов — в `status` (его и так поллят). Дублировать чужой ответ ради одной ленты
+# значит завести второй источник правды для чипа, который стоит рядом с первым.
+emit_tech() {
+	dsrc=""; dadr=""; dvia=""; dpro=doh; dres=cloudflare; dprx=1; dbin=""
+	# DNS-путь — у владельца слоя (doh-lib.sh::dns_now), тот же ответ, что в карточке
+	# «Шифрованный DNS». Нет либы → пустой класс, и чип DNS панель просто не рисует.
+	if [ -f "$D/doh-lib.sh" ]; then
+		ENODIA_DIR="$D"; . "$D/doh-lib.sh"
+		# Гард по СПОСОБНОСТИ, а не по наличию файла: библиотека СТАРЕЕ этой ленты сорсится
+		# успешно, а `dns_now` в ней ещё нет — и вызов сыпал бы «not found» в лог uhttpd на
+		# каждый тик. Нет функции — нет класса пути, чип DNS панель просто не рисует.
+		if command -v dns_now >/dev/null 2>&1; then
+			_dn=$(dns_now)
+			dsrc=$(dns_field "$_dn" src); dadr=$(dns_field "$_dn" addr); dvia=$(dns_field "$_dn" via)
+		fi
+		# Протокол — ЧЕМ ШИФРУЕТ СЕЙЧАС (doh_proto_now), а не выбор: при закрытом 853 выбранный DoT работает по DoH, и лента
+		# «Обзора» говорит про то, что на проводе. Библиотека старше переезда — прежний ответ (выбор).
+		if command -v doh_proto_now >/dev/null 2>&1; then dpro=$(doh_proto_now)
+		elif command -v doh_proto >/dev/null 2>&1; then dpro=$(doh_proto); fi
+		# Имя резолвера — тем же путём: без `tr -d` оно приезжало как «cloudflare » (замер на
+		# железе 10.09.2026), и чип ленты печатал лишний пробел перед закрывающим тегом.
+		command -v doh_resolver_name >/dev/null 2>&1 && dres=$(doh_resolver_name | tr -d '\r\n' | jesc 40)
+		# ЖИВ ЛИ ТОТ, КОМУ ОТДАН DNS. Класс пути `doh` считает конфиг dnsmasq (upstream =
+		# 127.0.0.1#5053), и он остаётся `doh`, даже когда прокси УМЕР — а это уже не «шифруется»,
+		# это СЕТЬ БЕЗ ИМЁН: dnsmasq форвардит в мёртвый порт, пока сторож не поднимет демона.
+		# Общий инвариант проекта «демон жив ≠ сервис работает» здесь работает и в обратную
+		# сторону: конфиг говорит «шифруется», но спросить надо ещё и про демона. Экран DNS этот
+		# случай называет отдельной строкой с 09.08.2026, а лента без этого поля светила бы
+		# зелёным ровно тогда, когда у сети не резолвится ничего.
+		command -v doh_running >/dev/null 2>&1 && { doh_running || dprx=0; }
+		# …и ЕСТЬ ЛИ ЧЕМ его поднять: без программы активного протокола «сторож поднимет» — неправда (прокси мёртв
+		# навсегда, пока компонент не поставят). Роутер старше поля — пусто, панель обещает как раньше.
+		command -v doh_installed >/dev/null 2>&1 && { if doh_installed; then dbin=1; else dbin=0; fi; }
+	fi
+	# Раздельный резолв рунета — у владельца (dns-split.sh status): при нём имена .ru/.рф/.su уходят открытыми
+	# мимо туннеля и прокси, и «что видит провайдер» обязано это сказать.
+	dspl=0
+	[ -f "$D/dns-split.sh" ] && [ "$(sh "$D/dns-split.sh" status 2>/dev/null)" = on ] && dspl=1
+	# MTU НЕСУЩЕЙ — факт из ядра у владельца (ip-lib.sh::carrier_mtu), а НЕ `.tun-mtu` из `prefs`:
+	# тот про awg0 и остаётся на экране, даже когда активен xray и несущая — xtun. Несущей нет
+	# (прямой режим, VPN выключен) → mtu=0, и чипа нет: MTU нечего показывать.
+	# Сорсим ЗДЕСЬ, а не в шапке файла: остальным секциям `data` библиотека маршрутов не нужна,
+	# а грузится она на КАЖДЫЙ запрос.
+	mtu=0; mif=""
+	if [ -f "$D/ip-lib.sh" ]; then
+		. "$D/ip-lib.sh"
+		if command -v carrier_mtu >/dev/null 2>&1; then
+			mif=$(carrier_iface); mtu=$(carrier_mtu)
+		fi
+	fi
+	case "$mtu" in ''|*[!0-9]*) mtu=0 ;; esac
+	mif=$(printf '%s' "$mif" | tr -cd 'a-zA-Z0-9_.-')
+	printf '{"dns_src":"%s","dns_addr":"%s","dns_via":"%s","dns_proto":"%s","dns_resolver":"%s","dns_proxy":%s,"dns_bin":"%s","dns_split":%s,"mtu":%s,"mtu_if":"%s"}\n' \
+		"$dsrc" "$dadr" "$dvia" "$dpro" "$dres" "$dprx" "$dbin" "$dspl" "$mtu" "$mif"
+}
+
+# --- Кэш проверок серверов (.srv-checks, TSV key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts) → JSON-объект
+# key→{st,ms,method,cdn,mbps,kind,ts}. Пишет панель (action save_checks); тут только читаем. -----
+emit_checks() {
+	F="$DS/.srv-checks"
+	printf '{'
+	first=1
+	if [ -f "$F" ]; then
+		TAB=$(printf '\t')
+		while IFS="$TAB" read -r key st ms method cdn mbps kind ts; do
+			case "$key" in 'awg|'*|'xray|'*|'hy2|'*) : ;; *) continue ;; esac
+			msj=$ms;   case "$msj" in ''|*[!0-9]*) msj=null ;; esac
+			mbj=$mbps; case "$mbj" in ''|*[!0-9.]*) mbj=null ;; esac
+			case "$cdn" in 1) cdj=true ;; *) cdj=false ;; esac
+			case "$st" in ok) stj=ok ;; *) stj=dead ;; esac
+			case "$kind" in speed) kj=speed ;; *) kj=ping ;; esac
+			case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
+			case "$method" in *[!A-Za-z0-9:._-]*|'') method="-" ;; esac
+			[ "$first" = 1 ] || printf ','; first=0
+			printf '"%s":{"st":"%s","ms":%s,"method":"%s","cdn":%s,"mbps":%s,"kind":"%s","ts":%s}' \
+				"$key" "$stj" "$msj" "$method" "$cdj" "$mbj" "$kj" "$ts"
+		done < "$F"
+	fi
+	printf '}\n'
+}
+
+case "$sec" in
+	devices)  emit_devices ;;
+	checks)   emit_checks ;;
+	# «Что запрашивает устройство»: наблюдаем ли + домены (query-log) + активные соединения
+	# (conntrack) для ?ip=<клиент>. Весь срез строит devwatch.sh view (он же валидирует ip).
+	# &ifc=<интерфейс станции Wi-Fi> — панель знает его из wifi-stats и по нему рисует режим сети; без него
+	# правило сети (`physdev`) для строк не видно. Пусто — кабель или станция не найдена.
+	devtraffic)
+		ip=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^ip=' | head -1 | cut -d= -f2)
+		ifc=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^ifc=' | head -1 | cut -d= -f2)
+		case "$ip" in *[!0-9.]*|'') printf '{"error":"bad ip"}\n' ;;
+		*) case "$ifc" in *[!A-Za-z0-9._-]*) printf '{"error":"bad ifc"}\n' ;; *) sh "$D/devwatch.sh" view "$ip" "$ifc" ;; esac ;; esac ;;
+	# «ЧТО ПОБЕДИТ» — rt_route&t=<домен|адрес>&ip=<клиент>[&ifc=][&port=][&proto=]. Ответ строит
+	# devwatch.sh route: там живёт ЕДИНСТВЕННАЯ лестница ядра (та же, что у строк «Что запрашивает»),
+	# он же валидирует все аргументы. Цель не декодируем — домен и адрес ASCII-only, а набор символов
+	# проверяет и он, и мы (ведущий дефис уехал бы в nslookup КЛЮЧОМ).
+	# Гард на файл обязателен: ответ — ЧУЖОЙ JSON, и на старой установке без devwatch.sh панель
+	# получила бы пустое тело вместо внятного отказа.
+	rt_route)
+		rt=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^t=' | head -1 | cut -d= -f2)
+		rip=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^ip=' | head -1 | cut -d= -f2)
+		rifc=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^ifc=' | head -1 | cut -d= -f2)
+		rprt=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^port=' | head -1 | cut -d= -f2)
+		rpro=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^proto=' | head -1 | cut -d= -f2)
+		case "$rprt" in *[!0-9]*) rprt="" ;; esac
+		case "$rpro" in udp) ;; *) rpro=tcp ;; esac
+		# Гард по ВЕРБУ, а не по файлу: перекос «новая панель, прежний devwatch.sh» (частично доехавший
+		# apply-scripts) давал usage в stderr и ПУСТОЕ тело — панель говорила «ответил не то» и советовала
+		# повторить проверку вместо «обновите скрипты роутера».
+		if ! grep -q '^	route)' "$D/devwatch.sh" 2>/dev/null; then printf '{"error":"no devwatch"}\n'
+		else case "$rt" in -*|''|*[!A-Za-z0-9._-]*) printf '{"error":"bad target"}\n' ;;
+		     *) case "$rip" in *[!0-9.]*|'') printf '{"error":"bad ip"}\n' ;;
+		        *) case "$rifc" in *[!A-Za-z0-9._-]*) printf '{"error":"bad ifc"}\n' ;;
+		           *) sh "$D/devwatch.sh" route "$rt" "$rip" "$rifc" "$rprt" "$rpro" ;; esac ;; esac ;; esac
+		fi ;;
+	sites)    emit_sites ;;
+	# Именованные группы правил «в VPN / мимо VPN» — весь JSON (реестр + члены + счётчики
+	# сетов) строит groups.sh list. Движка может не быть на старой установке → пустой список,
+	# фронт тогда просто не рисует блок групп (а не падает на битом JSON).
+	groups)   if [ -f "$D/groups.sh" ]; then sh "$D/groups.sh" list; else printf '{"groups":[],"engine":false}\n'; fi ;;
+	# Доп-выходы (слоты мульти-транспорта, Ф1): реестр + счётчик привязанных групп + флаг «мест
+	# нет». Нет slots.sh (старая установка) → engine:false, экран «Дополнительные выходы» говорит, что роутер их не умеет.
+	slots)    if [ -f "$D/slots.sh" ]; then sh "$D/slots.sh" list-json; else printf '{"slots":[],"count":0,"full":false,"engine":false}\n'; fi ;;
+	wifi)     emit_wifi ;;
+	# Статистика КЛИЕНТОВ Wi-Fi (скорость линка, стандарт, ширина, RSSI/SNR, время в эфире).
+	# ОТДЕЛЬНАЯ секция, а не поле в `devices`, СОЗНАТЕЛЬНО: emit_devices на каждый запрос читает
+	# аренды, `ip neigh`, три хранилища и `.port-rules`, зовёт `groups.sh dev-list` и делает
+	# полный проход по всем conf'ам dnsmasq — такую цену нельзя платить в ритме поллинга, а
+	# здесь она равна одному `wlanconfig` на VAP (замерено: 160 вызовов = 0 с).
+	# Отказ отдаём в ТОЙ ЖЕ форме, что и сам движок (`ok:0`), а не привычным `engine:false`:
+	# у фронта тогда ОДНА ветка отказа и на «нет скрипта», и на «нет wlanconfig».
+	wifi_sta) if [ -f "$D/wifi-stats.sh" ]; then sh "$D/wifi-stats.sh" json
+	          else printf '{"ok":0,"err":"no-engine","n":0,"sta":[]}\n'; fi ;;
+	notify)   emit_notify ;;
+	settings) emit_settings ;;
+	prefs)    emit_prefs ;;
+	subs)     emit_subs ;;
+	subs_run) emit_subs_run ;;
+	doh)      emit_doh ;;
+	tech)     emit_tech ;;
+	# Доступ к панели (HTTPS + вход снаружи по WAN): весь срез строит сам web-ui.sh вербом json —
+	# он владеет и panel-tls, и правилом в input_wan_rule. Второй копии «включено/работает» тут
+	# намеренно нет. Старая установка без верба → выключенное состояние, панель прячет секцию.
+	panel_access)
+		j=""
+		# Берём ПОСЛЕДНЮЮ строку на `{`: busybox start-stop-daemon пишет свой результат в stdout,
+		# и без этого его строка протекла бы в JSON (грабля, уже ловленная в cgi-обёртках).
+		[ -f "$D/web-ui.sh" ] && j=$(sh "$D/web-ui.sh" json 2>/dev/null | grep '^{' | tail -1)
+		if [ -n "$j" ]; then printf '%s\n' "$j"
+		else printf '{"engine":false,"installed":false,"tls_on":false,"wan_on":false}\n'; fi ;;
+	# «Доступ домой» (роутер как VPN-СЕРВЕР): срез строит vpn-server.sh json — он владеет несущей
+	# awgs0, реестром пиров и правилами, второй копии «включено/работает» тут нет (тот же приём,
+	# что у panel_access). Старая установка без скрипта → engine:false, панель прячет карточку.
+	vpnsrv)
+		j=""
+		[ -f "$D/vpn-server.sh" ] && j=$(sh "$D/vpn-server.sh" json 2>/dev/null | grep '^{' | tail -1)
+		if [ -n "$j" ]; then printf '%s\n' "$j"
+		else printf '{"engine":false,"ready":false,"on":false,"running":false,"peers":[],"count":0}\n'; fi ;;
+	# Статические DNS-hosts (оверрайд домен→IP): список строит dns-hosts.sh (валидный JSON-массив).
+	dns_hosts) if [ -f "$D/dns-hosts.sh" ]; then sh "$D/dns-hosts.sh" list; else printf '[]\n'; fi ;;
+	update)   emit_update ;;
+	# gh_status · gh_check · gh_verify — экран «Обновление» (шаг 6c). Отвечает апдейтер (gh-update.sh *-json): версия, снимки
+	# отката и последнее обновление (без сети) · вердикт «есть ли новее» (сеть) · сверка установленного с опубликованными суммами
+	# (сеть). Своей копии «новее ли» в CGI нет: вердикт считает тот же файл, что потом и обновляет.
+	gh_status|gh_check|gh_verify)
+		if [ -f "$D/gh-update.sh" ]; then
+			case "$sec" in gh_status) sh "$D/gh-update.sh" status-json ;; gh_check) sh "$D/gh-update.sh" check-json ;; *) sh "$D/gh-update.sh" verify-json ;; esac
+		else printf '{"engine":false}\n'; fi ;;
+	# --- Компоненты («связки»): ЕДИНСТВЕННЫЙ источник «что установлено, сколько займёт/
+	# освободит, можно ли снять и почему нет» — движок packages.sh. Своей копии этого знания
+	# в CGI нет намеренно: ровно так разъезжались прежние curCombo()/cur_alt() (на роутере
+	# лежат и xray, и byedpi, а панель рисовала один альт).
+	packages) if [ -f "$D/packages.sh" ]; then sh "$D/packages.sh" list-json
+	          else printf '{"engine":false,"pkgs":[],"free_b":0,"total_b":0,"reserve_b":0,"on_store":false}\n'; fi ;;
+	# pkg_op — ПОСЛЕДНЯЯ ОПЕРАЦИЯ движка компонентов: что ставили/снимали, чем кончилось, когда и журнал его словами (экран
+	# «Компоненты»). Отвечает владелец журнала (packages.sh op-json); без него — «журнала нет», а не выдуманный журнал.
+	pkg_op) if [ -f "$D/packages.sh" ]; then sh "$D/packages.sh" op-json
+	        else printf '{"engine":false,"running":false,"state":"IDLE","ins":"","del":"","at":0,"now":0,"log":[]}\n'; fi ;;
+	# pkg_plan&ins=<a,b>&del=<c> — вердикт ПЛАНА (влезет ли, что мешает, что снять). Считает
+	# РОУТЕР тем же кодом, что и apply: вторая копия арифметики во фронте = классическое
+	# «в панели влезало, а на роутере нет». Пустая сторона — «-» (так же зовёт CLI).
+	pkg_plan)
+		pins=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^ins=' | head -1 | cut -d= -f2)
+		pdel=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^del=' | head -1 | cut -d= -f2)
+		# Значение уходит АРГУМЕНТОМ в sh — жёсткий whitelist «имена связок через запятую».
+		case "$pins" in *[!a-z0-9,]*) pins="" ;; esac
+		case "$pdel" in *[!a-z0-9,]*) pdel="" ;; esac
+		if [ -f "$D/packages.sh" ]; then sh "$D/packages.sh" plan "${pins:--}" "${pdel:--}"
+		else printf '{"ok":false,"engine":false,"errors":["движок компонентов не установлен"],"blocked":[],"free_candidates":[]}\n'; fi ;;
+	# disk — РАЗБИВКА занятого на /data по категориям + кандидаты на чистку. Считает роутер
+	# (clean.sh json) — тот же файл, который потом и чистит: список «что считается мусором»
+	# обязан быть ОДИН, иначе панель предложит снести не то, что движок снесёт.
+	disk) if [ -f "$D/clean.sh" ]; then sh "$D/clean.sh" json
+	      else printf '{"engine":false,"total_b":0,"used_b":0,"free_b":0,"awg_b":0,"cats":[],"junk":[],"junk_b":0,"snaps_b":0,"snaps_n":0,"ramlogs_b":0,"ramlogs_n":0,"stocklogs_b":0,"stocklogs_n":0}\n'; fi ;;
+	# ram — КТО ЕСТ ОПЕРАТИВНУЮ ПАМЯТЬ (ram-usage.sh json). Отдельной секцией, а не полем в
+	# sysinfo: тот опрашивается раз в 5 с ради температуры и ЦП, а здесь обход всего /proc —
+	# полсотни forks, которые незачем платить в таком ритме. Панель тянет это ЛЕНИВО, по клику.
+	ram) if [ -f "$D/ram-usage.sh" ]; then sh "$D/ram-usage.sh" json
+	     else printf '{"engine":false,"total_b":0,"free_b":0,"avail_b":0,"buffers_b":0,"cached_b":0,"ours_b":0,"ours_n":0,"others_b":0,"others_n":0,"procs":[],"others":[],"rest_b":0,"rest_n":0}\n'; fi ;;
+	# store — ВНЕШНИЙ НАКОПИТЕЛЬ: включён ли, что на нём лежит, что роутер видит воткнутым.
+	# Отвечает движок (usb-offload.sh json) — тот же файл, который потом монтирует и переселяет.
+	# Нет файла (роутер не обновлял скрипты) ⇒ «выключено» с пустыми списками: экран места и
+	# «Компоненты» обязаны работать на роутере БЕЗ накопителя ровно как раньше.
+	store) if [ -f "$D/usb-offload.sh" ]; then sh "$D/usb-offload.sh" json
+	       else printf '{"engine":false,"on":false,"ready":false,"state":"none","store":"","fs":"","store_free_b":0,"store_total_b":0,"store_used_b":0,"data_free_b":0,"data_total_b":0,"bins":[],"cands":[]}\n'; fi ;;
+	# Удаление: что именно исчезнет (несущая, выходы, «доступ домой», cron, сеты, размер каталога).
+	# Считает РОУТЕР (uninstall.sh plan) — тот же файл, который потом и удаляет; экран
+	# подтверждения обязан показывать факты, а не список из головы фронта.
+	uninstall) if [ -f "$D/uninstall.sh" ]; then sh "$D/uninstall.sh" plan
+	           else printf '{"engine":false,"dir":"%s","size_b":0,"slots":0,"cron":0,"sets":0}\n' "$D"; fi ;;
+	# byedpi[&slot=2|3|4] — стратегия десинка ОСНОВНОЙ несущей либо конкретного доп-выхода
+	# (у каждого byedpi-выхода своя .byedpi-args-s<id>). Чужой slot= отбрасываем в основной.
+	# probes[&slot=2|3|4|zapret] — ПУЛ ПРОБ браузер-свипа (что именно грузит браузер).
+	# Формат стора: url⇥w⇥h (w/h = эталон размера, снятый калибровкой; 0 = не калибровано).
+	probes)
+		psl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
+		case "$psl" in 2|3|4|zapret) ;; *) psl="" ;; esac
+		emit_probes "$psl" ;;
+	# probe_cands[&slot=2|3|4] — КАНДИДАТЫ пула проб: домены, привязанные к этому выходу.
+	probe_cands)
+		# slot=zapret — не выход, а «всё, что десинкает общий nfqws» (очередь 212 одна на
+		# транспорт и все zapret-выходы ⇒ и пул проверки у карточки Zapret общий).
+		csl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
+		case "$csl" in 2|3|4|zapret) ;; *) csl="" ;; esac
+		emit_probe_cands "$csl" ;;
+	# probe_route&host=<домен>[&slot=2|3|4|zapret] — «едет ли ЭТОТ домен через проверяемый десинк».
+	# По ФАКТУ ядра (резолв + ipset test), а не по реестру: CIDR-маршруты в реестре не видны.
+	probe_route)
+		rsl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
+		case "$rsl" in 2|3|4|zapret) ;; *) rsl="" ;; esac
+		# host не декодируем: домен ASCII-only, а строгий charset проверит сам slots.sh route
+		# (аргумент уходит в argv, не в eval — подставить туда команду нельзя).
+		rho=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^host=' | head -1 | cut -d= -f2)
+		emit_probe_route "$rsl" "$rho" ;;
+	byedpi)
+		bsl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
+		case "$bsl" in 2|3|4) ;; *) bsl="" ;; esac
+		emit_byedpi "$bsl" ;;
+	zapret)   emit_zapret ;;
+	# Раскладка панели: порядок/свёрнутость/состав/ширина карточек + порядок подписок. Персист НА РОУТЕРЕ,
+	# чтобы раскладка ехала за юзером между устройствами (localStorage был per-browser).
+	# Пишет .panel-layout строго-валидированным JSON-блобом cgi-bin/action verb save_layout —
+	# отдаём как есть (уже валидный JSON); нет файла → {} (панель возьмёт дефолт/localStorage).
+	layout)   if [ -s "$DS/.panel-layout" ]; then cat "$DS/.panel-layout"; else printf '{}\n'; fi ;;
+		# Режим поддержки: статус туннеля ({active,port,expires_in,relay_set,need_cred}) — печатает
+		# сам support.sh status (read-only). Нет скрипта (старая установка) → active:0.
+		support)  if [ -f "$D/support.sh" ]; then sh "$D/support.sh" status; else printf '{"active":0,"relay_set":0,"need_cred":1}\n'; fi ;;
+	# Менеджер источников списков: состояние категории (?cat=…) — сам JSON строит lists-update.sh list.
+	# Категория из фиксированного whitelist (инъекция невозможна: в shell уходит только проверенное).
+	# `lite=1` — только состояние категории (`state`: включена, обновление, проверка связи) — чипу двери раздела «Сеть».
+	sources)
+		c=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^cat=' | head -1 | cut -d= -f2)
+		v=list; printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep -qx 'lite=1' && v=state
+		case "$c" in
+			tunnel-cidr|tunnel-domains|bypass-ip|adblock|ipblock|zapret-cidr|zapret-dom) sh "$D/lists-update.sh" "$v" "$c" ;;
+			*) printf '{"error":"unknown cat"}\n' ;;
+		esac ;;
+	blob)     # содержимое file/text-источника (для просмотра/правки «вставленного текста» в панели)
+		c=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^cat=' | head -1 | cut -d= -f2)
+		i=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^id=' | head -1 | cut -d= -f2)
+		case "$c" in tunnel-cidr|tunnel-domains|bypass-ip|adblock|ipblock|zapret-cidr|zapret-dom) ;; *) printf '{"error":"unknown cat"}\n'; exit 0 ;; esac
+		case "$i" in s[0-9]*) ;; *) printf '{"error":"bad id"}\n'; exit 0 ;; esac
+		b=$(sh "$D/lists-update.sh" get-blob "$c" "$i" 2>/dev/null | base64 2>/dev/null | tr -d '\r\n')
+		[ -n "$b" ] && printf '{"ok":true,"content":"%s"}\n' "$b" || printf '{"ok":false,"error":"no blob"}\n' ;;
+	# Журнал событий («центр уведомлений»): JSON целиком строит events.sh list —
+	# он владеет форматом хранения, CGI его не парсит (title/text уезжают base64,
+	# панель декодирует b64toUtf8). Нет скрипта (старая установка) → пустой журнал.
+	events)   if [ -f "$D/events.sh" ]; then sh "$D/events.sh" list; else printf '{"now":0,"read_at":0,"events":[],"unread":0}\n'; fi ;;
+	# Гео-категории: JSON целиком строит geo.sh list (каталог + выбранные действия + счётчики сетов).
+	# Нет скрипта (старая установка) → пустой каталог, панель покажет «обнови панель».
+	geo)      if [ -f "$D/geo.sh" ]; then sh "$D/geo.sh" list; else printf '{"update_state":"IDLE","set_vpn":0,"set_out":0,"set_blk":0,"dns_route":0,"dns_block":0,"items":[],"upstreams":{}}\n'; fi ;;
+	# Только ВКЛЮЧЁННЫЕ гео-категории — страница «Маршрутизации» спрашивает их на каждый показ раздела, а весь каталог
+	# (`geo`) стоит 1,5 с и 305 КБ. Копия geo.sh старее верба печатает справку, а не JSON — такой ответ сводим к
+	# engine:false («роутер так не умеет»), а не отдаём панели мусор, который она прочла бы как отказ сети.
+	geo_active)
+		j=""
+		[ -f "$D/geo.sh" ] && j=$(sh "$D/geo.sh" active 2>/dev/null | grep '^{' | tail -1)
+		if [ -n "$j" ]; then printf '%s\n' "$j"; else printf '{"engine":false,"items":[]}\n'; fi ;;
+	*)        printf '{"error":"unknown section"}\n' ;;
+esac
