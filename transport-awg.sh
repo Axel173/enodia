@@ -625,6 +625,23 @@ cmd_cold() {
     log "AmneziaWG-несущая погашена холодно ($IFACE снят вместе с демоном)."
 }
 
+# REWARM — the WARM RESERVE again, on the installed build (Components → «Перезапустить» while ANOTHER transport carries). A restart
+# means «the same state on the new file»: heal raises awg0 as a reserve on purpose (section 1), and the watchdog reads its handshake
+# to notice the home server is back (watchdog.sh::awg_watchable) — `cold` alone would end the return home until a reboot (review of
+# bins-2026-10, round 2). The same bring-up as `up` (ensure_carrier), minus everything that carries: no routing, no DNS — they belong
+# to the active transport. A reload awg_setup itself caused is replayed by its owner, `repair`, under the ACTIVE transport's flag.
+# awg carrying (or implied: no flag) — refused: that is the main channel, `transport.sh restart`.
+cmd_rewarm() {
+    case "$(cat "$TRANSPORT_FLAG" 2>/dev/null | tr -d ' \r\n')" in
+        ""|awg) log "rewarm: AmneziaWG сейчас несёт трафик — это основной канал, а не резерв"; return 1 ;;
+    esac
+    cmd_cold
+    if ensure_carrier; then replay_fw3 repair; log "тёплый резерв AmneziaWG поднят заново ($IFACE)"; return 0; fi
+    replay_fw3 repair
+    log "rewarm: $IFACE не поднялся — резерв пропал до следующей загрузки"
+    return 1
+}
+
 cmd_health() {
     t=awg; [ -f "$TRANSPORT_FLAG" ] && t=$(cat "$TRANSPORT_FLAG" 2>/dev/null | tr -d ' \r\n')
     [ "$t" = awg ] || return 0          # активен не awg — судить не нам
@@ -707,6 +724,9 @@ case "$1" in
     up)       carrier_run carrier_undo cmd_up ;;
     down)     cmd_down ;;
     cold)     cmd_cold ;;                 # «выключили VPN» — гасим демон, тёплый резерв не нужен
+    # тёплый резерв на установленной сборке (перезапуск в «Компонентах»); отпускаем поднятое тем же холодным снятием, не `down`:
+    # `down` снял бы маршрут и DNS — а они чужие, активного транспорта
+    rewarm)   carrier_run cmd_cold cmd_rewarm ;;
     status)   cmd_status ;;
     health)   cmd_health ;;
     failover) carrier_run carrier_undo cmd_failover ;;
@@ -722,5 +742,5 @@ case "$1" in
     # живёт в двух местах (здесь и slot_tun в slot-tun-lib.sh), и разъехались бы они молча.
     slot-iface) slot_iface "$2" ;;
     conf-gen)   shift; cmd_conf_gen "$@" ;;   # поколение протокола конфигов (разбор у cmd_conf_gen)
-    *) echo "usage: $0 up|down|cold|status|health|failover|dns|slot-up <id> <cfg>|slot-down <id>|slot-probe <id> <cfg>|slot-iface <id>|conf-gen <файл>…"; exit 2 ;;
+    *) echo "usage: $0 up|down|cold|rewarm|status|health|failover|dns|slot-up <id> <cfg>|slot-down <id>|slot-probe <id> <cfg>|slot-iface <id>|conf-gen <файл>…"; exit 2 ;;
 esac

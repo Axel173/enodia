@@ -135,7 +135,7 @@ hold_switch() {
 	# закрывает. Отказ словами; держатели без пида (установка, перенос, CLI) — как раньше, дальше без лока.
 	if [ "$SWITCH_LOCK_MINE" != 1 ]; then
 		_hsp=$(cat "$SWITCH_LOCK" 2>/dev/null | tr -d ' \r\n')
-		case "$_hsp" in ''|*[!0-9]*) ;; *) { [ -d "/proc/$_hsp" ] || hs_work_alive "$_hsp"; } && fail "${HS_FAIL_MSG:-идёт смена транспорта или сервера (другая вкладка или сам роутер) — повторите через минуту}" ;; esac
+		case "$_hsp" in ''|*[!0-9]*) ;; *) { [ -d "/proc/$_hsp" ] || hs_work_alive "$_hsp"; } && fail "${HS_FAIL_MSG:-идёт смена транспорта или сервера либо перезапуск компонентов (другая вкладка или сам роутер) — повторите через минуту}" ;; esac
 	fi
 	# Метка держателя — потомкам: смену ведут они, и SIGKILL закрытой вкладки их не трогает (daemon-lib.sh::switch_work_alive).
 	if [ "$SWITCH_LOCK_MINE" = 1 ]; then ENODIA_SWITCH_HOLDER=$$; export ENODIA_SWITCH_HOLDER; fi
@@ -319,10 +319,22 @@ spawn_bg() {  # spawn_bg <pidfile> <argv для /bin/sh…>:  spawn_bg /tmp/enod
 # (гард «несёт выход» живёт в packages.sh, у кнопки его не было).
 # Отказ ДОЛЖЕН приезжать синхронно: план считаем ДО фонового запуска, иначе причина оседает в
 # логе, а человек видит бодрое «запущено» и пустой прогресс.
+# START OF A COMPONENTS OPERATION in the background — one sequence for «Применить» and «Перезапустить»: status, log and plan are
+# written HERE, before the spawn, or the screen's first poll would read the previous operation and call this one finished.
+pkg_spawn() {  # pkg_spawn <строка плана: ставим⇥снимаем⇥обновляем[⇥перезапускаем]> <верб движка> [аргументы…]
+	# Атомарно (запись рядом + `mv`) — разбор у packages.sh::set_state: читатель обрезанного файла видит «IDLE».
+	echo RUNNING > "$ENODIA_STATE/.proto-install.state.new" && mv -f "$ENODIA_STATE/.proto-install.state.new" "$ENODIA_STATE/.proto-install.state"
+	: > "$ENODIA_STATE/.proto-install.log"
+	printf '%s\n' "$1" > "$ENODIA_STATE/.proto-install.plan"
+	shift
+	spawn_bg /tmp/enodia-proto-install.pid "$ENODIA_DIR/packages.sh" "$@"
+}
 pkg_bg() {  # pkg_bg <ставим|-> <снимаем|-> <сообщение об успехе>
 	[ -f "$ENODIA_DIR/packages.sh" ] || fail "packages.sh не установлен (обновите скрипты с GitHub)"
 	# «Идёт ли установка» спрашиваем У ДВИЖКА — единственного владельца ответа (packages.sh busy).
-	sh "$ENODIA_DIR/packages.sh" busy >/dev/null 2>&1 && fail "установка компонентов уже идёт — дождитесь её конца"
+	sh "$ENODIA_DIR/packages.sh" busy >/dev/null 2>&1 && fail "операция с компонентами уже идёт — дождитесь её конца"
+	# …и обновление системы: оно заменит движок и манифест бинарей посреди операции (ревью ветки bins-2026-10, круг 3)
+	sh "$ENODIA_DIR/gh-update.sh" upd-busy >/dev/null 2>&1 && fail "идёт обновление системы — дождитесь его конца"
 	pplan=$(sh "$ENODIA_DIR/packages.sh" plan "$1" "$2" 2>/dev/null | grep '^{' | tail -1)
 	case "$pplan" in
 		*'"ok":true'*) : ;;
@@ -333,14 +345,10 @@ pkg_bg() {  # pkg_bg <ставим|-> <снимаем|-> <сообщение о�
 			[ -n "$pwhy" ] || pwhy="не хватает места на флеше — снимите что-нибудь в «Роутер → Компоненты»"
 			fail "$pwhy" ;;
 	esac
-	# Атомарно (запись рядом + `mv`) — разбор у packages.sh::set_state: читатель обрезанного файла видит «IDLE».
-	echo RUNNING > "$ENODIA_STATE/.proto-install.state.new" && mv -f "$ENODIA_STATE/.proto-install.state.new" "$ENODIA_STATE/.proto-install.state"
-	: > "$ENODIA_STATE/.proto-install.log"
 	# Третье поле — какие из «ставим» обновления, словами плана (`upd`): иначе до перезаписи движком карточка «Идёт установка»
 	# называла обновление «Поставить». Только имена связок — план печатает их сам, чужого в строку не пускаем.
 	pupd=$(printf '%s' "$pplan" | sed -n 's/.*"upd":"\([a-z0-9 ]*\)".*/\1/p' | tr ' ' ',')
-	printf '%s\t%s\t%s\n' "$1" "$2" "${pupd:--}" > "$ENODIA_STATE/.proto-install.plan"
-	spawn_bg /tmp/enodia-proto-install.pid "$ENODIA_DIR/packages.sh" apply "$1" "$2"
+	pkg_spawn "$(printf '%s\t%s\t%s' "$1" "$2" "${pupd:--}")" apply "$1" "$2"
 	printf '{"ok":true,"code":0,"msg":"%s"}\n' "$3"
 	exit 0
 }
@@ -1600,7 +1608,7 @@ EOF
 		else
 			[ -e "$dir/$new.$ext" ] && fail "конфиг «$new» уже есть — выберите другое имя"
 		fi
-		[ -e "$SWITCH_LOCK" ] && fail "идёт смена сервера — повторите через минуту"
+		[ -e "$SWITCH_LOCK" ] && fail "идёт смена транспорта или сервера либо перезапуск компонентов — повторите через минуту"
 		_rwp=$(cat /tmp/enodia-watchdog.pid 2>/dev/null | tr -cd '0-9')
 		{ [ -e /tmp/enodia-watchdog.lock ] && [ -n "$_rwp" ] && [ -d "/proc/$_rwp" ]; } && fail "сторож сейчас проверяет туннель — повторите через минуту"
 		hold_switch
@@ -2451,6 +2459,23 @@ EOF
 	# 20-МБ флеше замена (снять Xray → поставить Hysteria2) двумя заходами вообще не влезает.
 	# Прогресс и лок — ТЕ ЖЕ .proto-install.{state,log} + /tmp/enodia-proto-install.lock, что у смены
 	# набора: фронт уже умеет их опрашивать, а «две установки разом» лок и придуман не пускать.
+	# «Перезапустить» у строки «работает прежняя сборка»: живые процессы связки — на установленную сборку, каждый через своего
+	# владельца (разбор — packages.sh::cmd_restart). Фоном, под тем же локом и статусом, что «Применить»: ход и итог экран
+	# показывает своей «Последней операцией». «Нечего перезапускать» — тоже ответ движка, синхронного отказа тут нет.
+	# `u` — owners whose interruption the confirmation named (the screen's `rst_units`): the engine touches only those (consent, see
+	# packages.sh::rst_agreed). Empty `u` from the panel would mean «everything», so it is refused rather than passed on.
+	# DECODE FIRST, then the whitelist (the trap disk_clean below describes): the panel sends the list through encodeURIComponent,
+	# and its commas arrive as %2C — a restart of two owners was refused every time (review of bins-2026-10, round 2).
+	pkg_restart)
+		prs=$(urldecode "$(field p)"); pru=$(urldecode "$(field u)")
+		case "$prs" in ''|*[!a-z0-9,]*) fail "недопустимый список компонентов" ;; esac
+		case "$pru" in ''|*[!a-z0-9,-]*) fail "недопустимый список перезапускаемого" ;; esac
+		[ -f "$ENODIA_DIR/packages.sh" ] || fail "packages.sh не установлен (обновите скрипты с GitHub)"
+		sh "$ENODIA_DIR/packages.sh" busy >/dev/null 2>&1 && fail "операция с компонентами уже идёт — дождитесь её конца"
+		sh "$ENODIA_DIR/gh-update.sh" upd-busy >/dev/null 2>&1 && fail "идёт обновление системы — дождитесь его конца"
+		pkg_spawn "$(printf -- '-\t-\t-\t%s' "$prs")" restart "$prs" "$pru"
+		printf '{"ok":true,"code":0,"msg":"%s"}\n' "Перезапуск запущен — ход виден на экране «Компоненты»"
+		exit 0 ;;
 	pkg_apply)
 		pins=$(field ins); pdel=$(field del)
 		# «-» = ПУСТАЯ сторона плана (так шлёт панель, так же зовётся CLI). Разбираем ДО whitelist'а:
@@ -2645,6 +2670,8 @@ EOF
 		# «Идёт ли» — у апдейтера (живой держатель по пидфайлу фона): строка RUNNING, пережившая перезагрузку посреди
 		# обновления, иначе запирала бы кнопку навсегда. Старая копия верба не знает (код 2) — тогда не судим.
 		sh "$ENODIA_DIR/gh-update.sh" upd-busy >/dev/null 2>&1 && fail "обновление уже идёт"
+		# Операция с компонентами идёт — обновление заменило бы движок и манифест бинарей под ней (ревью ветки bins-2026-10, круг 3).
+		[ -f "$ENODIA_DIR/packages.sh" ] && sh "$ENODIA_DIR/packages.sh" busy >/dev/null 2>&1 && fail "идёт операция с компонентами — дождитесь её конца"
 		# ИТОГ ПИШЕМ (OK | FAIL), а не «DONE»: экран «Обновление» показывает, чем кончилось, — прежний DONE ставился и на
 		# провале, и «последнее обновление — готово» было бы враньём. Запись атомарная (рядом + `mv`): читатель обрезанного
 		# файла видит «IDLE» (разбор у packages.sh::set_state). Лок в /tmp — примета «идёт» для дампа.
@@ -2658,6 +2685,7 @@ EOF
 		# Откат ПОСРЕДИ обновления перемешал бы два набора файлов (вторая вкладка, страница, открытая до запуска) — гард тот же, что
 		# у кнопки обновления (ревью шага 6c, круг 1).
 		sh "$ENODIA_DIR/gh-update.sh" upd-busy >/dev/null 2>&1 && fail "идёт обновление — дождитесь его конца"
+		[ -f "$ENODIA_DIR/packages.sh" ] && sh "$ENODIA_DIR/packages.sh" busy >/dev/null 2>&1 && fail "идёт операция с компонентами — дождитесь её конца"
 		# ИТОГ И ЖУРНАЛ ОТКАТА — в те же файлы, что у обновления (RBOK | RBFAIL): экран «Обновление» показывает последнее действие, и
 		# после отката карточка иначе продолжала бы говорить «обновление — готово, панель уже новая» (ревью шага 6c, круг 1).
 		# ОТКАТ — ФОНОМ, как обновление: теперь это установка из снимка вместе с установщиком возвращённой версии (cron, бутстрап,

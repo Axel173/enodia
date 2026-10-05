@@ -698,18 +698,22 @@ emit_update() {
 	# «Не идёт» — это ИТОГ, КОТОРЫЙ ПРОЧЁЛ САМ ДВИЖОК, а не наш IDLE: между нашим чтением RUNNING и его чтением операция успевает
 	# кончиться (OK/FAIL), и прежний IDLE здесь давал опросу «Компоненты: не удалось» при «готово» в журнале — около 1,5 % операций
 	# (замер BE7000: busy ~30 мс при опросе раз в 2 с; ревью шага 6c, круг 1). RUNNING в ЕГО ответе при коде 1 — сирота ⇒ IDLE.
+	# install_rst — the running operation is a restart (the plan's 4th field, read by its owner: `busy` → `rst`), so the Router door
+	# says «идёт перезапуск», not «идёт установка».
+	irst=false
 	if [ "$st" = RUNNING ] && [ -f "$D/packages.sh" ]; then
 		_bj=$(sh "$D/packages.sh" busy 2>/dev/null); _bc=$?
 		if [ "$_bc" = 1 ]; then
 			st=$(printf '%s' "$_bj" | sed -n 's/.*"state":"\([A-Z]*\)".*/\1/p')
 			case "$st" in ''|RUNNING) st=IDLE ;; esac
 		fi
+		[ "$st" = RUNNING ] && [ -n "$(printf '%s' "$_bj" | sed -n 's/.*"rst":"\([a-z0-9 ]*\)".*/\1/p')" ] && irst=true
 	fi
 	# Последняя строка лога фоновой установки (для polling) — JSON-эскейп.
 	# Потолок 600: итог отказа с причиной 429 весит ~330 байт (разбор у packages.sh::cmd_op_json).
 	msg=$(printf '%s' "$(tail -n 1 "$DS/.proto-install.log" 2>/dev/null)" | jesc 600)   # printf: перевод строки ушёл бы хвостовым пробелом
-	printf '{"installed":{"awg":%s,"xray":%s,"hy2":%s,"byedpi":%s},"zapret_installed":%s,"ready":[%s],"version":"%s","code":%s,"disk_free":%s,"install_state":"%s","install_msg":"%s"}\n' \
-		"$ia" "$ix" "$ih" "$ib" "$iz" "$rj" "${vn:-?}" "$vc" "${dfree:-0}" "$st" "$msg"
+	printf '{"installed":{"awg":%s,"xray":%s,"hy2":%s,"byedpi":%s},"zapret_installed":%s,"ready":[%s],"version":"%s","code":%s,"disk_free":%s,"install_state":"%s","install_rst":%s,"install_msg":"%s"}\n' \
+		"$ia" "$ix" "$ih" "$ib" "$iz" "$rj" "${vn:-?}" "$vc" "${dfree:-0}" "$st" "$irst" "$msg"
 }
 
 # --- ByeDPI: текущие десинк-аргументы (.byedpi-args или авто-дефолт) + состояние. -----

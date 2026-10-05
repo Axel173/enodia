@@ -1730,8 +1730,20 @@ case "$0" in
 	*doh-lib.sh)
 		case "${1:-}" in
 			start) doh_start ;;
+			# restart — the running proxy on a fresh process from the installed file (Components → «Перезапустить»). Not running =
+			# nothing to do: whether DoH SHOULD run is doh_want's call at its own start, not ours. Same pidfile for DoH and DoT.
+			# The code is the restart's verdict (packages.sh::cmd_restart): 0 — the proxy is back AND names resolve through it, judged
+			# WITHOUT dnsmasq's cache (doh_names_ok: a cached example.com would «prove» a mute proxy). Not back, or back but mute: dnsmasq
+			# keeps forwarding to it, and the whole home is without names — so DNS is re-wired by its OWNER (`transport.sh dns` → plugin
+			# → doh_apply_dns), which tries the proxy once more and otherwise falls back to the transport's plain path: encrypted DNS
+			# must never mean no DNS — the rule of every DoH up-path (review of bins-2026-10, round 2). 1 — DoH is not working now.
+			restart) doh_running || exit 0
+			         doh_restart_wait && doh_names_ok && exit 0
+			         [ -f "$ENODIA_DIR/transport.sh" ] && sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+			         doh_running && doh_names_ok 1 && exit 0
+			         exit 1 ;;
 			"")    : ;;
-			*)     echo "usage: $0 start" >&2; exit 2 ;;
+			*)     echo "usage: $0 start|restart" >&2; exit 2 ;;
 		esac
 		;;
 esac

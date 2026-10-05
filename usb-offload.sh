@@ -612,7 +612,7 @@ command -v store_mode_alive >/dev/null 2>&1 || store_mode_alive() {   # стар
     _sma=$(cat /tmp/enodia-store-mode.pid 2>/dev/null | tr -cd '0-9'); [ -n "$_sma" ] && [ -d "/proc/$_sma" ]; }
 # Несущую ведёт тик сторожа ЛИБО прогон heal: heal проверяет switching-лок один раз, на старте, и начатый до переноса прогон идёт
 # насквозь — поднимает несущую бинарём, которого в эту секунду нет ни на одном месте (ревью ветки, круг 2).
-carrier_busy() { wd_tick_alive || heal_alive; }
+command -v carrier_busy >/dev/null 2>&1 || carrier_busy() { wd_tick_alive || heal_alive; }   # старая библиотека — тот же ответ
 move_hold() {
     [ "$ENODIA_MOVE_SW" = 1 ] && return 0          # продолжение смены раскладки: лок уже наш
     _mhw=0

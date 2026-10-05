@@ -158,6 +158,32 @@ heal_alive() {
     _hlr=$(cat "$DL_REPLAY_PID" 2>/dev/null | tr -cd '0-9')
     pid_runs "$_hlr" 'heal\.sh'
 }
+# The carrier is being driven by a watchdog tick or a heal run — both drive it WITHOUT the switching lock (the reserve sweep runs inside
+# the plugin for minutes), so «nobody holds the lock» does not mean «nobody touches the carrier».
+carrier_busy() { wd_tick_alive || heal_alive; }
+# TAKE THE SWITCHING LOCK WITH OUR OWN PID once nobody drives the carrier (packages.sh::cmd_restart). Same order as the binary move
+# (usb-offload.sh::move_hold, reasons there): wait until there is no tick, no heal run and no foreign switch (the lock is there), then
+# take the lock exclusively (noclobber), and ask about the tick once more after a pause — the gap between its gate and its pid write.
+# Unlike the move's lock, OUR PID IS INSIDE: cgi `hold_switch` waits for a live holder (a manual switch in the middle would otherwise
+# run alongside, and whichever `up` finished last would overwrite the other's choice), and the watchdog drops a killed holder's lock at
+# once (watchdog.sh::switch_lock_held). A dead holder's lock is reaped by its owner (switch_lock_reap). The mark goes to our children:
+# the work is done by them (switch_work_alive). Code 0 — the lock is ours (DL_HOLD_MINE=1), 1 — not within $2 s.
+switch_hold() {   # $1 — путь лока, $2 — потолок ожидания, с, [$3 — пауза перед переспросом тика, с; деф. 1]
+    _shw=0; DL_HOLD_MINE=0
+    while :; do
+        _shp=$(cat "$1" 2>/dev/null | tr -d ' \r\n')
+        case "$_shp" in ''|*[!0-9]*) ;; *) [ -d "/proc/$_shp" ] || switch_work_alive "$_shp" || SWITCH_LOCK=$1 switch_lock_reap "$_shp" ;; esac
+        if ! carrier_busy && ( set -C; echo $$ > "$1" ) 2>/dev/null; then
+            DL_HOLD_MINE=1
+            sleep "${3:-1}"
+            while carrier_busy && [ "$_shw" -lt "$2" ]; do sleep 1; _shw=$((_shw + 1)); done
+            carrier_busy || { switch_holder_mark; return 0; }
+            rm -f "$1" 2>/dev/null; DL_HOLD_MINE=0
+        fi
+        [ "$_shw" -ge "$2" ] && return 1
+        sleep 1; _shw=$((_shw + 1))
+    done
+}
 # СМЕНА РАСКЛАДКИ (`usb-offload.sh mode`) ИДЁТ? Пидфайл один у обоих, кто её запускает отцепленно, — CGI `store_mode` и мастер
 # `enodia.py`. Судим по argv ЖИВОГО процесса, а не по файлу и не по голому `/proc/<pid>`: пидфайл в /tmp переживает убитый движок,
 # номер переиспользуется, а у ответа есть потребитель, которому ложное «идёт» дорого, — гейт входа (totp.sh) на это время вместо

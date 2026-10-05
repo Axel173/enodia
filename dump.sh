@@ -190,7 +190,7 @@ DUMP_LOGS="enodia-startup enodia-watchdog enodia-switch-vpn-setup enodia-transpo
 enodia-iplist-update enodia-subs-update enodia-notify enodia-notify-event enodia-hev
 enodia-hysteria enodia-byedpi enodia-byedpi-test-run enodia-byedpi-fetch enodia-zapret-nfqws
 enodia-doh enodia-panel-tls enodia-support enodia-xiaomi-bypass enodia-dnsq enodia-restore
-enodia-store-mode xray xray-access hytest ussl-dbg
+enodia-store-mode enodia-pkg-restart xray xray-access hytest ussl-dbg
 switch-vpn-setup transport-awg-setup iplist-update subs-update notify notify-event hev hysteria
 byedpi byedpi-test-run zapret-nfqws doh panel-tls support xiaomi-bypass"
 # ХВОСТ — имена ДО 02.09.2026 (префикс `enodia-`), и он тут не ради симметрии со списком чистки:

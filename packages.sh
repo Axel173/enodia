@@ -45,6 +45,11 @@ if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
 if [ -f "$ENODIA_DIR/json-lib.sh" ]; then . "$ENODIA_DIR/json-lib.sh"; fi
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -d "/proc/$1" ]; }
+# Old library: the restart takes the lock only when it is free — no waiting for the watchdog (the behaviour before switch_hold).
+command -v switch_hold >/dev/null 2>&1 || switch_hold() { ( set -C; echo $$ > "$1" ) 2>/dev/null; }
+# Does the main carrier carry right now (cmd_restart) — the owner's answer, ip-lib.sh::carrier_iface (C81).
+if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
+command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table 1000 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
 command -v jlines >/dev/null 2>&1 || jlines() { cat >/dev/null; }
 command -v bin_path   >/dev/null 2>&1 || bin_path()   { printf '%s' "$ENODIA_BIN/$1"; }
 command -v bin_dest   >/dev/null 2>&1 || bin_dest()   { printf '%s' "$ENODIA_BIN/$1"; }
@@ -144,6 +149,267 @@ pkg_upd() {
 }
 # Живой процесс связки исполняет прежнюю сборку (файл заменили под ним) — новая заработает после перезапуска.
 pkg_run_old() { for b in $(pkg_files "$1"); do [ "$(bst_field "$b" 5)" = old ] && return 0; done; return 1; }
+
+# --- ПЕРЕЗАПУСК НА УСТАНОВЛЕННУЮ СБОРКУ («Перезапустить» у строки «работает прежняя сборка») ----------------------------------
+# An update replaces the FILE; a live daemon keeps executing the replaced build until it restarts, and all the screen could offer
+# was "reboot the router" — a couple of minutes offline for what takes seconds per process (and no hint that the panel's own
+# switches would do it: «Отключить VPN» → «Включить» restarts the tunnel and exits but NOT home access).
+# The unit of a restart is not a binary but the OWNER of a process: amneziawg-go alone runs as the main carrier, an extra exit, a
+# warm reserve and the home server, and each comes back only through its owner's verb. Killing a pid and letting someone notice
+# would be the watchdog's ladder: failover, emails, a switch to a reserve.
+# Whose process: amneziawg-go by its interface (no pidfile — the same match as awg_kill_daemon / srv_kill_daemon); the rest by
+# THEIR pidfile, names as the owners declare them: XRAY_PID/slot_xray_pid (xray-transport.sh), HY2_PID/slot_hy2_pid
+# (transport-hy2.sh), CIADPI_PID/slot_ciadpi_pid (transport-byedpi.sh), HEV_PID/slot_hev_pid (plugins, slot-tun-lib.sh), NFQ_PID
+# (zapret.sh), DOH_PID (doh-lib.sh), TLS_PID (web-ui.sh). Three kinds of stale pid, told apart because only the first can be acted on:
+#   · a UNIT — its owner is live, and its verb brings the process back on the installed file;
+#   · an ORPHAN — ours (our pidfile, our interface naming), but its owner is gone: a daemon of a transport that is no longer active,
+#     of an exit since disabled or moved to another transport. No owner verb reaches it (`slot-down` of a disabled exit refuses,
+#     `down` of an inactive transport would tear the ACTIVE one's routing), so it is named, not restarted — a reboot clears it;
+#   · NOT OURS — in no pidfile at all (a throwaway xray-test.sh instance): it ends by itself.
+RST_ORDER="doh zapret slot2 slot3 slot4 server warm-awg main tls"   # short cuts first; the main tunnel late, the panel's own HTTPS last
+# What the scan reads — top-level, so the sandbox stand points them at its own world (dev/pkg-restart-test.sh), as with LOCK/BGPID.
+RST_PROC=/proc
+RST_PIDDIR=/tmp
+RST_HEALTH_TRIES=6
+RST_HOLD_WAIT=120   # с: столько ждём, пока несущую ведёт сторож, heal или чужая смена (фон — ждать можно; перебор резервов дольше)
+RST_HOLD_GAP=1      # с: пауза перед переспросом тика, уже взяв лок (щель между его гейтом и записью пида — разбор у switch_hold)
+# The owners' own output (plugins, mark-core, awg_setup…) goes HERE, not into the operation log: the screen shows that log's last
+# line as progress and as the reason of a failure, and the owners speak their own untranslated words — a toast «несущая снята…
+# трафик напрямую» in the middle of a restart reads as an accident. RAM, rewritten per restart; the diagnostic dump takes it.
+RST_OWNER_LOG=/tmp/enodia-pkg-restart.log
+# An exit's daemon is the exit's only while the exit is ON and run by the transport of that daemon (`slots.sh show`: ⇥-fields,
+# 3 = transport, 6 = on|off) — otherwise `slot-down`/`slot-up` refuse or call the new transport's plugin, and the old process stays.
+rst_slot_of() {   # $1 = id, $2… = транспорты, чей это демон → slot<id> | orphan
+    _rsy=$(sh "$ENODIA_DIR/slots.sh" show "$1" 2>/dev/null); _rsyi=$1; shift
+    if [ "$(printf '%s\n' "$_rsy" | cut -f6)" = on ]; then
+        case " $* " in *" $(printf '%s\n' "$_rsy" | cut -f3) "*) echo "slot$_rsyi"; return 0 ;; esac
+    fi
+    echo orphan
+}
+rst_unit() {   # $1 = pid, $2 = бинарь, $3 = активный транспорт → main | warm-awg | slot<N> | server | zapret | doh | tls | orphan | (пусто)
+    case "$2" in
+        amneziawg-go)
+            _rui=$(tr '\000' ' ' 2>/dev/null < "$RST_PROC/$1/cmdline" | awk '{ print $2 }')
+            case "$_rui" in
+                # awg0 is a warm reserve only while ANOTHER transport is active. No `.transport` at all is the layout from before
+                # multi-transport, where AmneziaWG is implied (transport.sh::implied): there awg0 IS the tunnel, and `cold` on it
+                # would take the home off the VPN while reporting «warm reserve restarted».
+                awg0)     case "$3" in ""|awg) echo main ;; *) echo warm-awg ;; esac ;;
+                awg[2-4]) rst_slot_of "${_rui#awg}" awg ;;
+                # The home server's daemon only while the server is ON (its owner answers): a leftover awgs0 without the intent is
+                # an orphan — `vpn-server.sh restart` would do nothing, and the rescan would call it «still on the previous build».
+                awgs0)    if sh "$ENODIA_DIR/vpn-server.sh" enabled >/dev/null 2>&1; then echo server; else echo orphan; fi ;;
+            esac
+            return 0 ;;
+    esac
+    for _ruf in "$RST_PIDDIR"/enodia-*.pid; do
+        [ "$(tr -cd '0-9' < "$_ruf" 2>/dev/null)" = "$1" ] || continue
+        _run=${_ruf#"$RST_PIDDIR"/enodia-}; _run=${_run%.pid}
+        case "$_run" in
+            # The main carrier's daemons only while THAT transport is active: restarting the active transport would not touch an
+            # earlier one's leftover.
+            xray|hysteria|byedpi|hev)
+                case "$3:$_run" in xray:xray|xray:hev|hy2:hysteria|hy2:hev|byedpi:byedpi|byedpi:hev) echo main ;; *) echo orphan ;; esac ;;
+            xray-s[2-4])     rst_slot_of "${_run##*-s}" xray ;;
+            hysteria-s[2-4]) rst_slot_of "${_run##*-s}" hy2 ;;
+            byedpi-s[2-4])   rst_slot_of "${_run##*-s}" byedpi ;;
+            hev-s[2-4])      rst_slot_of "${_run##*-s}" xray hy2 byedpi ;;
+            zapret-nfqws)    echo zapret ;;
+            doh)             echo doh ;;
+            panel-tls)       echo tls ;;
+        esac
+        return 0
+    done
+    return 0
+}
+# Stale processes are read ONCE per scan (`bin-stale` hashes what it hasn't cached); a rescan after a restart resets RSS_DONE.
+# Load by a plain call, never inside `$(…)`: the assignment would die with the subshell (same as bst_load).
+# Each pid's unit and component are worked out ONCE here too (RSU: pid⇥бинарь⇥unit⇥component, «-» for orphans and strangers):
+# list-json asks rst_scan for every component, and per-component classification started `slots.sh` and a `tr` per pidfile for
+# every stale pid again and again — 45 `sh` and 390 `tr` for one screen right after an update (review of bins-2026-10, round 3).
+RSS=""; RSU=""; RSS_T=""; RSS_DONE=0
+rss_load() {
+    [ "$RSS_DONE" = 1 ] && return 0; RSS_DONE=1
+    RSS=""; [ -f "$GH" ] && RSS=$(sh "$GH" bin-stale 2>/dev/null)
+    RSS_T=$(sh "$ENODIA_DIR/transport.sh" active 2>/dev/null)
+    RSU=$(printf '%s\n' "$RSS" | while IFS="$(printf '\t')" read -r _rlq _rln; do
+        [ -n "$_rlq" ] || continue
+        _rlx=$(rst_unit "$_rlq" "$_rln" "$RSS_T"); _rlx=${_rlx:-other}
+        case "$_rlx" in orphan|other) _rlk=- ;; *) _rlk=$(rst_comp "$_rlx" "$RSS_T"); _rlk=${_rlk:--} ;; esac
+        printf '%s\t%s\t%s\t%s\n' "$_rlq" "$_rln" "$_rlx" "$_rlk"
+    done)
+    return 0
+}
+# THE COMPONENT A UNIT BELONGS TO — the one whose transport RUNS it, not every component listing the binary. hev is a file of Xray,
+# Hysteria2 and ByeDPI alike, and judged by files a stale hev of the Xray tunnel put «Перезапустить» on all three rows: «Restart
+# Hysteria2?» then restarted the Xray tunnel, titled «Перезапуск Hysteria2» (review of bins-2026-10, round 2). Main — the active
+# transport (no flag: the implied AmneziaWG); an exit — the transport of that exit; the reserve and home access — AmneziaWG.
+rst_comp() {   # $1 = unit, $2 = активный транспорт → id связки
+    case "$1" in
+        main)              echo "${2:-awg}" ;;
+        warm-awg|server)   echo awg ;;
+        slot[2-4])         sh "$ENODIA_DIR/slots.sh" show "${1#slot}" 2>/dev/null | cut -f3 ;;
+        *)                 echo "$1" ;;
+    esac
+}
+rst_scan() {   # $@ = связки → RST_UNITS (в порядке RST_ORDER), RST_ORPHAN (pid'ов без живого хозяина), RST_OTHER (не наших)
+    RST_UNITS=""; RST_ORPHAN=0; RST_OTHER=0
+    rss_load
+    [ -n "$RSS" ] || return 0
+    _rsc=" $* "
+    _rsf=""; for _rsp in "$@"; do _rsf="$_rsf $(pkg_files "$_rsp")"; done
+    # A unit — by the component that runs it (rst_comp); orphans and strangers have no such component, so they are counted for every
+    # requested component whose files they execute.
+    _rsu=$(printf '%s\n' "$RSU" | while IFS="$(printf '\t')" read -r _rsq _rsn _rsx _rsk; do
+        [ -n "$_rsq" ] || continue
+        case "$_rsx" in
+            orphan|other) case " $_rsf " in *" $_rsn "*) echo "$_rsx" ;; esac ;;
+            *)            case "$_rsc" in *" $_rsk "*) echo "$_rsx" ;; esac ;;
+        esac
+    done)
+    for _rso in $RST_ORDER; do
+        printf '%s\n' "$_rsu" | grep -qxF "$_rso" && RST_UNITS="$RST_UNITS${RST_UNITS:+ }$_rso"
+    done
+    RST_ORPHAN=$(printf '%s\n' "$_rsu" | grep -cxF orphan || true)
+    RST_OTHER=$(printf '%s\n' "$_rsu" | grep -cxF other || true)
+    return 0
+}
+rst_label() { case "$1" in
+        main) echo "основной канал" ;; warm-awg) echo "тёплый резерв AmneziaWG" ;; server) echo "«доступ домой»" ;;
+        slot[2-4]) echo "дополнительный выход №${1#slot}" ;; zapret) echo "Zapret (nfqws)" ;;
+        doh) echo "шифрованный DNS" ;; tls) echo "HTTPS панели" ;; *) echo "$1" ;;
+    esac; }
+# CAN A UNIT BE RESTARTED NOW — one answer for the offer (list-json `rst_units`) and the run (cmd_restart): the main carrier only while
+# it CARRIES. No default route in table 1000 means the watchdog holds traffic direct (FAILOPEN — a network state, not the string in
+# its state file) or is bringing the tunnel up; a restart would put the route back into the server the watchdog has just given up on,
+# behind its back — and a confirmation that promised «5–10 s» for a channel the engine then refuses read as a broken tunnel.
+rst_can() { [ "$1" != main ] || [ -n "$(carrier_iface)" ]; }
+# The carrier of exit N exists — its name asked of the owner (`transport.sh slot-iface`: awgN at AmneziaWG, xtunN at the alts).
+rst_slot_iface() { _rsi=$(sh "$ENODIA_DIR/transport.sh" slot-iface "$1" 2>/dev/null); [ -n "$_rsi" ] && ip link show "$_rsi" >/dev/null 2>&1; }
+# WORKS after the restart — by the RESULT («демон жив» never meant «сервис работает»). The owners of DoH, zapret, home access and the
+# panel's HTTPS answer it themselves: their restart verbs wait for the service and return non-zero when it did not come back (doh-lib.sh
+# restart, zapret.sh reload, vpn-server.sh restart, web-ui.sh tls-reload), so their code IS the verdict (cmd_restart). The tunnels are
+# judged here, by health; a fresh one needs a moment for its first handshake, hence the retry.
+# An exit is judged by its plugin's `slot-health` CONTRACT (transport.sh): 0 alive · 1 sagging · 2 «can't judge». 2 is the AmneziaWG
+# plugin, which has no exit health at all — an idle exit has no handshake until traffic or its 25-s keepalive reaches it (BE7000
+# 2026-10-05: an idle awg3 restarted fine, first handshake 30 s later, and was reported «не отвечает»); then the fact we CAN check is
+# the exit's carrier interface. HEV_CHECK=0: the hev path check belongs to the watchdog's sweep — it would restart the hev we have
+# just started, and under our own switching lock it answers 4 «not judged» on every try (slot-tun-lib.sh::slot_hev_path_check).
+# HEALTH_OWN_LOCK=1: a plugin that refuses to judge under the switching lock (ByeDPI: «a switch is in progress, hands off») must judge
+# for its holder — otherwise «0 under any lock» made every ByeDPI restart «Готово», forwarding or not (review, round 2).
+rst_works() {   # $1 = unit
+    case "$1" in
+        main|slot[2-4])
+            _rwn=0
+            while [ "$_rwn" -lt "$RST_HEALTH_TRIES" ]; do
+                if [ "$1" = main ]; then HEALTH_OWN_LOCK=1 sh "$ENODIA_DIR/transport.sh" health >/dev/null 2>&1; _rwc=$?
+                else HEV_CHECK=0 sh "$ENODIA_DIR/transport.sh" slot-health "${1#slot}" >/dev/null 2>&1; _rwc=$?
+                     [ "$_rwc" = 2 ] && rst_slot_iface "${1#slot}" && _rwc=0; fi
+                [ "$_rwc" = 0 ] && return 0
+                sleep 2; _rwn=$((_rwn + 1))
+            done
+            return 1 ;;
+    esac
+    return 0
+}
+rst_one() {   # $1 = unit → код владельца (0 — перезапустил и своё проверил)
+    log "Перезапускаю: $(rst_label "$1")…"
+    echo "=== $(date '+%H:%M:%S') $1" >> "$RST_OWNER_LOG" 2>/dev/null
+    case "$1" in
+        doh)       sh "$ENODIA_DIR/doh-lib.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;
+        zapret)    sh "$ENODIA_DIR/zapret.sh" reload >> "$RST_OWNER_LOG" 2>&1 ;;                   # nfqws only: rules and set stay
+        slot[2-4]) sh "$ENODIA_DIR/transport.sh" slot-down "${1#slot}" >> "$RST_OWNER_LOG" 2>&1
+                   sh "$ENODIA_DIR/transport.sh" slot-up "${1#slot}" >> "$RST_OWNER_LOG" 2>&1 ;;
+        server)    sh "$ENODIA_DIR/vpn-server.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;
+        # The warm reserve comes back AS a reserve (the watchdog notices the home server by its handshake): not `cold` alone.
+        warm-awg)  sh "$ENODIA_DIR/transport.sh" rewarm awg >> "$RST_OWNER_LOG" 2>&1 ;;
+        main)      sh "$ENODIA_DIR/transport.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;
+        tls)       sh "$ENODIA_DIR/web-ui.sh" tls-reload >> "$RST_OWNER_LOG" 2>&1 ;;
+        *)         return 1 ;;
+    esac
+}
+# CONSENT: the panel asked the human about the units its screen listed and sends them back (`$2`); a unit found now that was not on that
+# list — a failover made awg0 the main carrier after the screen was drawn, an exit was switched on — is not touched: the confirmation
+# said «warm reserve, put out», not «the tunnel drops for 10 s». The CLI sends nothing: whoever types the command chose everything.
+rst_agreed() { [ -z "$RST_OK" ] && return 0; case " $RST_OK " in *" $1 "*) return 0 ;; esac; return 1; }
+cmd_restart() {   # $1 = связки через запятую («-» = все), [$2 = владельцы, на чей перерыв согласились, через запятую; пусто — все]
+    : > "$LOG"; set_state RUNNING; : > "$RST_OWNER_LOG" 2>/dev/null
+    _rp=$(printf '%s' "${1:--}" | tr ',' ' ')
+    [ "$_rp" = - ] && _rp=$PKGS
+    for p in $_rp; do pkg_known "$p" || { set_state FAIL; log "Отказ: неизвестный компонент: $p"; return 1; }; done
+    RST_OK=$(printf '%s' "$2" | tr ',' ' ')
+    # The plan names what is restarted (4th field: the screen titles the operation by it) — the components that HAVE something to
+    # restart; `-` from the CLI would otherwise title it with every component, absent ones included.
+    _rpa=""; for p in $_rp; do rst_scan "$p"; [ -n "$RST_UNITS" ] && _rpa="$_rpa${_rpa:+,}$p"; done
+    printf -- '-\t-\t-\t%s\n' "${_rpa:-$(printf '%s' "$_rp" | tr ' ' ',')}" > "$PLANF" 2>/dev/null
+    rst_scan $_rp
+    if [ -n "$RST_UNITS" ]; then
+        # The carrier is ours alone for the restart: no watchdog tick, no heal run, no other switch — and our pid in the lock, so a
+        # manual switch waits for us instead of running alongside (daemon-lib.sh::switch_hold, reasons there).
+        SWITCH_LOCK=$SWLOCK
+        # Waiting is not silence: the screen shows the last line as progress, and an empty one for up to two minutes reads as a hang.
+        if [ -e "$SWLOCK" ] || { command -v carrier_busy >/dev/null 2>&1 && carrier_busy; }; then
+            log "Жду, пока роутер закончит свою работу с туннелем (проверка сторожа, восстановление или другая смена), — до $((RST_HOLD_WAIT / 60)) мин"
+        fi
+        if ! switch_hold "$SWLOCK" "$RST_HOLD_WAIT" "$RST_HOLD_GAP"; then
+            set_state FAIL
+            log "Роутер сейчас сам ведёт туннель (проверка сторожа, восстановление или другая смена) — ничего не перезапускал, повторите через пару минут"
+            return 1
+        fi
+        SWMINE=1
+        RSS_DONE=0; rst_scan $_rp   # the world may have changed while we waited
+    fi
+    if [ -z "$RST_UNITS" ]; then
+        set_state OK
+        if [ "$RST_ORPHAN" -gt 0 ]; then
+            log "Без хозяина, на прежней сборке: $RST_ORPHAN (демон выключенного выхода или прежнего транспорта) — уйдёт с перезагрузкой роутера"
+        else
+            log "Перезапускать нечего: все процессы уже работают на установленных сборках."
+        fi
+        return 0
+    fi
+    # «Can't now» comes BEFORE consent: the screen never offers such a unit (list-json, rst_can), so it is not «not agreed» — and
+    # «нажмите «Перезапустить» ещё раз» for a channel that carries nothing would only repeat itself (review, round 3).
+    _rgo=""; _rskip=""; _rhold=""
+    for u in $RST_UNITS; do
+        if ! rst_can "$u"; then _rhold="$_rhold${_rhold:+, }$(rst_label "$u")"
+        elif rst_agreed "$u"; then _rgo="$_rgo${_rgo:+ }$u"
+        else _rskip="$_rskip${_rskip:+, }$(rst_label "$u")"; fi
+    done
+    _rl=""; for u in $_rgo; do _rl="$_rl${_rl:+, }$(rst_label "$u")"; done
+    [ -n "$_rl" ] && log "Перезапуск на установленной сборке: $_rl"
+    [ "$RST_ORPHAN" -gt 0 ] && log "Без хозяина, на прежней сборке: $RST_ORPHAN (демон выключенного выхода или прежнего транспорта) — уйдёт с перезагрузкой роутера"
+    [ "$RST_OTHER" -gt 0 ] && log "Ещё процессов на прежней сборке, не наших: $RST_OTHER (разовая проверка сервера) — закончатся сами"
+    # FAILED and NOT TOUCHED are two lists: the last line is what the screen shows as the reason, and «Перезапуск не удался: основной
+    # канал» for a channel nobody touched read as a broken tunnel (review of bins-2026-10, round 2).
+    _rrc=0; _rbad=""; _rnot=""
+    # The watchdog restores the carrier itself when the server answers (rst_can — reasons there).
+    if [ -n "$_rhold" ]; then
+        log "Основной канал не трогаю: сейчас он не везёт трафик (прямой режим сторожа или подъём туннеля). Перезапустите, когда туннель вернётся."
+        _rrc=1; _rnot=$_rhold
+    fi
+    if [ -n "$_rskip" ]; then
+        log "Не трогаю без вашего согласия: $_rskip — экран о нём не спрашивал; нажмите «Перезапустить» ещё раз"
+        _rrc=1; _rnot="$_rnot${_rnot:+, }$_rskip"
+    fi
+    for u in $_rgo; do
+        rst_one "$u"; _rorc=$?
+        # Judged by FACT: the unit's processes must no longer run a replaced build, its owner must say it came back, and it must work.
+        RSS_DONE=0; rst_scan $_rp
+        case " $RST_UNITS " in
+            *" $u "*) log "Не вышло: $(rst_label "$u") — всё ещё на прежней сборке"; _rrc=1; _rbad="$_rbad${_rbad:+, }$(rst_label "$u")" ;;
+            *) if [ "$_rorc" != 0 ]; then
+                   log "Не вышло: $(rst_label "$u") — после перезапуска не работает (подробности — в диагностике роутера)"; _rrc=1; _rbad="$_rbad${_rbad:+, }$(rst_label "$u")"
+               elif rst_works "$u"; then log "Готово: $(rst_label "$u") — на установленной сборке"
+               else log "Перезапущено, но не отвечает: $(rst_label "$u") — сторож проверит и починит на своём тике"; _rrc=1; _rbad="$_rbad${_rbad:+, }$(rst_label "$u")"; fi ;;
+        esac
+    done
+    _rtail=""; [ -n "$_rnot" ] && _rtail="; не трогал: $_rnot"
+    if [ "$_rrc" = 0 ]; then set_state OK; log "Готово: всё перезапущено на установленных сборках."
+    elif [ -n "$_rbad" ]; then set_state FAIL; log "Перезапуск не удался: $_rbad$_rtail"
+    else set_state FAIL; log "Перезапущено не всё — не трогал: $_rnot"; fi
+    return $_rrc
+}
 
 # absent (ничего нет) | partial (часть файлов) | installed (всё на месте).
 # «partial» — не педантизм: половинная установка awg («демон есть, CLI нет») ВРАЛА «готов»,
@@ -345,7 +611,16 @@ cmd_list_json() {
         # писала «A → A» (ревью ветки, круг 1). cur/ver остаются про главный файл — их показывает имя строки.
         _ub=""; _uc=""; _uv=""
         if [ "$_upd" = true ]; then _ub=$(pkg_upd_bin "$p"); _uc=$(bst_field "$_ub" 3 | tr -d '"\\\r'); _uv=$(bst_field "$_ub" 4 | tr -d '"\\\r'); fi
-        _ro=false; [ "$_st" != absent ] && pkg_run_old "$p" && _ro=true
+        # run_old — a process of THIS component runs a replaced build: the Xray tunnel's stale hev is a file of Hysteria2 too, but not
+        # its process (rst_comp). rst_units — WHAT a restart of this component would touch (units in restart order, only what can be
+        # restarted now — rst_can): the panel names exactly that before asking and sends it back as the consent (cmd_restart).
+        # Orphans are not units: nothing but a reboot reaches them, so they keep «работает прежняя» with the reboot advice.
+        _ro=false; _rsj=""
+        if [ "$_st" != absent ] && pkg_run_old "$p"; then
+            rst_scan "$p"
+            if [ -n "$RST_UNITS" ] || [ "$RST_ORPHAN" -gt 0 ] || [ "$RST_OTHER" -gt 0 ]; then _ro=true; fi
+            for _rsu1 in $RST_UNITS; do rst_can "$_rsu1" && _rsj="$_rsj${_rsj:+,}\"$_rsu1\""; done
+        fi
         _need=""; for b in $(pkg_files "$p"); do bin_needs "$_st" "$b" && _need="$_need${_need:+,}\"$b\""; done
         [ "$_first" = 1 ] || printf ','
         _first=0
@@ -354,8 +629,8 @@ cmd_list_json() {
         # из чего панель может узнать место жительства связки: иначе карточка «Xray» обещала бы
         # освободить 7.9 МБ ФЛЕША, а освободила бы флешку, и полоса не шевельнулась бы.
         # add_b у стоящей связки с обновлением — вес НОВЫХ сборок её устаревших файлов (тот же pkg_add_b, что у плана).
-        printf '{"id":"%s","label":"%s","state":"%s","ver":"%s","cur":"%s","upd":%s,"ub":"%s","ucur":"%s","uver":"%s","run_old":%s,"need":[%s],"add_b":%s,"add_data_b":%s,"del_b":%s,"del_data_b":%s,"hold":"%s","warn":"%s"}' \
-            "$p" "$(pkg_label "$p")" "$_st" "$_ver" "$_cur" "$_upd" "$_ub" "$_uc" "$_uv" "$_ro" "$_need" \
+        printf '{"id":"%s","label":"%s","state":"%s","ver":"%s","cur":"%s","upd":%s,"ub":"%s","ucur":"%s","uver":"%s","run_old":%s,"rst_units":[%s],"need":[%s],"add_b":%s,"add_data_b":%s,"del_b":%s,"del_data_b":%s,"hold":"%s","warn":"%s"}' \
+            "$p" "$(pkg_label "$p")" "$_st" "$_ver" "$_cur" "$_upd" "$_ub" "$_uc" "$_uv" "$_ro" "$_rsj" "$_need" \
             "$(pkg_add_b "$p")" "$(pkg_add_b "$p" data)" \
             "$(pkg_del_b "$p" "$p")" "$(pkg_del_b "$p" "$p" data)" "$_hold" "$_warn"
     done
@@ -728,11 +1003,11 @@ busy_calc() {
     [ "$_bs" = RUNNING ] && pkg_pid_ours "$_bp" && _br=true
     # План — словами движка (`ins`/`del`, имена связок через пробел, «-» = ничего); чужого в строку не пускаем.
     # Третье поле (`_bu`) — какие из «ставим» обновления; у плана прежнего формата (и у записи из CGI до старта движка) его нет.
-    _bi=""; _bd=""; _bu=""
+    _bi=""; _bd=""; _bu=""; _brs=""
     if [ -f "$PLANF" ]; then
-        IFS="$(printf '\t')" read -r _bi _bd _bu < "$PLANF" 2>/dev/null
+        IFS="$(printf '\t')" read -r _bi _bd _bu _brs < "$PLANF" 2>/dev/null
         _bi=$(printf '%s' "$_bi" | tr ',' ' ' | tr -cd 'a-z0-9 -'); _bd=$(printf '%s' "$_bd" | tr ',' ' ' | tr -cd 'a-z0-9 -')
-        _bu=$(printf '%s' "$_bu" | tr ',' ' ' | tr -cd 'a-z0-9 -')
+        _bu=$(printf '%s' "$_bu" | tr ',' ' ' | tr -cd 'a-z0-9 -'); _brs=$(printf '%s' "$_brs" | tr ',' ' ' | tr -cd 'a-z0-9 -')
     fi
     return 0
 }
@@ -743,7 +1018,7 @@ busy_calc() {
 cmd_op_json() {
     busy_calc
     _at=$(stat -c %Y "$LOG" 2>/dev/null); case "$_at" in ''|*[!0-9]*) _at=0 ;; esac
-    printf '{"running":%s,"state":"%s","ins":"%s","del":"%s","upd":"%s","at":%s,"now":%s,"log":[' "$_br" "$_bs" "$_bi" "$_bd" "$_bu" "$_at" "$(date +%s)"
+    printf '{"running":%s,"state":"%s","ins":"%s","del":"%s","upd":"%s","rst":"%s","at":%s,"now":%s,"log":[' "$_br" "$_bs" "$_bi" "$_bd" "$_bu" "$_brs" "$_at" "$(date +%s)"
     # Потолок строки — 600 байт: итог отказа с причиной 429 весит ~330, и при 300 обрывался посреди фразы, а под английским
     # оставался русским целиком (перевод по обрывку не ложится; ревью шага 6c, круг 3).
     [ -f "$LOG" ] && tail -n 40 "$LOG" 2>/dev/null | jlines 600
@@ -767,7 +1042,7 @@ case "$1" in
     # лежат МИНУТЫ, и тик сторожа в это окно волен уводить транспорт/переподнимать несущую поверх
     # идущей установки. proto-install.sh это уже держит (батч 10), а панельный путь — единственный
     # экран установки — ходит СЮДА. Идиома общая: чужой лок не трогаем, свой снимаем trap'ом.
-    apply|install|remove)
+    apply|install|remove|restart)
                if ! mkdir "$LOCK" 2>/dev/null; then
                    # ЛОК МОЖЕТ БЫТЬ ПРОТУХШИМ, и признать это обязаны МЫ. Держатель снимает его trap'ом, но
                    # `kill -9` (OOM на 176-МБ модели) трапов не знает, а `ram-lib.sh` мог принести сюда лок,
@@ -784,8 +1059,17 @@ case "$1" in
                    mkdir "$LOCK" 2>/dev/null || { echo "уже выполняется"; exit 1; }
                fi
                echo $$ > "$LOCK/pid" 2>/dev/null
+               # A SYSTEM UPDATE replaces this very file, gh-update.sh and bin-manifest.txt under a running operation (fetch-bin would
+               # check against another manifest), and both peak on the 20-MB /data at once (review of bins-2026-10, round 3: the visible
+               # «Обновление» door made it one click away). Asked AFTER our lock — pkg-install.sh asks `busy` after its own (pi_gate), so
+               # at least one of two that started together sees the other. The updater's own answer covers the download before it.
+               if { command -v pkg_install_alive >/dev/null 2>&1 && pkg_install_alive; } || { [ -f "$GH" ] && sh "$GH" upd-busy >/dev/null 2>&1; }; then
+                   : > "$LOG"; set_state FAIL; log "Идёт обновление системы — компоненты не трогал; дождитесь его конца и повторите"
+                   rm -rf "$LOCK" 2>/dev/null; exit 1
+               fi
                SWLOCK=/tmp/enodia-switching.lock; SWMINE=0
-               [ -e "$SWLOCK" ] || { : > "$SWLOCK" 2>/dev/null && SWMINE=1; }
+               # `restart` takes it itself — with its pid, after waiting for the watchdog and heal (cmd_restart, switch_hold).
+               [ "$1" = restart ] || [ -e "$SWLOCK" ] || { : > "$SWLOCK" 2>/dev/null && SWMINE=1; }
                # Уборка — ОДНА, на выходе, при ЛЮБОМ исходе: скачанное заранее из ОЗУ (иначе мегабайты лежали бы в /tmp до ребута) —
                # ДО снятия лока, иначе следующая операция успела бы начать свою закачку в тот же каталог. СИГНАЛ — это ВЫХОД (ревью
                # порции «закачка заранее», находка 5): ловушка INT/TERM/HUP/PIPE без `exit` убирала лок и ОЗУ, а шелл шёл ДАЛЬШЕ — к
@@ -802,6 +1086,7 @@ case "$1" in
                    apply)   cmd_apply "$2" "$3" ;;
                    install) cmd_apply "$2" "" ;;
                    remove)  cmd_apply "" "$2" ;;
+                   restart) cmd_restart "$2" "$3" ;;
                esac ;;
     state)     cat "$STATE" 2>/dev/null || echo IDLE ;;
     # ЕДИНСТВЕННЫЙ ОТВЕТ «идёт ли установка ПРЯМО СЕЙЧАС». До 03.09.2026 на него отвечали ТРОЕ и
@@ -816,7 +1101,7 @@ case "$1" in
                # читателей (секция doh, карточка HTTPS): своя копия разбора плана у каждого разъехалась бы (ревью 5a, круг 3).
                _bm=false
                [ -n "$2" ] && case " $_bi " in *" $2 "*) _bm=true ;; esac
-               printf '{"running":%s,"state":"%s","pid":%s,"ins":"%s","del":"%s","upd":"%s","mine":%s}\n' "$_br" "$_bs" "${_bp:-0}" "$_bi" "$_bd" "$_bu" "$_bm"
+               printf '{"running":%s,"state":"%s","pid":%s,"ins":"%s","del":"%s","upd":"%s","rst":"%s","mine":%s}\n' "$_br" "$_bs" "${_bp:-0}" "$_bi" "$_bd" "$_bu" "$_brs" "$_bm"
                [ "$_br" = true ] && exit 0
                exit 1 ;;
     # ПОСЛЕДНЯЯ ОПЕРАЦИЯ — экрану «Компоненты»: что делали, чем кончилось, когда и журнал словами движка. Тост с отказом
@@ -828,5 +1113,5 @@ case "$1" in
     # `gh-update.sh bin-ver` и сверку сборок. Здесь — только файловая система. Владелец состояния остаётся один (pkg_state), копий не заводим.
     pkg-state) pkg_known "$2" || { echo "неизвестный компонент: $2" >&2; exit 2; }
                pkg_state "$2" ;;
-    *) echo "usage: $0 list-json | plan <ставим> <снимаем> | plan-ok <ставим> <снимаем> | apply <ставим> <снимаем> | install <список> | remove <список> | state | busy [компонент] | op-json | pkg-state <компонент>"; echo "       списки через запятую, «-» = пусто; компоненты: $PKGS"; exit 2 ;;
+    *) echo "usage: $0 list-json | plan <ставим> <снимаем> | plan-ok <ставим> <снимаем> | apply <ставим> <снимаем> | install <список> | remove <список> | restart <список|-> [владельцы] | state | busy [компонент] | op-json | pkg-state <компонент>"; echo "       списки через запятую, «-» = пусто; компоненты: $PKGS"; exit 2 ;;
 esac

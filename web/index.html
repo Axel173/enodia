@@ -31,7 +31,7 @@
 <!-- ?v= обязателен и здесь: icons.css — единственный подресурс, который был ВНЕ инварианта
      кэш-бастера (и вне проверки build-dev-archive.ps1), хотя кэшируется браузером ровно так же.
      Цена всплыла на этой же правке: добавьте в него класс — и правка часами не доезжает. -->
-<link rel="stylesheet" href="assets/icons.css?v=100000">
+<link rel="stylesheet" href="assets/icons.css?v=100005">
 <script>
   /* Тема из localStorage-кэша — ДО первого кадра (в <head>, не в общем скрипте внизу):
      истина живёт на роутере (.prefs theme), но её fetch асинхронный, и страница успела бы
@@ -60,7 +60,7 @@
      (~10% возраста файла) и после деплоя способен часами держать СТАРЫЙ panel.js рядом с
      новым index.html = «панель сломалась на ровном месте». Смена ?v= рвёт этот кэш.
      Бампится вместе с CODE (build-dev-archive.ps1 синкает и проверяет). -->
-<link rel="stylesheet" href="assets/panel.css?v=100000">
+<link rel="stylesheet" href="assets/panel.css?v=100005">
 <!-- БЕЗ JAVASCRIPT ПАНЕЛИ НЕТ ВОВСЕ: заставку снимает скрипт, и она висела бы вечно, а её строка через
      10 с просила бы «обновить страницу» — неправда (независимое ревью шага 2k, круг 5). Каркас без
      скрипта — кости, которые никто не снимет. Показываем одно: что нужно включить (плашка в <body>). -->
@@ -440,11 +440,11 @@
     <div class="door" id="card-events" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-bell"/></svg></span><div class="grow"><div class="nm">События</div><div class="ds">что происходило с роутером</div></div><span class="chip acc" id="card-events-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
     <div class="door wide" id="card-actlog" role="button" tabindex="0"><span class="bar" style="background:var(--g5)"></span><span class="sq" style="background:var(--g5)"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg></span><div class="grow"><div class="nm">Журнал действий</div><div class="ds">что делали в панели в этой вкладке</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
     <div class="door" id="card-packages" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-cpu"/></svg></span><div class="grow"><div class="nm">Компоненты</div><div class="ds">какие движки стоят · установка и снятие</div></div><span class="chip" id="card-packages-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
-    <!-- СКРЫТА: публичный репозиторий заморожен ⇒ апдейтеру нечего предлагать (защита от
-         даунгрейда всё равно откажет — там версия старее нашей), а кнопка «Проверить
-         обновления» отвечала бы «обновлений нет» на живом канале. Разметку и openUpdate НЕ
-         удаляем: вернуть дверь = снять display:none. Идиома та же, что у card-byedpi ниже. -->
-    <div class="door" id="card-update" role="button" tabindex="0" style="display:none"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></span><div class="grow"><div class="nm">Обновление</div><div class="ds">версия и обновление скриптов</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
+    <!-- Дверь была СКРЫТА, пока публичный канал был заморожен (файла версии не было, проверка отвечала «обновлений нет»).
+         С релиза 1.0.0 (05.10.2026) канал открыт — дверь видна: без неё человек на 1.0.0 не находил экрана обновления вовсе
+         (он открывался только по адресу #rr-update). Спрятать снова = вернуть display:none — строка «Обновления компонентов»
+         на «Компонентах» сама перестанет вести на экран (pkgCheckRow). -->
+    <div class="door" id="card-update" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></span><div class="grow"><div class="nm">Обновление</div><div class="ds">версия и обновление скриптов</div></div><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
     <!-- Место и память — свои экраны (шаг 6b): раньше жили внутри «Компонентов» и «О роутере». Чип двери места — только
          «накопитель не найден» (его ставит опрос статуса): заполнение и так на дуге над дверями. -->
     <div class="door" id="card-disk" role="button" tabindex="0"><span class="bar" style="background:var(--g4)"></span><span class="sq" style="background:var(--g4)"><svg class="ic" aria-hidden="true"><use href="#i-usb"/></svg></span><div class="grow"><div class="nm">Место и накопитель</div><div class="ds">что занимает флеш · вынос на накопитель · чистка</div></div><span class="chip wr" id="card-disk-chip" style="display:none"></span><svg class="ic s chev" aria-hidden="true"><use href="#i-chev"/></svg></div>
@@ -499,7 +499,7 @@
 <div id="toast" role="status" aria-live="polite"><span id="toast-sp" class="sp"></span><span id="toast-msg"></span></div>
 
 
-<script src="assets/panel.js?v=100000"></script>
+<script src="assets/panel.js?v=100005"></script>
 <!-- СТРАХОВКА ОТ СМЕШАННОГО НАБОРА ФАЙЛОВ (шаг 2k, найдено независимым ревью, круг 4). Этот скрипт
      исполняется СТРОГО после panel.js (скрипты без async идут по порядку) и смотрит на его маркер.
      Маркера нет — скрипт панели не пришёл, не разобрался или ОСТАЛСЯ ОТ ПРОШЛОЙ ВЕРСИИ (обновление

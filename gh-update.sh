@@ -621,36 +621,38 @@ bs_paths() {
 # на накопитель демон работает с удалённого файла до перезапуска, и без памяти КАЖДЫЙ показ экрана и каждый клик плана заново
 # читал 8 МБ xray на каждый экземпляр (ревью ветки, круг 2). Ключ с pid — перезапуск даёт новый; файл гибнет с ребутом.
 BS_RUN_SAME=/tmp/enodia-bin-run.same
-bs_run_old() {   # $1 = имя, $2 = путь стоящего, $3 = его sha
-    [ -n "$BS_DEL" ] || return 1
+# The pids themselves (one per line), not just "is there one": the restart in Components has to know WHICH processes, so it can
+# hand each to its owner (packages.sh::rst_unit). One loop serves both answers, so "flagged stale" and "restarted" can't disagree.
+bs_stale_pids() {   # $1 = имя, $2 = путь стоящего, $3 = его sha
+    [ -n "$BS_DEL" ] || return 0
     _brs=$(stat -c %s "$2" 2>/dev/null)
-    printf '%s\n' "$BS_DEL" | {
-        while read -r _bpid _bpath; do
-            [ "${_bpath##*/}" = "$1" ] || continue
-            _bps=$(stat -L -c '%s %Y' "/proc/$_bpid/exe" 2>/dev/null) || continue
-            [ "${_bps% *}" = "$_brs" ] || exit 0
-            _brk="$_bpid $_bps $3"
-            grep -qxF "$_brk" "$BS_RUN_SAME" 2>/dev/null && continue
-            [ "$(file_sha256 "/proc/$_bpid/exe")" = "$3" ] || exit 0
-            echo "$_brk" >> "$BS_RUN_SAME" 2>/dev/null
-        done
-        exit 1
-    }
+    printf '%s\n' "$BS_DEL" | while read -r _bpid _bpath; do
+        [ "${_bpath##*/}" = "$1" ] || continue
+        _bps=$(stat -L -c '%s %Y' "/proc/$_bpid/exe" 2>/dev/null) || continue
+        [ "${_bps% *}" = "$_brs" ] || { echo "$_bpid"; continue; }
+        _brk="$_bpid $_bps $3"
+        grep -qxF "$_brk" "$BS_RUN_SAME" 2>/dev/null && continue
+        if [ "$(file_sha256 "/proc/$_bpid/exe")" = "$3" ]; then echo "$_brk" >> "$BS_RUN_SAME" 2>/dev/null; else echo "$_bpid"; fi
+    done
+    return 0
 }
+bs_run_old() { [ -n "$(bs_stale_pids "$1" "$2" "$3" | head -n 1)" ]; }
 # bin-status [имя…] — строка на бинарь: имя⇥состояние⇥стоит⇥доступна⇥работает.
 #   состояние: absent (файла нет) · current (хеш совпал с опубликованной сборкой своей арки) · outdated (манифест знает хеш
 #   своей арки, и он другой — новая сборка приехала с обновлением кода) · unknown (сверять не с чем: в коде нет манифеста);
 #   стоит — версия стоящего, если её удалось узнать; доступна — версия в манифесте; работает — `old`, когда живой процесс
 #   исполняет сборку, которую уже заменили. Без имён — все бинари манифеста.
 # В СЕТЬ НЕ ХОДИТ: манифест лежит в каталоге кода (его зовут синхронно экран «Компоненты», план движка и дамп).
+bm_names() { [ -s "$BM_FILE" ] && awk -F'\t' '$1 !~ /^#/ && NF >= 4 { print $1 }' "$BM_FILE" | sort -u; }
+bs_pick() { printf '%s\n' "$_bsp" | awk -v n="$1" '$1 == n { sub(/^[^ ]* /, ""); print; exit }'; }   # из bs_paths — путь имени $1
 bin_status() {
     BA_VAL=$(bin_arch); BA_DONE=1
     BS_DEL=$(exe_deleted)   # процессы, исполняющие удалённый файл, — у владельца (daemon-lib.sh; сорсится ниже, до разбора вербов)
     _bsn="$*"
-    [ -n "$_bsn" ] || _bsn=$( [ -s "$BM_FILE" ] && awk -F'\t' '$1 !~ /^#/ && NF >= 4 { print $1 }' "$BM_FILE" | sort -u )
+    [ -n "$_bsn" ] || _bsn=$(bm_names)
     _bsp=$(bs_paths $_bsn)
     for _n in $_bsn; do
-        _p=$(printf '%s\n' "$_bsp" | awk -v n="$_n" '$1 == n { sub(/^[^ ]* /, ""); print; exit }')
+        _p=$(bs_pick "$_n")
         _av=$(bm_field "$_n" 4 max)
         if [ -z "$_p" ] || [ ! -f "$_p" ]; then printf '%s\tabsent\t\t%s\t\n' "$_n" "$_av"; continue; fi
         _h=$(bs_sha "$_n" "$_p"); _st=unknown; _cv=""; _run=""
@@ -665,6 +667,22 @@ bin_status() {
             bs_run_old "$_n" "$_p" "$_h" && _run=old
         fi
         printf '%s\t%s\t%s\t%s\t%s\n' "$_n" "$_st" "$_cv" "$_av" "$_run"
+    done
+    return 0
+}
+# bin-stale [имя…] — WHO runs a replaced build: one line `pid⇥имя` per process. Same judgement as bin-status's `old` (bs_stale_pids),
+# for the restart in Components. Empty output = nothing to restart. No network, like bin-status.
+bin_stale() {
+    BS_DEL=$(exe_deleted)
+    [ -n "$BS_DEL" ] || return 0
+    _bsn="$*"
+    [ -n "$_bsn" ] || _bsn=$(bm_names)
+    _bsp=$(bs_paths $_bsn)
+    for _n in $_bsn; do
+        _p=$(bs_pick "$_n")
+        [ -n "$_p" ] && [ -f "$_p" ] || continue
+        _h=$(bs_sha "$_n" "$_p"); [ -n "$_h" ] || continue
+        bs_stale_pids "$_n" "$_p" "$_h" | while read -r _sp; do printf '%s\t%s\n' "$_sp" "$_n"; done
     done
     return 0
 }
@@ -1496,10 +1514,11 @@ case "$1" in
     bin-ver)       bin_ver "$2" ;;
     # bin-status — «стоит ли свежая сборка и какая работает» по факту, без сети (разбор у bin_status).
     bin-status)    shift; bin_status "$@" ;;
+    bin-stale)     shift; bin_stale "$@" ;;
     # Закачка заранее (движок компонентов, разбор у BIN_PREFETCH): скачать в ОЗУ · убрать скачанное.
     bin-prefetch)  cmd_bin_prefetch "$2" ;;
     bin-unprefetch) cmd_bin_unstage "$BIN_PREFETCH" ;;
-    *) echo "usage: $0 fetch-bin <name> <dst> [minsz] | check | apply [--force] | rollback | verify [путь] | check-json | verify-json | status-json | upd-busy | reachable [path] | bin-manifest | bin-size <имя> [min|max] | bin-ver <имя> | bin-status [имя…] | bin-stage <имя> <файл> | bin-staged | bin-unstage | bin-prefetch <имя> | bin-unprefetch | bin-arch"; exit 2 ;;
+    *) echo "usage: $0 fetch-bin <name> <dst> [minsz] | check | apply [--force] | rollback | verify [путь] | check-json | verify-json | status-json | upd-busy | reachable [path] | bin-manifest | bin-size <имя> [min|max] | bin-ver <имя> | bin-status [имя…] | bin-stale [имя…] | bin-stage <имя> <файл> | bin-staged | bin-unstage | bin-prefetch <имя> | bin-unprefetch | bin-arch"; exit 2 ;;
 esac
 _rc=$?
 # Кэш сумм — временный (свежий на каждый запуск): протухшая копия молча пропустила бы

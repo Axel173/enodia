@@ -704,8 +704,23 @@ cmd_status() {
     fi
 }
 
+# restart — the SAME server on a fresh daemon (Components → «Перезапустить» after a binary update). Carrier only: the rules match
+# the interface by NAME and peer modes live in apply-bypass by address, so both outlive the interface being recreated; the `.on`
+# intent is never touched (down → up would clear it, and a failed `up` then would leave home access off for good). A failed start
+# leaves `.on` with no awgs0 — exactly what the watchdog tick re-ups.
+cmd_restart() {
+    [ -f "$ON_FLAG" ] || { log "сервер выключен — перезапускать нечего"; return 0; }
+    srv_kill_daemon
+    ip link del "$IFACE" 2>/dev/null
+    srv_carrier_up || { log "перезапуск: $IFACE не поднялся — сторож поднимет его на следующем тике"; return 1; }
+    log "сервер перезапущен: $IFACE на новом демоне"
+    return 0
+}
+
 case "$1" in
     init)        cmd_init ;;
+    restart)     cmd_restart ;;
+    enabled)     [ -f "$ON_FLAG" ] ;;   # код 0 — «доступ домой» включён (намерение); перезапуск в «Компонентах» отличает демон от сироты
     up)          cmd_up ;;
     down)        cmd_down ;;
     status)      cmd_status ;;

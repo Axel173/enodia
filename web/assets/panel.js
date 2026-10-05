@@ -1311,7 +1311,7 @@
   // ФОКУС ПЕРЕЖИВАЕТ ПЕРЕРИСОВКУ ЭКРАНА. Экран после действия рисуется заново целиком, и фокус клавиатуры уходил в body:
   // нажал пробелом тумблер выхода — и следующий Tab начинается с начала страницы (тот же класс, что лечили у ленты в
   // шаге 2 и у плиток «Транспорта»). Примету узла берём ДО перерисовки, возвращаем фокус на узел с той же приметой.
-  var FOCUS_ATTRS=['data-xa','data-fb','data-fo','data-xk','data-sa','data-si','data-va','data-pa','data-pm','data-ck','data-ap','data-cact','data-rdel','data-rb','data-rdon','data-rst','data-rstg','data-rstale','data-ga','data-gd','data-gs','data-tab','data-t','data-dvm','data-dvs','data-dvos','data-dvps','data-dvt','data-dvod','data-dvpp','data-dvpd','data-dvpr','data-dwd','data-dwc','data-dwa','data-dwr','data-dwx','data-dws','data-dwg','data-dwgd','data-dva','data-gact','data-gsrc','data-gtab','data-rna','data-rns','data-rnd','data-rnx','data-rnpr','data-rnc','data-ris','data-ric','data-rix','data-rit','data-dnsp','data-dnsa','data-ntm','data-nta','data-dha','data-dhd','data-wfa','data-wfo','data-blka','data-lsi','data-dk','data-dkm','data-dkc','data-pkg','data-pka','data-pku','data-upd','data-sia','data-sup','data-sud','data-unm','data-una','data-hk','data-paa','data-tfa','data-pvt','data-pvl','data-sid','data-nfa','data-eva','data-evs','data-ala','data-sv','id'];
+  var FOCUS_ATTRS=['data-xa','data-fb','data-fo','data-xk','data-sa','data-si','data-va','data-pa','data-pm','data-ck','data-ap','data-cact','data-rdel','data-rb','data-rdon','data-rst','data-rstg','data-rstale','data-ga','data-gd','data-gs','data-tab','data-t','data-dvm','data-dvs','data-dvos','data-dvps','data-dvt','data-dvod','data-dvpp','data-dvpd','data-dvpr','data-dwd','data-dwc','data-dwa','data-dwr','data-dwx','data-dws','data-dwg','data-dwgd','data-dva','data-gact','data-gsrc','data-gtab','data-rna','data-rns','data-rnd','data-rnx','data-rnpr','data-rnc','data-ris','data-ric','data-rix','data-rit','data-dnsp','data-dnsa','data-ntm','data-nta','data-dha','data-dhd','data-wfa','data-wfo','data-blka','data-lsi','data-dk','data-dkm','data-dkc','data-pkg','data-pka','data-pku','data-pkrs','data-upd','data-sia','data-sup','data-sud','data-unm','data-una','data-hk','data-paa','data-tfa','data-pvt','data-pvl','data-sid','data-nfa','data-eva','data-evs','data-ala','data-sv','id'];
   function focusMark(){
     var a=document.activeElement;
     if(!a || !a.getAttribute) return null;
@@ -5643,7 +5643,7 @@
     "имя сервера подписки задаёт подписка — переименовать его нельзя":"a subscription server's name is set by the subscription — it can't be renamed",
     "имена «sub-…» принадлежат подпискам — выберите другое":"«sub-…» names belong to subscriptions — choose another one",
     "«default» — служебное имя установщика: его нельзя ни дать, ни снять":"«default» is the installer's service name: it can be neither given nor taken away",
-    "идёт смена сервера — повторите через минуту":"a server switch is in progress — try again in a minute",
+    "идёт смена транспорта или сервера либо перезапуск компонентов — повторите через минуту":"a transport or server switch or a component restart is in progress — try again in a minute",
     // Экран сервера и список (ревью пачки 2, круг 2).
     "сторож сейчас проверяет туннель — повторите через минуту":"the watchdog is checking the tunnel right now — try again in a minute",
     "идёт проверка другого сервера Xray — дождитесь итога":"another Xray server is being checked — wait for the result",
@@ -5945,6 +5945,7 @@
     "всё на флеше роутера":"everything on the router flash","накопитель используется":"drive in use","накопитель не найден":"drive not found",
     "идёт установка":"installing","ничего не установлено":"nothing installed",   // «установлен частично» — ключ экрана «Компоненты» ниже
     "Идёт установка или снятие компонентов":"Components are being installed or removed",
+    "идёт перезапуск":"restarting","Идёт перезапуск компонентов":"Components are restarting",
     "Не установлено ни одного компонента":"No component is installed",
     "Скачать архив":"Download archive","Собираю срез…":"Building snapshot…","Только текст":"Text only",
     "Архив для разбора":"Archive for troubleshooting",
@@ -6290,7 +6291,7 @@
     "такого имени нет":"no such name","не удалось убрать":"could not remove",
     // — круг 2 ревью шага 5a: чужая операция движка, заглушка по версии dnsmasq, поддомены —
     "Сейчас идёт другая операция с компонентами — поставить шифрованный DNS можно будет, когда она закончится.":"Another component operation is running right now — encrypted DNS can be installed once it finishes.",
-    "дождитесь конца другой установки":"wait for the other installation to finish",
+    "дождитесь конца другой операции с компонентами":"wait for the other component operation to finish",
     "Идёт другая операция с компонентами — дождитесь её конца":"Another component operation is running — wait for it to finish",
     "заглушка для IPv4":"a stub for IPv4","заглушка для IPv6":"a stub for IPv6",
     "Последняя установка компонента:":"Last component installation:",
@@ -6743,6 +6744,8 @@
     "Список компонентов получить не удалось: роутер ответил не то. Если вход в панель истёк — обновите страницу.":"Could not get the component list: the router answered something else. If your panel sign-in expired, reload the page.",
     "Движок компонентов на роутере не установлен — обновите скрипты роутера или переустановите панель с компьютера.":"The components engine is not installed on the router — update the router scripts or reinstall the panel from a computer.",
     "Пока идёт установка, план не меняется.":"While an installation runs, the plan does not change.",
+    "Пока идёт перезапуск, план не меняется.":"While a restart runs, the plan does not change.",
+    "Перезапуск оборвали на полпути — перезагрузкой роутера или нехваткой памяти. Часть процессов могла остаться на прежней сборке: если строка «работает прежняя сборка» не ушла, нажмите «Перезапустить» ещё раз.":"The restart was cut off halfway — by a router reboot or a lack of memory. Some processes may still run the previous build: if the «previous build is running» line is still there, press «Restart» again.",
     "Ничего не меняется — включите или выключите компонент в списке.":"Nothing changes — turn a component on or off in the list.",
     "Роутер не ответил — план не посчитан. Переключите компонент ещё раз.":"The router did not answer — the plan was not calculated. Toggle the component again.",
     "План посчитать не удалось: роутер ответил не то. Если вход в панель истёк — обновите страницу.":"Could not calculate the plan: the router answered something else. If your panel sign-in expired, reload the page.",
@@ -6757,6 +6760,10 @@
     // — обновление компонента (29.09.2026): строка «есть обновление», кнопка, «работает прежняя», сверка с GitHub.
     "есть обновление":"update available","обновим":"will update",
     "Поставить обновление":"Install update","Отменить обновление":"Cancel update",
+    "Перезапустить":"Restart","Перезапуск":"Restart","перезапуск":"restart","Идёт перезапуск":"Restart in progress",
+    "работает прежняя сборка — новая заработает после перезапуска":"the previous build is running — the new one starts working after a restart",
+    "перезапуск запущен…":"restart started…","перезапускаю…":"restarting…",
+    "Процессы перезапускаются по очереди, каждый — через своего владельца: связь у затронутых пропадает на секунды. Пока идёт — список не меняется и план не применить. Если роутер замолчит на 10 минут, панель скажет об этом, а не будет ждать вечно.":"Processes restart one by one, each through its owner: the affected ones lose connectivity for seconds. While it runs, the list does not change and the plan cannot be applied. If the router goes silent for 10 minutes, the panel will say so instead of waiting forever.",
     "работает прежняя сборка — новая заработает после перезапуска (проще всего перезагрузить роутер)":"the previous build is running — the new one starts working after a restart (the simplest way is to reboot the router)",
     "Обновления компонентов":"Component updates","новые сборки приезжают с обновлением системы":"new builds arrive with a system update",
     "Файлы с компьютера":"Files from your computer","Загрузить…":"Upload…","загружено:":"uploaded:","Убрать":"Remove",
@@ -7754,7 +7761,7 @@
     "нужен домен или IP/подсеть":"a domain or an IP/subnet is needed","куда: в VPN, напрямую, блокировать или в доп-выход":"where to: via VPN, direct, block or an extra exit",
     "недопустимое правило":"invalid rule","протокол: udp, tcp или оба":"protocol: udp, tcp or both","порты: 443, 3478-3480 или «все»":"ports: 443, 3478-3480 or “all”",
     "недопустимый домен (буквы, цифры, точка и дефис; часть между точками — до 63 знаков)":"invalid domain (letters, digits, dot and hyphen; up to 63 characters between dots)",
-    "недопустимый список компонентов":"invalid component list","неизвестный режим":"unknown mode","переключение раскладки уже идёт":"a layout switch is already in progress",
+    "недопустимый список компонентов":"invalid component list","недопустимый список перезапускаемого":"invalid list of what to restart","неизвестный режим":"unknown mode","переключение раскладки уже идёт":"a layout switch is already in progress",
     "неизвестный компонент":"unknown component","неизвестное направление":"unknown direction",
     "браузер-свип выхода возможен только когда выход ВКЛЮЧЁН":"a browser sweep of an exit is only possible while the exit is ON",
     "выход выключен — свип прерван":"the exit is off — sweep aborted",
@@ -8541,7 +8548,7 @@
     "nfqws не запущен":"nfqws is not running","Выключить (→ прямой режим)":"Turn off (→ direct mode)",
     "При включении туннель гаснет — весь трафик идёт напрямую (провайдер видит ваш адрес), а заблокированные категории пробивает nfqws. Переключать можно и в шапке «Обзора» или на экране «Транспорт».":"When turned on, the tunnel goes down — all traffic goes direct (the ISP sees your address), and nfqws punches through the blocked categories. You can also switch in the «Overview» header or on the «Transport» screen.",
     "Что мешает десинку":"What blocks the desync","Открыть ByeDPI":"Open ByeDPI",
-    "Сейчас идёт установка компонентов — откройте экран заново, когда она закончится.":"Components are being installed right now — reopen the screen when it finishes.",
+    "Сейчас идёт операция с компонентами — откройте экран заново, когда она закончится.":"A component operation is running right now — reopen the screen when it finishes.",
     "Что десинкать":"What to desync","Выбрать категории…":"Choose categories…",
     "Ничего не выбрано — десинк ничего не заворачивает. Выберите категории (YouTube, Discord, любой сервис из каталога) или добавьте свои домены ниже.":"Nothing selected — the desync redirects nothing. Choose categories (YouTube, Discord, any service from the catalog) or add your own domains below.",
     "Источник ровно один — действие «в десинк» в гео-категориях. Крестик у категории снимает это действие там же.":"There is exactly one source — the «to desync» action in geo categories. The cross on a category removes that action there.",
@@ -9202,6 +9209,9 @@
   // буквы внутри слов). i18nStr применяет их подряд и, если в итоге остаётся кириллица, ВОЗВРАЩАЕТ
   // оригинал (не показываем ru/en-мешанину).
   var I18N_RULES=[
+    // Строка ожидания перезапуска в «Компонентах» — ЦЕЛИКОМ и первой: короткие правила ниже переводят её куски раньше.
+    [/^Жду, пока роутер закончит свою работу с туннелем \(проверка сторожа, восстановление или другая смена\), — до (\d+) мин$/,
+     "Waiting for the router to finish its own work with the tunnel (a watchdog check, a recovery or another switch) — up to $1 min"],
     // ПОЛНЫЕ фразы, в которых есть «ОЗУ»/«МБ», — ПЕРВЫМИ: общие правила ниже (/ ОЗУ/g, /МБ/g) переводят кусок раньше, и точное
     // правило уже не находит своей строки (закачка заранее, 01.10.2026 — поймано стендом panel-rr-pkg).
     [/Заранее не скачать: в ОЗУ свободно ([0-9.]+) МБ, нужно ([0-9.]+) МБ и запас — качаю по ходу установки, как прежде\./,"Can't download ahead: $1 MB of RAM free, $2 MB plus a margin needed — downloading during the install, as before."],
@@ -9257,8 +9267,9 @@
     [/^Конфиг (\S+) сохранён — применится, когда включите VPN$/,"Config $1 saved — it will apply once you turn the VPN on"],
     [/^Конфиг (\S+) сохранён, но не применён: идёт смена транспорта или сервера — сохраните его ещё раз через минуту$/,
      "Config $1 saved but not applied: a transport or server switch is running — save it again in a minute"],
-    [/^идёт смена транспорта или сервера \(другая вкладка или сам роутер\) — повторите через минуту$/,
-     "a transport or server switch is running (another tab or the router itself) — try again in a minute"],
+    // «либо перезапуск компонентов» — держатель лока бывает и перезапуском из «Компонентов» (ревью ветки bins-2026-10, круг 2)
+    [/^идёт смена транспорта или сервера либо перезапуск компонентов \(другая вкладка или сам роутер\) — повторите через минуту$/,
+     "a transport or server switch or a component restart is running (another tab or the router itself) — try again in a minute"],
     // Отказы ревью с.97: Zapret сменили, пока ждали лок смены; CGI не завёл свой каталог вывода (cap_run).
     [/^Zapret уже не активен — транспорт сменили, пока ждали \(другая вкладка или сам роутер\)$/,
      "Zapret is no longer active — the transport was changed while waiting (another tab or the router itself)"],
@@ -9710,7 +9721,9 @@
     [/^зелёное — быстрее (\d+) мс, жёлтое — от (\d+); в скобках то, чем ответил сервер: icmp или порт$/,"green is under $1 ms, yellow from $2; in brackets is how the server answered: icmp or a port"],
     [" (прервано)"," (interrupted)"],
     [/^Удалить мёртвые серверы Xray \((\d+)\)\?/,"Delete dead Xray servers ($1)?"],
-    ["… и ещё ","… and "],
+    // «… и ещё N» — регуляркой и здесь: строка «… и ещё » раньше съедала её, и «… и ещё 3» выходило «… and 3» без «more» (ревью ветки
+    // bins-2026-10, круг 2: прежний дефект, не этой ветки).
+    [/… и ещё (\d+)/g,"… and $1 more"],
     ["Активный сервер не трогается. Отменить нельзя.","The active server is not touched. This cannot be undone."],
     ["· не удалось:","· failed:"],
     [/^Удалить «([^»]*)»\? Его конфиг и QR перестанут работать — восстановить ключ будет нельзя, устройство придётся добавить заново\.$/,"Delete “$1”? Its config and QR code will stop working — the key cannot be restored, the device will have to be added again."],
@@ -9948,7 +9961,7 @@
     //   заглавной — метка столбца тест-таблицы (пул выхода, приходит из byedpi-test.sh JSON).
     ["привязываю ","binding "],["отвязываю ","unbinding "],
     ["создаю пул «","creating pool «"],
-    ["пул «","pool «"],["» создан (","» created ("],["Выход №","Exit #"],["выход №","exit #"],
+    ["пул «","pool «"],["» создан (","» created ("],["дополнительный выход №","extra exit #"],["Выход №","Exit #"],["выход №","exit #"],
     //   заголовок карточки стратегии выхода: хвост — ИМЯ выхода (кириллическое откатит строку в
     //   ru целиком — как и прочий пользовательский контент):
     ["ByeDPI — стратегия выхода ","ByeDPI — exit strategy "],
@@ -10040,6 +10053,8 @@
     ["· почта НЕ настроена","· mail is not configured"],
     // «выключенЫ» — «off», а не «disabled»: ровно так его переводит ТОЧНЫЙ ключ словаря, и правило,
     // сказавшее иначе, дало бы две разных подписи одному состоянию (следит C89).
+    // перезапуск в «Компонентах»: «выключенного» иначе съело бы правило «выключен» строкой ниже
+    ["Без хозяина, на прежней сборке: ","Ownerless, on the previous build: "],[" (демон выключенного выхода или прежнего транспорта) — уйдёт с перезагрузкой роутера"," (a daemon of a disabled exit or an earlier transport) — a router reboot clears it"],
     ["выключена","disabled"],["выключено","disabled"],["выключены","off"],["выключен","disabled"],
     //   плейсхолдеры «по строке: домен (…) …» с хвостом-примером: exact-ключ (выше) не совпадает,
     //   хвост доедают токены «или»/«подсеть» ниже:
@@ -10129,11 +10144,39 @@
     [") — новая заработает после перезапуска компонента; проще всего перезагрузить роутер.",") — the new one starts working after the component restarts; the simplest way is to reboot the router."],
     ["Обновляю ","Updating "],["прежняя сборка","previous build"],["свежая сборка","new build"],
     ["Отказ:","Refused:"],["неизвестный компонент: ","unknown component: "],
+    // Перезапуск на установленную сборку (05.10.2026): журнал движка, ответ CGI и вопрос перед запуском.
+    ["Перезапускать нечего: все процессы уже работают на установленных сборках.","Nothing to restart: every process already runs the installed build."],
+    ["Перезапуск на установленной сборке: ","Restarting on the installed build: "],["Перезапускаю: ","Restarting: "],
+    ["Ещё процессов на прежней сборке, не наших: ","Other processes on the previous build, not ours: "],[" (разовая проверка сервера) — закончатся сами"," (a one-off server check) — they will end by themselves"],
+    ["Основной канал не трогаю: сейчас он не везёт трафик (прямой режим сторожа или подъём туннеля). Перезапустите, когда туннель вернётся.","Not touching the main channel: it carries no traffic right now (the watchdog's direct mode or the tunnel coming up). Restart it when the tunnel is back."],
+    ["Роутер сейчас сам ведёт туннель (проверка сторожа, восстановление или другая смена) — ничего не перезапускал, повторите через пару минут","The router is driving the tunnel itself right now (a watchdog check, a recovery or another switch) — nothing was restarted, try again in a couple of minutes"],
+    ["Не трогаю без вашего согласия: ","Not touching without your consent: "],[" — экран о нём не спрашивал; нажмите «Перезапустить» ещё раз"," — the screen did not ask about it; press «Restart» again"],
+    [" — после перезапуска не работает (подробности — в диагностике роутера)"," — not working after the restart (details are in the router diagnostics)"],
+    ["Готово: всё перезапущено на установленных сборках.","Done: everything restarted on the installed builds."],
+    [" — на установленной сборке"," — on the installed build"],[" — всё ещё на прежней сборке"," — still on the previous build"],
+    ["Перезапущено, но не отвечает: ","Restarted but not responding: "],[" — сторож проверит и починит на своём тике"," — the watchdog will check and repair it on its tick"],
+    ["Перезапуск не удался: ","Restart failed: "],["Не вышло: ","Did not work: "],["Готово: ","Done: "],
+    ["тёплый резерв AmneziaWG","AmneziaWG warm reserve"],["основной канал","main channel"],   // «дополнительный выход №» — выше, до «выход №»
+    ["шифрованный DNS","encrypted DNS"],
+    ["Перезапуск запущен — ход виден на экране «Компоненты»","Restart started — progress is shown on the «Components» screen"],
+    ["→ перезапуск: ","→ restart: "],["Перезапустить ","Restart "],[" на установленной сборке?"," on the installed build?"],
+    ["Ненадолго прервётся:","Briefly interrupted:"],["Перезагружать роутер не нужно.","No need to reboot the router."],
+    [" — на 5–10 с, открытые соединения переподключатся"," — for 5–10 s, open connections will reconnect"],
+    [" — на несколько секунд, туннель не прерывается"," — for a few seconds, the tunnel is not interrupted"],
+    ["Перезапущено не всё — не трогал: ","Not everything was restarted — not touched: "],["; не трогал: ","; not touched: "],
+    ["«доступ домой» — на несколько секунд, клиенты переподключатся сами","«home access» — for a few seconds, clients reconnect by themselves"],
+    ["«доступ домой»","«home access»"],
+    [" — на секунду, правила не трогаем"," — for a second, rules stay untouched"],[" — несколько секунд без имён"," — a few seconds without name lookups"],
+    [" — на секунду, открытая по HTTPS страница переподключится"," — for a second, a page opened over HTTPS will reconnect"],
+    [" — на несколько секунд, его трафик пока пойдёт запасным путём"," — for a few seconds, its traffic takes its fallback path meanwhile"],
     [" указан и на установку, и на удаление"," is listed both for install and for removal"],
     ["Нельзя снять ","Cannot remove "],
     // Отказы pkg_bg: приходят СИНХРОННО в ответе CGI (в отличие от строк лога выше) на любую
     // кнопку установки — «Компоненты», Zapret, DoH, HTTPS.
-    ["установка компонентов уже идёт — дождитесь её конца","a component operation is already running — wait for it to finish"],
+    ["операция с компонентами уже идёт — дождитесь её конца","a component operation is already running — wait for it to finish"],
+    ["идёт обновление системы — дождитесь его конца","a system update is running — wait for it to finish"],
+    ["идёт операция с компонентами — дождитесь её конца","a component operation is running — wait for it to finish"],
+    ["Идёт обновление системы — компоненты не трогал; дождитесь его конца и повторите","A system update is running — components were not touched; wait for it to finish and try again"],
     ["не хватает места на флеше — снимите что-нибудь в «Роутер → Компоненты»","not enough flash space — remove something in «Router → Components»"],
     ["план пуст — нечего применять","the plan is empty — nothing to apply"],
     ["несёт трафик прямо сейчас — сперва переключите транспорт","carries traffic right now — switch the transport first"],
@@ -10497,8 +10540,8 @@
     ["не удалось запустить","failed to start"],
     // — карточка «Компоненты» (packages.sh): фронт-обёртки. Фразы ВЫШЕ токенов, ru-хвост в
     //   склейке иначе откатит весь тост в русский.
-    ["установка компонентов: роутер 10 минут не сообщает о ходе — экран спросит его заново","components: the router has not reported progress for 10 minutes — the screen will ask it again"],
-    ["Компоненты: роутер 10 минут не сообщает о ходе установки","Components: the router has not reported installation progress for 10 minutes"],
+    ["компоненты: роутер 10 минут не сообщает о ходе операции — экран спросит его заново","components: the router has not reported progress for 10 minutes — the screen will ask it again"],
+    ["Компоненты: роутер 10 минут не сообщает о ходе операции","Components: the router has not reported the operation's progress for 10 minutes"],
     ["Компоненты: не удалось — причина на экране «Компоненты»","Components: failed — the reason is on the «Components» screen"],["Компоненты: готово","Components: done"],
     ["компоненты: не удалось","components: failed"],["компоненты: готово","components: done"],
     ["→ компоненты: ставим [","→ components: installing ["],["], снимаем [","], removing ["],
@@ -10777,7 +10820,11 @@
         if(rq[i]){ if(hid){ out=out.replace(/«\u0002(\d+)\u0003»/g, function(m, n){ return '«'+hid[+n]+'»'; }); hid=null; } }
         else if(!hid){ hid=[]; out=out.replace(/«([^«»]*)»/g, function(m, x){ hid.push(x); return '«\u0002'+(hid.length-1)+'\u0003»'; }); }
       }
-      out=out.replace(I18N_RULES[i][0], I18N_RULES[i][1]);
+      // Правило-СТРОКА — КАЖДОЕ вхождение, а не первое: `replace` со строкой меняет одно, и фраза с повтором («дополнительный выход
+      // №2, дополнительный выход №3» — перезапуск двух выходов, вопрос со списком владельцев) оставляла второе русским, а остаток
+      // кириллицы возвращал по-русски ВСЮ строку (ревью ветки bins-2026-10, круг 1). `split/join` ещё и не толкует `$` в замене.
+      var rp=I18N_RULES[i][0];
+      out=(typeof rp==='string') ? out.split(rp).join(I18N_RULES[i][1]) : out.replace(rp, I18N_RULES[i][1]);
     }
     if(hid) out=out.replace(/«\u0002(\d+)\u0003»/g, function(m, n){ return '«'+hid[+n]+'»'; });
     if(out===s) return s;                       // ничего не сработало → ru как есть
@@ -21892,7 +21939,7 @@
       + '<label class="sw"><input type="checkbox" id="dns-auto" aria-label="Включать само в прямых режимах"'+(auto?' checked':'')+'><i></i></label></div>';
     // Протокол без своей программы — плитка «недоступна», и клик ставит компонент: переключение на него роутер отвергнет всё
     // равно. Программа DoH отдельным полем (`doh_bin`): «установлен» — про АКТИВНЫЙ протокол.
-    var naT=function(){ return d.installing ? 'устанавливается…' : busyO ? 'дождитесь конца другой установки' : 'не установлен · нажмите, чтобы поставить'; };
+    var naT=function(){ return d.installing ? 'устанавливается…' : busyO ? 'дождитесь конца другой операции с компонентами' : 'не установлен · нажмите, чтобы поставить'; };
     var dohNa=(d.doh_bin===false), dotNa=(d.dot_installed===false);
     h+='<div class="wt" style="margin-top:14px">Чем шифровать</div><div class="opt c2">'
       + optTile('data-dnsp', 'doh', !dot, 'i-lock', 'DoH', dohNa ? naT() : 'поверх HTTPS · порт 443', dohNa)
@@ -22208,8 +22255,9 @@
      считает тот же gh-update.sh, который потом и обновляет (`gh_check`), и кнопка «Обновить» есть только при коде НОВЕЕ
      установленного — иначе сбойный релиз «обновил» бы роутер назад. Своей арифметики версий во фронте нет. Набор протоколов
      сюда не входит — это «Компоненты».
-     Дверь раздела СКРЫТА, пока канал заморожен (публичный репозиторий файла версии не публикует, и роутер честно отвечает
-     «обновлений этим каналом нет»); экран живёт по адресу и обязан говорить правду и тогда.
+     Дверь раздела была СКРЫТА, пока канал был заморожен (публичный репозиторий файла версии не публиковал); с релиза 1.0.0
+     (05.10.2026) канал открыт, и дверь видна — человек не находил экрана обновления. Экран обязан говорить правду и без файла версии
+     («обновлений этим каналом нет»): форк или пред-релизный канал его так и отвечает.
      ОТВЕТЫ: `gh_status` (без сети — на каждый показ и раз в 2 с, пока идёт обновление), `gh_check` и `gh_verify` (сеть — только
      по кнопке). Итоги кнопок живут до ухода с экрана: опрос перерисовывает колоду, и итог проверки не должен при этом пропадать,
      а новый показ начинает с чистого листа — вердикт получасовой давности после обновления был бы уже неправдой. */
@@ -22481,6 +22529,9 @@
   function openPackages(){
     var fsig=focusMark();
     openModal(null, {route:'rr-pkg', deck:true});
+    // Выбор, отложенный до перерисовки, забирает ЭТОТ показ — сразу, до ответа роутера: ушёл, пока он шёл, — выбор пропал вместе с
+    // показом, а не всплыл при следующем открытии экрана (ревью ветки bins-2026-10, круг 3).
+    var selKeep=pkgSelKeep, updKeep=pkgUpdKeep; pkgSelKeep=null; pkgUpdKeep=null;
     var b=document.getElementById('modal-body'); loading(b);
     var fail=function(e){ return {__err:(e && e.net) ? 'net' : 'form'}; };
     Promise.all([fetchJson('/cgi-bin/data?section=packages').then(null, fail), fetchJson('/cgi-bin/data?section=update').then(null, fail),
@@ -22490,7 +22541,7 @@
         if(!pkgListOk(r[0])){
           // Ответ не пришёл — ожидания этого показа (тост сверки, выбор «обновить») не переносятся на следующий: иначе через час
           // открытый экран сказал бы «не обновился» ни к чему и показал бы заранее нажатое обновление (ревью ветки, круг 2).
-          pkgUpdKeep=null; pkgSelKeep=null; pkgUpPick=false;
+          pkgUpPick=false;
           // «Роутер не ответил» ≠ «ответил не то»: первому поможет «ещё раз», второму — нет (разбор у noteText).
           b.innerHTML='<div class="vwrap"><div class="card w2" id="pkg-list"><div class="wt">Что должно стоять</div>'+dkLine((r[0] && r[0].__err==='net')
             ? 'Роутер не ответил — список компонентов не пришёл. Откройте экран ещё раз.'
@@ -22501,10 +22552,10 @@
         pkgOp=pkgOpOk(r[2]) ? r[2] : null;
         pkgData=r[0]; pkgRunning=!!(r[1] && r[1].install_state==='RUNNING') || !!(pkgOp && pkgOp.running===true); pkgSel={};
         (pkgData.pkgs||[]).forEach(function(p){ pkgSel[p.id]=(p.state!=='absent'); });
-        if(pkgSelKeep){ for(var k in pkgSelKeep) if(pkgSelKeep.hasOwnProperty(k) && pkgSel.hasOwnProperty(k)) pkgSel[k]=pkgSelKeep[k]; pkgSelKeep=null; }
+        if(selKeep){ for(var k in selKeep) if(selKeep.hasOwnProperty(k) && pkgSel.hasOwnProperty(k)) pkgSel[k]=selKeep[k]; }
         // Выбор «обновить» переживает перерисовку только там, где обновление ВСЁ ЕЩЁ есть (роутер мог успеть его поставить).
         pkgUpd={};
-        if(pkgUpdKeep){ (pkgData.pkgs||[]).forEach(function(p){ if(pkgUpdKeep[p.id] && pkgHasUpd(p)) pkgUpd[p.id]=true; }); pkgUpdKeep=null; }
+        if(updKeep){ (pkgData.pkgs||[]).forEach(function(p){ if(updKeep[p.id] && pkgHasUpd(p)) pkgUpd[p.id]=true; }); }
         // Только что загрузили файлы с компьютера — связки, которым теперь хватает загруженного, сразу в план (стоящей с устаревшим
         // файлом — обновлением): человек пришёл их ставить, и «загрузил — теперь найди, где отметить» было бы лишним шагом. Решает
         // ответ роутера (`need`/`staged`).
@@ -23060,7 +23111,7 @@
   // ЧТО ДЕЛАЛИ — своими текстовыми узлами: глагол, имена и итог переводятся каждый своим ключом, а склейка «Поставить Xray —
   // готово» одной строкой не совпала бы ни с одним ключом словаря (имена связок — переменные). Смена набора из CLI плана не
   // оставляет — тогда общими словами.
-  function pkgOpTitle(ins, del, tail, upd){
+  function pkgOpTitle(ins, del, tail, upd, rst){
     var nm=function(ids){ return ids.map(function(id){ return '<span>'+esc(pkgLabelOf(id))+'</span>'; }).join(', '); }, h=[];
     // «Обновить» — те из «ставим», что роутер назвал обновлением (третье поле плана, `upd`): по окончании связка «установлена» в
     // обоих случаях, и задним числом их не отличить.
@@ -23070,6 +23121,9 @@
     if(up.length) h.push('<span>'+(h.length ? 'обновление' : 'Обновление')+'</span> '+nm(up));
     ins=put;
     if(del.length) h.push('<span>'+(h.length ? 'снять' : 'Снять')+'</span> '+nm(del));
+    // «Перезапуск» — живые процессы на установленную сборку (четвёртое поле плана, `rst`): у этой операции нет ни «ставим», ни «снимаем».
+    rst=rst||[];
+    if(rst.length) h.push('<span>'+(h.length ? 'перезапуск' : 'Перезапуск')+'</span> '+nm(rst));
     return '<span class="pk-t">'+(h.length ? h.join(' · ') : '<span>Смена набора протоколов</span>')+(tail||'')+'</span>';
   }
   // МЕСТО ЖИТЕЛЬСТВА связки. Полный вес и его часть на томе кода приходят разными числами: пока накопителя нет, они равны и
@@ -23110,7 +23164,12 @@
       // включённого DoH); держит его только идущая операция.
       + pkgUpdHtml(p, pkgRunning)
       // Файл уже заменён, а живой демон исполняет прежний (роутер видит это по процессу, `run_old`): «обновил, а ничего не изменилось».
-      + (was && p.run_old===true ? '<div class="ds"><span class="wr">работает прежняя сборка — новая заработает после перезапуска (проще всего перезагрузить роутер)</span></div>' : '')
+      // Кнопка — только когда роутер назвал, ЧТО перезапуск затронет (`rst_units`): иначе (прежний роутер, процесс без живого хозяина
+      // или не наш) остаётся прежний совет. `data-busy` — под общим замком занятости (BUSY_LOCK): чужое действие запирает её и отпирает
+      // по концу, а не оставляет живой кнопкой, клик по которой молча ничего не делает; идущая операция — `data-na`, его конец отопрёт сам.
+      + (was && p.run_old===true ? ((p.rst_units||[]).length
+          ? '<div class="ds pk-upd"><span class="wr">работает прежняя сборка — новая заработает после перезапуска</span> <button type="button" class="btn sm gh" data-pkrs="'+id+'" data-busy="1"'+(pkgRunning ? ' data-na="1"' : '')+((pkgRunning||busy) ? ' disabled' : '')+'>Перезапустить</button></div>'
+          : '<div class="ds"><span class="wr">работает прежняя сборка — новая заработает после перезапуска (проще всего перезагрузить роутер)</span></div>') : '')
       + (p.hold ? '<div class="ds"><span class="wr">снять нельзя: '+esc(p.hold)+'</span></div>' : '')
       // warn — «стоит, но здесь работать не будет» (zapret на ядре без NFQUEUE): не запрет и не состояние, а причина, по
       // которой занятое место бесполезно.
@@ -23161,13 +23220,14 @@
   function pkgRunHtml(){
     if(!pkgRunning) return '';
     var op=pkgOp||{ins:'', del:'', log:[]}, last=pkgProgText((op.log||[]).length ? op.log[op.log.length-1] : lastProtoMsg);
-    return '<div class="card wfull" id="pkg-run"><div class="wt">Идёт установка</div>'
-      + '<div class="lrow"><div class="grow"><div class="nm" id="pkg-run-now" role="status" tabindex="-1">'+pkgOpTitle(pkgIds(op.ins), pkgIds(op.del), '', pkgIds(op.upd))+'</div>'
+    var rs=pkgIds(op.rst).length>0;
+    return '<div class="card wfull" id="pkg-run"><div class="wt">'+(rs ? 'Идёт перезапуск' : 'Идёт установка')+'</div>'
+      + '<div class="lrow"><div class="grow"><div class="nm" id="pkg-run-now" role="status" tabindex="-1">'+pkgOpTitle(pkgIds(op.ins), pkgIds(op.del), '', pkgIds(op.upd), pkgIds(op.rst))+'</div>'
       + '<div class="ds one" id="pi-progress" aria-live="polite">'+esc(last||'')+'</div></div><span class="chip wr">идёт</span></div>'
       // Срок — от ПОСЛЕДНЕГО ПРОГРЕССА, а не от нажатия (разбор у pollProto): «замолчит» здесь значит ровно это. Перенос на накопитель
       // не ждёт, а ОТКАЗЫВАЕТ, пока идёт установка (usb-offload.sh смотрит на тот же лок) — так и говорим (ревью шага 6c, круг 1).
       // Порядок — закачка заранее (packages.sh): сперва всё в ОЗУ, потом снятия и установка; у операции без установки качать нечего.
-      + dkLine((op.ins ? 'Сперва всё нужное скачивается в память роутера, потом удаления и установка. ' : '')+'Пока идёт — список не меняется и план не применить, а перенос движков на накопитель роутер не начнёт. Если роутер замолчит на 10 минут, панель скажет об этом, а не будет ждать вечно.')+'</div>';
+      + dkLine(rs ? 'Процессы перезапускаются по очереди, каждый — через своего владельца: связь у затронутых пропадает на секунды. Пока идёт — список не меняется и план не применить. Если роутер замолчит на 10 минут, панель скажет об этом, а не будет ждать вечно.' : (op.ins ? 'Сперва всё нужное скачивается в память роутера, потом удаления и установка. ' : '')+'Пока идёт — список не меняется и план не применить, а перенос движков на накопитель роутер не начнёт. Если роутер замолчит на 10 минут, панель скажет об этом, а не будет ждать вечно.')+'</div>';
   }
   // ---- карточка «Что должно стоять» ----
   function pkgListHtml(d){
@@ -23180,8 +23240,8 @@
   // НОВЫЕ СБОРКИ КОМПОНЕНТОВ ПРИЕЗЖАЮТ С ОБНОВЛЕНИЕМ СИСТЕМЫ (решение пользователя 30.09.2026): суммы бинарей едут в подписанном
   // пакете кода, и роутер ставит только сборку, которую знает установленная версия (разбор — шапка манифеста в gh-update.sh). Своей
   // сверки с GitHub у экрана больше нет — строка ведёт туда, где обновление проверяют и ставят. ДВЕРЬ — ТОЛЬКО пока показана дверь
-  // раздела «Обновление» (`card-update` в index.html): канал заморожен — экран спрятан, и строка не уводит на него в обход (ревью ветки,
-  // круг 1); переключатель у обоих один — `display:none` той двери.
+  // раздела «Обновление» (`card-update` в index.html): спрятанный экран строка не открывает в обход (ревью ветки, круг 1); переключатель
+  // у обоих один — `display:none` той двери (с релиза 1.0.0 она видна).
   function pkgCheckRow(){
     var ud=document.getElementById('card-update'), open=!!ud && ud.style.display!=='none';
     var body='<div class="grow"><div class="nm">Обновления компонентов</div><div class="ds">новые сборки приезжают с обновлением системы</div></div>';
@@ -23282,7 +23342,7 @@
     var st=op.state, v=(st==='OK') ? {d:'', w:'готово'} : (st==='FAIL') ? {d:' bad', w:'не удалось'} : (st==='RUNNING') ? {d:' warn', w:'прервана'} : {d:' off', w:''};
     var last=String(op.log[op.log.length-1]||'').replace(/^\[\d\d:\d\d:\d\d\] /, '');
     var h='<div class="card w2" id="pkg-last"><div class="wt">Последняя операция</div>'
-      + '<div class="lrow"><span class="dot'+v.d+'"></span><div class="grow"><div class="nm" id="pkg-last-now" tabindex="-1">'+pkgOpTitle(pkgIds(op.ins), pkgIds(op.del), v.w ? ' — <span>'+v.w+'</span>' : '', pkgIds(op.upd))
+      + '<div class="lrow"><span class="dot'+v.d+'"></span><div class="grow"><div class="nm" id="pkg-last-now" tabindex="-1">'+pkgOpTitle(pkgIds(op.ins), pkgIds(op.del), v.w ? ' — <span>'+v.w+'</span>' : '', pkgIds(op.upd), pkgIds(op.rst))
       + '</div><div class="ds"><span>'+esc(fmtAge(Math.max(0, (Number(op.now)||0)-(Number(op.at)||0))))+'</span></div></div></div>';
     if(st==='FAIL') h+='<div class="cline wr">'+esc(last)+'</div>';
     // НЕ СКАЧАЛОСЬ — ДВЕРЬ, а не только причина: у кого GitHub закрыт, повтор кнопки не поможет никогда. Имена — у роутера (`need`).
@@ -23292,7 +23352,9 @@
       var upN=[]; pkgIds(op.ins).forEach(function(id){ ((pkgData||{}).pkgs||[]).forEach(function(q){ if(q.id===id) (q.need||[]).forEach(function(n){ if(upN.indexOf(n)<0) upN.push(n); }); }); });
       if(upN.length) h+='<div class="cline"><span>Нет связи с GitHub? Загрузите файлы с компьютера («Файлы с компьютера» выше):</span> <span class="mono" translate="no">'+esc(upN.map(pkgUpPath).join(', '))+'</span></div>';
     }
-    if(st==='RUNNING') h+=dkLine('Операцию оборвали на полпути — перезагрузкой роутера или нехваткой памяти. Часть файлов могла не доехать: сверьте список выше и примените план ещё раз, если нужно.', true);
+    if(st==='RUNNING') h+=dkLine(pkgIds(op.rst).length
+      ? 'Перезапуск оборвали на полпути — перезагрузкой роутера или нехваткой памяти. Часть процессов могла остаться на прежней сборке: если строка «работает прежняя сборка» не ушла, нажмите «Перезапустить» ещё раз.'
+      : 'Операцию оборвали на полпути — перезагрузкой роутера или нехваткой памяти. Часть файлов могла не доехать: сверьте список выше и примените план ещё раз, если нужно.', true);
     return h+'<details class="ri-more"'+(st==='OK' ? '' : ' open')+'><summary>Журнал операции</summary><div class="ri-list mono">'
       + op.log.map(function(l){ return '<div>'+esc(l)+'</div>'; }).join('')+'</div></details></div>';
   }
@@ -23329,6 +23391,7 @@
         if(a==='upload'){ var fi=document.getElementById('pkg-file'); if(fi && !x.disabled) fi.click(); return; }
         if(a==='unstage'){ if(!x.disabled) pkgUnstage(); return; }
         var u=x.getAttribute('data-pku'); if(u){ if(!x.disabled) pkgUpdPick(b, u); return; }
+        var rs=x.getAttribute('data-pkrs'); if(rs){ if(!x.disabled) pkgRestart(rs); return; }
         var c=x.getAttribute('data-pkc'); if(c){ pkgCand(b, c); return; }
         // Сам переключатель (и его подпись) шлёт change — второй раз строка его не переключает.
         if(x.tagName==='LABEL' || x.tagName==='INPUT' || x.tagName==='BUTTON' || x.tagName==='A' || x.tagName==='SUMMARY') return;
@@ -23366,7 +23429,7 @@
     // ПОКОЛЕНИЕ — на КАЖДЫЙ пересчёт, и без запроса тоже: «Сбросить», нажатое, пока считается прежний план, иначе получало поверх
     // «Ничего не меняется» опоздавший ответ того плана — с живой кнопкой «Применить» (ревью шага 6c, круг 1).
     var seq=++pkgPlanSeq;
-    if(pkgRunning){ el.innerHTML=pkgPlanNow('Пока идёт установка, план не меняется.'); keep(); return; }
+    if(pkgRunning){ el.innerHTML=pkgPlanNow(pkgIds((pkgOp||{}).rst).length ? 'Пока идёт перезапуск, план не меняется.' : 'Пока идёт установка, план не меняется.'); keep(); return; }
     var df=pkgDiff();
     if(!df.ins.length && !df.del.length){ el.innerHTML=pkgPlanNow('Ничего не меняется — включите или выключите компонент в списке.'); keep(); return; }
     el.innerHTML=pkgPlanNow('Считаю план…'); keep();
@@ -23428,6 +23491,61 @@
     el.innerHTML=h;
     back();
   }
+  // «ПЕРЕЗАПУСТИТЬ» — живые процессы связки на установленную сборку без перезагрузки роутера. ЧТО прервётся — по списку роутера
+  // (`rst`: владельцы процессов в порядке перезапуска), а не догадкой экрана: один AmneziaWG — это и основной канал, и выход, и
+  // «доступ домой». Запуск, опрос и итог — те же, что у «Применить» (операция движка, `pkg_op`).
+  var PKG_RST_CUT={
+    main:'основной канал — на 5–10 с, открытые соединения переподключатся',
+    'warm-awg':'тёплый резерв AmneziaWG — на несколько секунд, туннель не прерывается',
+    server:'«доступ домой» — на несколько секунд, клиенты переподключатся сами',
+    zapret:'Zapret (nfqws) — на секунду, правила не трогаем',
+    doh:'шифрованный DNS — несколько секунд без имён',
+    tls:'HTTPS панели — на секунду, открытая по HTTPS страница переподключится'
+  };
+  function pkgRstCut(u){ var m=/^slot([2-4])$/.exec(u); return m ? 'дополнительный выход №'+m[1]+' — на несколько секунд, его трафик пока пойдёт запасным путём' : (PKG_RST_CUT[u]||u); }
+  function pkgRestart(id){
+    if(busy || pkgRunning) return;
+    var p=null; ((pkgData||{}).pkgs||[]).forEach(function(q){ if(q.id===id) p=q; });
+    if(!p || !(p.rst_units||[]).length) return;
+    var q='Перезапустить '+pkgLabelOf(id)+' на установленной сборке?\n\nНенадолго прервётся:\n'
+      + p.rst_units.map(function(u){ return '• '+pkgRstCut(u); }).join('\n')+'\n\nПерезагружать роутер не нужно.';
+    if(!askConfirm(q)) return;
+    // Согласие — РОВНО на названное: список уходит роутеру, и владельца, которого вопрос не называл (сменился с тех пор, как экран
+    // нарисован), движок не тронет (packages.sh::rst_agreed).
+    pkgLaunch('pkg_restart', 'p='+encodeURIComponent(id)+'&u='+encodeURIComponent(p.rst_units.join(',')),
+      {busy:'перезапускаю…', log:'→ перезапуск: '+pkgLabelOf(id), toast:'перезапуск запущен…', keepOk:true, failFocus:['[data-pkrs="'+id+'"]', '#pkg-plan-now']});
+  }
+  // ЗАПУСК ОПЕРАЦИИ ДВИЖКА — один на «Применить» и «Перезапустить» (зеркало pkg_spawn на роутере): занятость, POST, «идёт», опрос,
+  // фокус и судьба выбора в списке. Две копии этой последовательности успели разойтись дважды (ревью ветки, круг 1).
+  //  * Экран — в состояние «идёт» сразу, а не через десять минут: кнопки нет, фокус уходит на строку «что идёт» (разбор у
+  //    nwFocusBack). Быстрая операция кончается раньше, чем перерисованный экран спросит роутер, — карточки «идёт» тогда нет, и фокус
+  //    с одной целью уходил в BODY (ревью шага 6c, круг 3): цели — списком по предпочтению. Опрос запустит сама отрисовка.
+  //  * Отказ СИНХРОННЫЙ (идёт чужая операция, запрет снятия появился после расчёта плана) — экран спрашивает роутер заново: иначе на
+  //    нём оставался прежний план с рабочей кнопкой (ревью шага 6c, круг 2).
+  //  * Выбор человека в списке (`pkgSel`, «обновить» — `pkgUpd`) переживает перерисовку: при отказе — всегда (план он составлял сам;
+  //    стёртый, он дал бы «Ничего не меняется» вместо нового вердикта — ревью шага 6c, круг 3), при успехе — у операции, которая плана
+  //    не применяет (`keepOk`: перезапуск). Только когда перерисовка на месте: иначе выбор всплыл бы при следующем открытии экрана.
+  function pkgLaunch(action, args, o){
+    var np=navMark();   // где нажали (разбор у navLate)
+    setBusy(true, o.busy); lastProtoMsg='';
+    logLine(o.log, null);
+    tokPost('/cgi-bin/action', function(tok){
+      return 'action='+action+'&token='+encodeURIComponent(tok)+'&'+args;
+    }).then(function(d){
+      logLine(d.msg||'', !!d.ok);
+      if(d.ok){
+        pkgRunning=true; showToast(o.toast, 'busy');
+        if(o.keepOk && navHere(np)){ pkgSelKeep=pkgSel; pkgUpdKeep=pkgUpd; }
+        startProtoPoll(openPackages, np);
+        _nwFocus={s:['#pkg-run-now', '#pkg-last-now', '#pkg-plan-now'], g:_navGen};
+        navLate(np, openPackages);
+      } else {
+        showToast(d.msg||'не удалось запустить', false); setBusy(false);
+        if(navHere(np)){ pkgSelKeep=pkgSel; pkgUpdKeep=pkgUpd; }
+        _nwFocus={s:o.failFocus, g:_navGen}; navLate(np, openPackages);
+      }
+    }).catch(function(){ logLine('сбой запроса', false); showToast('сбой запроса', false); setBusy(false); });
+  }
   function applyPackages(){
     if(busy || pkgRunning) return;
     var df=pkgDiff(); if(!df.ins.length && !df.del.length) return;
@@ -23442,34 +23560,9 @@
     q+='\nАктивную несущую и дополнительные выходы операция не переключает.';
     if(up.length) q+='\nОбновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — проще всего перезагрузить роутер.';
     if(!askConfirm(q)) return;
-    var np=navMark();   // где нажали «Применить» (разбор у navLate)
-    setBusy(true,'меняю компоненты…'); lastProtoMsg='';
-    logLine('→ компоненты: ставим ['+(df.ins.join(', ')||'—')+'], снимаем ['+(df.del.join(', ')||'—')+']', null);
-    tokPost('/cgi-bin/action', function(tok){
-      return 'action=pkg_apply&token='+encodeURIComponent(tok)+'&ins='+(df.ins.join(',')||'-')+'&del='+(df.del.join(',')||'-');
-    }).then(function(d){
-      logLine(d.msg||'', !!d.ok);
-      if(d.ok){
-        pkgRunning=true; showToast('изменение компонентов запущено…','busy');
-        // Экран — в состояние «идёт» сразу, а не через десять минут: кнопки «Применить» больше нет, и фокус уходит на строку
-        // «что идёт» (разбор у nwFocusBack). Опрос запустит сама отрисовка; место — то, где нажали.
-        startProtoPoll(openPackages, np);
-        // Быстрая операция (снятие — секунда) кончается раньше, чем перерисованный экран спросит роутер: карточки «идёт» тогда нет, и
-        // фокус с одной целью уходил в BODY (ревью шага 6c, круг 3). Цель — списком по предпочтению.
-        _nwFocus={s:['#pkg-run-now', '#pkg-last-now', '#pkg-plan-now'], g:_navGen};
-        navLate(np, openPackages);
-      }
-      else {
-        showToast(d.msg||'не удалось запустить', false); setBusy(false);
-        // Отказ СИНХРОННЫЙ (идёт чужая операция, запрет снятия появился после расчёта плана) — экран спрашивает роутер заново: иначе на
-        // нём оставался прежний план с рабочей «Применить» (ревью шага 6c, круг 2). Фокус — на строку плана.
-        // Выбор человека переживает перерисовку (план он составлял сам; стёртый, он дал бы «Ничего не меняется» вместо нового вердикта
-        // — ревью шага 6c, круг 3), но только когда перерисовка на месте: иначе он всплыл бы при следующем открытии экрана.
-        // Выбор «обновить» — туда же: план из одного обновления иначе превращался в «Ничего не меняется» (ревью ветки, круг 1).
-        if(navHere(np)){ pkgSelKeep=pkgSel; pkgUpdKeep=pkgUpd; }
-        _nwFocus={s:['#pkg-plan-now'], g:_navGen}; navLate(np, openPackages);
-      }
-    }).catch(function(){ logLine('сбой запроса', false); showToast('сбой запроса', false); setBusy(false); });
+    pkgLaunch('pkg_apply', 'ins='+(df.ins.join(',')||'-')+'&del='+(df.del.join(',')||'-'),
+      {busy:'меняю компоненты…', log:'→ компоненты: ставим ['+(df.ins.join(', ')||'—')+'], снимаем ['+(df.del.join(', ')||'—')+']',
+       toast:'изменение компонентов запущено…', keepOk:false, failFocus:['#pkg-plan-now']});
   }
   var lastProtoMsg='', protoPolling=false, protoDeadline=0, protoReopen=null, protoNav=null;
   // Запуск поллинга с ЕДИНЫМ активным циклом (флаг protoPolling — иначе повторный openUpdate
@@ -23481,12 +23574,17 @@
   // загрузки экрана, и место в этот миг — то, куда человек успел уйти (подтверждающий круг ревью шага 3a).
   // Без места экран по завершении не переоткрывается вовсе.
   function startProtoPoll(reopen, place){ protoDeadline=Date.now()+10*60000; if(reopen) protoNav=place||null; protoReopen=reopen||protoReopen; if(protoPolling) return; protoPolling=true; pollProto(); }
+  // Перезапуск плана не применяет: несохранённый выбор в списке переживает и его КОНЕЦ — обычный и по сроку «роутер замолчал» (ревью
+  // ветки bins-2026-10, круг 2), а не только запуск (разбор у pkgLaunch). Только когда перерисовка на месте: иначе выбор всплыл бы
+  // при следующем открытии экрана.
+  function pkgKeepAfterRestart(){ if(pkgIds((pkgOp||{}).rst).length && protoNav && protoNav.s && navHere(protoNav)){ pkgSelKeep=pkgSel; pkgUpdKeep=pkgUpd; } }
   function pollProto(){
     // СРОК — ОТ ПОСЛЕДНЕГО ПРОГРЕССА (новая строка журнала продлевает его, ниже): долгая, но живая закачка по медленному каналу —
     // не «роутер замолчал». Истёк — экран, откуда запускали, спрашивает роутер заново: он и скажет, идёт ли ещё (ревью шага 6c, круг 1).
     if(Date.now()>protoDeadline){ protoPolling=false; setBusy(false); pkgRunning=false;
-      logLine('установка компонентов: роутер 10 минут не сообщает о ходе — экран спросит его заново', false);
-      showToast('Компоненты: роутер 10 минут не сообщает о ходе установки', false); load(true);
+      logLine('компоненты: роутер 10 минут не сообщает о ходе операции — экран спросит его заново', false);
+      showToast('Компоненты: роутер 10 минут не сообщает о ходе операции', false); load(true);
+      pkgKeepAfterRestart();
       if(protoReopen && protoNav && protoNav.s) navLate(protoNav, protoReopen);
       return; }
     fetchJson('/cgi-bin/data?section=update').then(function(d){
@@ -23513,6 +23611,7 @@
       logLine(okk?'компоненты: готово':'компоненты: не удалось', okk);
       showToast(okk ? 'Компоненты: готово' : cut ? 'Компоненты: операция прервана — подробности на экране «Компоненты»' : 'Компоненты: не удалось — причина на экране «Компоненты»', okk);
       load(true); loadPing(true);
+      pkgKeepAfterRestart();
       // Перерисовать экран, откуда запускали, — только если человек всё ещё там (разбор у navLate).
       if(protoReopen && protoNav && protoNav.s) navLate(protoNav, protoReopen);
     }).catch(function(){ setTimeout(pollProto, 3000); });
@@ -24926,7 +25025,7 @@
       h+='<div class="card"><div class="wt">Что мешает десинку</div>';
       if(!d.installed){
         h+=noteBox('nfqws ещё не установлен на роутере — десинк не заработает, но настройки ниже сохранятся и применятся после установки.','warn')
-          + (d.install_state==='RUNNING' ? '<div class="cline">Сейчас идёт установка компонентов — откройте экран заново, когда она закончится.</div>' : '')
+          + (d.install_state==='RUNNING' ? '<div class="cline">Сейчас идёт операция с компонентами — откройте экран заново, когда она закончится.</div>' : '')
           + '<div class="acts"><button id="zp-pkg" type="button" class="btn sm">Открыть «Компоненты»</button></div>';
       } else {
         h+=noteBox('Ядро этого роутера не умеет NFQUEUE — <b>десинк здесь невозможен</b>. Бинарь nfqws установлен, но правило перехвата пакетов поставить нечем (старое ядро 4.4, iptables без libxt_NFQUEUE), поэтому включение только погасило бы туннель. Обход DPI без VPS здесь даёт ByeDPI — он работает через socks и NFQUEUE не требует.','warn')
@@ -25740,8 +25839,10 @@
     var list=(pk && pk.pkgs) || [], n=0, part=[], up=[];
     list.forEach(function(x){ if(x.state==='installed') n++; else if(x.state==='partial') part.push(x.label||x.id); if(pkgHasUpd(x)) up.push(x.label||x.id); });
     // Обновление — после «частично»: половинная связка не поднимется вовсе, а устаревшая работает; о ней скажет экран за дверью.
-    var tx=run ? 'идёт установка' : part.length ? 'установлен частично' : up.length ? 'есть обновление' : n ? String(n) : 'ничего не установлено';
-    var tt=run ? 'Идёт установка или снятие компонентов' : part.length ? 'Установлен частично: '+part.join(', ')
+    // Перезапуск — не установка (`install_rst`: четвёртое поле плана, прочитанное движком).
+    var rs=run && _rrUpd.install_rst===true;
+    var tx=run ? (rs ? 'идёт перезапуск' : 'идёт установка') : part.length ? 'установлен частично' : up.length ? 'есть обновление' : n ? String(n) : 'ничего не установлено';
+    var tt=run ? (rs ? 'Идёт перезапуск компонентов' : 'Идёт установка или снятие компонентов') : part.length ? 'Установлен частично: '+part.join(', ')
       : up.length ? 'Есть обновление: '+up.join(', ') : n ? 'Установлено компонентов: '+n : 'Не установлено ни одного компонента';
     c.textContent=tx; c.className='chip'+((run || part.length) ? ' wr' : up.length ? ' acc' : ''); c.style.display='';
     if(c._tt!==tt){ c.title=tt; c.setAttribute('aria-label', tt); c._tt=tt; }   // по своей записи (разбор у gaugeSet)

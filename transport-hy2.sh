@@ -274,7 +274,9 @@ start_daemons() {
     return 0
 }
 stop_daemons() {
-    start-stop-daemon -K -p "$HEV_PID" 2>/dev/null
+    # hev — с ожиданием смерти (slot-tun-lib.sh::hev_stop): за `down` в смене транспорта и в перезапуске сразу идёт `up` с новым hev
+    # на тот же TUN. Нет слоя — прежний путь.
+    if command -v hev_stop >/dev/null 2>&1; then hev_stop "$HEV_PID"; else start-stop-daemon -K -p "$HEV_PID" 2>/dev/null; fi
     start-stop-daemon -K -p "$HY2_PID" 2>/dev/null
     ip link del "$TUN" 2>/dev/null
     # Пидфайлы чистим СРАЗУ (как slot_stop_daemons): busybox start-stop-daemon -K их не убирает,

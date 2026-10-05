@@ -341,7 +341,9 @@ start_daemons() {
     return 0
 }
 stop_daemons() {
-    start-stop-daemon -K -p "$HEV_PID"    2>/dev/null
+    # hev — с ожиданием смерти (slot-tun-lib.sh::hev_stop): за `down` в смене транспорта и в перезапуске сразу идёт `up` с новым hev
+    # на тот же TUN. Нет слоя — прежний путь.
+    if command -v hev_stop >/dev/null 2>&1; then hev_stop "$HEV_PID"; else start-stop-daemon -K -p "$HEV_PID" 2>/dev/null; fi
     start-stop-daemon -K -p "$CIADPI_PID" 2>/dev/null
     ip link del "$TUN" 2>/dev/null
     # Пидфайлы убираем СРАЗУ (как slot_stop_daemons/slot_hev_down): busybox start-stop-daemon -K
@@ -493,7 +495,10 @@ cmd_health() {
     # судить нельзя: reup_carrier поднял бы ciadpi+hev обратно и вернул `default dev xtun` в
     # table 1000 ПОВЕРХ уже поднятой новой несущей — осиротевшие демоны на socks 10808 и чужая
     # таблица маршрутов (класс Б4-5). У xray/hy2 такой гард есть с 2026-07-09, у нас не было.
-    [ -e "$SWITCH_LOCK" ] && { log "health: идёт смена транспорта (lock) — не вмешиваюсь"; return 0; }
+    # …КРОМЕ ВЕРДИКТА ДЕРЖАТЕЛЯ ЛОКА: перезапуск в «Компонентах» сам держит лок и спрашивает, работает ли поднятое им (packages.sh::
+    # rst_works, HEALTH_OWN_LOCK=1) — «0 при любом локе» объявлял «Готово» ciadpi, который не форвардит (ревью ветки bins-2026-10,
+    # круг 2). Смену ведёт тот же, кто спрашивает, — несущую вернуть поверх чужой некому.
+    [ -e "$SWITCH_LOCK" ] && [ "${HEALTH_OWN_LOCK:-}" != 1 ] && { log "health: идёт смена транспорта (lock) — не вмешиваюсь"; return 0; }
     # БРАУЗЕР-СВИП идёт → панель сама рулит ciadpi (применяет стратегии вживую). Не вмешиваемся,
     # иначе reup/cross подрались бы с рестартами. Lock протух (браузер закрыли, не завершив свип) →
     # восстанавливаем исходную стратегию и снимаем lock (нет «застрявшей» плохой стратегии).

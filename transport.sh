@@ -176,6 +176,9 @@ transport_installed() {
 }
 
 active() { cat "$TRANSPORT_FLAG" 2>/dev/null | tr -d ' \r\n'; }
+# The transport that carries: `.transport`, or — without the file — AmneziaWG when its config is there (the layout from before
+# multi-transport; why only with the config — at cmd_up). Asked by the bring-up and by the restart.
+implied() { _imt=$(active); [ -n "$_imt" ] || { [ -f "$ENODIA_STATE/awg.conf" ] && _imt=awg; }; echo "$_imt"; }
 apply_marking() { [ -f "$MARK_CORE" ] && sh "$MARK_CORE" >/dev/null 2>&1; }
 
 # «ТРАНСПОРТА НЕТ ВООБЩЕ» — состояние установки «только панель»: роутер обычный, наших правил в
@@ -299,8 +302,7 @@ cmd_up() {
     # найдёт бинарей, но каждый вызыватель (heal на буте, repair, тик сторожа) платил бы за это
     # попыткой и строкой ошибки в логе, а человек читал бы про AmneziaWG на роутере, где он
     # ничего, кроме панели, не ставил.
-    t="${1:-$(active)}"
-    [ -n "$t" ] || { [ -f "$ENODIA_STATE/awg.conf" ] && t=awg; }
+    t="${1:-$(implied)}"
     [ -n "$t" ] || { echo "[transport] транспорт не настроен — поднимать нечего"; return 1; }
     p=$(plugin_for "$t"); [ -f "$p" ] || { echo "[transport] нет плагина для '$t'"; return 1; }
     apply_marking
@@ -388,8 +390,15 @@ cmd_switch() {
     fi
     take_switch_lock         # сторож/heal на время переключения не вмешиваются (см. SWITCH_LOCK)
     cur=$(active)
-    if [ -n "$cur" ] && [ "$cur" != "$new" ]; then
+    # SWITCH_RESTART (verb `restart`): the same transport goes down too, and COLD — its daemon is then started afresh from the
+    # installed file. `down` alone is not enough: AmneziaWG keeps its daemon as a warm reserve there (only `cold` kills it; the
+    # alts kill theirs in `down`, their `cold` is a no-op), and `up` over a live carrier is a no-op (ensure_carrier keeps a
+    # daemon whose key matches) — a component update would keep running the replaced build until reboot. No `.transport` (the
+    # implied AmneziaWG, see implied) is still that same transport: without this `cur` would be empty and nothing went down.
+    [ "$SWITCH_RESTART" = 1 ] && [ -z "$cur" ] && cur=$new
+    if [ -n "$cur" ] && { [ "$cur" != "$new" ] || [ "$SWITCH_RESTART" = 1 ]; }; then
         cp=$(plugin_for "$cur"); [ -f "$cp" ] && sh "$cp" down
+        [ "$SWITCH_RESTART" = 1 ] && [ -f "$cp" ] && sh "$cp" cold
     fi
     # ВЫБОР ТРАНСПОРТА ЧЕЛОВЕКОМ — ЭТО И ЕСТЬ ВКЛЮЧЕНИЕ, поэтому флаг «человек выключил VPN» снимаем ЗДЕСЬ.
     # Иначе получилось бы худшее из двух состояний: несущая поднята и маркировка разложена, а
@@ -647,7 +656,16 @@ case "$1" in
     up)       cmd_up "$2" ;;
     down)     cmd_down "$2" ;;
     cold)     cmd_cold "$2" ;;      # «выключили VPN»: погасить и ТЁПЛЫЕ резервы (без аргумента — все)
+    # rewarm <t> — тёплый резерв транспорта заново, на установленной сборке (перезапуск в «Компонентах»; держит его только awg —
+    # разбор у плагина). Не тот транспорт, что несёт, — у того `restart`.
+    rewarm)   p=$(plugin_for "$2"); [ -f "$p" ] || { echo "[transport] нет плагина для '$2'"; exit 1; }
+              sh "$p" rewarm ;;
     switch)   cmd_switch "$2" "$3" ;;   # $3 = --home («выбрал человек»), см. cmd_switch
+    # restart — the ACTIVE transport again, its daemon started afresh from the installed file (Components → «Перезапустить»).
+    # Same path as a switch (lock, marking, VPN-off guards); the only difference is the forced `down`, see cmd_switch.
+    restart)  _rst=$(implied)
+              case "$_rst" in ""|none) echo "[transport] активного транспорта нет — перезапускать нечего"; exit 1 ;; esac
+              SWITCH_RESTART=1; cmd_switch "$_rst" ;;
     health)   cmd_health "$2" ;;
     live)     cmd_live ;;           # машинно: живо ли что-то из снимаемого «Отключить VPN» (доводчик выключения)
     failover) cmd_failover "$2" ;;
@@ -660,5 +678,5 @@ case "$1" in
     slot-probe) cmd_slot_probe "$2" ;;   # снятый выход: проба сервера без перепроводки, ответил — вернуть (сторож)
     slot-iface) cmd_slot_iface "$2" ;;   # имя несущей выхода №N (учёт трафика); пусто = считать нечем
     slot-list) cmd_slot_list ;;      # транспорты, готовые нести ДОП-ВЫХОД (пикер в панели; ≠ list)
-    *) echo "usage: $0 active|configured|ready [t]|marking <t>|names|list|installed [t]|next <t>|up [t]|down [t]|cold [t]|switch <t> [--home]|health [t]|live|failover [t]|dns [t]|slots-up|slots-down|slot-up <id>|slot-down <id>|slot-health <id>|slot-probe <id>|slot-iface <id>|slot-list"; exit 2 ;;
+    *) echo "usage: $0 active|configured|ready [t]|marking <t>|names|list|installed [t]|next <t>|up [t]|down [t]|cold [t]|rewarm <t>|switch <t> [--home]|restart|health [t]|live|failover [t]|dns [t]|slots-up|slots-down|slot-up <id>|slot-down <id>|slot-health <id>|slot-probe <id>|slot-iface <id>|slot-list"; exit 2 ;;
 esac

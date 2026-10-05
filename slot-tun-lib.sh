@@ -136,26 +136,32 @@ slot_hev_up() {   # $1 = id
     return 0
 }
 
-# Снять hev слота. hev держит xtunN как НЕ-persistent tun ⇒ устройство уходит вместе с ним,
-# но -K НЕ блокирует, поэтому ждём исчезновения (и добиваем явным del, если tun пережил hev).
-# Пидфайл убираем, чтобы не копить stale (риск попасть в переиспользованный pid).
+# ПОГАСИТЬ hev ПО ПИДФАЙЛУ И ДОЖДАТЬСЯ ЕГО СМЕРТИ — одна копия на всех, кто следом поднимает новый hev на то же имя TUN: перезапуск
+# пути (hev_path_check), переподъём выхода (slot_hev_down) и `down` трёх плагинов (stop_daemons) — за ним в смене транспорта и в
+# перезапуске из «Компонентов» сразу идёт `up` (ревью ветки bins-2026-10, круг 2). `-K` возвращается ДО смерти (daemon-lib.sh
+# daemon_wait_gone): новый hev стартовал бы на имя, которое старый ещё держит. TERM не услышан за 5 с — KILL, и только СВОЕМУ hev:
+# пидфайл мог протухнуть, а номер — уйти чужому процессу (ревью с.93, круг 3; с.96, круг 2). Пидфайл убираем сразу: по stale
+# proc_alive однажды попадёт в переиспользованный pid. -K пишет в stdout — health читают и CGI. Нет библиотеки — прежний путь.
+hev_stop() {   # $1 = пидфайл
+    _hvp=$(cat "$1" 2>/dev/null | tr -d ' \r\n')
+    start-stop-daemon -K -p "$1" >/dev/null 2>&1
+    if command -v daemon_wait_gone >/dev/null 2>&1 && [ -n "$_hvp" ] && ! daemon_wait_gone "$_hvp" 5; then
+        { ! command -v pid_runs >/dev/null 2>&1 || pid_runs "$_hvp" hev; } && { kill -9 "$_hvp" 2>/dev/null; daemon_wait_gone "$_hvp" 3; }
+    fi
+    rm -f "$1" 2>/dev/null
+}
+
+# Снять hev слота. hev держит xtunN как НЕ-persistent tun ⇒ устройство уходит вместе с ним, но и после смерти hev оно иногда
+# остаётся — добиваем явным del.
 slot_hev_down() {   # $1 = id
     _id="$1"; _tun=$(slot_tun "$_id")
-    _hdp=$(cat "$(slot_hev_pid "$_id")" 2>/dev/null | tr -d ' \r\n')
-    start-stop-daemon -K -p "$(slot_hev_pid "$_id")" 2>/dev/null
-    # -K возвращается ДО смерти (daemon-lib.sh daemon_wait_gone): перезапуск на месте (slot_hev_path_check) стартовал бы новый hev
-    # на то же имя xtunN, пока старый его ещё держит. Нет библиотеки — прежний путь.
-    # …и TERM не услышан — KILL (новый hev на то же имя рядом с сиротой: ревью с.93, круг 3).
-    if command -v daemon_wait_gone >/dev/null 2>&1 && [ -n "$_hdp" ] && ! daemon_wait_gone "$_hdp" 5; then
-        { ! command -v pid_runs >/dev/null 2>&1 || pid_runs "$_hdp" hev; } && { kill -9 "$_hdp" 2>/dev/null; daemon_wait_gone "$_hdp" 3; }
-    fi
+    hev_stop "$(slot_hev_pid "$_id")"
     _i=0
     while ip link show "$_tun" >/dev/null 2>&1 && [ "$_i" -lt 6 ]; do
         ip link del "$_tun" 2>/dev/null
         ip link show "$_tun" >/dev/null 2>&1 || break
         sleep 1; _i=$((_i+1))
     done
-    rm -f "$(slot_hev_pid "$_id")" 2>/dev/null
 }
 
 # Карриер-часть слота: default dev xtunN в table 100N + FORWARD ACCEPT (у fw3 policy FORWARD=DROP).
@@ -191,7 +197,8 @@ slot_remove_routing() {   # $1 = id
 #   * ОСНОВНУЮ несущую судим только по просьбе ТИКА сторожа (`HEV_CHECK=1` у его главного health): тот же `cmd_health` проверяет
 #     КАЖДОГО кандидата перебора резервов и прогрев, и каждый мёртвый путь там был бы перезапуском hev и сбросом соединений дома —
 #     на 60–70 конфигах подписки (путь от сервера не зависит, сменой сервера его не вылечить). Дамп (`dump.sh`) тоже зовёт health —
-#     без просьбы он улик не трогает. У выходов `slot-health` зовёт только свип сторожа;
+#     без просьбы он улик не трогает. У выходов `slot-health` с проверкой пути зовёт только свип сторожа (вердикт перезапуска
+#     в «Компонентах» спрашивает его с HEV_CHECK=0 — разбор у slot_hev_path_check);
 #   * перезапуск — не чаще раза в HEV_RESTART_GAP при ЛЮБОМ признаке: путь мёртв и после перезапуска — health «нездоров», и дальше
 #     лестница сторожа (cross, прямой режим), а не перезапуск каждые две минуты;
 #   * перезапуск — под ЛОКОМ СМЕНЫ ТРАНСПОРТА со своим пидом (как подъём несущей сторожем, watchdog.sh::wd_switch_take): панель,
@@ -316,15 +323,9 @@ hev_path_check() {   # $1 = функция маршрута плагина
     esac
     hev_lock_take || { log "health: $_hpw — но идёт смена транспорта (лок): hev не трогаю"; return 0; }
     log "health: $_hpw — hev залип → перезапускаю hev на месте"
-    _hpp=$(cat "$HEV_PID" 2>/dev/null | tr -d ' \r\n')
-    start-stop-daemon -K -p "$HEV_PID" >/dev/null 2>&1      # -K пишет в stdout — health читают и CGI
-    # TERM не услышан за 5 с — добиваем KILL: пидфайл ниже удаляется, и `start_daemons` поднял бы ВТОРОЙ hev рядом с сиротой (ревью с.93).
-    if command -v daemon_wait_gone >/dev/null 2>&1 && [ -n "$_hpp" ] && ! daemon_wait_gone "$_hpp" 5; then
-        # KILL — только СВОЕМУ hev: пидфайл мог протухнуть, и номер уже у чужого процесса (ревью с.96, круг 2).
-        { ! command -v pid_runs >/dev/null 2>&1 || pid_runs "$_hpp" hev; } && { kill -9 "$_hpp" 2>/dev/null; daemon_wait_gone "$_hpp" 3; }
-    fi
+    hev_stop "$HEV_PID"      # и дождаться смерти: иначе `start_daemons` поднял бы ВТОРОЙ hev рядом с сиротой (ревью с.93)
     hev_log_trim "$HEV_LOG"
-    ip link del "$TUN" 2>/dev/null; rm -f "$HEV_PID" 2>/dev/null
+    ip link del "$TUN" 2>/dev/null
     _hpo=fail
     if start_daemons && "$1"; then
         ct_flush
@@ -346,6 +347,10 @@ hev_path_check() {   # $1 = функция маршрута плагина
 # (ревью с.93, круг 2: прежний код 1 вёл к «не отвечает» и паре slot-up/slot-down на каждом тике) · 4 — путь мёртв, но лечить нельзя:
 # идёт смена транспорта (лок) — «не судили», выход сторож не трогает.
 slot_hev_path_check() {   # $1 = id
+    # HEV_CHECK=0 — asked by someone other than the watchdog's sweep: the verdict of a restart in Components (packages.sh::rst_works)
+    # comes seconds after it started this very hev, under its own switching lock — the check would answer 4 «not judged» every time
+    # and could restart a hev it just brought up. Unset (the sweep) — as before.
+    [ "${HEV_CHECK:-}" = 0 ] && return 0
     _shid="$1"; _shtun=$(slot_tun "$_shid")
     _shw=$(hev_stuck "$_shtun" "$(slot_hev_log "$_shid")" "s$_shid"); _shr=$?
     case "$_shr" in

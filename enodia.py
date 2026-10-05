@@ -42,7 +42,7 @@ from collections import namedtuple
 
 # Версия PC-стороны проекта. Держится В СИНХРОНЕ с `version` в pyproject.toml и requirements.txt
 # (копии сознательные — uv-путь и pip-путь; разъезд ловит C35). См. CHANGELOG.md.
-PROJECT_VERSION = "1.0.0"
+PROJECT_VERSION = "1.0.1"
 
 # --- Зависимость paramiko (in-process SSH) — с авто-доустановкой ---
 # paramiko ОБЯЗАТЕЛЕН (in-process SSH). Если его нет — НЕ падаем молча с кодом 1: на

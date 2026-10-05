@@ -203,7 +203,7 @@ snap_targets() {
 
 # Логи В ОЗУ. Список ЯВНЫЙ, а не `/tmp/*.log`: рядом лежат СТОКОВЫЕ логи Xiaomi
 # (wifi_analysis.log, ssh_patch.log, *.bootcheck.log) — обрезать чужое мы не вправе.
-RAM_LOGS="enodia-dnsq enodia-restore enodia-startup enodia-store-mode enodia-watchdog
+RAM_LOGS="enodia-dnsq enodia-restore enodia-startup enodia-store-mode enodia-watchdog enodia-pkg-restart
 enodia-byedpi enodia-byedpi-test-run enodia-byedpi-fetch enodia-doh enodia-hev enodia-hysteria
 enodia-iplist-update enodia-notify enodia-notify-event enodia-panel-tls enodia-subs-update
 enodia-support enodia-switch-vpn-setup enodia-transport-awg-setup enodia-xiaomi-bypass
