@@ -615,6 +615,14 @@ if [ -f "$ENODIA_DIR/bin/panel-tls.user" ]; then
     chmod +x "$ENODIA_BIN/panel-tls"
     ok "panel-tls (HTTPS панели) установлен"
 fi
+# dns-filter (фильтр по категориям) — DNS-фильтр «ограничено» расписаний доступа (static musl, ~40 KB). Runs only while some
+# device is limited; the schedule tick starts and stops it.
+if [ -f "$ENODIA_DIR/bin/dns-filter.user" ]; then
+    log "Найден dns-filter.user (фильтр по категориям), ставлю..."
+    mv "$ENODIA_DIR/bin/dns-filter.user" "$ENODIA_BIN/dns-filter"
+    chmod +x "$ENODIA_BIN/dns-filter"
+    ok "dns-filter (фильтр по категориям) установлен"
+fi
 # ИТОГ ПО БИНАРЯМ — ОБЯЗАТЕЛЕН. Десять блоков выше гейтятся на СТЕЙДЖ-файл `bin/<имя>.user`, а
 # ставится бинарь через `mv`/bin_install, то есть стейдж ИСЧЕЗАЕТ. Ветки else у блоков нет ⇒
 # отсутствие строки «[ OK ] X установлен» НЕОТЛИЧИМО от успеха: повторный прогон установщика (или
@@ -622,7 +630,7 @@ fi
 # установке. Отсюда и жалоба «половину пакетов будто не видит». Печатаем ФАКТ, и спрашиваем его у
 # bin_path — он знает про внешний накопитель, поэтому «нет на /data» ≠ «нет вообще».
 _have=""; _miss=""
-for _b in amneziawg-go awg xray hev hysteria byedpi nfqws https-dns-proxy dot-proxy panel-tls; do
+for _b in amneziawg-go awg xray hev hysteria byedpi nfqws https-dns-proxy dot-proxy panel-tls dns-filter; do
     if [ -x "$(bin_path "$_b")" ]; then _have="$_have $_b"; else _miss="$_miss $_b"; fi
 done
 ok "Бинари на роутере:${_have:- (ни одного!)}"
@@ -1076,7 +1084,12 @@ cron_put() {
         _cp_line="$_cp_s $CRON_RUN $_cp_t >/dev/null 2>&1"
     fi
     if grep -qF "$_cp_line" /etc/crontabs/root 2>/dev/null; then _cp_new=; else _cp_new=1; fi
-    sed -i "\|$_cp_t|d" /etc/crontabs/root 2>/dev/null
+    # The script NAME at a word boundary (a space or a path slash before it, a space or the end after it) — any older form of
+    # the line goes (code dir, bootstrap), nothing else does. By substring, every `cron_put … access-sched.sh`-like name that
+    # is the tail of another one (`sched.sh` ⊂ `update-sched.sh`) would delete THAT script's line (caught before the first
+    # install, s.109; stand dev/cron-put-test.sh).
+    _cp_re=$(printf '%s' "$_cp_t" | sed 's/[.]/\\./g')
+    sed -i -r "\\#(^|[ /])$_cp_re( |\$)#d" /etc/crontabs/root 2>/dev/null
     echo "$_cp_line" >> /etc/crontabs/root
     [ -n "$_cp_new" ]
 }
@@ -1117,6 +1130,12 @@ if [ -f "$ENODIA_DIR/iplist-update.sh" ]; then
         ok "Cron-задача iplist-update зарегистрирована (5:00 ежедневно, со сводкой на почту)"
     fi
 fi
+# The user's tasks («Задачи» in the panel): their registry lives in $ENODIA_STATE and survives the update, but their cron lines
+# are DERIVED — an install that rewrote the crontab (or a firmware that reset it) must get them back from the registry, the
+# same way the update schedule above comes back from its marker. No registry ⇒ `apply` writes nothing.
+if [ -f "$ENODIA_DIR/tasks.sh" ] && [ -d "$ENODIA_STATE/tasks" ]; then
+    if sh "$ENODIA_DIR/tasks.sh" apply >/dev/null 2>&1; then ok "Расписание задач восстановлено из настроек"; fi
+fi
 
 # watchdog.sh — сторож VPN: каждые 2 минуты проверяет живость VPS, при
 # падении переводит трафик в прямой режим (safety-off) и шлёт письмо. Добавлен
@@ -1134,6 +1153,16 @@ if [ -f "$ENODIA_DIR/traffic-acct.sh" ]; then
     chmod +x "$ENODIA_DIR/traffic-acct.sh"
     if cron_put "*/5 * * * *" traffic-acct.sh; then
         ok "Cron-задача учёта трафика зарегистрирована (каждые 5 минут)"
+    fi
+fi
+
+# access-sched.sh — access schedules: a level-triggered tick every minute converges the per-MAC rules to «what must be true now».
+# Its own line, not the watchdog's tick: that one can run tens of minutes (failover ladder), and a 23:00 close would wait for it.
+# With no schedules the tick is one directory listing.
+if [ -f "$ENODIA_DIR/access-sched.sh" ]; then
+    chmod +x "$ENODIA_DIR/access-sched.sh"
+    if cron_put "*/1 * * * *" access-sched.sh tick; then
+        ok "Cron-задача расписаний доступа зарегистрирована (каждую минуту)"
     fi
 fi
 

@@ -573,7 +573,7 @@ slot_exclude_endpoint() {   # $1 = id
 # Контракт слота (transport.sh _slot_dispatch): slot-up <id> <cfg> / slot-down <id> / slot-health <id>.
 cmd_slot_up() {   # $1 = id ; $2 = имя конфига
     _id="$1"; _cfg="$2"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     [ -n "$_cfg" ] && [ "$_cfg" != "-" ] || { log "слот №$_id: не задан конфиг сервера"; return 1; }
     if ! slot_start_daemons "$_id" "$_cfg"; then
         log "слот №$_id: hy2-несущая не поднялась -> выход живёт по fallback-политике (mark-core)"
@@ -588,7 +588,7 @@ cmd_slot_up() {   # $1 = id ; $2 = имя конфига
 }
 cmd_slot_down() {   # $1 = id
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     slot_remove_routing "$_id"
     slot_stop_daemons "$_id"
     [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1
@@ -604,7 +604,7 @@ cmd_slot_down() {   # $1 = id
 # Здоровье выхода для watchdog: 0 = жив, 1 = просел (смерть VPS видна только egress-пробой).
 cmd_slot_health() {   # $1 = id
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) return 1 ;; esac
     proc_alive "$(slot_hy2_pid "$_id")" || { log "слот №$_id health: hysteria не жива"; return 1; }
     proc_alive "$(slot_hev_pid "$_id")" || { log "слот №$_id health: hev не жив"; return 1; }
     ip link show "$(slot_tun "$_id")" >/dev/null 2>&1 || { log "слот №$_id health: нет $(slot_tun "$_id")"; return 1; }

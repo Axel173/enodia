@@ -132,10 +132,10 @@ cmd_status() {
     else
         echo "VPN: OFF (глобально)"
     fi
-    # Доп-выходы (слоты) — ОТДЕЛЬНАЯ строка, а не молчание: у каждого своя марка 0x2..0x4 и свой
+    # Доп-выходы (слоты) — ОТДЕЛЬНАЯ строка, а не молчание: у каждого своя марка 0x2..0x7 и свой
     # ip rule, поэтому по одной лишь марке основного туннеля судить о них нельзя (ревью 04.08.2026 —
     # раньше `off` их не снимал, а status показывал «OFF» при живых выходах).
-    _slr=$(ip rule show 2>/dev/null | grep -c 'fwmark 0x[234]')
+    _slr=$(ip rule show 2>/dev/null | grep -c 'fwmark 0x[2-7]')
     case "$_slr" in ''|*[!0-9]*) _slr=0 ;; esac   # busybox: grep -c при нуле даёт код 1
     [ "$_slr" -gt 0 ] && echo "Доп-выходы: правил маршрутизации активно: $_slr"
     echo
@@ -146,7 +146,7 @@ cmd_status() {
     iptables -t mangle -L "$EXCLUDE_CHAIN_PRE" -n 2>/dev/null | awk '/ACCEPT/{print "  " $4}'
 }
 
-# Снимаем PBR ВСЕХ выходов: основного (0x1) и доп-выходов (0x2..0x4). Раньше уходила только марка
+# Снимаем PBR ВСЕХ выходов: основного (0x1) и доп-выходов (0x2..0x7). Раньше уходила только марка
 # основного туннеля, а группы/устройства, привязанные к доп-выходу, продолжали ехать через свой VPS
 # при «VPN выключен для всех» (ревью 04.08.2026) — то есть тумблер врал ровно тем, кто настроил
 # больше одного выхода. Форм у слот-правила две (своя table 100N и fallback на 1000) — сносим обе,
@@ -166,7 +166,7 @@ cmd_off() {
     # `down` и к концу был уже не виден (ревью ветки, круг 2). Свой switching-лок ниже ещё не взят — всё, что видно, чужое.
     _busy0=0; settle_busy && _busy0=1
     ip rule del fwmark $MARK table $TABLE 2>/dev/null
-    for _s in 2 3 4; do
+    for _s in 2 3 4 5 6 7; do
         ip rule del fwmark "0x$_s" table "100$_s" 2>/dev/null
         ip rule del fwmark "0x$_s" table $TABLE 2>/dev/null
     done
@@ -497,6 +497,9 @@ cmd_repair() {
     [ -f "$ENODIA_DIR/lists-update.sh" ] && sh "$ENODIA_DIR/lists-update.sh" wire ipblock >/dev/null 2>&1
     [ -f "$ENODIA_DIR/geo.sh" ] && sh "$ENODIA_DIR/geo.sh" wire >/dev/null 2>&1
     [ -f "$ENODIA_DIR/net-tune.sh" ] && sh "$ENODIA_DIR/net-tune.sh" apply >/dev/null 2>&1
+    # Access schedules: their own tick re-wires a wiped chain within a minute anyway (level-triggered); here — at once, with the
+    # rest of the rules the reload took. Not a VPN rule: it stands with the VPN off as well.
+    [ -f "$ENODIA_DIR/access-sched.sh" ] && sh "$ENODIA_DIR/access-sched.sh" tick >/dev/null 2>&1
 
     # NSS/ECM offload: правила только что переставлены — для УЖЕ установленных потоков
     # старый маршрут залипает до conntrack-таймаута. Сбрасываем (инвариант проекта).

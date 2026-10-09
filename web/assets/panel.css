@@ -42,6 +42,8 @@
     --border-success:#5dcaa5;
     /* цвета РАЗДЕЛОВ (сайдбар, таб-бар, заголовки) */
     --g1:#1d9e75; --g2:#3b82f6; --g3:#a855f7; --g4:#e0a33c; --g5:#e0715e;
+    /* exits 5..7 (exitColor): validated 05.10.2026 adjacent to exit 4 (--g4), light and dark */
+    --ex5:#b5651d; --ex6:#c4458f; --ex7:#4d7c0f;
     /* ряды графиков — ОТДЕЛЬНАЯ палитра от разделов: у неё другая работа (различать ряды в
        стеке, в том числе дальтонику). Прежний набор валидатор провалил, этот прошёл. */
     --s1:#1d9e75; --s2:#3b82f6; --s3:#c8871f; --s4:#7c4ddb; --s5:#d0533f;
@@ -99,6 +101,7 @@
       --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.15);
       --border-success:#0f6e56;
       --g1:#2fc493; --g2:#6ba6f8; --g3:#c084fc; --g4:#f0bd6a; --g5:#f08a78;
+      --ex5:#b8642f; --ex6:#d05a9b; --ex7:#78a12f;
       --s1:#27b98c; --s2:#4f93ee; --s3:#d9a447; --s4:#9b84f3; --s5:#e57a66;
       --mute:#4d4c47; --grid:#26262a;
       --st-ok:#27b98c; --st-warn:#d9a447; --st-bad:#e57a66;
@@ -126,6 +129,7 @@
     --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.15);
     --border-success:#0f6e56;
     --g1:#2fc493; --g2:#6ba6f8; --g3:#c084fc; --g4:#f0bd6a; --g5:#f08a78;
+    --ex5:#b8642f; --ex6:#d05a9b; --ex7:#78a12f;
     --s1:#27b98c; --s2:#4f93ee; --s3:#d9a447; --s4:#9b84f3; --s5:#e57a66;
     --mute:#4d4c47; --grid:#26262a;
     --st-ok:#27b98c; --st-warn:#d9a447; --st-bad:#e57a66;
@@ -486,7 +490,8 @@
      простыни-caption — пояснение прячется за иконкой-подсказкой. */
   .popmenu-head{display:flex;align-items:center;justify-content:space-between;gap:8px;
                 padding:6px 8px 7px 11px;border-bottom:1px solid var(--border-t);margin-bottom:2px}
-  .popmenu-head b{font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.03em}
+  .popmenu-head b{font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.03em;
+                  min-width:0;overflow-wrap:anywhere;word-break:break-word}
   /* «(?)»-подсказка: кружок «?», раскрывает пояснение по наведению (десктоп) И тапу (мобайл;
      там native title недоступен). Глиф — литерал «?», в icon-шрифте нужного нет (17-подмножество).
      Всплывашка — фикс-поз, как popmenu (флип вверх при нехватке места). */
@@ -869,9 +874,10 @@
     .vwrap>*:not(.card):not(.sect){grid-column:1/-1}
     .vwrap>.w2{grid-column:span 2}
     .vwrap>.wfull{grid-column:1/-1}
-    /* Колода из одной-двух карточек над дверями раздела («DNS сейчас»): колонки держим и пустыми — карточка встаёт в одну колонку
-       колоды, как в макете, а не растягивается во всю строку (`auto-fit` схлопнул бы пустые). */
-    .vwrap.fill{grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
+    /* r2 — a TALL card spans two rows, so the two short cards after it stand one under the other beside it (mockup 08.10.2026: a
+       600–1000 px card beside a 190 px one left 400–790 px of blank). No wrapper markup: decks painted card by card (deckPaint)
+       replace a card in place, and a wrapper around two cards would break that. The tall card comes FIRST in the markup. */
+    .vwrap>.r2,.vwrap>.tpane>.r2{grid-row:span 2}
     /* Широкая дверь (макет `.door.wide`: «Журнал действий») — две колонки сетки дверей. */
     .doors>.door.wide{grid-column:span 2}
     /* Дети прозрачной панели вкладки — те же правила колоды, что у прямых детей: ряд кнопок и заметка — во всю строку. */
@@ -879,8 +885,36 @@
     .vwrap>.tpane>.w2{grid-column:span 2}
     .vwrap>.tpane>.wfull{grid-column:1/-1}
   }
+  /* WIDE MONITORS (mockup 08.10.2026): AT MOST three columns, not «as many as fit». Screens are «2+1» pairs and rows of three;
+     auto-fit gave 4 columns at 1920 and 5 at 2560, and every pair ended in blank columns (mockup at 2560: 34 screens, up to 1821 px).
+     Track minimum = max(380 px, a third of the deck): never a 4th column, while auto-fit still COLLAPSES empty tracks (a plain
+     repeat(3) left a blank third beside every two-card screen). Extra width becomes margins: .main's content stops at 1680 px,
+     centred — the title bar (#topbar, outside #view) together with the deck, or the title would drift left of the cards. */
+  .main>*{max-width:1680px;width:100%;margin-inline:auto}
   @container view (min-width:1150px){
-    .vwrap{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+    .vwrap{grid-template-columns:repeat(auto-fit,minmax(max(380px,calc((100% - 20px) / 3)),1fr))}
+  }
+  /* TWO COLUMNS (tablet, 700–1149): a two-column card stands in ONE. At three columns a screen is «2+1» pairs; at two, the wide
+     card took the whole row and its partner stood alone beside an empty half (mockup: 24 rows; 9 after — all the last row of an
+     odd card count). `.vwrap.c3` did this for the tasks screens; now for all. Every card lays out at phone width (~330), so half
+     of 715 is never too narrow for it. */
+  /* …and the band is TWO columns, not «as many 330s as fit»: from a 1010-px deck (viewports ~1317–1456: 1366, 1440) auto-fit gave
+     three, a two-column card stood in one third and the third column of every pair stayed blank (review s.113, round 5) */
+  @container view (min-width:700px) and (max-width:1149px){
+    .vwrap{grid-template-columns:repeat(auto-fit,minmax(max(330px,calc((100% - 10px) / 2)),1fr))}
+    .vwrap>.w2,.vwrap>.tpane>.w2{grid-column:span 1}
+  }
+  /* A SCREEN BUILT OF «2+1» PAIRS (`.vwrap.c3`: the tasks screens): EXACTLY three columns, not as many as fit — at 1920 auto-fit
+     gave four (a full-row card keeps every track alive, so auto-fit collapses none), the pair took three, and an empty column
+     gaped on the right (BE7000 07.10.2026; the decision «no holes on desktop», 07.10). In two columns the pair stands 1+1: a
+     two-column card took the whole row there and left an empty half beside the single one. */
+  @container view (min-width:700px){
+    .vwrap.c3{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .vwrap.c3>.w2{grid-column:span 1}
+  }
+  @container view (min-width:1150px){
+    .vwrap.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .vwrap.c3>.w2{grid-column:span 2}
   }
   /* ПЕРЕХОД МЕЖДУ ЭКРАНАМИ служит ОРИЕНТАЦИИ («откуда пришли»), а не украшению: 170 мс и
      7 px. Всё, что дольше ~200 мс, на панели ощущается задержкой, а не плавностью. */
@@ -912,7 +946,7 @@
     #mcards>.wfull{grid-column:1/-1}
   }
   @container view (min-width:1150px){
-    #mcards{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+    #mcards{grid-template-columns:repeat(auto-fit,minmax(max(380px,calc((100% - 20px) / 3)),1fr))}
   }
 
   /* ============================================================================
@@ -1022,6 +1056,9 @@
   .card>.ct{font-size:14.5px;font-weight:600;letter-spacing:-.01em;color:var(--ink);margin-bottom:11px;
             display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;min-width:0}
   .card>.ct .sub{font-size:12px;font-weight:400;color:var(--ink3)}
+  /* a NAME inside a `.wt` title (the device tab's «Расписание доступа «Дети»»): one shrinkable item that wraps anywhere — a 60-character
+     name without spaces ran 482 px past the card's edge at 320 (review s.113, round 5) */
+  .wt>.wt-long{min-width:0;overflow-wrap:anywhere;word-break:break-word}
   .card>.ct .sub.dotb::before{content:'· '}
   .card>.ct .sp{flex:1}
   /* ВКЛАДКИ ЭКРАНА — `Tabs` макета: пилюли, выбранная — тёмная. */
@@ -1071,6 +1108,17 @@
      ширину карточки, моноширинным: в нём домены и адреса, их сверяют посимвольно. */
   .f input,.f select,.inrow input{max-width:560px}
   .f textarea{min-height:78px;font-family:var(--font-mono);font-size:12.5px;resize:vertical}
+  /* «Задачи» (07.10.2026, by the mockup): the five cron fields stay in ONE row on a phone too — a cron line reads only as a
+     whole. The code editor has no soft wrap: a wrapped shell line reads as two. Settings side by side in a full-width strip —
+     `.fauto` (one column on a phone, two to three on a desk). */
+  .cron5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;align-items:end}
+  .cron5 .f input{padding:8px 4px;text-align:center}
+  .f textarea.code{min-height:190px;line-height:1.55;white-space:pre;overflow:auto;tab-size:2}
+  .fauto{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 24px;align-items:start}
+  /* «DNS сейчас» (mockup 08.10.2026): the rows painted into #nw-now-b are cells of the strip's columns; a separator between
+     COLUMNS reads as a stray line. */
+  .nw-now-cols>#nw-now-b{display:contents}
+  .nw-now-cols .kv+.kv{border-top:0}
   .f input:focus,.f select:focus,.f textarea:focus,.inrow input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
   .inrow{display:flex;gap:8px;align-items:center;min-width:0}
   .inrow input{flex:1;min-width:0;width:auto}
@@ -1151,6 +1199,25 @@
   .lg{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2)}
   .lg i{width:10px;height:10px;border-radius:3px;display:block}
   .lg.ln i{width:16px;height:3px;border-radius:2px}
+  /* WEEK OF AN ACCESS SCHEDULE (macket `WeekBars`/`.wk`, 08.10.2026): one bar per day, windows in % of the day — a window is set to the
+     minute, and a bar in percent reads the same at 320 px and at 1600 (a 7×24 grid would not). Painted weakest first, so the stricter
+     state ends up on top: the picture IS the overlap rule. `b` — «now» on the router's clock. */
+  .wk{display:grid;grid-template-columns:24px minmax(0,1fr);gap:6px 9px;align-items:center}
+  .wk .dn{font-size:11.5px;color:var(--ink3);line-height:1}
+  .wk .dn.now{color:var(--ink);font-weight:600}
+  .wk .tl{position:relative;height:15px;border-radius:5px;background:var(--soft2);overflow:hidden}
+  .wk .tl i{position:absolute;top:0;bottom:0}
+  .wk .tl i.open{background:var(--wk-op)}
+  .wk .tl i.limited{background:var(--st-warn)}
+  .wk .tl i.closed{background:var(--st-bad)}
+  .wk .tl b{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--ink);box-shadow:0 0 0 1.5px var(--card)}
+  .wk .ax{position:relative;height:12px;font-size:10.5px;color:var(--ink3)}
+  .wk .ax span{position:absolute;top:0;transform:translateX(-50%)}
+  .wk .ax span:first-child{transform:none}
+  .wk .ax span:last-child{transform:translateX(-100%)}
+  :root{--wk-op:color-mix(in srgb,var(--st-ok) 45%,var(--card))}
+  /* the device tab's «what now» line of its schedule (mockup: 14.5 px, medium) */
+  .dv-schst{font-size:14.5px;font-weight:500;color:var(--ink)}
   /* ПЛИТКИ-ПОКАЗАТЕЛИ экрана «Трафик» (макет: `.tiles`/`.tile`/`.delta`, Л6): число ведёт, искра сопровождает; дельта окрашена только
      там, где «больше» = «лучше» (доля туннеля). */
   .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
@@ -1217,8 +1284,12 @@
   /* Шаг 5a («Сеть»): выбор резолвера — рядом с кнопкой, как поле ссылки (`.lnkrow>input`), а не во всю ширину с кнопкой под ним. */
   .lnkrow>select{flex:1 1 auto;min-width:0}
   /* Два поля рядом — `.f2` макета (две равные колонки), но по ширине КАРТОЧКИ: в узкой колонке — друг под другом. */
-  .f2{display:grid;grid-template-columns:minmax(0,1fr);gap:0 10px}
+  /* The fields of a row carry no `.f` margin of their own (the second one kept it and sat 11 px lower than the first — BE7000,
+     08.10.2026); the gap between stacked ones is the grid's. `.keep` (macket) — two columns at any width: a time range «С — До». */
+  .f2{display:grid;grid-template-columns:minmax(0,1fr);gap:11px 10px}
+  .f2>.f{margin-top:0}
   @container card (min-width:441px){ .f2{grid-template-columns:minmax(0,1fr) minmax(0,1fr)} }
+  .f2.keep{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
   /* СОБЫТИЕ ЖУРНАЛА НА ЭКРАНЕ «СОБЫТИЯ» (шаг 7b) — `<details>`: summary — та же строка `.lrow`, что у «Обзора», под ней полный
      текст события (многострочный — развёрнутыми строки превратили бы список в простыню). Маркер браузера прячем: стрелку даёт `.chev`. */
   .evd+.evd{border-top:1px solid var(--line)}
@@ -1357,9 +1428,11 @@
        border:1px solid transparent;white-space:nowrap;flex:none;max-width:100%}
   .dir>span{overflow:hidden;text-overflow:ellipsis}
   .dir i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
-  .dir.vpn{background:var(--acc-soft);color:var(--acc-deep);border-color:color-mix(in srgb,var(--acc) 40%,transparent)}
+  /* `.opn`/`.lim` — the state of an access schedule (open / limited): the colour family of the path chips (macket `.dir.opn`,
+     `.dir.lim`), so «Закрыто» reads like «Блок» and «Открыто» like a working path. */
+  .dir.vpn,.dir.opn{background:var(--acc-soft);color:var(--acc-deep);border-color:color-mix(in srgb,var(--acc) 40%,transparent)}
   .dir.dirc{background:var(--soft);color:var(--ink2);border-color:var(--line2)}
-  .dir.des{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+  .dir.des,.dir.lim{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
   .dir.blk{background:var(--bad-soft);color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,transparent)}
   /* Выход — цвет по номеру (`exitColor`), тот же, что у выхода в разрезе трафика; текст — чернилами (контраст). */
   .dir.ex{--xc:var(--g5);background:color-mix(in srgb,var(--xc) 14%,transparent);color:var(--ink);border-color:color-mix(in srgb,var(--xc) 45%,transparent)}
@@ -1372,6 +1445,9 @@
      в оперативной памяти (оранжевый = «это стоит памяти», у каждой скачанной категории). */
   .badge.inh{background:var(--info-soft);color:var(--info);text-transform:none;letter-spacing:0;font-weight:500;font-size:11px}
   .badge.ram{background:var(--warn-soft);color:var(--warn);text-transform:none;letter-spacing:0}
+  /* Status by a name (task rows of «Задачи»): a failure and «running» — words, not capitals, like `.inh` */
+  .badge.bd{background:var(--bad-soft);color:var(--bad);text-transform:none;letter-spacing:0;font-weight:500;font-size:11px}
+  .badge.acc{background:var(--acc-soft);color:var(--acc-deep);text-transform:none;letter-spacing:0;font-weight:500;font-size:11px}
   .lrow .rp-ck{width:16px;height:16px;margin:0;flex:none;cursor:pointer}
   .lrow .rp-mac{font-size:11px;font-weight:400;color:var(--ink3)}
   /* На узкой карточке MAC в строке не показываем (макет его не рисует вовсе): он уводил строку в четыре линии, а сверить его можно

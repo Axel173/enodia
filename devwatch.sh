@@ -301,7 +301,7 @@ load_marks() {   # $1 = IP клиента
 		case "$MARK_GO" in *" $3:"*) continue ;; esac      # у метки действует ПЕРВОЕ правило (вывод — по pref)
 		_lmgo=direct
 		if ip -4 route show table "$4" 2>/dev/null | grep -q '^default'; then   # not-wan: таблица МЕТКИ (1000/100N), а не WAN
-			case "$4" in 100[234]) _lmgo="slot${4#100}" ;; *) _lmgo=vpn ;; esac
+			case "$4" in 100[2-7]) _lmgo="slot${4#100}" ;; *) _lmgo=vpn ;; esac
 		fi
 		MARK_GO="$MARK_GO$3:$_lmgo "
 	done
@@ -318,7 +318,7 @@ load_marks() {   # $1 = IP клиента
 	done
 	IFS=$_lmI
 }
-mark_go() {   # $1 = метка (0x1..0x4) → GO = vpn | slotN | direct
+mark_go() {   # $1 = метка (0x1..0x7) → GO = vpn | slotN | direct
 	case "$MARK_GO" in *" $1:"*) GO=${MARK_GO#*" $1:"}; GO=${GO%% *} ;; *) GO=direct ;; esac
 }
 
@@ -711,7 +711,7 @@ dom_route() {   # $1 = домен, $2 = порт (опц.; пусто = 443, к�
 		# Набор ЗАПОМИНАЕМ: «десинк» обещает не пул сам по себе, а NFQUEUE на ЭТОМ наборе и ЭТОМ порту.
 		if on "$DOM_HITS" "$_d:E:geo_zapret " && on "$ZAP_SETS" "geo_zapret "; then _hzap=1; [ -n "$_hzs" ] || _hzs=geo_zapret; fi
 		if on "$DOM_HITS" "$_d:Z:zapret_dom " && on "$ZAP_SETS" "zapret_dom "; then _hzap=1; [ -n "$_hzs" ] || _hzs=zapret_dom; fi
-		for _dn in 2 3 4; do
+		for _dn in 2 3 4 5 6 7; do
 			for _dt in G:grp_vpn_s E:geo_vpn_s; do
 				on "$DOM_HITS" "$_d:$_dt$_dn " || continue
 				# Группа ZAPRET-выхода — не метка, а пул десинка: ACCEPT в ENODIA_ZAPRET, метки нет (mark-core).
@@ -740,7 +740,7 @@ dom_route() {   # $1 = домен, $2 = порт (опц.; пусто = 443, к�
 		block)  res block 'правило устройства' '' ''; return ;;
 		bypass) res_direct bypass 'правило устройства' '' '' '' "$_zd"; return ;;
 		vpn)    res_mark 0x1 'правило устройства' '' '' "$_zd"; return ;;
-		slot[234])
+		slot[2-7])
 			# Выход выключен или zapret — rebuild_dev ставит основную метку: судим по меткам цепочки, а не по выбору.
 			_dm="0x${_hdev#slot}"; on "$DEV_MARKS" "$_dm " || _dm=0x1
 			res_mark "$_dm" 'правило устройства' '' '' "$_zd"; return ;;
@@ -813,7 +813,7 @@ ip_route() {
 		direct) if [ "$GUEST_MAIN" = 1 ]; then res_direct direct 'гостевая сеть' "$_ia" "$_ipt" '' ''
 		        else res_direct direct 'правило по портам' "$_ia" "$_ipt" '' ''; fi; return ;;
 		vpn)    res_mark 0x1 'правило по портам' "$_ia" "$_ipt" ''; return ;;
-		s[234]) res_mark "0x${PORT_VERDICT#s}" 'правило по портам' "$_ia" "$_ipt" ''; return ;;
+		s[2-7]) res_mark "0x${PORT_VERDICT#s}" 'правило по портам' "$_ia" "$_ipt" ''; return ;;
 	esac
 	walk "$_ia"; walk_via
 	if [ "$W_T" = drop ]; then res block "$W_VIA" '' ''; return; fi

@@ -236,6 +236,23 @@ carrier_run() {
 # так же). Спрашивают двое, и вопросы у них разные: «работает прежняя СБОРКА» (gh-update.sh bin-status: путь тот же, файл заменён)
 # и «работает со СТАРОГО МЕСТА» (usb-offload.sh: файл переехал, а место держит удалённый inode).
 exe_deleted() { ls -l /proc/[0-9]*/exe 2>/dev/null | sed -n 's#^.* /proc/\([0-9][0-9]*\)/exe -> \(.*\) (deleted)$#\1 \2#p'; }
+# proc_tree <pid> — the pid and ALL its descendants, every level (walk /proc by PPid). ONE copy for every «kill the whole tree»:
+# the panel console's ceiling (cgi-bin/action), the background download of gh-update.sh, the task runner (tasks.sh). Killing the
+# top alone leaves the grandchildren (a script's `ping`, curl under a subshell) alive and orphaned. Collect while the parent is
+# ALIVE: once it dies its children get PPid 1 and this walk can no longer find them.
+proc_tree() {
+	_pt_all="$1"; _pt_q="$1"
+	while [ -n "$_pt_q" ]; do
+		_pt_n=""
+		for _pt_p in $_pt_q; do
+			for _pt_f in $(grep -l "^PPid:[[:space:]]*$_pt_p\$" /proc/[0-9]*/status 2>/dev/null); do
+				_pt_c=${_pt_f#/proc/}; _pt_n="$_pt_n ${_pt_c%/status}"
+			done
+		done
+		_pt_all="$_pt_all$_pt_n"; _pt_q=$_pt_n
+	done
+	echo "$_pt_all"
+}
 # СМЕРТЬ ПРОЦЕССА ЖДЁМ ТОЖЕ ПО ПРОЦЕССУ. `start-stop-daemon -K` и `kill` шлют сигнал и возвращаются СРАЗУ, а за ними у нас идёт то,
 # чему нужен уже мёртвый: бинд того же порта (перезапуск) или снос каталога, из которого процесс служит. Смена раскладки гасила
 # uhttpd и тут же сносила настройки на флеше — недоживший сервер отвечал из полуснесённых «нужен вход» при живой сессии (замер
@@ -255,6 +272,12 @@ daemon_port_listens()  { netstat -ltn 2>/dev/null | grep -q "$1:$2 "; }
 daemon_uport_listens() { netstat -lnu 2>/dev/null | grep -q "$1:$2 "; }   # UDP: резолвер DoH/DoT
 daemon_dev_exists()    { ip link show "$1" >/dev/null 2>&1; }
 
+# ONE STEP OF A SHORT POLL — a fifth of a second where busybox has `usleep` (the router), a whole second without it.
+# DAEMON_STEP_Q = steps per second (5 or 1): a cap of N seconds is N*Q steps. The one owner of the form: the start wait below,
+# the reload waits of the schedules' DNS filter and the task runner's poll live by it (s.114: three inline copies before).
+daemon_step_init() { DAEMON_STEP_Q=1; if command -v usleep >/dev/null 2>&1; then DAEMON_STEP_Q=5; fi; }
+daemon_step() { if [ "${DAEMON_STEP_Q:-1}" = 5 ]; then usleep 200000; else sleep 1; fi; }
+
 # Ядро. Пробуем готовность, и ТОЛЬКО если её нет — спрашиваем процесс. Порядок важен: демон мог
 # успеть стать готовым и умереть (или отдать пид другому — stale-пидфайл), и тогда «готово»
 # честнее, чем «умер».
@@ -265,7 +288,7 @@ _daemon_wait() {   # $1 пидфайл ; $2 бинарь ; $3 срок-на-фл
     # ШАГ — ПЯТАЯ ДОЛЯ СЕКУНДЫ (`usleep`, как у daemon_wait_gone): демон обычно готов через доли секунды, а секундный шаг
     # добавлял почти целую секунду к КАЖДОМУ подъёму — у смены сервера с «Шифрованным DNS» это прокси, у альтов hev и socks.
     # Счёт — в долях (`_dwt`), секунды (`_dwi`) — для потолка, грейса пидфайла и слов отказа, как раньше. Нет `usleep` — секундный.
-    _dwi=0; _dwt=0; _dwq=1; command -v usleep >/dev/null 2>&1 && _dwq=5
+    _dwi=0; _dwt=0; daemon_step_init; _dwq=$DAEMON_STEP_Q
     while :; do
         if "$@"; then DAEMON_WAIT_WHY=''; return 0; fi
         # Пид читаем САМИ, а не через proc_alive вызывающего: тому пустой пидфайл и мёртвый pid —
@@ -285,7 +308,7 @@ _daemon_wait() {   # $1 пидфайл ; $2 бинарь ; $3 срок-на-фл
             return 1
         fi
         [ "$_dwi" -ge "$_dwmax" ] && break
-        if [ "$_dwq" = 5 ]; then usleep 200000; else sleep 1; fi
+        daemon_step
         _dwt=$((_dwt+1)); _dwi=$((_dwt/_dwq))
     done
     DAEMON_WAIT_WHY="процесс ЖИВ, но за $_dwmax с $_dwwhat не появился (бинарь $_dwbin $(daemon_where_ru "$_dwbin"))"

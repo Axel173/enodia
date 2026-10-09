@@ -126,7 +126,7 @@ emit_devices() {
 		# сверяем ПЕРВОЕ ПОЛЕ, иначе привязанное к выходу устройство читалось бы «раздельно».
 		fslot=$(awk -F'\t' -v want="$1" '$1==want{print $2; exit}' "$DS/.fullvpn-ips" 2>/dev/null)
 		awk -F'\t' -v want="$1" '$1==want{f=1} END{exit f?0:1}' "$DS/.fullvpn-ips" 2>/dev/null && mode=force
-		case "$fslot" in s[234]) ;; *) fslot="" ;; esac
+		case "$fslot" in s[2-7]) ;; *) fslot="" ;; esac
 		# keep = «мимо VPN, но ручные правила действуют» (цепочка VPN_KEEP). Осмысленно
 		# ТОЛЬКО при mode=bypass — движок сам чистит строку при снятии выреза.
 		[ "$mode" = bypass ] && grep -qxF "$1" "$DS/.keep-vpn-ips" 2>/dev/null && keep=true
@@ -272,7 +272,7 @@ emit_devices() {
 			seen_add "$ip"
 			keep=false
 			[ "$m" = bypass ] && grep -qxF "$ip" "$DS/.keep-vpn-ips" 2>/dev/null && keep=true
-			case "$fslot" in s[234]) ;; *) fslot="" ;; esac
+			case "$fslot" in s[2-7]) ;; *) fslot="" ;; esac
 			[ "$first" -eq 1 ] || printf ','
 			first=0
 			printf '{"ip":"%s","mac":"","host":"","mode":"%s","online":false,"keep":%s,"fslot":"%s"%s}' "$ip" "$m" "$keep" "$fslot" "$(dev_extra "$ip" "" false)"
@@ -723,7 +723,7 @@ emit_update() {
 # --- Пул проб браузер-свипа: ЕДИНСТВЕННЫЙ источник того, что меряет свип. --------
 # Хранится построчно `url⇥w⇥h` в $DS/.probe-pool[-s<id>|-zapret] (per-цель, решение Р2 дизайна):
 # пул проб обязан быть ПОДМНОЖЕСТВОМ пула цели, иначе проба меряет чужой маршрут.
-# Цели ТРИ и стор у каждой свой: основная несущая byedpi (пусто) · доп-выход (2|3|4) ·
+# Цели ТРИ и стор у каждой свой: основная несущая byedpi (пусто) · доп-выход (2..7) ·
 # карточка Zapret (`zapret` — общий nfqws транспорта и всех zapret-выходов). Общий стор у
 # byedpi-несущей и Zapret был бы сюрпризом: правишь пул в одной карточке — меняется в другой.
 # w/h — эталон размера с калибровки (0 = ещё не калибровано); по нему свип ловит заглушку.
@@ -748,7 +748,7 @@ EOF
 
 # КАНДИДАТЫ пула проб = домены, которые РЕАЛЬНО едут через проверяемый десинк (`slots.sh
 # domains`, единый источник — его же читает byedpi-test.sh): 0/пусто = основная несущая,
-# 2|3|4 = доп-выход, zapret = общий nfqws. Это ЕДИНСТВЕННЫЙ источник проб — вшитых наборов
+# 2..7 = доп-выход, zapret = общий nfqws. Это ЕДИНСТВЕННЫЙ источник проб — вшитых наборов
 # в панели больше нет: они не были связаны с тем, что идёт через десинк, и давали таблицу,
 # где все стратегии одинаковы. Пусто = доменов в этом пуле нет (только CIDR или вовсе ничего) —
 # панель так и скажет, а свип честно откажется идти.
@@ -783,7 +783,7 @@ emit_probe_route() {
 }
 
 emit_byedpi() {
-	# $1 = id ДОП-ВЫХОДА (2|3|4) или пусто = основная несущая byedpi. У выхода своя стратегия
+	# $1 = id ДОП-ВЫХОДА (2..7) или пусто = основная несущая byedpi. У выхода своя стратегия
 	# (.byedpi-args-s<id>, читает transport-byedpi.sh slot_desync_args), а библиотека пресетов и
 	# авто-набор ОБЩИЕ — ciadpi один и тот же, разнести их значило бы держать две копии каталога.
 	# active для выхода = «выход включён» (несёт трафик своего пула), а не «byedpi активный транспорт».
@@ -1290,9 +1290,33 @@ emit_checks() {
 	printf '}\n'
 }
 
+# «ЗАДАЧИ» (cron manager): every view is built by tasks.sh — the owner validates and answers in JSON, this CGI only carries.
+# A free-form argument (the schedule) comes base64url-encoded: no URL decoding, and it reaches tasks.sh as one quoted
+# argument. The charset is checked here, the meaning — by tasks.sh.
+qv() { printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep "^$1=" | head -1 | cut -d= -f2; }
+b64url_dec() {
+	case "$1" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+	printf '%s' "$1" | tr '_-' '/+' | awk '{ l = length($0) % 4; if (l == 2) $0 = $0 "=="; else if (l == 3) $0 = $0 "="; print }' | base64 -d 2>/dev/null
+}
+tasks_relay() {   # tasks_relay <verb> [args] — the owner's JSON, or a refusal the panel can read
+	if [ -f "$D/tasks.sh" ]; then sh "$D/tasks.sh" "$@"
+	else printf '{"ok":false,"msg":"на роутере нет tasks.sh — обновите скрипты роутера"}\n'; fi
+}
+
 case "$sec" in
 	devices)  emit_devices ;;
 	checks)   emit_checks ;;
+	# Only what holds no secrets is read here: the list (names, schedules, statuses) and the schedule preview. A script's body,
+	# the raw crontab and a file's text can carry passwords — those are POST verbs under CSRF in cgi-bin/action, like get_config_raw.
+	tasks)    tasks_relay list-json ;;
+	# Access schedules: the clock, «close all» and every schedule with its state and the week's next changes — ONE answer for the
+	# list, a schedule's screen (it needs all of them: one device = one schedule) and the device screen. Built by access-sched.sh.
+	sched)    if [ -f "$D/access-sched.sh" ]; then sh "$D/access-sched.sh" list-json
+	          else printf '{"ok":false,"msg":"на роутере нет access-sched.sh — обновите скрипты роутера"}\n'; fi ;;
+	tasks_explain)
+	          tsc=$(b64url_dec "$(qv s)")
+	          if [ -n "$tsc" ] && [ "$(printf '%s' "$tsc" | wc -l | tr -d ' ')" = 0 ]; then tasks_relay explain "$tsc"
+	          else printf '{"ok":false,"msg":"нет расписания"}\n'; fi ;;
 	# «Что запрашивает устройство»: наблюдаем ли + домены (query-log) + активные соединения
 	# (conntrack) для ?ip=<клиент>. Весь срез строит devwatch.sh view (он же валидирует ip).
 	# &ifc=<интерфейс станции Wi-Fi> — панель знает его из wifi-stats и по нему рисует режим сети; без него
@@ -1420,33 +1444,33 @@ case "$sec" in
 	# подтверждения обязан показывать факты, а не список из головы фронта.
 	uninstall) if [ -f "$D/uninstall.sh" ]; then sh "$D/uninstall.sh" plan
 	           else printf '{"engine":false,"dir":"%s","size_b":0,"slots":0,"cron":0,"sets":0}\n' "$D"; fi ;;
-	# byedpi[&slot=2|3|4] — стратегия десинка ОСНОВНОЙ несущей либо конкретного доп-выхода
+	# byedpi[&slot=2..7] — стратегия десинка ОСНОВНОЙ несущей либо конкретного доп-выхода
 	# (у каждого byedpi-выхода своя .byedpi-args-s<id>). Чужой slot= отбрасываем в основной.
-	# probes[&slot=2|3|4|zapret] — ПУЛ ПРОБ браузер-свипа (что именно грузит браузер).
+	# probes[&slot=2..7|zapret] — ПУЛ ПРОБ браузер-свипа (что именно грузит браузер).
 	# Формат стора: url⇥w⇥h (w/h = эталон размера, снятый калибровкой; 0 = не калибровано).
 	probes)
 		psl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
-		case "$psl" in 2|3|4|zapret) ;; *) psl="" ;; esac
+		case "$psl" in [2-7]|zapret) ;; *) psl="" ;; esac
 		emit_probes "$psl" ;;
-	# probe_cands[&slot=2|3|4] — КАНДИДАТЫ пула проб: домены, привязанные к этому выходу.
+	# probe_cands[&slot=2..7] — КАНДИДАТЫ пула проб: домены, привязанные к этому выходу.
 	probe_cands)
 		# slot=zapret — не выход, а «всё, что десинкает общий nfqws» (очередь 212 одна на
 		# транспорт и все zapret-выходы ⇒ и пул проверки у карточки Zapret общий).
 		csl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
-		case "$csl" in 2|3|4|zapret) ;; *) csl="" ;; esac
+		case "$csl" in [2-7]|zapret) ;; *) csl="" ;; esac
 		emit_probe_cands "$csl" ;;
-	# probe_route&host=<домен>[&slot=2|3|4|zapret] — «едет ли ЭТОТ домен через проверяемый десинк».
+	# probe_route&host=<домен>[&slot=2..7|zapret] — «едет ли ЭТОТ домен через проверяемый десинк».
 	# По ФАКТУ ядра (резолв + ipset test), а не по реестру: CIDR-маршруты в реестре не видны.
 	probe_route)
 		rsl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
-		case "$rsl" in 2|3|4|zapret) ;; *) rsl="" ;; esac
+		case "$rsl" in [2-7]|zapret) ;; *) rsl="" ;; esac
 		# host не декодируем: домен ASCII-only, а строгий charset проверит сам slots.sh route
 		# (аргумент уходит в argv, не в eval — подставить туда команду нельзя).
 		rho=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^host=' | head -1 | cut -d= -f2)
 		emit_probe_route "$rsl" "$rho" ;;
 	byedpi)
 		bsl=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^slot=' | head -1 | cut -d= -f2)
-		case "$bsl" in 2|3|4) ;; *) bsl="" ;; esac
+		case "$bsl" in [2-7]) ;; *) bsl="" ;; esac
 		emit_byedpi "$bsl" ;;
 	zapret)   emit_zapret ;;
 	# Раскладка панели: порядок/свёрнутость/состав/ширина карточек + порядок подписок. Персист НА РОУТЕРЕ,

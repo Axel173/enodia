@@ -349,6 +349,12 @@ strip_bogon() {  # strip_bogon [мин_маска] ; stdin (CIDR по строк
 		print
 	}'
 }
+# The same cut for IPv6 (strip_bogon6 [min mask], default 16): only global unicast 2000::/3 passes — a first group of four hex
+# digits starting with 2 or 3 («200:» is 0x0200, not 2000::/3). ULA (fc00::/7 — the BE7000 LAN carries fd00:6969:6969::1),
+# link-local, multicast, ::-forms go; a mask wider than min is «half the internet», never a service's network.
+strip_bogon6() {
+	awk -F/ -v minm="${1:-16}" '{ m = ($2 == "") ? 128 : $2 + 0; if (m < minm || m > 128) next; if ($1 !~ /^[23][0-9a-f][0-9a-f][0-9a-f]:/) next; print }'
+}
 
 # --- ЗАЩИТА СВЯЗИ: динамический allowlist критичных ПУБЛИЧНЫХ IP -------------------------------
 # strip_bogon режет ПРИВАТКУ, но критичные сущности — ПУБЛИЧНЫЕ IP: endpoint активной несущей (VPS),
@@ -371,7 +377,7 @@ collect_critical() {  # stdout: «IP/CIDR<TAB>причина[<TAB>уточнен
 	# endpoint активной несущей (VPS) — авто-файл apply-bypass (та же анти-петля, что для mangle).
 	[ -s "$ENODIA_STATE/.endpoint-bypass" ] && grep -E '^[0-9]' "$ENODIA_STATE/.endpoint-bypass" 2>/dev/null | sed "s/\$/${TAB}vps/"
 	# endpoint'ы доп-выходов (slots.sh, apply-bypass endpoint-slot-set) — у каждого свой сервер.
-	for _cs in 2 3 4; do
+	for _cs in 2 3 4 5 6 7; do
 		[ -s "$ENODIA_STATE/.endpoint-bypass-s$_cs" ] && grep -E '^[0-9]' "$ENODIA_STATE/.endpoint-bypass-s$_cs" 2>/dev/null | sed "s/\$/${TAB}exit${TAB}$_cs/"
 	done
 	# Имя WAN и шлюз — у владельца (ip-lib.sh); до 05.09.2026 тут жила своя копия wan_iface,
@@ -469,7 +475,7 @@ norm_cidr() {  # stdin → stdout (по IP/CIDR на строку)
 	tr -d '\r' | sed 's/[#;].*$//' > "$_nc"
 	# 1) СТРОГИЙ проход: строка целиком = IP/CIDR. Так было всегда — не подхватываем IP-столбец
 	#    hosts-файлов и прочий текст, где адрес лишь часть строки.
-	_out=$(sed 's/[[:space:]]//g' "$_nc" | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
+	_out=$(sed 's/[[:space:]]//g' "$_nc" | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$' | cidr4_ok)
 	if [ -n "$_out" ]; then printf '%s\n' "$_out"; rm -f "$_nc"; return 0; fi
 	# 2) ФОЛБЭК (только если строгий не дал НИ ОДНОЙ строки): источник структурный, а не плоский —
 	#    официальные списки диапазонов публикуются в JSON (Google goog.json → "ipv4Prefix": "…",
@@ -477,8 +483,29 @@ norm_cidr() {  # stdin → stdout (по IP/CIDR на строку)
 	#    в структурном тексте — скорее пример/адрес в описании, чем диапазон.
 	#    Порядок «строгий → фолбэк» выбран сознательно: для всех ныне работающих источников
 	#    результат остаётся байт-в-байт прежним, фолбэк включается только там, где раньше был ноль.
-	grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$_nc"
+	grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' "$_nc" | cidr4_ok
 	rm -f "$_nc"
+}
+# The form above is digits; the VALUES are judged here: an octet over 255 or a mask over 32 («1.2.300.4», «5.6.7.8/33» — a typo
+# in own addresses) is a line `ipset restore` cannot read, and restore STOPS there: every line after it was lost, the set
+# swapped in half (review s.112). Valid input passes byte for byte.
+# …and a LEADING ZERO is normalised to its decimal (`8.8.8.08` → 8.8.8.8): ipset reads an octet through inet_aton (base 0 — `076` is
+# 62, `08` no number at all, then a DNS lookup that fails and stops the restore) and the mask through strtoull base 0; `012.0.0.0/8`
+# passed strip_bogon as 12/8 and went in as 10/8 (review s.113, round 5). The panel and this judge read decimal, so the kernel does.
+cidr4_ok() {
+	awk -F'[./]' '$1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255 && (NF < 5 || $5 <= 32) {
+		if ($0 ~ /(^|[.\/])0[0-9]/) { o = ($1 + 0) "." ($2 + 0) "." ($3 + 0) "." ($4 + 0); if (NF >= 5) o = o "/" ($5 + 0); print o } else print }'
+}
+# norm_cidr6: the IPv6 lines of the same lists (an address or a CIDR per line, comments cut), lowercase. Not inside norm_cidr: its
+# output fills inet sets, and `ipset restore` into an inet set STOPS at the first v6 line — everything after it would be lost.
+# Its consumer: geo.sh's `<key>@6` form (the access schedules close a messenger by its network in both families).
+# The form says «groups of hex»; the rest is judged in awk: at most one «::» and no «:::», eight groups without it and at most
+# seven colons with it, no lone colon at either end, a mask ≤ 128 — `2a00:::1` or `1::2::3` stopped `ipset restore` as above.
+norm_cidr6() {
+	tr -d '\r' | sed 's/[#;].*$//; s/[[:space:]]//g' | tr 'A-F' 'a-f' | grep -E '^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}(/[0-9]{1,3})?$' |
+		awk -F/ '{ a = $1; if (NF > 1 && $2 + 0 > 128) next; if (a ~ /:::/ || a ~ /^:[^:]/ || a ~ /[^:]:$/) next
+			c = a; d = gsub(/::/, "", c); if (d > 1) next; c = a; n = gsub(/:/, "", c)
+			if (d == 0 && n != 7) next; if (d == 1 && n > 7) next; print }'
 }
 
 # norm_domains: из hosts / adblock-ABP / dnsmasq / geosite / plain вытащить голый домен (нижний

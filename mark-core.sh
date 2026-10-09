@@ -171,7 +171,7 @@ SLOTS_SH="$ENODIA_DIR/slots.sh"
 # «включено» в панели. Цена гарда тут максимальная в проекте, поэтому судим по НАЛИЧИЮ файла.
 if [ -f "$SLOTS_SH" ]; then
     sh "$SLOTS_SH" list-enabled 2>/dev/null | while IFS="$(printf '\t')" read -r sid stransport _scfg sfb; do
-        case "$sid" in 2|3|4) ;; *) continue ;; esac
+        case "$sid" in [2-7]) ;; *) continue ;; esac
         [ "$stransport" = zapret ] && continue
         for sset in "grp_vpn_s$sid" "geo_vpn_s$sid"; do
             ipset list -n 2>/dev/null | grep -qx "$sset" || continue

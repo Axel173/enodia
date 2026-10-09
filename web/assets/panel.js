@@ -745,6 +745,12 @@
     // Чип двери «Режим поддержки» (шаг 6a) — то же поле, что пилюля шапки: доступ открыт — видно и из раздела.
     var supC=document.getElementById('card-support-chip');
     if(supC){ var sOn=(d.support_active===1||d.support_active==='1'); supC.textContent=sOn ? 'включён' : ''; supC.className='chip'+(sOn ? ' acc' : ''); supC.style.display=sOn ? '' : 'none'; }
+    // Чип двери «Задачи» — тем же опросом: сколько задач, а упавшие последним запуском — красным словом (ночная задача, которая
+    // не удалась, видна из раздела, не открывая экран). Старый CGI поля не знает — чипа нет.
+    var tkC=document.getElementById('card-tasks-chip');
+    if(tkC){ var tkN=(d.tasks_n|0), tkB=(d.tasks_bad|0);
+      tkC.textContent=tkB ? tkL('не удалось: '+tkB, 'failed: '+tkB) : (tkN ? String(tkN) : '');
+      tkC.className='chip'+(tkB ? ' bd' : ''); tkC.style.display=(tkN||tkB) ? '' : 'none'; }
     // Индикатор «выход не работает»: включённый доп-выход, чья несущая не поднялась, до этого
     // выглядел зелёным ВЕЗДЕ (реестр говорит on) — а его сайты втихую ехали основным туннелем
     // либо, при fallback=direct, вообще напрямую мимо VPN. Счётчик считает cgi-bin/status по
@@ -758,7 +764,7 @@
     if(exInd){
       var exBad=cur.exitsBad;
       exInd.style.display = exBad>0 ? 'inline-flex' : 'none';
-      if(exBad>0) exInd.querySelector('span').textContent = exBad>1 ? (exBad+' выхода не работают') : 'выход не работает';
+      if(exBad>0) exInd.querySelector('span').textContent = exBad>1 ? (exBad+' '+plu(exBad,['выход','выхода','выходов'])+' не работают') : 'выход не работает';   // up to 6 exits since 05.10: «5 выходов»
     }
     // РЯД индикаторов гасим ВМЕСТЕ с ними. Пустой ряд не «ничего»: он лежит в колонке с
     // зазором 14 px, и при обоих скрытых индикаторах над шапкой оставалась дырка ровно в этот
@@ -1311,18 +1317,29 @@
   // ФОКУС ПЕРЕЖИВАЕТ ПЕРЕРИСОВКУ ЭКРАНА. Экран после действия рисуется заново целиком, и фокус клавиатуры уходил в body:
   // нажал пробелом тумблер выхода — и следующий Tab начинается с начала страницы (тот же класс, что лечили у ленты в
   // шаге 2 и у плиток «Транспорта»). Примету узла берём ДО перерисовки, возвращаем фокус на узел с той же приметой.
-  var FOCUS_ATTRS=['data-xa','data-fb','data-fo','data-xk','data-sa','data-si','data-va','data-pa','data-pm','data-ck','data-ap','data-cact','data-rdel','data-rb','data-rdon','data-rst','data-rstg','data-rstale','data-ga','data-gd','data-gs','data-tab','data-t','data-dvm','data-dvs','data-dvos','data-dvps','data-dvt','data-dvod','data-dvpp','data-dvpd','data-dvpr','data-dwd','data-dwc','data-dwa','data-dwr','data-dwx','data-dws','data-dwg','data-dwgd','data-dva','data-gact','data-gsrc','data-gtab','data-rna','data-rns','data-rnd','data-rnx','data-rnpr','data-rnc','data-ris','data-ric','data-rix','data-rit','data-dnsp','data-dnsa','data-ntm','data-nta','data-dha','data-dhd','data-wfa','data-wfo','data-blka','data-lsi','data-dk','data-dkm','data-dkc','data-pkg','data-pka','data-pku','data-pkrs','data-upd','data-sia','data-sup','data-sud','data-unm','data-una','data-hk','data-paa','data-tfa','data-pvt','data-pvl','data-sid','data-nfa','data-eva','data-evs','data-ala','data-sv','id'];
+  var FOCUS_ATTRS=['data-xa','data-fb','data-fo','data-xk','data-sa','data-si','data-va','data-pa','data-pm','data-ck','data-ap','data-cact','data-rdel','data-rb','data-rdon','data-rst','data-rstg','data-rstale','data-ga','data-gd','data-gs','data-tab','data-t','data-dvm','data-dvs','data-dvos','data-dvps','data-dvt','data-dvod','data-dvpp','data-dvpd','data-dvpr','data-dwd','data-dwc','data-dwa','data-dwr','data-dwx','data-dws','data-dwg','data-dwgd','data-dva','data-gact','data-gsrc','data-gtab','data-rna','data-rns','data-rnd','data-rnx','data-rnpr','data-rnc','data-ris','data-ric','data-rix','data-rit','data-dnsp','data-dnsa','data-ntm','data-nta','data-dha','data-dhd','data-wfa','data-wfo','data-blka','data-lsi','data-dk','data-dkm','data-dkc','data-pkg','data-pka','data-pku','data-pkrs','data-upd','data-sia','data-sup','data-sud','data-unm','data-una','data-hk','data-paa','data-tfa','data-pvt','data-pvl','data-sid','data-nfa','data-eva','data-evs','data-ala','data-sv','data-sc-lmode','data-scact','data-scov','data-sccat','data-scd','data-sc-base','data-sc-ws','data-scwdel','data-scdel','data-scgdel','data-scgadd','data-sctpl','id'];
+  // …and of a TEXT field its caret, selection and inner scroll: a field built from markup comes back with the caret at 0, and text
+  // typed after a background repaint glued onto the start (`newsite.comroblox.com` — the schedule's own sites; review s.113, r.5)
   function focusMark(){
     var a=document.activeElement;
+    focusMark.sel=null;
     if(!a || !a.getAttribute) return null;
     smFocusKeep(a);
-    for(var i=0;i<FOCUS_ATTRS.length;i++){ var v=a.getAttribute(FOCUS_ATTRS[i]); if(v) return '['+FOCUS_ATTRS[i]+'="'+selVal(v)+'"]'; }
+    for(var i=0;i<FOCUS_ATTRS.length;i++){
+      var v=a.getAttribute(FOCUS_ATTRS[i]); if(!v) continue;
+      var sig='['+FOCUS_ATTRS[i]+'="'+selVal(v)+'"]';
+      try{ if(typeof a.selectionStart==='number') focusMark.sel={sig:sig, s:a.selectionStart, e:a.selectionEnd, t:a.scrollTop|0, v:a.value}; }catch(e){}
+      return sig;
+    }
     return null;
   }
   function focusBack(body, sig){
     if(!body || !sig) return;
     var n=body.querySelector(sig);
     if(n && n.focus){ try{ n.focus({preventScroll:true}); }catch(e){} }
+    // the caret only into the SAME text (the draft gave it back): another value means another place
+    var f=focusMark.sel;
+    if(n && f && f.sig===sig && n.value===f.v){ try{ n.setSelectionRange(f.s, f.e); n.scrollTop=f.t; }catch(e){} }
   }
   // ---- КАРТОЧКИ «ОБЗОРА»: ОДИН ПЛАНИРОВЩИК НА ВСЮ КОЛОДУ (шаг 2e переноса) -----------------
   // ПОЧЕМУ ПЛАНИРОВЩИК, А НЕ ЧЕТЫРЕ `setInterval`. Каждая карточка колоды — это отдельный ответ
@@ -1350,6 +1367,8 @@
   var OVC=[
     {id:'exits',   ttl:60000,  load:ovcExits},
     {id:'devices', ttl:120000, load:ovcDevices},
+    // schedules change at window edges, minutes apart; the list answer is the registry read and one awk per schedule
+    {id:'sched',   ttl:60000,  load:ovcSched},
     {id:'events',  ttl:120000, load:ovcEvents},
     {id:'ram',     ttl:120000, load:ovcRam},
     {id:'subs',    ttl:600000, load:ovcSubs}
@@ -1537,6 +1556,7 @@
     exits:  ['cn',['Все выходы','exits'],'js'],
     subs:   ['cn',['Все подписки','subs'],'js'],
     devices:['rt',['Все устройства','devices'],'js'],
+    sched:  ['rt',['Все расписания','sched'],'js'],
     events: ['pn',['Все события','events'],'js'],
     ram:    ['rr',['Все процессы','ram'],'js'],
     // «Трафик» ведёт на экран «Обзора», у «Журнала» перехода нет вовсе: его «Очистить» — своё
@@ -1826,12 +1846,21 @@
   function ovcDevices(fresh){
     // Станции Wi-Fi и режимы сетей — для строки «куда идёт трафик» (сеть «мимо» и гостевая сильнее режима устройства, `dvNet`) и
     // имени сети под адресом. Их отказ роняет только эту точность: `dvNet` скажет «режим сети не получен», а не выдумает «правила нет».
+    schDevRepaint('ov', function(){ if(_ovcDevLast) ovcDevicesPaint(); });
     return Promise.all([fetchJson('/cgi-bin/data?section=devices'), wsFetch(),
                         fetchJson('/cgi-bin/data?section=wifi').then(function(x){ return x; }, function(){ return {__fail:true}; })]).then(function(r){
       if(fresh && !fresh()) return;   // ответ старее нарисованного (разбор у ovcStart)
       if(!r[0] || !r[0].devices) return;   // не тот ответ — молчим (см. разбор в ovcExits)
       _ovcDevLast=r; ovcDevicesPaint();
     });
+  }
+  // A device row's schedule (devRow reads `_sch`) arrives BESIDE the device list, not inside it: a slow or absent access-sched.sh
+  // must not hold the list back. The answer repaints the rows only when the schedules' states changed (a repaint recreates nodes —
+  // focus and selection would go on every tick for nothing).
+  var _schDevSig={};   // per consumer (the home card, the routing page): each repaints its own rows
+  function schDevSig(d){ return (d && d.ok===true && Array.isArray(d.items)) ? (d.clock ? 1 : 0)+':'+d.tick+':'+JSON.stringify(d.all || null)+':'+((d.filter && d.filter.state) || '')+'|'+d.items.map(function(x){ return x.id+':'+x.on+':'+x.st+':'+x.why+':'+(x.devs||[]).join(',')+':'+(x.over||[]).join(',')+':'+JSON.stringify(x.ovr || null)+':'+JSON.stringify(x.next && x.next[0] || null)+':'+x.name; }).join(';') : ''; }
+  function schDevRepaint(key, paint){
+    schLoad().then(function(d){ var s=schDevSig(d); if(s && s!==_schDevSig[key]){ _schDevSig[key]=s; paint(); } }, function(){});
   }
   // ФАКТЫ СТАТУСА СМЕНИЛИСЬ — чип строки «куда идёт трафик» (`devRow` → `dvRest`) называет сервер и состояние туннеля, а срок карточки
   // — 2 мин: смену сервера сторожем (резерв, откат) она показывала бы с опозданием (ревью пачки 5, круг 2). Перерисовка — из последнего
@@ -1872,6 +1901,44 @@
           + (rows.length-OVC_DEV_MAX)+' '+unitF(rows.length-OVC_DEV_MAX,'устройств')+' онлайн</div></div>'+CHEV+'</div>';
     }
     ovcPaint('devices', h);
+  }
+  // 2b. РАСПИСАНИЯ ДОСТУПА (mockup, the user's ask 08.10.2026): per schedule — what now and until when, and ONE action in one tap:
+  // close the open, open the closed (the same menus as on the schedule's screen). The answer is the router's (section=sched).
+  // The buttons live inside rows that lead into the schedule — their own handler stops the click before the deck's row transition.
+  function ovcSched(fresh){
+    return fetchJson('/cgi-bin/data?section=sched').then(function(d){
+      if(fresh && !fresh()) return;   // ответ старее нарисованного (разбор у ovcStart)
+      schTake(d);
+      if(!d || d.ok!==true || !Array.isArray(d.items)) return;   // не тот ответ — молчим (см. разбор в ovcExits)
+      var h=cardHeadOf('sched','Расписания доступа');
+      if(!d.items.length) h+='<div class="lempty">Расписаний нет. Расписание закрывает устройствам интернет по времени — ночью, в учебные часы или всегда, кроме выбранных окон.</div>';
+      else {
+        if(!d.clock) h+='<div class="cline" style="margin-top:0">Не действуют: время роутера ещё не сверено.</div>';
+        else if(d.tick===0) h+='<div class="cline" style="margin-top:0">Не действуют: Enodia снята с расписания.</div>';
+        d.items.forEach(function(it){
+          // one tap only where the router keeps it: holidays and «закрыто всем» stand above a hand action (it refuses it)
+          var s=schSayOver(it, d), live=schLive(d) && it.on, act=live && it.why!=='hol' && it.why!=='all', open=(it.st==='open');
+          h+=lrowGo('sch:'+it.id, '')+'<span class="dot'+(!live ? ' off' : open ? '' : ' bad')+'"></span>'
+            + '<div class="grow"><div class="nm"><span translate="no">'+esc(it.name)+'</span></div><div class="ds" translate="no">'+esc(schLow(s.t))+'</div></div>'
+            + (act ? '<button type="button" class="btn sm'+(open ? '' : ' gh')+'" data-scov="'+(open ? 'close' : 'open')+'" data-scid="'+esc(it.id)+'" aria-haspopup="menu">'+(open ? 'Закрыть…' : 'Открыть на…')+'</button>' : '')+'</div>';
+        });
+        h+='<div class="acts" style="justify-content:flex-start;margin-top:11px">'
+          + (d.all ? '<button type="button" class="btn sm" data-scov="allopen">Открыть всем</button>'
+                   : '<button type="button" class="btn sm" data-scov="all" aria-haspopup="menu"'+(schLive(d) ? '' : ' disabled')+'>'+icUse('i-lock','s')+'Закрыть всем сейчас…</button>')+'</div>';
+      }
+      ovcPaint('sched', h);
+      var b=ovcBody('sched');
+      if(b) b.onclick=function(e){   // one handler however often the card repaints (a property, not a pile of listeners)
+        var t=e.target && e.target.closest ? e.target.closest('[data-scov]') : null; if(!t || t.disabled) return;
+        e.stopPropagation();
+        var a=t.getAttribute('data-scov'), id=t.getAttribute('data-scid'), it=(_sch && _sch.items || []).filter(function(x){ return x.id===id; })[0];
+        function done(){ ovcExpire('sched'); ovcTick(); }
+        if(a==='all') schCloseMenu(t, function(v){ postAction('sched_all', null, 'закрываю всем…', {arg:v}, done); });
+        else if(a==='allopen') postAction('sched_all', null, 'открываю всем…', {arg:'off'}, done);
+        else if(a==='close' && it) schCloseMenu(t, function(v){ postAction('sched_ovr', null, 'закрываю…', {id:id, op:'close', arg:v}, done); });
+        else if(a==='open' && it) schOpenMenu(t, it, function(v){ postAction('sched_ovr', null, 'открываю…', {id:id, op:'open', arg:v}, done); });
+      };
+    });
   }
   // 3. СОБЫТИЯ. Тот же журнал, что у колокольчика (section=events), но карточка — ЧИТАТЕЛЬ:
   // пометку «прочитано» ставит только открытый центр уведомлений, иначе счётчик гас бы сам собой
@@ -2092,6 +2159,8 @@
     if(a.indexOf('exit:')===0){ exitScrOpen(a.slice(5)); return; }
     if(a.indexOf('peer:')===0){ vsPeerOpen(a.slice(5)); return; }
     if(a.indexOf('grp:')===0){ grpScrOpen(a.slice(4)); return; }
+    if(a.indexOf('task:')===0){ taskScrOpen(a.slice(5)); return; }   // «Задачи»: строка задачи — в её экран
+    if(a.indexOf('sch:')===0){ schScrOpen(a.slice(4)); return; }     // access schedules: a schedule's row — into its screen
     // Категория хаба «Источники списков» — по своему адресу (строки «Категорий» и дверь пула с экрана Zapret).
     if(a.indexOf('src:')===0){ openSources(a.slice(4)); return; }
     // Строка события — к СВОЕМУ событию экрана «События»: раскрыто и в фокусе (разбор у evRowHtml).
@@ -2126,6 +2195,11 @@
       case 'mode':    openMode();    break;
       case 'events':  openEvents();  break;
       case 'notify':  openNotify();  break;   // «События» ↔ «Уведомления»: история и письма о ней
+      case 'tasks':   openTasks();   break;
+      case 'tasknew': openTaskNew(); break;
+      case 'sched':   openSched();   break;   // «Расписания доступа» (the routing page's «Ещё здесь», the home card)
+      case 'rr-pkg':  openPackages(); break;  // «Компоненты» — the schedules' «нужен компонент» notes (filter missing or dead)
+      case 'schednew': schNew();     break;
       case 'ram':     openRam();  break;
       case 'disk':    openDisk(); break;
       case 'disk:clean': openAt(openDisk, 'dk-clean'); break;   // к чистке: логи в /tmp — это память (экран «Память и процессы»)
@@ -2140,7 +2214,11 @@
   // ДЕЛЕГИРОВАННЫЙ ПЕРЕХОД — тоже один: содержимое и колоды, и разрезов экрана перерисовывается
   // целиком, и персональные слушатели пришлось бы вешать заново после каждого тика.
   function wireCacts(cont){
-    if(!cont) return;
+    // ONCE per container: the handlers read `data-cact` from the click itself, so one pair serves any content later painted into
+    // it. A screen repainted in place (the schedules' list asked again every minute) added a pair per repaint, and after ten
+    // minutes one click opened the schedule ten times — ten list-json runs and 503s from uhttpd (review s.113, round 5)
+    if(!cont || cont._cacts) return;
+    cont._cacts=true;
     function actOf(t){ while(t && t!==cont){ if(t.getAttribute && t.getAttribute('data-cact')) return t.getAttribute('data-cact'); t=t.parentNode; } return null; }
     cont.addEventListener('click', function(e){ cardGo(actOf(e.target)); });
     // С КЛАВИАТУРЫ — ТЕМ ЖЕ путём. `<button>` в заголовке срабатывает сам, а строки-кнопки —
@@ -2541,7 +2619,7 @@
     if(d.vif || v>0) h+=row(exitColor(0), 'Через туннель', Math.min(v, w));
     if(x.x){
       var sx=0;
-      for(k=2;k<=4;k++){
+      for(k=2;k<2+x.x.length;k++){
         var b=Number(x.x[k-2])||0, e=null, j;
         for(j=0;j<exs.length;j++) if((exs[j].id|0)===k) e=exs[j];
         sx+=b;
@@ -2924,7 +3002,8 @@
   function exitColor(id){
     if(id===0)  return 'var(--g1)';
     if(id===-1) return 'var(--text-tertiary)';
-    return ({2:'var(--g2)',3:'var(--g3)',4:'var(--g4)'})[id] || 'var(--g5)';
+    // Exits 5..7 (since 05.10.2026): own tokens --ex5..--ex7, validated against their neighbours in both themes.
+    return ({2:'var(--g2)',3:'var(--g3)',4:'var(--g4)',5:'var(--ex5)',6:'var(--ex6)',7:'var(--ex7)'})[id] || 'var(--g5)';
   }
   // ПЕРИОД — АРГУМЕНТ, А НЕ ВТОРАЯ ЛЕСТНИЦА. Карточка «Обзора» спрашивает «сегодня», экран
   // «Трафик» — те же строки за неделю, месяц и год. Разрез один, и порядок «основной путь ·
@@ -3050,10 +3129,9 @@
   //   · КОНФИГИ — интерфейс ОДИН, серверов много ⇒ нужна отметка счётчика В МОМЕНТ переключения;
   //   · СЕТИ — счётчики сетевых интерфейсов считают и обмен ВНУТРИ сети: это «в сети», а не
   //     «в интернет», и сумма по сетям будет больше, чем через провайдера;
-  //   · УСТРОЙСТВА — упираются не в интерфейс, а в аппаратный ускоритель: NSS/ECM уводит
-  //     установленные потоки мимо netfilter, и цифры из счётчиков правил были бы не
-  //     «примерными», а случайными.
-  // Три последних — обещания и невозможности, и они помечены как обещания. Нули вместо них
+  //   · УСТРОЙСТВА — by address the router cannot count (NSS/ECM takes flows past netfilter), but the firmware's trafficd counts
+  //     per MAC, offloaded bytes included: «через роутер», not «в интернет» — home traffic is in it (traffic-dev.sh, 09.10.2026).
+  // Конфиги и сети — обещания, и они помечены как обещания. Нули вместо них
   // ставить нельзя: ноль это ответ «трафика не было», а у нас ответа НЕТ ВОВСЕ.
   //
   // ПЕРИОДЫ СЧИТАЕТ РОУТЕР. Все четыре окна приезжают готовыми из `cgi-bin/traffic` — включая
@@ -3120,7 +3198,7 @@
     openModal(null, {route:'ov-traffic', deck:true});
     var myGen=dwGen;                       // openModal двигает dwGen — фиксируем ПОСЛЕ него
     var b=document.getElementById('modal-body');
-    tsData=null; tsErr=false; tsGen=myGen;
+    tsData=null; tsErr=false; tsGen=myGen; tdMore=false;   // the devices' list opens folded
     // КОЛОДА МАКЕТА (ov-traffic): период — пилюлями сверху, плитки-показатели своей карточкой, график — своей, разрез — пилюлями и
     // карточками вкладки (обёртка `.tpane` прозрачна для сетки колоды: её карточки встают рядом, как в макете), «как считается» — в конце.
     b.innerHTML='<div class="vwrap">'
@@ -3136,6 +3214,11 @@
     // Обработчик вешаем НА КОНТЕЙНЕР, который переживает перерисовку: строки разреза меняются
     // каждые пять секунд, и слушатель на самой строке умер бы на первом же тике.
     wireCacts(document.getElementById('ts-cut-body'));
+    // «Показать ещё» of the devices' tab — on the same surviving container; the choice lives in `tdMore`, so a repaint keeps it.
+    document.getElementById('ts-cut-body').addEventListener('click', function(e){
+      var t=e.target && e.target.closest ? e.target.closest('[data-tdmore]') : null;
+      if(t){ tdMore=true; tsPaintCut(); }
+    });
     tsFetch(true);   // запрос прошлого открытия ещё в воздухе — повторить сразу за ним, а не ждать тика
     var tm=setInterval(function(){ if(!tsAlive(myGen)){ clearInterval(tm); return; } tsFetch(); }, 5000);
   }
@@ -3259,14 +3342,114 @@
     // широкая карточка с честной причиной, а не нули.
     if(tsCut===1)      h='<div class="card w2"><div class="wt">По конфигам</div>'+noteBox('<b>Пока не считается.</b> Интерфейс у туннеля один, а серверов много: awg0 остаётся awg0 и после переключения. Единственный честный путь — фиксировать счётчик В МОМЕНТ смены конфига и засчитывать объём тому серверу, который был активен. Это отметка на роутере, а не арифметика в панели, — поэтому разрез ждёт своей очереди, а не рисуется примерно.','warn')+'</div>';
     else if(tsCut===2) h='<div class="card w2"><div class="wt">По сетям</div>'+noteBox('<b>Пока не считается.</b> Считать пришлось бы по счётчикам сетевых интерфейсов, а это ЭФИР: туда попадут и обмен между устройствами, и широковещание — сумма по сетям выйдет больше, чем через провайдера. Разрез полезный, но подписывать его придётся «в сети», а не «в интернет», и сделать это надо аккуратно.','warn')+'</div>';
-    else if(tsCut===3) h='<div class="card w2"><div class="wt">По устройствам</div>'+noteBox('<b>Роутер этого не считает — и мы говорим это прямо, а не рисуем нули.</b> Мешает аппаратный ускоритель: установленные соединения уходят в NSS/ECM мимо netfilter, и счётчики правил по адресам почти не тикают — числа из них были бы не «примерными», а случайными. Оба пути (счётчики точки доступа — только Wi-Fi и только пока клиент в эфире — и статистика самого ускорителя) требуют замера на железе.','warn')
-      + '<div style="margin-top:10px">'
-      +   lrowGo('devices','посмотреть, кто в сети и что запрашивает')
-      +   '<div class="grow"><div class="nm">Устройства в сети</div>'
-      +   '<div class="ds">за минуту наблюдения видно, куда ходит одно устройство — на его экране</div></div>'+CHEV+'</div>'
-      + '</div></div>';
+    else if(tsCut===3){ h=tdHtml(); tdFetch(tdAsk!==tsPer); }
     else               h=tsCutExits(d);
-    box.innerHTML=h;
+    // The screen's 5-s poll repaints the cut: the SAME string is not written again, and a changed one keeps the keyboard focus on
+    // its row (review s.115, round 2: with up to 16+ device rows, focus fell to the page every five seconds — the wfStaRepaint way).
+    if(box._h===h) return;
+    var fa=document.activeElement, fs=(fa && box.contains(fa)) ? focusMark() : null;
+    box.innerHTML=h; box._h=h;
+    if(fs) focusBack(box, fs);
+  }
+  // ---- «ТРАФИК → УСТРОЙСТВА» (traffic-dev.sh, 09.10.2026; mockup ov-traffic tab 3) ------------------------------------------------
+  // The router answers per window (`?dev=<per>`): the devices by volume, «other», since when it counts — the counters of the firmware's
+  // trafficd per MAC (by address the router cannot count at all: NSS/ECM offload). Its own request and gate: the interface answer of
+  // the screen does not carry it, and the tab asks only while shown — at once on a new period, then every TD_POLL (the router's day
+  // moves every five minutes, plus a live delta of «now»). Shares are of the list's own total: devices + «other».
+  var TD_TOP=7, TD_POLL=15000, TD_COL=['var(--g1)','var(--g2)','var(--g3)','var(--g4)','var(--g5)'];
+  // tdData/tdPer — the last ANSWER and its window; tdAsk/tdAt — the last REQUEST (window, time) and tdErr its refusal. Two pairs,
+  // not one: a refusal must not count as «this window answered» (the old answer of another window would be drawn under this one),
+  // and it must count as «this window asked» — keyed on the answer only, a refusing router (503 «занят», uhttpd restarting) got the
+  // next request at once from the repaint, a loop of 165 requests in 200 ms (review s.115, round 1).
+  var tdData=null, tdPer='', tdAsk='', tdAt=0, tdErr=0, tdMore=false, _tdGate=flightGate(TR_CEIL);
+  // A day of the router («2026-10-09») in words of the language — the table of the chart, not the dictionary (lcDay's reason).
+  // A share of the list: a device that moved a few megabytes of tens of gigabytes is not «0.0 %» — it is there, just tiny.
+  function tdPct(p){ return (p>0 && p<0.1) ? '<0.1 %' : (p.toFixed(p<10?1:0)+' %'); }
+  function tdDay(iso){
+    var m=/^(\d{4})-(\d\d)-(\d\d)$/.exec(iso||''); if(!m) return iso||'';
+    var L=(LANG==='en')?'en':'ru', mn=LC_MON[L][(+m[2])-1]||m[2], D=+m[3], y=(+m[1]!==new Date().getFullYear()) ? ' '+m[1] : '';
+    return L==='en' ? mn+' '+D+y : D+' '+mn+y;
+  }
+  function tdFetch(force){
+    if(!force && tdAsk===tsPer && (Date.now()-tdAt)<TD_POLL) return;
+    var tok=_tdGate.take(force); if(!tok) return;
+    var per=tsPer;
+    if(tdAsk!==per){ tdErr=0; tdMore=false; }   // a new window: no stale refusal, the list starts folded
+    tdAsk=per; tdAt=Date.now();
+    function retry(){ if(tsAlive(tsGen) && tsCut===3) tdFetch(true); }
+    // The answer is the router's for its window whoever asked: kept even when the screen was closed and opened again meanwhile
+    // (round 2: dropped, the new opening showed «загрузка…» until TD_POLL), drawn by the CURRENT opening.
+    fetchJson('/cgi-bin/traffic?dev='+per).then(function(d){
+      var gr=_tdGate.settle(tok, false, retry);
+      if(gr<0 || per!==tsPer) return;
+      tdData=d; tdPer=per; tdErr=0;
+      if(tsAlive(tsGen) && tsCut===3) tsPaintCut();
+    }).catch(function(e){
+      var gr=_tdGate.settle(tok, true, retry);
+      if((gr!==0 && gr!==1) || per!==tsPer) return;
+      // a refusal keeps an answer already drawn for this window; the next try waits TD_POLL from this request, not the next repaint
+      tdErr=(e && e.net) ? 2 : 1;
+      if(tsAlive(tsGen) && tsCut===3) tsPaintCut();
+    });
+  }
+  function tdHtml(){
+    var h='<div class="card w2"><div class="wt">По устройствам</div>', d=(tdPer===tsPer) ? tdData : null, per=tsPer, i;
+    if(!d) return h+'<div class="lempty">'+((tdErr && tdAsk===tsPer) ? noteText(tdErr===2) : 'загрузка…')+'</div></div>';
+    // A router older than the cut answers `?dev=` with the interface answer (no `devs`): say so, do not draw an empty list.
+    if(!Array.isArray(d.devs))
+      return h+noteBox(d.ok===false && d.msg ? esc(trNow(String(d.msg))) : 'Этот роутер устройства ещё не считает — обновите панель на роутере, и разрез появится.', 'warn')+'</div>';
+    var devs=d.devs, oth=(Number(d.other_rx)||0)+(Number(d.other_tx)||0), tot=oth;
+    for(i=0;i<devs.length;i++) tot+=(Number(devs[i].rx)||0)+(Number(devs[i].tx)||0);
+    if(d.src===false) h+='<div style="margin-bottom:10px">'+noteBox('<b>Прошивка сейчас не отвечает про устройства.</b> Служба trafficd молчит — показано то, что роутер успел записать.', 'warn')+'</div>';
+    if(d.trusted===false) h+='<div style="margin-bottom:10px">'+noteBox('<b>Время на роутере ещё не сверено.</b> Новые байты устройств лягут в свой день, как только оно сверится.', 'info')+'</div>';
+    if(!(tot>0)){
+      h+='<div class="lempty">'+(d.since ? 'за этот период через роутер ничего не прошло' : 'роутер начнёт считать устройства с ближайшего шага учёта — раз в пять минут')+'</div>';
+    } else {
+      // The share bar — the same markup as the exits' (`.tstack`): the top five in colour, the rest one grey piece.
+      var bar='', rest=oth, n=(tdMore || devs.length<=TD_TOP+1) ? devs.length : TD_TOP;
+      for(i=0;i<devs.length;i++){
+        var b=(Number(devs[i].rx)||0)+(Number(devs[i].tx)||0);
+        if(i<TD_COL.length) bar+='<i style="width:'+Math.max(FLOW_MIN_SHARE, b*100/tot).toFixed(2)+'%;background:'+TD_COL[i]+'"></i>';
+        else rest+=b;
+      }
+      if(rest>0) bar+='<i style="width:'+Math.max(FLOW_MIN_SHARE, rest*100/tot).toFixed(2)+'%;background:var(--text-tertiary)"></i>';
+      h+='<div class="tstack" aria-hidden="true">'+bar+'</div>';
+      for(i=0;i<n;i++){
+        var x=devs[i], rx=Number(x.rx)||0, tx=Number(x.tx)||0, nm=devName({alias:x.alias, host:x.host, mac:x.mac}), sh=(rx+tx)*100/tot;
+        // A device trafficd no longer knows has no address now — and no door: the device screen is keyed by the current address.
+        var ip=argIp(x.ip) ? x.ip : '', pre=[];
+        if(x.alias && x.host && x.host!==x.alias) pre.push('<span class="sens" translate="no">'+esc(x.host)+'</span>');
+        if(!x.alias && !x.host) pre.push('<span>имени не сообщает</span>');
+        if(!ip) pre.push('<span>не в сети</span>');
+        pre.push('<span>'+esc(tdPct(sh)+' · ↓ '+humanBytes(rx)+' · ↑ '+humanBytes(tx))+'</span>');   // «<0.1 %» is text, not markup
+        h+=(ip ? lrowGo('dev:'+ip, 'открыть устройство') : '<div class="lrow">')
+          + '<span class="pipe" style="background:'+(i<TD_COL.length ? TD_COL[i] : 'var(--text-tertiary)')+'"></span>'
+          + '<div class="grow"><div class="nm"><span class="sens" translate="no">'+esc(nm)+'</span></div><div class="ds">'+pre.join(' · ')+'</div></div>'
+          + '<span class="chip'+(i===0?' acc':'')+'">'+humanBytes(rx+tx)+'</span>'+(ip?CHEV:'')+'</div>';
+      }
+      // «Прочие» — only a day that had more devices than the router keeps by name: their bytes are whole, not lost.
+      if(oth>0){
+        var osh=oth*100/tot;
+        h+='<div class="lrow"><span class="pipe" style="background:var(--text-tertiary)"></span><div class="grow"><div class="nm">Прочие</div>'
+          + '<div class="ds"><span>устройства сверх 16 за день — их объём целиком здесь</span> · <span>'+esc(tdPct(osh))+'</span></div></div>'
+          + '<span class="chip">'+humanBytes(oth)+'</span></div>';
+      }
+      if(n<devs.length) h+='<div class="acts" style="justify-content:flex-start"><button type="button" class="btn gh sm" data-tdmore="1">'+tkL('Показать ещё '+schDevN(devs.length-n), 'Show '+(devs.length-n)+' more')+'</button></div>';
+    }
+    h+='<div class="lfoot">'+(TS_WHEN[per]||TS_WHEN.today)+' · считает прошивка роутера по MAC-адресу</div>';
+    // The first counted day starts at the router's first accounting step, not at midnight (seen on BE7000 09.10.2026: «сегодня» from
+    // 21:30) — the windows' block below says it for long windows; «сегодня» has no such block, so it is said here.
+    if(per==='today' && d.since && d.since===d.from) h+='<div class="cline">Роутер начал считать устройства сегодня — за сегодня это не с начала дня.</div>';
+    h+='<div style="margin-top:12px">'+noteBox('<b>Это трафик через роутер, а не «в интернет».</b> Прошивка считает всё, что устройство передало через роутер: и показ на телевизор, и обмен с домашним NAS. Поэтому сумма по устройствам не обязана совпасть со «Всего» наверху: там нет домашнего обмена, а здесь — трафика самого роутера (обновления, проверки туннеля).', 'warn')+'</div>';
+    // What the window lacks — the same honesty as the exits' tab. The first counted day comes from the router (`since`); a window
+    // that starts before it is partial. A private MAC per network is a separate device here — said always, it is not a passing state.
+    if(per!=='today'){
+      h+='<div class="wt" style="margin-top:16px">Чего в окнах пока нет</div><div class="tiny">';
+      // the date comes from a file on the router (backup import copies it as is): escaped like any data, not trusted to be a date
+      if(d.since && d.from && d.since>d.from) h+='<span>'+esc(tkL('Роутер считает устройства с '+tdDay(d.since), 'The router counts devices since '+tdDay(d.since)))+'</span> <span>— дни до этого в разрезе пусты, и доли за длинное окно посчитаны только по тем дням, что есть.</span> ';
+      h+='<span>Телефон со «случайным» MAC в каждой сети здесь — отдельное устройство: другого имени, кроме MAC, у роутера для него нет.</span></div>';
+    }
+    return h+'</div>';
   }
   function tsCutExits(d){
     // Роутер старше самой карточки «Куда идёт трафик» — разреза нет вовсе (то же правило, что у
@@ -3288,10 +3471,11 @@
     // недельная доля выхода честно занижена. Молчать об этом — то же самое, что нарисовать ноль.
     // ФРАЗА ОБЯЗАНА ОСТАТЬСЯ ВЕРНОЙ И ЧЕРЕЗ МЕСЯЦ: ни «до обновления» (правда сегодня и ложь, когда история доберётся до полного
     // окна), ни дата макета (у роутера, обновлённого позже, она соврала бы) — говорим, ЧЕГО в днях нет (пачка 5).
-    h+='</div>';
-    // «Чего в окнах пока нет» — соседней карточкой и мелким текстом, как в макете; у «сегодня» оговорки нет — окно в один день.
+    // «Чего в окнах пока нет» — the tail of THIS card (mockup 08.10.2026: as a card beside it the tab made four columns on a
+    // three-column deck); «сегодня» has no such caveat — a one-day window.
     if(per!=='today')
-      h+='<div class="card"><div class="wt">Чего в окнах пока нет</div><div class="tiny">Дни, которых выход не застал, его объёма не содержат: до появления выхода — и до того обновления, с которого роутер начал считать каждый выход отдельно, — эти байты лежат внутри «Напрямую». За длинное окно доля такого выхода занижена.</div></div>';
+      h+='<div class="wt" style="margin-top:16px">Чего в окнах пока нет</div><div class="tiny">Дни, которых выход не застал, его объёма не содержат: до появления выхода — и до того обновления, с которого роутер начал считать каждый выход отдельно, — эти байты лежат внутри «Напрямую». За длинное окно доля такого выхода занижена.</div>';
+    h+='</div>';
     return h;
   }
   function tsKeepHtml(){
@@ -3301,9 +3485,11 @@
       // ПОВТОРЕНО словами для человека. Расхождение ловит чекер (C92) — иначе панель однажды
       // пообещала бы год там, где роутер режет историю раньше.
       + kv('Посуточно', '<span>приём и отдача: через несущую, через провайдера и через каждый дополнительный выход</span> · <span class="keep-days">400 дней</span>')
+      // By device: the same kind of borrowed numbers — TD_KEEP and TD_DAY_MAX of traffic-dev.sh (C92 compares both).
+      + kv('По устройствам', '<span>счётчики прошивки по MAC — и через аппаратный ускоритель тоже; сутки копятся в памяти и сохраняются раз в 4 часа</span> · <span class="keep-dev-days">400 дней</span> · <span class="keep-dev-max">до 16 устройств в день</span>, <span>остальные — «прочие»</span>')
       + kv('По часам', 'не ведётся: дельты снимаются раз в пять минут и складываются в сутки')
       + kv('Где лежит', 'в настройках на роутере — счёт переживает и перезагрузку, и обновление')
-      + kv('Цена на флеше', 'одна строка в сутки — сырьё закачек и кэш на /data не пишем никогда')
+      + kv('Цена на флеше', '<span>строка в сутки и строка на устройство за сутки (около 15 КБ в месяц на десяток устройств)</span> <span>— сырьё закачек и кэш на /data не пишем никогда</span>')
       + '<div style="margin-top:11px">'+noteBox('/data смонтирован в режиме <span class="mono kw">sync</span> и его всего 20 МБ: история обязана быть кольцом с заранее известным размером. Та же причина, по которой закачки и кэш списков живут в оперативной памяти, а не на флеше.', 'info')+'</div>';
   }
   // ИСХОД КЛИКА ПО ПИНГУ ПОКАЗЫВАЕТ ТОЛЬКО ПОСЛЕДНИЙ КЛИК (независимое ревью шага 2k, круги 14–17). `_pingClick` — номер
@@ -3523,11 +3709,12 @@
       + '<div class="rr-acts"><button type="button" class="btn" data-repair="1"'+(busy ? ' disabled' : '')+'>'+icUse('i-refresh','s')+'Починить правила</button>'
       + '<button type="button" class="btn gh" data-dgo="ev">Журнал событий</button></div>'
       + '<div class="cline">«Починить правила» заново ставит правила маршрутизации, если их смыло: например, сохранение настроек в родной панели Xiaomi снимает их все.</div></div>'
-      + '<div class="card w2" id="dg-in"><div class="wt">Что внутри</div>'
-      + diagRow('Версия и состояние подсистем','что установлено и что несёт трафик: транспорт, дополнительные выходы, десинк, доступ домой, шифрованный DNS; включены ли письма и о чём; у секретных файлов — только «есть ли»')
+      + '<div class="card wfull" id="dg-in"><div class="wt">Что внутри</div>'
+      + diagRow('Версия и состояние подсистем','что установлено и что несёт трафик: транспорт, дополнительные выходы, десинк, доступ домой, шифрованный DNS, учёт трафика по устройствам; включены ли письма и о чём; у секретных файлов — только «есть ли»')
       + diagRow('Правила ядра','маршрутизация, метки, цепочки, наборы адресов и проба прямого пути')
       + diagRow('DNS','настройки резолвера и что он положил в наборы')
       + diagRow('Клиенты сети','адреса домашней сети и производитель по MAC; имена из аренд заменены метками')
+      + diagRow('Расписания доступа','сверено ли время роутера, что сейчас закрыто и правила в ядре; имена расписаний не входят')
       + diagRow('Вход в панель','сессии и паузы после неудачных входов; пароль и его хэш не читаются')
       + diagRow('Внешний адрес','проба маршрута; адрес замаскирован')
       + diagRow('Ресурсы и расписание','память, флеш, накопитель, раскладка, задания cron и локи')
@@ -3803,9 +3990,10 @@
   // Переходы (`wireCacts`) висят на САМОМ теле экрана, а перерисовка поверх (`evRefresh`) тело не меняет — второй обработчик
   // отправлял бы по каждой двери дважды. Признак — НА УЗЛЕ тела, а не «кто рисовал»: первую разметку бывает рисует перерисовка
   // (первый ответ в пути или был отказом, а новое событие успело раньше), и дверь осталась бы мёртвой (ревью шага 7b, круг 1).
+  // Признак ведёт сам `wireCacts` (один раз на контейнер — ревью s.113: тот же класс у списка расписаний), здесь — только зов.
   // Кнопку «Очистить» разметка рожает заново — её проводим всегда.
   function evWire(body, rep){
-    if(!body._evWired){ wireCacts(body); body._evWired=1; }
+    wireCacts(body);
     var cl=body.querySelector('[data-eva="clear"]');
     if(cl) cl.addEventListener('click', function(){
       // «Очистить» пропадёт вместе со списком — фокус к соседней двери. Только если очистка НАЧАЛАСЬ: после «Отмены» примета
@@ -4537,6 +4725,1491 @@
       else if(e.key==='ArrowDown'){ if(consoleHistIdx<consoleHist.length-1){ consoleHistIdx++; inp.value=consoleHist[consoleHistIdx]||''; } else { consoleHistIdx=consoleHist.length; inp.value=''; } e.preventDefault(); }
     });
     setTimeout(function(){ if(screenAlive(inp)) inp.focus(); }, 50);
+  }
+
+  /* ---- «ЗАДАЧИ» — cron manager (`rr-tasks`, `rr-task/<id>`, `rr-task-new`; чужая строка — шаг без адреса; 07.10.2026) ----
+     By the mockup (rr-tasks · rr-task · rr-task-new · rr-cron-line). EVERYTHING IS THE ROUTER'S (tasks.sh): the list, whether a
+     schedule is valid, the next runs (in ITS calendar and time zone), the syntax check, which languages exist. The panel owns
+     words and layout only: the phrase of a schedule is a reading of the five fields the human typed (cronSay), and «today /
+     tomorrow» is a reading of two router strings (tkWhen) — no clock of the browser is involved.
+     Enodia lines are a DOOR to their owner (owners rewrite them); foreign lines are edited BY CONTENT — the line itself (base64)
+     is the key, so a file changed meanwhile is refused by the router instead of editing a different line.
+     Composed phrases (schedule, times, statuses) are built in the panel's language right here (`tkL`): a sentence glued from
+     numbers cannot be a dictionary key. Fixed labels are Russian with their I18N_EN entries, like the rest of the panel. */
+  function tkL(ru, en){ return LANG==='en' ? en : ru; }
+  // Enodia's own lines: name, what it does, the door (cardGo action) where its schedule IS changed.
+  var TK_OURS={'heal.sh':['Самовосстановление','после перезагрузки поднимает всё обратно, дальше молчит'],
+    'watchdog.sh':['Сторож','следит за туннелем и уводит на резерв'], 'traffic-acct.sh':['Учёт трафика',''],
+    'web-ui.sh':['Панель','поднимает панель, если она упала'],
+    'iplist-update.sh':['Обновление списков','меняется в «Источниках списков»','sources'],
+    'subs-update.sh':['Обновление подписок','меняется в «Подписках»','subs']};
+  // Foreign lines the panel recognises: their badge and the warning that also goes into the delete question.
+  var TK_KNOWN=[{re:/\/etc\/crontabs\/patches\/ssh_patch\.sh/, badge:'держит SSH', ds:'без неё SSH закроется после перезагрузки'}];
+  function tkKnown(line){ for(var i=0;i<TK_KNOWN.length;i++) if(TK_KNOWN[i].re.test(line)) return TK_KNOWN[i]; return null; }
+  var _tkTab=0, _tkFor=[], _tkRaw=null, _tkRawRev='', _tkPoll=0;
+  function tkPl(n, one, few, many){ var a=Math.abs(n)%100, b=a%10; if(a>10&&a<20) return many; if(b>1&&b<5) return few; return b===1 ? one : many; }
+  var TK_DN={sun:0,mon:1,tue:2,wed:3,thu:4,fri:5,sat:6};
+  var TK_DOW_RU=['воскресеньям','понедельникам','вторникам','средам','четвергам','пятницам','субботам'],
+      TK_DOW_RS=['вс','пн','вт','ср','чт','пт','сб'], TK_DOW_EN=['Sundays','Mondays','Tuesdays','Wednesdays','Thursdays','Fridays','Saturdays'],
+      TK_DOW_ES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  function tkInt(x){ return /^\d{1,2}$/.test(x) ? +x : null; }
+  function tkDows(f){   // '1-5' · '0,6' · 'mon' → ascending days, or null for anything else
+    var out=[], ok=true;
+    String(f).split(',').forEach(function(it){
+      var m=/^([a-z0-9]+)(?:-([a-z0-9]+))?$/i.exec(it); if(!m){ ok=false; return; }
+      function n(x){ x=x.toLowerCase(); return TK_DN.hasOwnProperty(x) ? TK_DN[x] : (/^\d$/.test(x) ? +x : null); }
+      var a=n(m[1]), b=(m[2]!=null) ? n(m[2]) : a;
+      if(a==null || b==null || a>b || b>6){ ok=false; return; }
+      for(var i=a;i<=b;i++) if(out.indexOf(i)<0) out.push(i);
+    });
+    return ok ? out.sort(function(x,y){ return x-y; }) : null;
+  }
+  function tkHm(h, m){ return h+':'+(m<10?'0':'')+m; }
+  function tkList(a){ return a.length<2 ? a.join('') : a.slice(0,-1).join(', ')+tkL(' и ',' and ')+a[a.length-1]; }
+  // The phrase of a schedule — or '' when it is not one of the common shapes (the expression is then shown as is).
+  function cronSay(expr){
+    var f=String(expr||'').trim().split(/\s+/);
+    if(f.length!==5 || f[3]!=='*') return '';
+    var M=f[0], H=f[1], D=f[2], W=f[4], mi=tkInt(M), hi=tkInt(H), di=tkInt(D), pm, sm, sh, t;
+    if(D==='*' && W==='*'){
+      if(M==='*' && H==='*') return tkL('каждую минуту','every minute');
+      sm=/^\*\/(\d+)$/.exec(M);
+      if(sm && H==='*'){ var n=+sm[1]; return n===1 ? tkL('каждую минуту','every minute') : tkL('каждые '+n+' '+tkPl(n,'минуту','минуты','минут'), 'every '+n+' minutes'); }
+      if(mi!=null) pm=(mi<10?'0':'')+mi;
+      if(mi!=null && H==='*') return tkL('каждый час в :'+pm, 'every hour at :'+pm);
+      sh=/^\*\/(\d+)$/.exec(H);
+      if(mi!=null && sh){ var k=+sh[1]; return k===1 ? tkL('каждый час в :'+pm, 'every hour at :'+pm)
+        : tkL('каждые '+k+' '+tkPl(k,'час','часа','часов')+', в :'+pm, 'every '+k+' hours at :'+pm); }
+      if(mi!=null && /^\d{1,2}(,\d{1,2})*$/.test(H)) return tkL('ежедневно в ','daily at ')+tkList(H.split(',').map(function(h){ return tkHm(+h, mi); }));
+      return '';
+    }
+    if(mi==null || hi==null) return '';
+    t=tkHm(hi, mi);
+    if(D==='*'){
+      var wl=tkDows(W); if(!wl) return '';
+      if(wl.join()==='1,2,3,4,5') return tkL('по будням в '+t, 'on weekdays at '+t);
+      if(wl.join()==='0,6') return tkL('по выходным в '+t, 'on weekends at '+t);
+      if(wl.length===1) return tkL('по '+TK_DOW_RU[wl[0]]+' в '+t, 'on '+TK_DOW_EN[wl[0]]+' at '+t);
+      return tkL('по дням '+wl.map(function(d){ return TK_DOW_RS[d]; }).join(', ')+' в '+t, 'on '+wl.map(function(d){ return TK_DOW_ES[d]; }).join(', ')+' at '+t);
+    }
+    if(W==='*' && di!=null) return tkL('ежемесячно, '+di+'-го, в '+t, 'monthly on day '+di+' at '+t);
+    return '';
+  }
+  // 'YYYY-MM-DD HH:MM[:SS]' of the router against the router's «now» → «сегодня 15:00» / «завтра 4:30» / «12.10 4:00»
+  function tkWhen(ts, now){
+    var a=/^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)/.exec(ts||''), b=/^(\d{4})-(\d\d)-(\d\d)/.exec(now||'');
+    if(!a) return String(ts||'');
+    var t=(+a[4])+':'+a[5];
+    if(b){
+      var d=Math.round((Date.UTC(+a[1],+a[2]-1,+a[3])-Date.UTC(+b[1],+b[2]-1,+b[3]))/864e5);
+      if(d===0) return tkL('сегодня ','today ')+t;
+      if(d===1) return tkL('завтра ','tomorrow ')+t;
+      if(d===-1) return tkL('вчера ','yesterday ')+t;
+    }
+    return a[3]+'.'+a[2]+((b && a[1]!==b[1]) ? '.'+a[1] : '')+' '+t;
+  }
+  function tkSec(n){ n=n|0; return n<60 ? tkL(n+' с', n+' s') : tkL(Math.round(n/60)+' мин', Math.round(n/60)+' min'); }
+  var TK_TRIG={sched:['по расписанию','on schedule'], boot:['при загрузке','at boot'], manual:['вручную','manually']};
+  function tkTrig(t){ var w=TK_TRIG[t]||TK_TRIG.manual; return tkL(w[0], w[1]); }
+  // the end of a run in words: [badge-class|'', words]; ok has no badge — the dot says it
+  function tkEnd(r){
+    switch(r.flag){
+      case 'ok':         return ['', tkL('успешно','succeeded')];
+      case 'killed':     return ['bd', tkL('оборвана по времени','stopped by the time limit')];
+      case 'cut':        return ['bd', tkL('оборвана: вывод больше 512 КБ','cut: output over 512 KB')];
+      case 'nodir':      return ['bd', tkL('нет рабочего каталога','no working directory')];
+      case 'stopped':    return ['', tkL('остановлена вручную','stopped by hand')];
+      case 'skip-busy':  return ['', tkL('пропущен: прошлый запуск ещё шёл','skipped: the previous run was still going')];
+      case 'skip-clock': return ['', tkL('пропущен: часы роутера не сверены','skipped: the router clock was not synced yet')];
+      case 'running':    return ['', tkL('идёт '+tkSec(r.dur),'running for '+tkSec(r.dur))];
+      default:           return ['bd', tkL('ошибка · код '+r.code, 'error · code '+r.code)];
+    }
+  }
+  function tkWhenText(t){   // «при загрузке и каждые 3 часа» / «только вручную»
+    var s=t.sched ? (cronSay(t.sched) || t.sched) : '';
+    if(t.boot && s) return tkL('при загрузке и ','at boot and ')+s;
+    if(t.boot) return tkL('при загрузке','at boot');
+    return s || tkL('только вручную','manually only');
+  }
+  function tkParse(line){   // a crontab line → {off, f:[5], cmd} or null
+    var l=String(line||''), off=false;
+    if(/^\s*#/.test(l)){ off=true; l=l.replace(/^\s*#\s*/, ''); }
+    var m=/^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/.exec(l);
+    return m ? {off:off, f:[m[1],m[2],m[3],m[4],m[5]], cmd:m[6]} : null;
+  }
+  function tkLabel(cmd){   // «led_ctl led_on ethled» out of «/usr/sbin/led_ctl led_on ethled> /dev/null 2>&1»
+    var c=String(cmd||'').replace(/^.*&&\s*/, ''), w=c.split(/\s+/), out=[];
+    if(!w.length || !w[0]) return c.slice(0, 40);
+    out.push(w[0].replace(/^.*\//, '').replace(/[>|<`].*$/, ''));
+    for(var i=1;i<w.length && out.length<3;i++){
+      var x=w[i];
+      if(/^-/.test(x)) continue;
+      if(/^[\/>|<`$&]/.test(x) || /^\d*>/.test(x)) break;
+      x=x.replace(/[>|<`].*$/, '');
+      if(!/^[A-Za-z0-9_.-]+$/.test(x)) break;
+      out.push(x);
+      if(w[i].indexOf('>')>=0) break;
+    }
+    return out.join(' ') || c.slice(0, 40);
+  }
+
+  // ---- the list ----
+  function openTasks(){
+    var fsig=focusMark();
+    openModal(null, {route:'rr-tasks', deck:true});
+    var body=document.getElementById('modal-body'), rep=navIfShown('rr-tasks', openTasks); loading(body);
+    fetchJson('/cgi-bin/data?section=tasks').then(function(d){
+      if(!screenAlive(body)) return;
+      if(!d || d.ok!==true || !Array.isArray(d.tasks)){ body.innerHTML=pnErrHtml('tk-list', 'Задачи', (d && d.msg) ? trNow(String(d.msg)) : pnErrText(null)); return; }
+      _tkFor=Array.isArray(d.foreign) ? d.foreign : [];
+      body.innerHTML=tkListHtml(d);
+      nwFocusBack(body, fsig);
+      tkListWire(body, d, rep);
+    }, function(e){ if(screenAlive(body)) body.innerHTML=pnErrHtml('tk-list', 'Задачи', pnErrText(e)); });
+  }
+  function tkTaskRow(t, now, off){
+    var on=!!t.enabled, run=t.running, last=t.last, badge='', ds=[tkWhenText(t)], dot=(on && !off) ? 'ok' : 'off';
+    if(run){ badge=' <span class="badge acc">'+esc(tkL('идёт','running'))+'</span>'; }
+    else if(last){
+      var e=tkEnd(last);
+      if(e[0]){ badge=' <span class="badge '+e[0]+'">'+esc(e[1])+'</span>'; if(on) dot='bad'; }
+      else ds.push(tkL('последний ','last ')+tkWhen(last.ts, now)+' — '+e[1]);
+    }
+    if(!on) ds.push(tkL('выключена — строки в cron нет','disabled — no cron line'));
+    // off: a task taken from crontab runs as a plain line of it (the router's `plain`: the line it wrote is active), the rest wait
+    else if(off) ds.push(t.plain ? tkL('работает обычной строкой crontab, пока Enodia снята с расписания','runs as a plain crontab line while Enodia is off the schedule')
+                                 : tkL('не запускается, пока Enodia снята с расписания','not run while Enodia is off the schedule'));
+    else if(t.next && t.next[0]) ds.push(tkL('следующий ','next ')+tkWhen(t.next[0], now));
+    if(t.lang==='lua') ds.push('Lua');
+    return lrowGo('task:'+t.id, '')+'<span class="dot'+(dot==='ok'?'':' '+dot)+'"></span>'
+      + '<div class="grow"><div class="nm"><span translate="no">'+esc(t.name)+'</span>'+badge+'</div><div class="ds" translate="no">'+esc(ds.join(' · '))+'</div></div>'
+      + '<label class="sw tk-sw"><input type="checkbox" data-tkid="'+esc(t.id)+'" aria-label="'+esc(tkL('задача включена','task enabled'))+'"'+(on?' checked':'')+'><i></i></label>'+CHEV+'</div>';
+  }
+  function tkListHtml(d){
+    var h='<div class="vwrap c3">'
+      + noteBox('<b>Задачи выполняются с правами root и без проверок:</b> ошибочный скрипт или правка чужой строки могут нарушить работу роутера, VPN или интернета. Отвечаете за них вы.', 'bad')
+      + '<div class="row wfull" style="gap:9px;flex-wrap:wrap;justify-content:flex-start"><div class="tabs2" id="tk-tabs" role="group" aria-label="Вид">'
+      + dvSeg('data-tkt', '0', 'Задачи', String(_tkTab)) + dvSeg('data-tkt', '1', 'Файл crontab', String(_tkTab)) + '</div></div>';
+    if(_tkTab===1) return h + tkRawHtml() + '</div>';
+    var ts=d.tasks, off=(d.form==='off');
+    if(off) h+=noteBox('<b>Enodia снята с расписания:</b> в crontab нет её строки самовосстановления — задачи не запускаются, а строки, взятые под управление, работают в нём как обычные. После деактивации расписание возвращает «Включить VPN».', 'warn');
+    h+='<div class="card w2" id="tk-mine"><div class="wt"><span>Ваши задачи</span><span class="sp"></span><span class="chip">'+ts.length+'</span></div>'
+      + (ts.length ? ts.map(function(t){ return tkTaskRow(t, d.now, off); }).join('')
+                   : '<div class="cline">Задач пока нет. Задача — свой скрипт, файл на роутере или команда; запускается по расписанию, при загрузке или кнопкой.</div>')
+      + '<div class="acts" style="justify-content:flex-start"><button type="button" class="btn pri" data-cact="tasknew">'+icUse('i-plus','s')+'Создать задачу</button></div></div>';
+    var ours=Array.isArray(d.ours) ? d.ours : [];
+    h+='<div class="card" id="tk-ours"><div class="wt"><span>Enodia</span><span class="help-slot" data-tip="Эти строки подсистемы переписывают сами — при установке, обновлении и включении VPN: правка здесь продержалась бы до первого такого события. Менять можно то расписание, у которого есть дорога; в текстовой вкладке «Файл crontab» правятся и они."></span><span class="sp"></span><span class="chip">'+ours.length+'</span></div>'
+      + ours.map(function(o){
+          var sc=String(o.cmd||'').split(/\s+/)[0], w=TK_OURS[sc], say=cronSay(o.sched) || o.sched,
+              ds=say+(w && w[1] ? ' · '+trNow(w[1]) : '')+((!w || !w[2]) ? ' · '+sc : '');
+          return (w && w[2] ? lrowGo(w[2], '') : '<div class="lrow">')
+            + '<div class="grow"><div class="nm">'+esc(w ? w[0] : sc)+'</div><div class="ds" translate="no">'+esc(ds)+'</div></div>'+(w && w[2] ? CHEV : '')+'</div>';
+        }).join('')
+      + (ours.length ? '' : '<div class="cline">Строк Enodia в crontab нет — переустановите систему или нажмите «Починить правила».</div>')+'</div>';
+    var fl=_tkFor, cut=Math.ceil(fl.length/3)||1, cols=[fl.slice(0,cut), fl.slice(cut,2*cut), fl.slice(2*cut)];
+    h+='<div class="card wfull" id="tk-for"><div class="wt"><span>Чужие строки</span><span class="help-slot" data-tip="Прошивка Xiaomi и всё, что добавлено не через панель. Вывод и ошибки этих строк cron выбрасывает; «Взять под управление» на экране строки сделает из неё задачу — с историей запусков и письмом при ошибке. Часть строк прошивки она может вернуть при своём обновлении."></span><span class="sp"></span><span class="chip">'+fl.length+'</span></div>'
+      + (fl.length ? '<div class="fauto">'+cols.map(function(c, ci){
+          return '<div>'+c.map(function(x, i){ return tkForRow(x, ci*cut+i); }).join('')+'</div>';
+        }).join('')+'</div>' : '<div class="cline">Чужих строк нет.</div>')+'</div>';
+    return h+'</div>';
+  }
+  function tkForRow(x, idx){
+    var line=b64toUtf8(x.line), p=tkParse(line), kn=tkKnown(line), badge='', nm, ds;
+    if(x.bad || !p){ nm=tkL('непонятная строка','unreadable line'); ds=line; badge=' <span class="badge bd">'+esc(tkL('cron её пропускает','cron skips it'))+'</span>'; }
+    else {
+      nm=tkLabel(p.cmd); ds=(cronSay(p.f.join(' ')) || p.f.join(' '))+(kn ? ' · '+trNow(kn.ds) : '');
+      if(kn) badge=' <span class="badge">'+esc(trNow(kn.badge))+'</span>';
+      if(!x.on) badge+=' <span class="badge">'+esc(tkL('выключена','disabled'))+'</span>';
+    }
+    return '<div class="lrow cl lr-fit" role="button" tabindex="0" data-tkl="'+idx+'">'
+      + '<div class="grow"><div class="nm"><span translate="no">'+esc(nm)+'</span>'+badge+'</div>'
+      + '<div class="ds" translate="no">'+esc(ds)+(p && !x.bad ? ' · <span class="mono">'+esc(line)+'</span>' : '')+'</div></div>'+CHEV+'</div>';
+  }
+  function tkRawHtml(){
+    return '<div class="card wfull" id="tk-raw"><div class="wt"><span translate="no">/etc/crontabs/root</span></div>'
+      + noteBox('Весь файл как есть — правьте что угодно. Строки Enodia подсистемы перепишут при установке, обновлении и включении VPN, а строки ваших задач панель выводит из их настроек: поправленные здесь, они вернутся при следующем сохранении задачи — меняйте их на вкладке «Задачи».', 'warn')
+      + '<div class="f"><textarea id="tk-rawtx" class="code" wrap="off" spellcheck="false" translate="no" style="min-height:420px" aria-label="crontab"></textarea></div>'
+      + '<div class="cline wr" id="tk-rawerr" role="alert"></div>'
+      + '<div class="cline">Перед записью роутер проверяет каждую строку: пять полей расписания и команда. Ошибка хотя бы в одной — файл не записывается, а номер строки и причина появляются здесь. Сохранение действует сразу, перезапускать ничего не нужно.</div>'
+      + '<div class="acts" style="justify-content:flex-start"><button type="button" class="btn pri" id="tk-rawsave" disabled>Сохранить файл</button>'
+      + '<button type="button" class="btn gh" id="tk-rawre">Вернуть как было</button><button type="button" class="btn sm gh" id="tk-rawcp">Копировать</button></div></div>';
+  }
+  function tkPost(action, params){   // a verb whose answer the screen reads itself (not a toast-and-reload postAction)
+    return tokPost('/cgi-bin/action', function(tok){
+      var b='action='+encodeURIComponent(action)+'&token='+encodeURIComponent(tok);
+      for(var k in params) if(params.hasOwnProperty(k)) b+='&'+encodeURIComponent(k)+'='+encodeURIComponent(params[k]);
+      return b;
+    });
+  }
+  function tkListWire(body, d, rep){
+    wireCacts(body);
+    wireSeg('tk-tabs', 'data-tkt', function(v){ _tkTab=+v; body.innerHTML=tkListHtml(d); tkListWire(body, d, rep); });
+    Array.prototype.forEach.call(body.querySelectorAll('.tk-sw'), function(l){
+      l.addEventListener('click', function(e){ e.stopPropagation(); });   // the switch must not open the task
+      var inp=l.querySelector('input');
+      inp.addEventListener('change', function(){
+        swPost(inp, 'task_toggle', null, inp.checked ? 'включаю задачу…' : 'выключаю задачу…', {id:inp.getAttribute('data-tkid'), on:inp.checked ? 1 : 0}, rep);
+      });
+    });
+    function openFor(el){ var x=_tkFor[+el.getAttribute('data-tkl')]; if(x) openCronLine(x); }
+    Array.prototype.forEach.call(body.querySelectorAll('[data-tkl]'), function(el){
+      el.addEventListener('click', function(){ openFor(el); });
+      el.addEventListener('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openFor(el); } });
+    });
+    if(_tkTab===1) tkRawWire(body, d, rep);
+    // a task is running — the list follows it (only while THIS screen is shown, and not on the file tab: a redraw there wiped what
+    // the human was typing every 3 s — review s.106; the file tab shows no run state anyway)
+    var g=++_tkPoll;
+    if(_tkTab===0 && d.tasks.some(function(t){ return !!t.running; })) setTimeout(function(){ if(g===_tkPoll && screenAlive(body) && navShows('rr-tasks')) rep(); }, 3000);
+  }
+  function tkRawWire(body, d, rep){
+    var tx=document.getElementById('tk-rawtx'), er=document.getElementById('tk-rawerr'), sv=document.getElementById('tk-rawsave');
+    // Saving is possible only from a text the router GAVE: the editor is empty while reading, and an empty text saved against
+    // the previous version wiped every line of the file but the task lines (review s.106, round 2).
+    function rawLoad(){
+      tx.value=''; tx.placeholder=trNow('читаю crontab…'); _tkRawRev=''; sv.disabled=true;
+      tkPost('cron_raw_get', {}).then(function(r){
+        if(!screenAlive(tx)) return;
+        if(!r || r.ok!==true || !r.rev){ er.textContent=trNow((r && r.msg) || 'роутер ответил не то'); return; }
+        _tkRaw=b64toUtf8(r.text||''); _tkRawRev=String(r.rev); tx.value=_tkRaw; tx.placeholder=''; sv.disabled=false;
+      }, function(){ if(screenAlive(tx)) er.textContent=trNow('роутер не ответил — откройте вкладку ещё раз'); });
+    }
+    // Read from the router on EVERY showing: a text kept from an earlier visit was older than the file, and saving it wiped what
+    // changed since (a task saved, a line toggled — review s.106). The save goes against the version read (`rev`): the router
+    // refuses it when the file has changed meanwhile.
+    rawLoad();
+    document.getElementById('tk-rawre').addEventListener('click', function(){ er.textContent=''; rawLoad(); });
+    document.getElementById('tk-rawcp').addEventListener('click', function(){ copyToClip(tx.value, 'crontab скопирован'); });
+    sv.addEventListener('click', function(){
+      er.textContent='';
+      if(!_tkRawRev) return;
+      postAction('cron_raw_save', tx.value.trim() ? null : 'Сохранить пустой crontab?\n\nИз файла уйдут все строки — прошивки, Enodia и ваши. Без строки самовосстановления Enodia задачи перестанут запускаться, а взятые под управление вернутся в файл обычными строками.',
+        'сохраняю crontab…', {text:b64utf8(tx.value), rev:_tkRawRev}, function(r){
+        if(r && r.ok){ _tkRaw=null; rep(); }
+        else if(r && r.msg && screenAlive(er)){ er.textContent=trNow(r.msg); }
+      });
+    });
+  }
+
+  // ---- a task: resolver, form, runs ----
+  function taskScrOpen(id){
+    var rep=(id==null);
+    if(rep) id=navSplit(_navKey).a;
+    id=String(id==null?'':id);
+    if(!/^t[0-9]{1,6}$/.test(id)){ if(!rep) openTasks(); return; }
+    var g=++_navGen;
+    _navPend=true;
+    function back(msg){
+      if(rep){ showToast(msg || 'не удалось обновить экран задачи', false); return; }
+      showToast(msg || 'роутер не ответил — открываю список задач', false); if(navSplit(location.hash).r==='rr-task') navReplace('rr-tasks'); openTasks();
+    }
+    tkPost('task_get', {id:id}).then(function(d){
+      if(g!==_navGen) return;   // the human left while the router answered — their choice wins
+      _navPend=false;
+      if(rep && !navShows('rr-task')) return;
+      if(!d || d.ok!==true || !d.task){ back(d && d.msg ? String(d.msg) : null); return; }
+      openTask(d);
+    }, function(){ if(g!==_navGen) return; _navPend=false; back(); });
+  }
+  function openTaskNew(){
+    openModal(null, {route:'rr-task-new', deck:true});
+    var body=document.getElementById('modal-body'); loading(body);
+    // languages are the router's: the list endpoint answers them without a task
+    fetchJson('/cgi-bin/data?section=tasks').then(function(d){
+      if(!screenAlive(body)) return;
+      tkFormShow(body, {langs:(d && d.langs) || ['sh'], now:(d && d.now) || '', task:null});
+    }, function(){ if(screenAlive(body)) tkFormShow(body, {langs:['sh'], now:'', task:null}); });
+  }
+  function openTask(d){
+    var t=d.task;
+    openModal(String(t.name||t.id), {route:'rr-task', arg:String(t.id), deck:true, sens:true});
+    tkFormShow(document.getElementById('modal-body'), d);
+  }
+  var TK_EX=[
+    {ru:'Пустой скрипт', lang:'sh', code:{ru:'#!/bin/sh\n# Что делает задача — одной строкой.\necho "задача запущена: $(date +%H:%M)"\n', en:'#!/bin/sh\n# What the task does — in one line.\necho "task started: $(date +%H:%M)"\n'}},
+    {ru:'sh · Остановить облачные сервисы Xiaomi', lang:'sh', code:{
+      ru:'#!/bin/sh\n# Останавливает облачные сервисы Xiaomi: загрузка роутера падает.\n# Mi Home и mesh перестанут видеть роутер — VPN и интернет это не трогает.\nfor s in mosquitto miwifi-roam smartcontroller xq_info_sync_mqtt cab_meshd miio_client; do\n  if [ -x /etc/init.d/$s ]; then\n    /etc/init.d/$s stop && echo "остановлен: $s"\n  fi\ndone\n',
+      en:'#!/bin/sh\n# Stops Xiaomi cloud services: the router load drops.\n# Mi Home and mesh stop seeing the router — VPN and internet are not affected.\nfor s in mosquitto miwifi-roam smartcontroller xq_info_sync_mqtt cab_meshd miio_client; do\n  if [ -x /etc/init.d/$s ]; then\n    /etc/init.d/$s stop && echo "stopped: $s"\n  fi\ndone\n'}},
+    {ru:'sh · Перезапустить Wi-Fi', lang:'sh', code:{ru:'#!/bin/sh\n# Перезапускает Wi-Fi: клиенты переподключатся за полминуты.\nwifi down\nsleep 5\nwifi up\n', en:'#!/bin/sh\n# Restarts Wi-Fi: clients reconnect within half a minute.\nwifi down\nsleep 5\nwifi up\n'}},
+    {ru:'sh · Перезагрузить роутер', lang:'sh', code:{ru:'#!/bin/sh\n# Плановая перезагрузка роутера.\nlogger -t enodia-task "плановая перезагрузка"\nsleep 5\nreboot\n', en:'#!/bin/sh\n# Planned router reboot.\nlogger -t enodia-task "planned reboot"\nsleep 5\nreboot\n'}},
+    {ru:'Lua · Записать строку в системный журнал', lang:'lua', code:{ru:'-- Lua 5.1: пишет строку в системный журнал (logread)\nos.execute([[logger -t enodia-task "задача отработала"]])\nprint(os.date("%H:%M:%S") .. " готово")\n', en:'-- Lua 5.1: writes a line to the system log (logread)\nos.execute([[logger -t enodia-task "task done"]])\nprint(os.date("%H:%M:%S") .. " done")\n'}}
+  ];
+  // CRON BUILDER — ONE for the task and the foreign line (mockup `CronB`): a preset writes the five fields, editing a field
+  // makes it «own expression»; the verdict and the next runs are asked from the router (debounced), the phrase is read here.
+  var TK_MODES=[['min','Каждые N минут'],['hour','Каждые N часов'],['day','Ежедневно'],['week','По дням недели'],['month','Ежемесячно'],['own','Своё выражение']];
+  function tkModeOf(f){
+    var M=f[0], H=f[1], D=f[2], Mo=f[3], W=f[4], mi=tkInt(M), hi=tkInt(H);
+    if(Mo!=='*') return {m:'own'};
+    if(/^\*\/\d+$/.test(M) && H==='*' && D==='*' && W==='*') return {m:'min', n:M.slice(2)};
+    if(mi!=null && /^\*\/\d+$/.test(H) && D==='*' && W==='*') return {m:'hour', n:H.slice(2), mm:mi};
+    if(mi!=null && hi!=null && D==='*' && W==='*') return {m:'day', h:hi, mm:mi};
+    if(mi!=null && hi!=null && D==='*' && tkDows(W)) return {m:'week', h:hi, mm:mi, w:tkDows(W)};
+    if(mi!=null && hi!=null && tkInt(D)!=null && W==='*') return {m:'month', h:hi, mm:mi, d:+D};
+    return {m:'own'};
+  }
+  function tkTime(h, m){ return (h<10?'0':'')+h+':'+(m<10?'0':'')+m; }
+  function cronBHtml(p, sched){
+    var f=(sched||'0 */3 * * *').trim().split(/\s+/); if(f.length!==5) f=['0','*/3','*','*','*'];
+    var st=tkModeOf(f);
+    var h='<div class="segbar sm" id="'+p+'-mode" role="group" aria-label="Расписание">'
+      + TK_MODES.map(function(x){ return dvSeg('data-'+p+'m', x[0], x[1], st.m); }).join('')+'</div>'
+      + '<div class="f2" style="align-items:end"><div id="'+p+'-sub">'+cronSubHtml(p, st)+'</div><div class="cron5">'
+      + [['минута',0],['час',1],['день месяца',2],['месяц',3],['день недели',4]].map(function(x){
+          return '<div class="f"><label for="'+p+'-f'+x[1]+'">'+x[0]+'</label><input id="'+p+'-f'+x[1]+'" class="mono" value="'+esc(f[x[1]])+'" spellcheck="false" autocapitalize="off" autocomplete="off"></div>';
+        }).join('')+'</div></div>'
+      + '<div class="cline" id="'+p+'-say" role="status" translate="no"></div>';
+    return h;
+  }
+  function cronSubHtml(p, st){
+    function fld(id, l, v, ty){ return '<div class="f"><label for="'+p+'-'+id+'">'+l+'</label><input id="'+p+'-'+id+'"'+(ty?' type="'+ty+'"':' inputmode="numeric"')+' value="'+esc(v)+'" autocomplete="off"></div>'; }
+    var t=tkTime(st.h==null?4:st.h, st.mm==null?0:st.mm);
+    switch(st.m){
+      case 'min':   return fld('n', 'Каждые, минут', st.n||'15');
+      case 'hour':  return '<div class="f2">'+fld('n', 'Каждые, часов', st.n||'3')+fld('mm', 'В минуту', st.mm==null?0:st.mm)+'</div>';
+      case 'day':   return fld('t', 'Время', t, 'time');
+      case 'week':  return '<div class="segbar sm" id="'+p+'-days" role="group" aria-label="Дни недели">'+[1,2,3,4,5,6,0].map(function(d){
+                      return '<div class="seg'+((st.w||[1]).indexOf(d)>=0?' on':'')+'" data-'+p+'d="'+d+'">'+['Вс','Пн','Вт','Ср','Чт','Пт','Сб'][d]+'</div>'; }).join('')+'</div>'+fld('t', 'Время', t, 'time');
+      case 'month': return '<div class="f2">'+fld('d', 'День месяца', st.d||1)+fld('t', 'Время', t, 'time')+'</div>';
+      default:      return '<div class="cline" style="margin-top:0">Пять полей справа — как в crontab: списки через запятую, диапазоны через дефис, шаг — «*/N» или «a-b/N». День недели 0–6, воскресенье — 0.</div>';
+    }
+  }
+  // wire the builder; get() → the five fields as one string. Router verdict lands in `<p>-say`.
+  function cronBWire(p, onChange){
+    var mode=null, tm=null, gen=0;
+    function v(id){ var e=document.getElementById(p+'-'+id); return e ? String(e.value||'').trim() : ''; }
+    function fields(){ return [0,1,2,3,4].map(function(i){ return v('f'+i); }); }
+    function setF(a){ for(var i=0;i<5;i++){ var e=document.getElementById(p+'-f'+i); if(e) e.value=a[i]; } }
+    function fromSub(){
+      var tt=/^(\d{1,2}):(\d{2})$/.exec(v('t')||''), h=tt ? +tt[1] : 4, m=tt ? +tt[2] : 0;
+      switch(mode){
+        case 'min':   setF(['*/'+(v('n')||'15'),'*','*','*','*']); break;
+        case 'hour':  setF([v('mm')||'0','*/'+(v('n')||'3'),'*','*','*']); break;
+        case 'day':   setF([String(m),String(h),'*','*','*']); break;
+        case 'week':  var ds=Array.prototype.map.call(document.querySelectorAll('#'+p+'-days .seg.on'), function(s){ return s.getAttribute('data-'+p+'d'); }).sort();
+                      setF([String(m),String(h),'*','*',ds.length ? ds.join(',') : '1']); break;
+        case 'month': setF([String(m),String(h),v('d')||'1','*','*']); break;
+      }
+    }
+    function ask(){
+      clearTimeout(tm);
+      var expr=fields().join(' '), say=document.getElementById(p+'-say'), g=++gen;
+      if(!say) return;
+      var ph=cronSay(expr);
+      say.textContent=(ph ? ph+' · ' : '')+tkL('проверяю…','checking…');
+      tm=setTimeout(function(){
+        var s=b64utf8(expr).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+        fetchJson('/cgi-bin/data?section=tasks_explain&s='+s).then(function(r){
+          if(g!==gen || !screenAlive(say)) return;
+          if(!r || r.ok!==true){ say.innerHTML='<span class="wr">'+esc(trNow((r && r.msg) || 'роутер ответил не то'))+'</span>'; return; }
+          var nx=(r.next||[]).map(function(x){ return tkWhen(x, r.now); });
+          say.innerHTML=(ph ? '<b>'+esc(ph)+'</b> · ' : '')+esc(nx.length ? tkL('ближайшие запуски: ','next runs: ')+nx.join(', ') : tkL('в ближайшие четыре года не сработает','will not fire within four years'));
+        }, function(){ if(g===gen && screenAlive(say)) say.textContent=(ph ? ph+' · ' : '')+tkL('роутер не ответил — проверка при сохранении','the router did not respond — checked on save'); });
+      }, 350);
+      if(onChange) onChange();
+    }
+    function wireSub(){
+      var sub=document.getElementById(p+'-sub'); if(!sub) return;
+      Array.prototype.forEach.call(sub.querySelectorAll('input'), function(e){ e.addEventListener('input', function(){ fromSub(); ask(); }); });
+      var days=document.getElementById(p+'-days');
+      if(days) days.addEventListener('click', function(e){
+        var s=e.target.closest ? e.target.closest('.seg') : null; if(!s) return;
+        s.classList.toggle('on'); segMark(s, s.classList.contains('on')); fromSub(); ask();
+      });
+      if(days) Array.prototype.forEach.call(days.querySelectorAll('.seg'), function(s){ s.setAttribute('role','button'); s.setAttribute('tabindex','0'); segMark(s, s.classList.contains('on')); });
+    }
+    var bar=document.getElementById(p+'-mode');
+    var cur=bar && bar.querySelector('.seg.on'); mode=cur ? cur.getAttribute('data-'+p+'m') : 'own';
+    wireSeg(bar, 'data-'+p+'m', function(m){
+      mode=m;
+      var f=fields(), st=tkModeOf(f); if(st.m!==m) st={m:m, h:tkInt(f[1]), mm:tkInt(f[0]), n:'', d:tkInt(f[2])};
+      document.getElementById(p+'-sub').innerHTML=cronSubHtml(p, st); wireSub();
+      if(m!=='own') fromSub();
+      ask();
+    });
+    [0,1,2,3,4].forEach(function(i){
+      var e=document.getElementById(p+'-f'+i); if(!e) return;
+      e.addEventListener('input', function(){
+        if(mode!=='own'){ mode='own'; Array.prototype.forEach.call(bar.querySelectorAll('.seg'), function(s){ segMark(s, s.getAttribute('data-'+p+'m')==='own'); });
+          document.getElementById(p+'-sub').innerHTML=cronSubHtml(p, {m:'own'}); }
+        ask();
+      });
+    });
+    wireSub(); ask();
+    return {get:function(){ return fields().join(' '); }};
+  }
+  function tkSegRow(id, label, help, opts, cur){
+    return '<div class="f"><label>'+label+(help ? '<span class="help-slot" data-tip="'+help+'"></span>' : '')+'</label></div>'
+      + '<div class="segbar sm" id="'+id+'" role="group" aria-label="'+label+'">'+opts.map(function(o){ return dvSeg('data-v', String(o[0]), o[1], String(cur)); }).join('')+'</div>';
+  }
+  function tkSegVal(id){ var s=document.querySelector('#'+id+' .seg.on'); return s ? s.getAttribute('data-v') : ''; }
+  function tkFormHtml(d){
+    var t=d.task, isNew=!t, kind=t ? t.kind : 'script', lang=t ? t.lang : 'sh', langs=d.langs||['sh'],
+        body=t ? b64toUtf8(t.body||'') : TK_EX[0].code[LANG==='en' ? 'en' : 'ru'],
+        to=t ? (t.timeout|0) : 300, tos=[[60,'1 мин'],[300,'5 мин'],[1800,'30 мин'],[0,'нет']];
+    if(!tos.some(function(o){ return o[0]===to; })) tos.push([to, tkSec(to)]);
+    var h='<div class="vwrap c3">'
+      // name strip (mockup TaskHead): one row, no title — a short card beside the editor was a column of air
+      + '<div class="card wfull" id="tk-head"><div class="row" style="gap:18px;flex-wrap:wrap;align-items:flex-end">'
+      + '<div class="f grow" style="margin-top:0;min-width:210px;max-width:560px"><label for="tk-name">Название задачи</label><input id="tk-name" maxlength="80" value="'+esc(t ? t.name : '')+'" spellcheck="false" autocomplete="off" translate="no"></div>'
+      + '<div class="row" style="gap:10px;padding-bottom:5px"><span style="font-size:14px;font-weight:500">Включена</span><span class="help-slot" data-tip="Выключенная задача остаётся в списке, а её строки в cron нет."></span>'+pnSw('tk-on', 'Включена', t ? !!t.enabled : true, false)+'</div></div>'
+      + (t ? '<div class="cline" id="tk-state" role="status" translate="no">'+esc(tkStateText(d))+'</div>' : '')+'</div>';
+    // what to run
+    h+='<div class="card wfull" id="tk-what"><div class="wt">Что запускать</div>'
+      + '<div class="tabs2" id="tk-src" role="group" aria-label="Что запускать">'+dvSeg('data-tks','script','Свой скрипт',kind)+dvSeg('data-tks','file','Файл на роутере',kind)+dvSeg('data-tks','cmd','Команда',kind)+'</div>'
+      + '<div id="tk-p-script"'+(kind==='script'?'':' hidden')+'><div class="f2" style="align-items:end"><div>'
+      +   tkSegRow('tk-lang', 'Язык', langs.indexOf('lua')>=0 ? 'Список — от роутера: на этом есть sh (busybox ash) и Lua 5.1. «По первой строке #!» — интерпретатор из неё.'
+                                                             : 'Список — от роутера: на этом есть только sh (busybox ash). «По первой строке #!» — интерпретатор из неё.',
+              [['sh','sh · busybox']].concat(langs.indexOf('lua')>=0 ? [['lua','Lua 5.1']] : []).concat([['auto','по первой строке #!']]), lang)+'</div>'
+      +   '<div class="f"><label for="tk-ex">Начать с примера</label><div class="inrow"><select id="tk-ex" style="flex:1;min-width:0">'
+      +   TK_EX.map(function(x, i){ return (x.lang==='lua' && langs.indexOf('lua')<0) ? '' : '<option value="'+i+'">'+esc(trNow(x.ru))+'</option>'; }).join('')
+      +   '</select><button type="button" class="btn gh" id="tk-exins">Вставить</button></div></div></div>'
+      +   '<div class="f"><label for="tk-body">Скрипт</label><textarea id="tk-body" class="code" wrap="off" spellcheck="false" autocapitalize="off" translate="no">'+esc(body)+'</textarea></div>'
+      +   '<div class="cline" id="tk-chk">'+(t ? esc(tkL('Синтаксис проверен роутером при сохранении · ', 'Syntax checked by the router on save · ')+body.split('\n').filter(function(x){ return x!==''; }).length+tkL(' строк',' lines'))
+                                                : 'Синтаксис роутер проверит при сохранении. Переводы строк Windows — если вставили из Блокнота — уберутся сами.')+'</div></div>'
+      + '<div id="tk-p-file"'+(kind==='file'?'':' hidden')+'><div class="f2" style="align-items:end">'
+      +   '<div class="f"><label for="tk-path">Путь к файлу</label><div class="inrow"><input id="tk-path" class="mono" value="'+esc(t && kind==='file' ? b64toUtf8(t.target) : '')+'" placeholder="/data/overlay/script.sh" spellcheck="false" autocomplete="off" translate="no"><button type="button" class="btn gh" id="tk-pathchk">Проверить</button></div></div>'
+      +   '<div class="f2"><div class="f"><label for="tk-args">Аргументы</label><input id="tk-args" class="mono" value="'+esc(t ? b64toUtf8(t.args) : '')+'" spellcheck="false" autocomplete="off" translate="no"></div>'
+      +   '<div class="f"><label for="tk-flang">Запускать как</label><select id="tk-flang">'
+      +   [['auto','по первой строке #!'],['sh','sh · busybox']].concat(langs.indexOf('lua')>=0 ? [['lua','Lua 5.1']] : []).map(function(o){ return '<option value="'+o[0]+'"'+((kind==='file' && lang===o[0]) || (kind!=='file' && o[0]==='auto') ? ' selected' : '')+'>'+esc(trNow(o[1]))+'</option>'; }).join('')
+      +   '</select></div></div></div><div class="cline" id="tk-pathst" translate="no"></div>'
+      +   '<details id="tk-fdet" style="margin-top:9px"><summary class="act mut">Открыть и изменить сам файл</summary>'
+      +   '<div class="f"><textarea id="tk-ftext" class="code" wrap="off" spellcheck="false" translate="no"></textarea></div>'
+      +   '<div class="acts" style="justify-content:flex-start"><button type="button" class="btn" id="tk-fsave">Сохранить файл</button><span class="cline" style="margin:0">пишется прямо в файл на роутере; прежняя версия остаётся рядом с суффиксом .bak</span></div></details></div>'
+      + '<div id="tk-p-cmd"'+(kind==='cmd'?'':' hidden')+'><div class="f"><label for="tk-cmd">Команда — одной строкой, как в crontab</label><input id="tk-cmd" class="mono" value="'+esc(t && kind==='cmd' ? b64toUtf8(t.target) : '')+'" placeholder="/etc/init.d/mosquitto stop" spellcheck="false" autocomplete="off" translate="no" style="max-width:none"></div>'
+      +   '<div class="cline">Выполняется через sh: работают и &&, и перенаправления. Длинную команду удобнее сделать скриптом.</div></div></div>';
+    // when (2) + how (1): one row of near height
+    h+='<div class="card w2" id="tk-when"><div class="wt"><span>Когда</span><span class="sp"></span><span class="cline" style="margin:0">по расписанию</span>'+pnSw('tk-son', 'По расписанию', t ? !!t.sched : true, false)+'</div>'
+      + '<div id="tk-sbody"'+((t && !t.sched) ? ' hidden' : '')+'>'+cronBHtml('tkc', t && t.sched ? t.sched : (isNew ? '30 4 * * *' : '0 */3 * * *'))+'</div>'
+      + '<div style="margin-top:6px">'+pnKv('При загрузке роутера', 'один раз после перезагрузки — когда поднимутся сеть и VPN', pnSw('tk-boot', 'При загрузке роутера', t ? !!t.boot : false, false), 'swrow')+'</div>'
+      + '<div class="f2" style="align-items:end"><div class="f" id="tk-delayf"'+((t && t.boot) ? '' : ' hidden')+'><label for="tk-delay">Задержка после загрузки, секунд</label><input id="tk-delay" inputmode="numeric" value="'+(t ? (t.delay|0) : 60)+'" autocomplete="off"></div>'
+      + '<div class="cline" style="padding-bottom:10px">Выключите и расписание, и загрузку — задача будет запускаться только кнопкой.</div></div></div>';
+    h+='<div class="card" id="tk-how"><div class="wt">Как запускать</div>'
+      + tkSegRow('tk-to', 'Ограничение по времени', 'Не уложилась — роутер обрывает задачу вместе со всем, что она запустила.', tos, to)
+      + tkSegRow('tk-ov', 'Если прошлый запуск ещё идёт', '', [['skip','пропустить'],['wait','дождаться'],['par','рядом']], t ? t.overlap : 'skip')
+      + tkSegRow('tk-pr', 'Приоритет', 'Низкий не отнимает процессор у VPN и панели.', [['normal','обычный'],['low','низкий']], t ? t.prio : 'low')
+      + '<div style="margin-top:8px">'+pnKv('Ждать сверки часов<span class="help-slot" data-tip="После перезагрузки часы роутера стоят на прошлом, пока не сверятся с интернетом."></span>', 'до сверки запуск по расписанию пропускается', pnSw('tk-clock', 'Ждать сверки часов', t ? !!t.clockwait : true, false), 'swrow')+'</div>'
+      + '<details style="margin-top:4px"><summary class="act mut">Рабочий каталог и переменные окружения</summary>'
+      + '<div class="f"><label for="tk-wd">Рабочий каталог</label><input id="tk-wd" class="mono" value="'+esc(t ? b64toUtf8(t.workdir) : '')+'" placeholder="/tmp" spellcheck="false" autocomplete="off" translate="no"></div>'
+      + '<div class="f"><label for="tk-env">Переменные — по одной в строке<span class="help-slot" data-tip="Пароли и токены держите здесь, а не в тексте скрипта: в бэкап без ключей переменные не попадают."></span></label><textarea id="tk-env" spellcheck="false" placeholder="NAME=value" translate="no">'+esc(t ? b64toUtf8(t.env) : '')+'</textarea></div></details></div>';
+    h+='<div class="card wfull" id="tk-out"><div class="wt">Вывод и письма</div><div class="fauto">'
+      + '<div>'+tkSegRow('tk-keep', 'Хранить вывод', 'До 32 КБ на запуск, в оперативной памяти: флеш роутера на запуски не тратится, после перезагрузки история начинается заново.', [[1,'последний'],[5,'5 запусков'],[0,'не хранить']], t ? t.keep : 5)+'</div>'
+      + '<div>'+tkSegRow('tk-mail', 'Письмо', 'Ошибка — ненулевой код выхода или обрыв по времени. О задаче — не чаще письма в час: повторы приходят числом в следующем.', [['never','никогда'],['fail','при ошибке'],['always','каждый раз']], t ? t.mail : 'fail')
+      +   '<div class="cline">Почта настраивается в «Уведомлениях».</div><div class="acts" style="justify-content:flex-start;margin-top:6px">'+'<button type="button" class="btn sm gh" data-cact="notify">Уведомления</button></div></div>'
+      + '<div style="padding-top:6px">'+pnKv('Успешные — в журнал событий', 'ошибки и обрывы попадают туда всегда; о задаче — не чаще раза в час', pnSw('tk-journal', 'Успешные — в журнал событий', t ? !!t.journal : false, false), 'swrow')+'</div></div></div>';
+    if(t) h+='<div class="card wfull" id="tk-runs"><div class="wt">Последние запуски</div><div id="tk-runsb">'+tkRunsHtml(d)+'</div></div>';
+    h+='<div class="cline wr wfull" id="tk-err" role="alert"></div>';
+    h+= t ? '<div class="acts wfull" style="justify-content:flex-start;flex-wrap:wrap">'
+            + '<button type="button" class="btn pri" id="tk-save">Сохранить</button>'
+            + '<button type="button" class="btn" id="tk-run">'+icUse('i-zap','s')+(d.running ? 'Остановить' : 'Запустить сейчас')+'</button>'
+            + '<button type="button" class="btn gh" id="tk-dup">Дублировать</button><button type="button" class="btn gh" id="tk-del">'+icUse('i-trash','s')+'Удалить задачу</button></div>'
+          : '<div class="acts wfull" style="justify-content:flex-start;flex-wrap:wrap"><button type="button" class="btn pri" id="tk-save">Создать задачу</button>'
+            + '<button type="button" class="btn" id="tk-saverun">'+icUse('i-zap','s')+'Создать и запустить</button><button type="button" class="btn gh" id="tk-cancel">Отмена</button></div>';
+    return h+'</div>';
+  }
+  function tkStateText(d){
+    var t=d.task, r=(d.runs||[])[0], s=[];
+    if(d.running) s.push(tkL('выполняется с ','running since ')+tkWhen(d.running.since, d.now));
+    else if(r){ var e=tkEnd(r); s.push(tkL('последний запуск — ','last run — ')+tkWhen(r.ts, d.now)+', '+e[1]+(r.flag==='ok' || r.flag==='err' ? ', '+tkSec(r.dur) : '')); }
+    else s.push(tkL('запусков с загрузки роутера не было','no runs since the router booted'));
+    if(t.enabled && d.next && d.next[0]) s.push(tkL('следующий — ','next — ')+tkWhen(d.next[0], d.now));
+    return s.join(' · ');
+  }
+  var _tkSel=0;
+  function tkRunsHtml(d){
+    var rs=(d.runs||[]).slice();
+    // the run going on NOW leads the list with its output so far (follow() refreshes it): without it the block said «no runs»
+    // under «running since» for the whole run (BE7000 07.10.2026). Indices of finished runs stay put when it ends — it becomes row 0
+    if(d.running) rs.unshift({ts:d.running.since, trig:d.running.trig, dur:d.running.dur, flag:'running', kept:true, out:d.running.out||''});
+    if(!rs.length) return '<div class="cline" style="margin-top:0">Запусков с загрузки роутера не было. История и вывод живут в оперативной памяти: после перезагрузки начинаются заново.</div>';
+    if(_tkSel>=rs.length) _tkSel=0;
+    var sel=rs[_tkSel], out=(sel && (sel.kept===true || sel.out)) ? b64toUtf8(sel.out||'') : null;   // kept: an empty output is still kept
+    var none=(sel && sel.flag==='running') ? tkL('(вывода пока нет)','(no output yet)') : tkL('(нет вывода)','(no output)');
+    return '<div class="f2" style="align-items:start;gap:4px 20px"><div>'
+      + rs.map(function(r, i){
+          var e=tkEnd(r), dot=(r.flag==='ok') ? '' : ((r.flag||'').indexOf('skip')===0 || r.flag==='stopped' || r.flag==='running') ? ' off' : ' bad';
+          return '<div class="lrow cl'+(i===_tkSel?' on':'')+'" role="button" tabindex="0" data-tkr="'+i+'"'+(i===_tkSel?' aria-current="true"':'')+'><span class="dot'+dot+'"></span><div class="grow"><div class="nm" translate="no">'+esc(tkWhen(r.ts, d.now))+'</div>'
+            + '<div class="ds" translate="no">'+esc(tkTrig(r.trig)+(r.flag==='ok' || r.flag==='err' ? ' · '+tkSec(r.dur)+' · '+tkL('код ','code ')+r.code : '')+(r.flag==='ok' || r.flag==='err' ? '' : ' · '+e[1]))+'</div></div>'
+            + (i===_tkSel ? '<span class="chip acc">'+esc(tkL('вывод справа','output on the right'))+'</span>' : '')+'</div>';
+        }).join('')+'</div><div>'
+      + '<pre class="term" id="tk-term" tabindex="0" role="log" translate="no" aria-label="Вывод запуска">'+esc(out==null ? tkL('(вывод этого запуска не сохранён)','(this run\'s output was not kept)') : (out.replace(/\n$/,'') || none))+'</pre>'
+      + '<div class="acts" style="justify-content:flex-start"><button type="button" class="btn sm gh" id="tk-cp">Копировать вывод</button></div></div></div>';
+  }
+  function tkFormShow(body, d){
+    body.innerHTML=tkFormHtml(d);
+    var t=d.task, cb=cronBWire('tkc');
+    wireCacts(body);
+    function el(id){ return document.getElementById(id); }
+    function err(x, id){ el('tk-err').textContent=x ? trNow(x) : ''; if(id && el(id)) try{ el(id).focus(); }catch(e){} }
+    var kind=t ? t.kind : 'script';
+    wireSeg('tk-src', 'data-tks', function(v){ kind=v; ['script','file','cmd'].forEach(function(k){ el('tk-p-'+k).hidden=(k!==v); }); });
+    ['tk-lang','tk-to','tk-ov','tk-pr','tk-keep','tk-mail'].forEach(function(id){ wireSeg(id, 'data-v', function(){}); });
+    el('tk-son').addEventListener('change', function(){ el('tk-sbody').hidden=!el('tk-son').checked; });
+    el('tk-boot').addEventListener('change', function(){ el('tk-delayf').hidden=!el('tk-boot').checked; });
+    el('tk-exins').addEventListener('click', function(){
+      var x=TK_EX[+el('tk-ex').value]; if(!x) return;
+      var cur=el('tk-body').value, code=x.code[LANG==='en' ? 'en' : 'ru'];
+      if(cur.trim() && cur!==code && !askConfirm('Заменить текст скрипта примером?')) return;
+      el('tk-body').value=code;
+      var ls=document.querySelector('#tk-lang .seg[data-v="'+x.lang+'"]'); if(ls) ls.click();
+    });
+    // file: «check» asks the router about the path; «open» loads the text lazily (a file can be big or secret)
+    function fileInfo(){
+      var p=el('tk-path').value.trim(), st=el('tk-pathst'); if(!p){ st.textContent=''; return; }
+      st.textContent=tkL('проверяю…','checking…');
+      tkPost('task_file_get', {path:b64utf8(p)}).then(function(r){
+        if(!screenAlive(st)) return;
+        if(!r || r.ok!==true){ st.innerHTML='<span class="wr">'+esc(trNow((r && r.msg) || 'роутер ответил не то'))+'</span>'; return; }
+        var txt=b64toUtf8(r.text||''), first=txt.split('\n')[0];
+        st.textContent=tkL('файл есть · ','the file exists · ')+r.size+tkL(' Б',' B')+(/^#!/.test(first) ? ' · '+first : '')
+          +(/^\/tmp\//.test(p) ? tkL(' · лежит в /tmp — исчезнет при перезагрузке',' · in /tmp — gone after a reboot') : '');
+        el('tk-ftext').value=txt; el('tk-ftext').setAttribute('data-p', p);
+      }, function(){ if(screenAlive(st)) st.textContent=tkL('роутер не ответил','the router did not respond'); });
+    }
+    el('tk-pathchk').addEventListener('click', fileInfo);
+    el('tk-fdet').addEventListener('toggle', function(){ if(el('tk-fdet').open && el('tk-ftext').getAttribute('data-p')!==el('tk-path').value.trim()) fileInfo(); });
+    el('tk-fsave').addEventListener('click', function(){
+      var p=el('tk-ftext').getAttribute('data-p'); if(!p){ err('сначала откройте файл кнопкой «Проверить»', 'tk-path'); return; }
+      postAction('task_file_put', 'Записать файл на роутере?\n\nПрежняя версия останется рядом с суффиксом .bak.', 'сохраняю файл…', {path:b64utf8(p), text:b64utf8(el('tk-ftext').value)});
+    });
+    if(t && t.kind==='file') fileInfo();
+    // runs: a click shows that run's output; a running task is followed while THIS screen is shown
+    function wireRuns(dd){
+      var rb=el('tk-runsb'); if(!rb) return;
+      Array.prototype.forEach.call(rb.querySelectorAll('[data-tkr]'), function(r){
+        function pick(){ _tkSel=+r.getAttribute('data-tkr'); rb.innerHTML=tkRunsHtml(dd); wireRuns(dd); }
+        r.addEventListener('click', pick);
+        r.addEventListener('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); pick(); } });
+      });
+      var cp=el('tk-cp'); if(cp) cp.addEventListener('click', function(){ copyToClip(el('tk-term').textContent, 'вывод скопирован'); });
+    }
+    var g=++_tkPoll;
+    function follow(dd){
+      wireRuns(dd);
+      if(!dd.running) return;
+      setTimeout(function(){
+        if(g!==_tkPoll || !screenAlive(body) || !navShows('rr-task')) return;
+        tkPost('task_get', {id:t.id}).then(function(n){
+          if(g!==_tkPoll || !screenAlive(body) || !n || n.ok!==true) return;
+          // only the parts the router changes — the form keeps what the human is typing, the runs block the run they picked
+          el('tk-runsb').innerHTML=tkRunsHtml(n); el('tk-state').textContent=tkStateText(n);
+          var rb=el('tk-run'); if(rb && !n.running) rb.innerHTML=icUse('i-zap','s')+trNow('Запустить сейчас');
+          d.running=n.running; follow(n);
+        });
+      }, 2000);
+    }
+    if(t) follow(d);
+    // after «run» / «stop»: only the runs, the state and the button — the form keeps what the human is typing (a full redraw
+    // dropped unsaved edits — review s.106); the run is registered before the router answers, so the first read already sees it
+    function runsNow(){
+      tkPost('task_get', {id:t.id}).then(function(n){
+        if(!screenAlive(body) || !n || n.ok!==true) return;
+        el('tk-runsb').innerHTML=tkRunsHtml(n); el('tk-state').textContent=tkStateText(n);
+        var rb=el('tk-run'); if(rb) rb.innerHTML=icUse('i-zap','s')+trNow(n.running ? 'Остановить' : 'Запустить сейчас');
+        d.running=n.running; g=++_tkPoll; follow(n);
+      });
+    }
+    function collect(){
+      var name=el('tk-name').value.trim(), p={};
+      if(!name) return err('введите название задачи', 'tk-name');
+      p.name_b64=b64utf8(name); p.enabled=el('tk-on').checked ? 1 : 0; p.kind=kind;
+      if(kind==='script'){
+        var b=el('tk-body').value;
+        if(!b.trim()) return err('скрипт пустой', 'tk-body');
+        if(b64utf8(b).length>21800) return err('скрипт больше 16 КБ — положите его файлом на роутер', 'tk-body');
+        p.lang=tkSegVal('tk-lang')||'sh'; p.body_b64=b64utf8(b);
+      } else if(kind==='file'){
+        var fp=el('tk-path').value.trim(); if(!/^\//.test(fp)) return err('путь к файлу — полный, от /', 'tk-path');
+        p.lang=el('tk-flang').value; p.target_b64=b64utf8(fp); p.args_b64=b64utf8(el('tk-args').value.trim());
+      } else {
+        var c=el('tk-cmd').value.trim(); if(!c) return err('введите команду', 'tk-cmd');
+        p.lang='sh'; p.target_b64=b64utf8(c);
+      }
+      p.sched_b64=el('tk-son').checked ? b64utf8(cb.get()) : '';
+      p.boot=el('tk-boot').checked ? 1 : 0;
+      var dl=el('tk-delay').value.trim(); if(!/^\d{1,4}$/.test(dl) || +dl>3600) return err('задержка — число секунд, не больше 3600', 'tk-delay');
+      p.delay=dl; p.timeout=tkSegVal('tk-to')||'300'; p.overlap=tkSegVal('tk-ov')||'skip'; p.prio=tkSegVal('tk-pr')||'low';
+      p.clockwait=el('tk-clock').checked ? 1 : 0; p.keep=tkSegVal('tk-keep')||'5'; p.mail=tkSegVal('tk-mail')||'fail';
+      p.journal=el('tk-journal').checked ? 1 : 0; p.workdir_b64=b64utf8(el('tk-wd').value.trim()); p.env_b64=b64utf8(el('tk-env').value);
+      if(t) p.id=t.id;
+      err(''); return p;
+    }
+    function save(run){
+      var p=collect(); if(!p) return;
+      if(run) p.run=1;
+      postAction('task_save', null, t ? 'сохраняю задачу…' : 'создаю задачу…', p, function(r){
+        if(!r || !r.ok){ if(r && r.msg && screenAlive(body)) err(String(r.msg)); return; }
+        if(!t || run) _tkSel=0;
+        taskScrOpen(r.id);
+      });
+    }
+    el('tk-save').addEventListener('click', function(){ save(false); });
+    if(el('tk-saverun')) el('tk-saverun').addEventListener('click', function(){ save(true); });
+    if(el('tk-cancel')) el('tk-cancel').addEventListener('click', function(){ navUp(); });
+    if(t){
+      el('tk-run').addEventListener('click', function(){
+        if(d.running) postAction('task_stop', null, 'останавливаю задачу…', {id:t.id}, function(){ runsNow(); });
+        else postAction('task_run', null, 'запускаю задачу…', {id:t.id}, function(r){ if(r && r.ok) _tkSel=0; runsNow(); });
+      });
+      el('tk-dup').addEventListener('click', function(){ postAction('task_dup', null, 'копирую задачу…', {id:t.id}, function(r){ if(r && r.ok && r.id) taskScrOpen(r.id); }); });
+      el('tk-del').addEventListener('click', function(){
+        postAction('task_del', 'Удалить задачу «'+t.name+'»?\n\nСкрипт и настройки удалятся с роутера, строка уйдёт из crontab.', 'удаляю задачу…', {id:t.id},
+          function(r){ if(r && r.ok){ navReplace('rr-tasks'); openTasks(); } });
+      });
+    }
+  }
+
+  // ---- a foreign crontab line: a step without an address (the line is identified by its content, not by a URL) ----
+  function openCronLine(x){
+    var line=b64toUtf8(x.line), p=tkParse(line), kn=tkKnown(line);
+    openModal(p ? tkLabel(p.cmd) : tkL('Строка crontab','Crontab line'), {transient:'чужую строку узнают по содержимому — адреса у неё нет', deck:true});
+    var body=document.getElementById('modal-body');
+    var h='<div class="vwrap c3"><div class="card w2" id="tl-line"><div class="ct"><span translate="no">'+esc(p ? tkLabel(p.cmd) : tkL('непонятная строка','unreadable line'))+'</span>'+(kn ? ' <span class="badge">'+esc(trNow(kn.badge))+'</span>' : '')+'</div>'
+      + '<pre class="term" translate="no">'+esc(line)+'</pre>'
+      + (p && !x.bad ? '<div style="margin-top:6px">'+pnKv('Включена', 'выключенная остаётся в файле строкой с «#» в начале', pnSw('tl-on', 'Включена', !p.off, false), 'swrow')+'</div>' : '')
+      + '<div class="cline">'+(x.bad || !p ? 'cron эту строку пропускает: в ней нет пяти полей расписания и команды. Исправьте её в поле ниже или удалите.'
+                                           : 'Чужая строка — не задача панели: её вывод и ошибки cron выбрасывает, и что она делает и удаётся ли, отсюда не видно.')+'</div>'
+      + (kn ? '<div class="cline wr">'+esc(trNow(kn.ds))+'</div>' : '')+'</div>';
+    if(p && !x.bad){
+      h+='<div class="card" id="tl-cmd"><div class="wt">Что запускать</div><div class="f" style="margin-top:0"><label for="tl-c">Команда</label><input id="tl-c" class="mono" value="'+esc(p.cmd)+'" spellcheck="false" autocomplete="off" translate="no" style="max-width:none"></div>'
+        + '<div class="cline" id="tl-out" translate="no"></div></div>'
+        + '<div class="card w2" id="tl-when"><div class="wt">Когда</div>'+cronBHtml('tlc', p.f.join(' '))+'</div>'
+        + '<div class="card" id="tl-adopt"><div class="wt">Взять под управление</div>'
+        + noteBox('Строка станет задачей: история запусков с выводом, ограничение по времени, письмо при ошибке, запуск при загрузке и место в бэкапе. Файл останется где лежит, строка в crontab заменится строкой задачи, а при удалении или отключении Enodia вернётся обычной строкой — закомментированной, если задача выключена или без Enodia работать не может.', 'info')
+        + '<div class="acts" style="justify-content:flex-start"><button type="button" class="btn" id="tl-adoptb">Взять под управление</button></div></div>';
+    } else {
+      h+='<div class="card" id="tl-fix"><div class="wt">Исправить строку</div><div class="f" style="margin-top:0"><input id="tl-raw" class="mono" value="'+esc(line)+'" spellcheck="false" autocomplete="off" translate="no" style="max-width:none"></div></div>';
+    }
+    h+='<div class="cline wr wfull" id="tl-err" role="alert"></div><div class="acts wfull" style="justify-content:flex-start;flex-wrap:wrap">'
+      + '<button type="button" class="btn pri" id="tl-save">Сохранить строку</button>'
+      + (p && !x.bad ? '<button type="button" class="btn" id="tl-run">'+icUse('i-zap','s')+'Запустить сейчас</button>' : '')
+      + '<button type="button" class="btn gh" id="tl-del">'+icUse('i-trash','s')+'Удалить строку</button></div></div>';
+    body.innerHTML=h;
+    function el(id){ return document.getElementById(id); }
+    function err(m){ el('tl-err').textContent=m ? trNow(m) : ''; }
+    function done(r){ if(r && r.ok){ navUp(); } else if(r && r.msg && screenAlive(body)) err(String(r.msg)); }
+    var cb=(p && !x.bad) ? cronBWire('tlc') : null;
+    if(el('tl-on')) el('tl-on').addEventListener('change', function(){
+      var on=el('tl-on');
+      swPost(on, 'cron_line_toggle', null, on.checked ? 'включаю строку…' : 'выключаю строку…', {old:x.line}, done);
+    });
+    el('tl-save').addEventListener('click', function(){
+      var nl;
+      if(cb){ var c=el('tl-c').value.trim(); if(!c){ err('введите команду'); return; } nl=(p.off ? '# ' : '')+cb.get()+' '+c; }
+      else nl=el('tl-raw').value.trim();
+      if(!nl){ err('строка пустая — для удаления есть своя кнопка'); return; }
+      if(nl===line){ navUp(); return; }
+      err(''); postAction('cron_line_set', null, 'сохраняю строку…', {old:x.line, new:b64utf8(nl)}, done);
+    });
+    el('tl-del').addEventListener('click', function(){
+      postAction('cron_line_set', 'Удалить строку из crontab?\n\n'+line+(kn ? '\n\n'+kn.ds : ''), 'удаляю строку…', {old:x.line, new:''}, done);
+    });
+    if(el('tl-adoptb')) el('tl-adoptb').addEventListener('click', function(){
+      postAction('cron_adopt', null, 'делаю задачу из строки…', {old:x.line}, function(r){ if(r && r.ok && r.id) taskScrOpen(r.id); else done(r); });
+    });
+    // «run now» — the console's verb: the same root command line, its output shown here (one copy of «run and capture»)
+    if(el('tl-run')) el('tl-run').addEventListener('click', function(){
+      var c=el('tl-c').value.trim(), out=el('tl-out'); if(!c) return;
+      out.textContent=tkL('выполняю…','running…');
+      tkPost('console', {cmd:c}).then(function(r){
+        if(!screenAlive(out)) return;
+        var o=(r && typeof r.out==='string') ? r.out.replace(/\n$/,'') : '';
+        out.innerHTML='<pre class="term" translate="no" style="margin-top:6px">'+esc((o || tkL('(нет вывода)','(no output)'))+'\n'+tkL('(код выхода: ','(exit code: ')+((r && r.code!=null) ? r.code : '?')+')')+'</pre>';
+      }, function(){ if(screenAlive(out)) out.textContent=tkL('роутер не ответил','the router did not respond'); });
+    });
+  }
+
+  // ===== ACCESS SCHEDULES («Расписания доступа»: access-sched.sh; mockup rt-sched · rt-sched-p · the rt-dev tab, 08.10.2026) =====
+  // The ROUTER decides: the state now, why, until when and the week's next changes come in its answer — its calendar and its TZ;
+  // the panel only words them (no calendar arithmetic here, as with the tasks' next runs; «через 20 мин» is one subtraction of two
+  // router epochs). A schedule = devices by MAC + windows of a week + the state outside them. «Ограничено» is not OFFERED until the
+  // router can do it (its per-category sets are a later phase) — a window that already has it (a hand edit) is still shown.
+  // «Ограничено» is offered when the router has its filter (component «Фильтр по категориям» — `filter.inst` of the answer); a
+  // window that already has it (a backup, a hand edit, the component removed afterwards) is still shown.
+  function schLimOn(d){ return !!(d && d.filter && d.filter.inst); }
+  var SCH_LIM_OPT=[0, 30, 60, 90, 120, 180, 240, 360, 480];   // the day limit's choices, minutes (0 = none)
+  var _sch=null;   // the last list answer (section=sched): the device screen, the device rows and the home card read it
+  var SCH_ST={open:['Открыто','Open','opn'], limited:['Ограничено','Limited','lim'], closed:['Закрыто','Closed','blk']};
+  var SCH_RK={open:0, limited:1, closed:2};
+  var SCH_WD=['вс','пн','вт','ср','чт','пт','сб'], SCH_WD_EN=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  // the panel's week starts on Monday; the router numbers days as `date +%w` (0 = Sunday)
+  var SCH_ORD=[1,2,3,4,5,6,0], SCH_DN=['Вс','Пн','Вт','Ср','Чт','Пт','Сб'], SCH_DN_EN=['Su','Mo','Tu','We','Th','Fr','Sa'];
+  // ONE cache of the router's answer (`_sch`): every reader of section=sched passes its answer here
+  function schTake(d){ if(d && d.ok===true && Array.isArray(d.items)) _sch=d; return d; }
+  function schLoad(){ return fetchJson('/cgi-bin/data?section=sched').then(schTake); }
+  function schOfMac(mac, d){
+    d=d||_sch; mac=String(mac||'').toLowerCase();
+    if(!d || !mac || !Array.isArray(d.items)) return null;
+    for(var i=0;i<d.items.length;i++) if((d.items[i].devs||[]).indexOf(mac)>=0) return d.items[i];
+    return null;
+  }
+  // «22:00» today, «завтра 07:00», «ср 18:00» within the week, «12.10 07:00» further — against the router's own «now»
+  function schWhen(x, now){
+    var a=/^(\d{4})-(\d\d)-(\d\d) (\d\d:\d\d)/.exec((x && x.at)||''), b=/^(\d{4})-(\d\d)-(\d\d)/.exec(now||'');
+    if(!a) return '';
+    var dd=b ? Math.round((Date.UTC(+a[1],+a[2]-1,+a[3])-Date.UTC(+b[1],+b[2]-1,+b[3]))/864e5) : 99;
+    if(dd===0) return a[4];
+    if(dd===1) return tkL('завтра ','tomorrow ')+a[4];
+    if(dd>1 && dd<7) return tkL(SCH_WD[x.w], SCH_WD_EN[x.w])+' '+a[4];
+    return a[3]+'.'+a[2]+' '+a[4];
+  }
+  // a day of the router's calendar without the time: «сегодня» / «завтра» / a weekday this week / «20.10»
+  function schDay(x, now){
+    var a=/^(\d{4})-(\d\d)-(\d\d)/.exec((x && x.at)||''), b=/^(\d{4})-(\d\d)-(\d\d)/.exec(now||'');
+    if(!a) return '';
+    var dd=b ? Math.round((Date.UTC(+a[1],+a[2]-1,+a[3])-Date.UTC(+b[1],+b[2]-1,+b[3]))/864e5) : 99;
+    if(dd===0) return tkL('сегодня','today');
+    if(dd===1) return tkL('завтра','tomorrow');
+    if(dd>1 && dd<7) return tkL(SCH_WD[x.w], SCH_WD_EN[x.w]);
+    return a[3]+'.'+a[2];
+  }
+  // holidays — «Каникулы по 20.10 включительно»: `hol` is the last rested minute (the router acts again at 00:00 after it)
+  // lowercase for a phrase inside another — in Russian only: English keeps «Mon», «Tue» and the like
+  function schLow(t){ t=String(t); return tkL(t.toLowerCase(), t); }
+  function schHolWord(it, d){ var w=schDay(it.hol, d.now); return tkL('Каникулы по '+w+' включительно','Holidays through '+w); }
+  // «через 20 мин» / «через 2 ч 10 мин» — the router's epochs, one subtraction; further than a day — nothing (the date says it)
+  function schIn(x, d){
+    if(!x || x.ue==null || d.ne==null) return '';
+    var m=Math.max(0, Math.round((x.ue-d.ne)/60));
+    if(m>=1440) return '';
+    if(m<60) return tkL('через '+m+' мин','in '+m+' min');
+    return tkL('через '+Math.floor(m/60)+' ч'+(m%60 ? ' '+(m%60)+' мин' : ''), 'in '+Math.floor(m/60)+' h'+(m%60 ? ' '+(m%60)+' min' : ''));
+  }
+  function schStWord(s){ var w=SCH_ST[s]||SCH_ST.open; return tkL(w[0], w[1]); }
+  function schVerb(s){ return s==='closed' ? tkL('закроется','closes') : s==='open' ? tkL('откроется','opens') : tkL('будет ограничено','gets limited'); }
+  // The state for a person: words + the chip's colour. Not synced / switched off — said and not coloured: nothing acts then.
+  // ACTING NOW = the clock synced AND the router's tick scheduled (`tick`: deactivation takes its cron line, and then nothing may
+  // stand — nobody would lift it; access-sched.sh sc_ticking). The panel locks actions and says why by the same two facts.
+  function schLive(d){ return !!(d && d.clock && d.tick!==0); }
+  // «ограничено» needs the filter: dead (it did not answer after a restart) or missing — the router opened those devices whole
+  // (access-sched.sh sc_ffail; fail-open), and the panel must not call them «Ограничено»
+  function schLimDead(d){ var f=d && d.filter && d.filter.state; return f==='dead' || f==='nobin'; }
+  function schLimNote(d){
+    if(!schLimDead(d)) return '';
+    var pkg='<div class="acts" style="justify-content:flex-start;margin-top:9px"><button type="button" class="btn" data-cact="rr-pkg">Компоненты</button></div>';
+    // `old` — the filter that did not answer is an older build than the router's code (a config word it does not know): the cure
+    // is in «Компоненты», not «the next minute» (access-sched.sh sc_fold; review s.113, round 4)
+    if(d.filter.state==='dead' && d.filter.old) return noteBox('<b>«Ограничено» и безопасный поиск сейчас не действуют:</b> стоит прежняя сборка фильтра по категориям. Эти устройства открыты целиком — обновите компонент «Фильтр по категориям».', 'warn')+pkg;
+    return d.filter.state==='nobin'
+      ? noteBox('<b>«Ограничено» и безопасный поиск сейчас не действуют:</b> нет компонента «Фильтр по категориям». Эти устройства открыты целиком.', 'warn')
+        + pkg
+      : noteBox('<b>«Ограничено» и безопасный поиск сейчас не действуют:</b> фильтр по категориям не ответил после перезапуска. Эти устройства открыты целиком; роутер пробует снова каждую минуту.', 'warn');
+  }
+  function schSay(it, d){
+    if(!d.clock) return {k:'', t:tkL('не действует — время не сверено','not acting — the clock is not synced')};
+    if(d.tick===0) return {k:'', t:tkL('не действует — Enodia снята с расписания','not acting — Enodia is off the schedule')};
+    if(!it.on) return {k:'', t:tkL('выключено','switched off')};
+    if(it.st==='limited' && schLimDead(d)) return {k:'', t:tkL('Ограничено не действует — открыто','Limited is not acting — open')};
+    var w=schStWord(it.st), k=(SCH_ST[it.st]||SCH_ST.open)[2], u=null;
+    if(it.why==='hol') return {k:'opn', t:w+' · '+schLow(schHolWord(it, d))};
+    if(it.why==='ovr') u=it.ovr && it.ovr.until;
+    else if(it.why==='all') u=d.all && d.all.until;
+    else u=it.next && it.next[0];
+    if(u) return {k:k, t:w+' · '+tkL('до ','until ')+schWhen(u, d.now)};
+    if(it.why==='ovr' || it.why==='all') return {k:k, t:w+' · '+tkL('пока не откроете','until opened')};
+    return {k:k, t:w};
+  }
+  // translate="no": the words are composed in the right language already (tkL), and the dictionary must not touch them
+  function schChipHtml(s){ return '<span class="dir'+(s.k?' '+s.k:'')+'" translate="no"><i></i><span>'+esc(s.t)+'</span></span>'; }
+  function schChip(it, d){ return schChipHtml(schSay(it, d)); }
+  // THE DAY LIMIT closes one device while its schedule stays open — the router names who (`over`), the panel only words it
+  function schOver(it, mac){ return (it.over||[]).indexOf(String(mac||'').toLowerCase())>=0; }
+  function schOverN(it, d){ return (schLive(d) && it.on) ? (it.over||[]).length : 0; }   // devices its limit closes NOW
+  function schDevSay(it, mac, d){
+    if(schLive(d) && it.on && schOver(it, mac)) return {k:'blk', t:tkL('Закрыто · лимит на сегодня исчерпан','Closed · today\'s limit used up')};
+    return schSay(it, d);
+  }
+  function schDevChip(it, mac, d){ return schChipHtml(schDevSay(it, mac, d)); }
+  function schMinWord(m){   // «45 мин», «2 ч», «1 ч 20 мин»
+    m=m|0; if(m<60) return tkL(m+' мин', m+' min');
+    var h=Math.floor(m/60), r=m%60; return tkL(h+' ч'+(r ? ' '+r+' мин' : ''), h+' h'+(r ? ' '+r+' min' : ''));
+  }
+  // «сегодня 1 ч 20 мин из 2 ч» — only when today has a limit
+  function schUseWord(it, mac){
+    var t=(it.lim && it.lim.today)|0; if(!t) return '';
+    var u=((it.used||{})[String(mac||'').toLowerCase()])|0;
+    return tkL('сегодня ','today ')+schMinWord(u)+tkL(' из ',' of ')+schMinWord(t);
+  }
+  // '12345' → «Пн–Пт», '06' → «Сб, Вс», all seven → «каждый день» (Monday first, runs of three and more as a range)
+  function schDaysWord(ds){
+    ds=String(ds||'');
+    if(ds.length===7) return tkL('каждый день','every day');
+    var on=SCH_ORD.map(function(x){ return ds.indexOf(String(x))>=0; }), out=[], i=0;
+    function nm(k){ return tkL(SCH_DN[SCH_ORD[k]], SCH_DN_EN[SCH_ORD[k]]); }
+    while(i<7){
+      if(!on[i]){ i++; continue; }
+      var j=i; while(j+1<7 && on[j+1]) j++;
+      out.push(j-i>=2 ? nm(i)+'–'+nm(j) : (j>i ? nm(i)+', '+nm(j) : nm(i)));
+      i=j+1;
+    }
+    return out.join(', ');
+  }
+  function schMin(t){ var p=String(t).split(':'); return (+p[0])*60+(+p[1]); }
+  // One bar per day (mockup `WeekBars`): windows in % of the day, painted weakest first — the stricter on top, so the picture IS
+  // the overlap rule; a window past midnight continues on the next day's bar. `b` — «now» on the router's clock.
+  function schWeekHtml(it, d){
+    var seg=[[],[],[],[],[],[],[]], used={}, i;
+    for(i=0;i<7;i++) seg[i].push({s:it.base, a:0, b:1440});
+    used[it.base]=1;
+    (it.wins||[]).slice().sort(function(x, y){ return SCH_RK[x.s]-SCH_RK[y.s]; }).forEach(function(w){
+      var a=schMin(w.a), b=schMin(w.b); used[w.s]=1;
+      String(w.d).split('').forEach(function(ch){
+        var dd=+ch;
+        if(a<b) seg[dd].push({s:w.s, a:a, b:b});
+        else { seg[dd].push({s:w.s, a:a, b:1440}); if(b>0) seg[(dd+1)%7].push({s:w.s, a:0, b:b}); }
+      });
+    });
+    var nm=/(\d\d):(\d\d)$/.exec(d.now||''), nmin=nm ? (+nm[1])*60+(+nm[2]) : -1;
+    function pct(m){ return (m/14.4).toFixed(2)+'%'; }
+    var h='<div class="wk" translate="no" role="img" aria-label="'+esc(tkL('Неделя расписания','The schedule week'))+'">';
+    SCH_ORD.forEach(function(dd){
+      var now=(dd===d.w && d.clock && nmin>=0);
+      h+='<span class="dn'+(now?' now':'')+'">'+tkL(SCH_DN[dd], SCH_DN_EN[dd])+'</span><div class="tl">'
+        + seg[dd].map(function(s){ return '<i class="'+s.s+'" style="left:'+pct(s.a)+';width:'+pct(s.b-s.a)+'"></i>'; }).join('')
+        + (now ? '<b style="left:'+pct(nmin)+'" title="'+esc(tkL('сейчас на роутере: ','now on the router: ')+nm[1]+':'+nm[2])+'"></b>' : '')+'</div>';
+    });
+    h+='<span></span><div class="ax">'+[0,6,12,18,24].map(function(x){ return '<span style="left:'+(x/24*100)+'%">'+x+'</span>'; }).join('')+'</div></div>';
+    var lg=[['open','var(--wk-op)'],['limited','var(--st-warn)'],['closed','var(--st-bad)']].filter(function(x){ return x[0]!=='limited' || schLimOn(d) || used.limited; });
+    return h+'<div class="legend" translate="no">'+lg.map(function(x){ return '<span class="lg"><i style="background:'+x[1]+'"></i>'+esc(schStWord(x[0]).toLowerCase())+'</span>'; }).join('')+'</div>';
+  }
+  // «вне окон открыто · 2 окна» — the list row's summary
+  function schSum(it){
+    var n=(it.wins||[]).length;
+    return tkL('вне окон '+schStWord(it.base).toLowerCase(), 'outside windows '+schStWord(it.base).toLowerCase())
+      + ' · '+(n ? tkL(n+' '+tkPl(n,'окно','окна','окон'), n+' window'+(n===1?'':'s')) : tkL('окон нет','no windows'));
+  }
+  function schDevN(n){ return tkL(n+' '+tkPl(n,'устройство','устройства','устройств'), n+' device'+(n===1?'':'s')); }
+
+  // ---- the list ----
+  function openSched(){
+    var fsig=focusMark();
+    openModal(null, {route:'rt-sched', deck:true});
+    var body=document.getElementById('modal-body'), rep=navIfShown('rt-sched', openSched); loading(body);
+    schLoad().then(function(d){
+      if(!screenAlive(body)) return;
+      if(!d || d.ok!==true || !Array.isArray(d.items)){ body.innerHTML=pnErrHtml('sc-list', 'Расписания', (d && d.msg) ? esc(trNow(String(d.msg))) : pnErrText(null)); return; }
+      body.innerHTML=schListHtml(d);
+      nwFocusBack(body, fsig);
+      schListWire(body, d, rep);
+      schAgain(body, d, null, function(){ schListRefresh(body, rep); });
+    }, function(e){ if(screenAlive(body)) body.innerHTML=pnErrHtml('sc-list', 'Расписания', pnErrText(e)); });
+  }
+  // the list asked again in place: the answer first, then the repaint (openSched blanked the cards for the fetch every minute)
+  function schListRefresh(body, rep){
+    schLoad().then(function(d){
+      if(!screenAlive(body) || !navShows('rt-sched')) return;
+      // an answer that is not the list (ok:false mid-update: access-sched.sh replaced) — the drawn list stays, asked again in a
+      // minute; returning here stopped the live states for good (review s.113, round 4)
+      if(!d || d.ok!==true || !Array.isArray(d.items)){ schAgain(body, null, null, function(){ schListRefresh(body, rep); }); return; }
+      var fsig=focusMark();
+      body.innerHTML=schListHtml(d);
+      nwFocusBack(body, fsig);
+      schListWire(body, d, rep);
+      schAgain(body, d, null, function(){ schListRefresh(body, rep); });
+    }, function(){ if(screenAlive(body)) schAgain(body, null, null, function(){ schListRefresh(body, rep); }); });
+  }
+  function schRow(it, d){
+    return lrowGo('sch:'+it.id, '')+'<span class="av">'+icUse('i-clock','s','',true)+'</span>'
+      + '<div class="grow"><div class="nm"><span translate="no">'+esc(it.name)+'</span></div>'
+      // who the day limit closed — in the line under the name: in the chip the ellipsis cut it off at 320 px (review s.113, round 4)
+      + '<div class="ds" translate="no">'+esc(schDevN((it.devs||[]).length)+' · '+schSum(it)+schOverTail(it, d))+'</div></div>'
+      + schChip(it, d)+CHEV+'</div>';
+  }
+  // the schedule's state + who its day limit closed now (an «открыто» or «ограничено» schedule must not hide a device the limit closed)
+  function schOverTail(it, d){ var on=schOverN(it, d); return (it.st!=='closed' && on) ? ' · '+tkL('лимит исчерпан: ','limit used up: ')+on : ''; }
+  function schSayOver(it, d){ var s=schSay(it, d); return {k:s.k, t:s.t+schOverTail(it, d)}; }
+  // `lim` — the tile needs «ограничено» (1) or stands in for one that does (0): the mockup's «Учёба и сон» closes social, video and
+  // games in school hours, and without the filter component a limited window closes nothing — the same nights are offered alone
+  // then, under a name that does not promise the school hours (schTpls)
+  var SCH_TPL=[
+    {k:'night', ic:'i-clock', t:'Ночь без интернета', d:'закрыто каждую ночь с 23:00 до 07:00', base:'open', wins:[{d:'0123456', a:'23:00', b:'07:00', s:'closed'}]},
+    {k:'school', lim:1, ic:'i-shield', t:'Учёба и сон', d:'ночью закрыто, в учебные часы — без соцсетей, видео и игр', base:'open',
+     wins:[{d:'01234', a:'22:00', b:'07:00', s:'closed'}, {d:'56', a:'23:30', b:'09:00', s:'closed'}, {d:'12345', a:'08:30', b:'14:30', s:'limited'}],
+     cats:['social', 'video', 'games']},
+    {k:'sleep', lim:0, ic:'i-shield', t:'Будни и сон', d:'по будням ночью закрыто, в выходные — ночью дольше', base:'open',
+     wins:[{d:'01234', a:'22:00', b:'07:00', s:'closed'}, {d:'56', a:'23:30', b:'09:00', s:'closed'}]},
+    {k:'hours', ic:'i-lock', t:'Только в эти часы', d:'закрыто всегда, кроме окон, которые вы зададите', base:'closed', wins:[{d:'12345', a:'18:00', b:'20:00', s:'open'}, {d:'06', a:'10:00', b:'21:00', s:'open'}]},
+    {k:'never', ic:'i-home', t:'Без интернета', d:'закрыто всегда; в домашней сети видно — камеры, принтер, умный дом', base:'closed', wins:[]}
+  ];
+  function schTpls(d){ var on=schLimOn(d); return SCH_TPL.filter(function(t){ return t.lim==null || !!t.lim===on; }); }
+  function schListHtml(d){
+    var its=d.items, h='<div class="vwrap c3">';
+    if(!d.clock) h+=noteBox('<b>Расписания сейчас не действуют: роутер ещё не знает, который час.</b> Своих часов у него нет — время приходит из сети после загрузки. Как только оно сверится, расписания начнут действовать сами: закрыть интернет по неверным часам хуже, чем не закрыть.', 'warn');
+    else if(d.tick===0) h+=noteBox('<b>Расписания сейчас не действуют: Enodia снята с расписания.</b> В crontab нет строки, которой роутер раз в минуту проверяет окна, — открыть закрытое в срок было бы некому, поэтому не закрыто ничего. «Включить VPN» возвращает её вместе с остальным.', 'warn');
+    else h+=schLimNote(d);
+    h+='<div class="card w2" id="sc-list"><div class="wt"><span>Расписания</span><span class="sp"></span><span class="chip">'+its.length+'</span></div>'
+      + (its.length ? its.map(function(x){ return schRow(x, d); }).join('')
+                    : '<div class="cline">Расписаний пока нет. Расписание — это устройства и неделя: когда им открыт интернет, а когда закрыт. Начните с готового или создайте своё.</div>')
+      + (d.all ? '<div class="cline" translate="no">'+esc(tkL('Закрыто всем ','Closed for all ')+(d.all.until ? tkL('до ','until ')+schWhen(d.all.until, d.now) : tkL('— пока не откроете','— until opened')))+'</div>' : '')
+      // the router's cap (d.max): at it a new one is refused after the whole form is filled — said here instead
+      + (its.length>=(d.max||16) ? '<div class="cline">'+esc(tkL('Расписаний не больше ','At most '))+(d.max||16)+esc(tkL(' — чтобы добавить новое, удалите одно из этих.',' schedules — delete one of these to add a new one.'))+'</div>' : '')
+      + '<div class="acts" style="justify-content:flex-start"><button type="button" class="btn pri" data-cact="schednew"'+(its.length>=(d.max||16) ? ' disabled' : '')+'>'+icUse('i-plus','s')+'Новое расписание</button>'
+      + (d.all ? '<button type="button" class="btn" id="sc-allopen">Открыть всем</button>'
+               : '<button type="button" class="btn" id="sc-all" aria-haspopup="menu"'+((schLive(d) && its.length) ? '' : ' disabled')+'>'+icUse('i-lock','s')+'Закрыть всем сейчас…</button>')+'</div>'
+      + '<div class="cline">«Закрыть всем сейчас» — пауза для всех устройств из всех включённых расписаний, и на каникулах тоже: на 30 минут, на час, до утра или пока не откроете. Потом каждое расписание идёт своим чередом.</div></div>';
+    h+='<div class="card"><div class="wt">Как это работает</div>'
+      + schKv('Устройство узнаётся по MAC', 'правило не уедет на соседа, когда сменится адрес')
+      + schKv('«Закрыто» — закрыто всё', 'сильнее всей маршрутизации: ни правила по портам, ни свой VPN на устройстве не выпустят наружу. Домашняя сеть остаётся')
+      + (schLimOn(d) ? schKv('«Ограничено» — закрыто выбранное', 'категории и сайты из расписания, остальное работает') : '')
+      + schKv('Не остановит', 'мобильный интернет телефона и новый MAC')+'</div>';
+    h+='<div class="card w2"><div class="wt">Начать с готового</div><div class="opt c2">'
+      + schTpls(d).map(function(t){ return optTile('data-sctpl', t.k, false, t.ic, t.t, t.d, its.length>=(d.max||16)); }).join('')+'</div></div>';
+    h+='<div class="card"><div class="wt">Время роутера</div>'
+      + '<div class="kv"><div class="grow"><div class="k">Сейчас на роутере</div><div class="v" translate="no">'+esc(schWhenNow(d))+'</div></div>'
+      + '<span class="chip'+(d.clock ? ' acc' : ' bd')+'">'+(d.clock ? 'сверено' : 'не сверено')+'</span></div>'
+      + '<div class="cline">Окна считаются по этим часам. Своих часов у роутера нет: после загрузки время приходит из сети, и пока оно не сверено, расписания <b>не действуют</b> — закрыть интернет среди дня по неверным часам хуже, чем не закрыть.</div></div>';
+    return h+'</div>';
+  }
+  function schKv(k, v){ return '<div class="kv"><div class="grow"><div class="k">'+k+'</div><div class="v">'+v+'</div></div></div>'; }
+  function schWhenNow(d){ var m=/ (\d\d:\d\d)$/.exec(d.now||''); return tkL(SCH_WD[d.w], SCH_WD_EN[d.w])+' '+(m ? m[1] : ''); }
+  // «Закрыть всем сейчас…» / «Закрыть сейчас…» — one menu of terms; `HH:MM` = until that time comes (the router finds it)
+  function schCloseMenu(anchor, go, head){
+    openMenu(anchor, [
+      {header:head || tkL('Закрыть','Close')},
+      {label:tkL('на 30 минут','for 30 minutes'), onClick:function(){ go('30'); }},
+      {label:tkL('на час','for an hour'), onClick:function(){ go('60'); }},
+      {label:tkL('до утра (07:00)','until the morning (07:00)'), onClick:function(){ go('07:00'); }},
+      {label:tkL('пока не откроете','until opened'), onClick:function(){ go('0'); }}
+    ], anchor);
+  }
+  // «Открыть на…» — the schedule's screen, the device tab and the home card; «до конца окна» only when the week itself will open it
+  function schOpenMenu(anchor, it, go, head){
+    var items=[{header:head || tkL('Открыть','Open')},
+      {label:tkL('на 15 минут','for 15 minutes'), onClick:function(){ go('15'); }},
+      {label:tkL('на 30 минут','for 30 minutes'), onClick:function(){ go('30'); }},
+      {label:tkL('на час','for an hour'), onClick:function(){ go('60'); }}];
+    if((it.why==='win' || it.why==='base') && it.next && it.next[0]) items.push({label:tkL('до конца окна','until the window ends'), onClick:function(){ go('end'); }});
+    openMenu(anchor, items, anchor);
+  }
+  function schListWire(body, d, rep){
+    wireCacts(body);
+    var ab=document.getElementById('sc-all');
+    if(ab) ab.addEventListener('click', function(){
+      schCloseMenu(ab, function(t){ postAction('sched_all', null, 'закрываю всем…', {arg:t}, function(){ rep(); }); });
+    });
+    var ao=document.getElementById('sc-allopen');
+    if(ao) ao.addEventListener('click', function(){ postAction('sched_all', null, 'открываю всем…', {arg:'off'}, function(){ rep(); }); });
+    Array.prototype.forEach.call(body.querySelectorAll('[data-sctpl]'), function(el){
+      function go(){ if(el.classList.contains('na')) return; var k=el.getAttribute('data-sctpl'); schNew(SCH_TPL.filter(function(t){ return t.k===k; })[0]); }
+      el.addEventListener('click', go);
+      el.addEventListener('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); go(); } });
+    });
+  }
+
+  // ---- one schedule: resolver, the head (state + actions over it), the editor (draft until «Сохранить») ----
+  // The draft lives across redraws of the same schedule (an action over it repaints the screen) and dies with another one.
+  var _schDraft=null, _schNewTpl=null, _schNewDev='', _schRepG=0, _schRepId='';
+  function schNew(tpl, mac){
+    _schNewTpl=tpl||null; _schNewDev=mac ? String(mac).toLowerCase() : '';
+    _schDraft=null;
+    schScrOpen('');
+  }
+  function schScrOpen(id){
+    var rep=(id==null);
+    if(rep) id=navSplit(_navKey).a;
+    id=String(id==null?'':id);
+    if(id!=='' && !/^s[0-9]{1,6}$/.test(id)){ if(!rep) openSched(); return; }
+    // a re-ask while ANOTHER screen is opening (Back/Forward, an address typed): `++_navGen` below would cancel that open and redraw
+    // this one under the new address (review s.113, round 5) — it waits for the next turn instead
+    // …unless the pending open IS this screen's own re-ask of the same schedule: an action's refresh then supersedes it as before —
+    // deferred, the older answer drew the state before the action (a switch flipped back) for a minute (review s.113, confirming)
+    if(rep && _navPend && !(_schRepG===_navGen && _schRepId===id)){ var nb=document.getElementById('modal-body'); if(nb) schAgain(nb, null, null, navIfShown('rt-sched-p', schScrOpen), 30); return; }
+    var g=++_navGen;
+    _navPend=true;
+    _schRepG=rep ? g : 0; _schRepId=id;
+    // a re-ask (rep) that failed tries again in half a minute — one miss stopped the live state for good; a schedule deleted
+    // elsewhere leaves its screen in both modes (its buttons would all be refused)
+    // …through schAgain (review s.113, round 4): a bare timer redrew the form under the caret of a human typing by then, and — the
+    // address read again at its end — redrew s2 or the new form opened meanwhile; now only THIS schedule, never mid-typing
+    function back(msg, gone){
+      if(rep && !gone){
+        showToast(msg || 'не удалось обновить экран расписания', false);
+        var again=navIfShown('rt-sched-p', schScrOpen), b=document.getElementById('modal-body');
+        if(b) schAgain(b, null, null, function(){ if(navSplit(_navKey).a===id) again(); }, 30);
+        return;
+      }
+      showToast(msg || 'роутер не ответил — открываю список расписаний', false); if(navSplit(location.hash).r==='rt-sched-p') navReplace('rt-sched'); openSched();
+    }
+    // The LIST answer, not one schedule's: «add a device» offers only devices no other schedule holds (one device = one schedule),
+    // and that needs them all — the same answer the list screen draws.
+    Promise.all([schLoad(), fetchJson('/cgi-bin/data?section=devices').then(null, function(){ return null; })]).then(function(r){
+      if(g!==_navGen) return;   // the human left while the router answered — their choice wins
+      _navPend=false;
+      if(rep && !navShows('rt-sched-p')) return;
+      var d=r[0], it=null;
+      if(!d || d.ok!==true || !Array.isArray(d.items)){ back(d && d.msg ? String(d.msg) : null); return; }
+      if(id){ it=d.items.filter(function(x){ return x.id===id; })[0]; if(!it){ back('расписание удалено — открываю список', true); return; } }
+      schShow(d, it, (r[1] && Array.isArray(r[1].devices)) ? r[1].devices : []);
+    }, function(){ if(g!==_navGen) return; _navPend=false; back(); });
+  }
+  function schDraftOf(it){
+    var key=it ? it.id : 'new';
+    // `>=`: the tab's own toggle or holidays moved the draft one version ahead of the screen's `it` until the router is asked
+    // again — a redraw in that window (a mode tile, a device) must keep it, not call the tab's own action «another place»
+    if(_schDraft && _schDraft.key===key && (!it || _schDraft.ver>=it.ver)) return _schDraft;
+    // the same schedule at a NEWER version (a save from another tab or device): edits not saved yet cannot be laid over it
+    if(_schDraft && _schDraft.key===key && _schDraft.dirty && !_schDraft.sent) showToast(tkL('расписание изменили в другом месте — несохранённые правки сброшены','the schedule was changed elsewhere — unsaved edits were dropped'), false);
+    var t=_schNewTpl;
+    _schDraft=it ? {key:key, ver:it.ver, name:it.name, on:it.on, base:it.base, wins:(it.wins||[]).map(function(w){ return {d:w.d, a:w.a, b:w.b, s:w.s}; }), devs:(it.devs||[]).slice(),
+                    lim:{wd:(it.lim && it.lim.wd)|0, we:(it.lim && it.lim.we)|0},
+                    safe:it.safe ? 1 : 0, lmode:it.lmode||'block', cats:(it.cats||[]).slice(), geo:(it.geo||[]).map(function(g){ return {k:g.k, kind:g.kind, t:g.t, l:g.l}; }),
+                    sites:(it.sites||[]).concat(it.addrs||[]).join('\n'), nw:schNwDef(it.base), gq:'', dirty:false}
+                 : {key:key, ver:0, name:t ? trNow(t.t) : '', on:1, base:t ? t.base : 'open', wins:t ? t.wins.map(function(w){ return {d:w.d, a:w.a, b:w.b, s:w.s}; }) : [],
+                    devs:_schNewDev ? [_schNewDev] : [], lim:{wd:0, we:0}, safe:0, lmode:'block', cats:(t && t.cats) ? t.cats.slice() : [], geo:[], sites:'',
+                    nw:schNwDef(t ? t.base : 'open'), gq:'', dirty:!!(t || _schNewDev)};
+    return _schDraft;
+  }
+  // «Новое окно» — days, from, to, state; part of the draft so a redraw (a mode tile, a device, the router asked again) keeps what
+  // was set there: it went back to Пн–Пт 19:00–21:00 and «Добавить окно» added a window nobody set (review s.112, round 2)
+  function schNwDef(base){ return {d:'12345', a:'19:00', b:'21:00', s:base==='closed' ? 'open' : 'closed'}; }
+  // focus after a repaint: the control by its attribute (FOCUS_ATTRS); an action button that changed («Закрыть» → «Открыть») —
+  // the first button of the same row of actions
+  function schFocusActs(root, fsig, sel){
+    focusBack(root, fsig);
+    if(!fsig || !/data-sc(act|ov)/.test(fsig) || (document.activeElement && root.contains(document.activeElement))) return;
+    var b=root.querySelector(sel+' button:not([disabled])'); if(b) b.focus();
+  }
+  // THE ROUTER IS ASKED AGAIN when its next change is due (a window opens, an action ends — a few seconds after) or in a minute:
+  // the screen said «закроется через 20 мин» long after it closed. Never while a field has the focus (a redraw takes the caret
+  // away) — then ten seconds later. One timer per surface; it dies with its node (screenAlive). `sec` — a fixed delay (a retry).
+  var _schT={};
+  function schAgain(node, d, it, fn, sec){
+    var key=node.id || 'x', n=0; clearTimeout(_schT[key]);
+    var t=sec||60, x=it && (it.why==='ovr' && it.ovr && it.ovr.until ? it.ovr.until : (it.next && it.next[0]));
+    if(!sec && x && x.ue!=null && d && d.ne!=null) t=Math.max(15, Math.min(60, x.ue-d.ne+3));
+    _schT[key]=setTimeout(function again(){
+      if(!screenAlive(node)) return;
+      // the human is in the middle of something (review s.112, round 3: focus, menus and errors were swept away) — but not for
+      // ever (review s.113, round 4: a switch left focused by the mouse, a select picked, a refusal line or the holidays form held
+      // the head at «закроется в 22:00» for hours): TYPING (a text field and a key within NW_TYPING_MS — the network screens'
+      // rule, nwTyping) waits as long as it lasts, an open menu up to five minutes, a focused control, the holidays form or a
+      // refusal being read — one minute. Then the redraw: the draft keeps every input, the focus comes back by its attribute.
+      var a=document.activeElement, mine=a && a!==document.body && node.contains(a);
+      var soft=(mine && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || !focusMark())) || node.querySelector('#sc-holf:not([hidden])')
+        || [].some.call(node.querySelectorAll('.cline.wr'), function(x){ return !!x.textContent && x.offsetParent!==null; });
+      n++;
+      if((mine && nwTyping()) || (_menuEl && n<=30) || (soft && n<=6)){ _schT[key]=setTimeout(again, 10000); return; }
+      fn();
+    }, t*1000);
+  }
+  function schShow(d, it, devs){
+    var dr=schDraftOf(it), fsig=focusMark();
+    openModal(it ? it.name : null, {route:'rt-sched-p', arg:it ? it.id : '', deck:true, sens:!!it});
+    var body=document.getElementById('modal-body');
+    if(screenAlive(body) && !it) scrTitle(tkL('Новое расписание','New schedule'), true);
+    body.innerHTML=schFormHtml(d, it, dr, devs);
+    // the new form asks nobody again: a timer the previous schedule's screen left on this body would redraw it (review s.113)
+    if(!it) clearTimeout(_schT[body.id||'x']);
+    schFocusActs(body, fsig, '#sc-head .acts.sc-acts');
+    schFormWire(body, d, it, dr, devs);
+  }
+  function schDevNm(mac, devs){
+    var x=devs.filter(function(v){ return String(v.mac||'').toLowerCase()===mac; })[0];
+    return x ? {nm:devName(x), on:!!x.online, ip:x.ip} : {nm:mac.toUpperCase(), on:false, ip:''};
+  }
+  function schHeadHtml(d, it){
+    var s=schSay(it, d), h='<div class="card wfull" id="sc-head"><div class="dv-top"><span class="av">'+icUse('i-clock','','',true)+'</span><div class="grow">'
+      + '<div class="dv-nm"><span translate="no">'+esc(it.name)+'</span></div>';
+    var line=schDevN((it.devs||[]).length)+' · ';
+    if(!schLive(d) || !it.on) line+=s.t;
+    else {
+      var nx=it.next && it.next[0];
+      line+=tkL('сейчас ','now ')+schStWord(it.st).toLowerCase();
+      if(it.why==='win' || it.why==='base'){ if(nx) line+=' — '+schVerb(nx.s)+' '+tkL('в ','at ')+schWhen(nx, d.now)+(schIn(nx, d) ? ', '+schIn(nx, d) : ''); }
+      else if(it.why==='hol') line+=' — '+schLow(schHolWord(it, d));
+      else if(it.why==='all') line+=' — '+(d.all && d.all.until ? tkL('закрыто всем до ','closed for all until ')+schWhen(d.all.until, d.now) : tkL('закрыто всем, пока не откроете','closed for all until opened'));
+    }
+    h+='<div class="dv-meta" translate="no">'+esc(line)+'</div>';
+    if(schLive(d) && it.on && (it.why==='win' || it.why==='base') && it.next && it.next.length>1)
+      h+='<div class="dv-meta" translate="no">'+esc(tkL('дальше: ','then: ')+it.next.slice(1, 4).map(function(x){ return schWhen(x, d.now)+' — '+schStWord(x.s).toLowerCase(); }).join(' · '))+'</div>';
+    h+='</div></div>';
+    // the switch as a list row (.lrow keeps it on the right at any width)
+    h+='<div class="lrow"><div class="grow"><div class="nm">Расписание действует</div><div class="ds">выключенное хранится, но ничего не закрывает</div></div>'
+      + '<label class="sw"><input type="checkbox" id="sc-on" aria-label="'+esc(tkL('расписание действует','the schedule acts'))+'"'+(it.on?' checked':'')+'><i></i></label></div>';
+    if(!d.clock) h+=noteBox('<b>Расписание сейчас не действует:</b> роутер ещё не знает, который час. Действия поверх расписания станут доступны, когда время сверится.', 'warn');
+    else if(d.tick===0) h+=noteBox('<b>Расписание сейчас не действует:</b> Enodia снята с расписания — «Включить VPN» возвращает её.', 'warn');
+    else if(it.st==='limited' || it.safe) h+=schLimNote(d);
+    // an action over the schedule: its row and «back to the schedule»
+    if(it.ovr){
+      var ow=it.ovr.s==='closed' ? tkL('Закрыто вручную','Closed by hand') : tkL('Открыто вручную','Opened by hand');
+      h+='<div class="lrow"><div class="grow"><div class="nm" translate="no">'+esc(ow+' '+(it.ovr.until ? tkL('до ','until ')+schWhen(it.ovr.until, d.now) : tkL('— пока не откроете','— until opened')))+'</div>'
+        // an «open for…» laid over a hand close: the router brings the close back when it ends (`back`)
+        + '<div class="ds">'+(it.ovr.back ? 'потом — снова закрыто вручную' : 'действие поверх расписания — до своего срока')+'</div></div><button type="button" class="btn sm gh" data-scact="clear">Вернуть по расписанию</button></div>';
+    }
+    if(it.hol) h+='<div class="lrow"><div class="grow"><div class="nm" translate="no">'+esc(schHolWord(it, d))+'</div><div class="ds">окна и лимит расписания в эти дни не действуют</div></div><button type="button" class="btn sm gh" data-scact="holoff">Отменить</button></div>';
+    h+=schActsHtml(it, d, true)
+      + '<div class="f" id="sc-holf" hidden><label for="sc-hold">Расписание не действует до этого дня включительно</label><div class="row" style="gap:9px">'
+      + '<input id="sc-hold" type="date" autocomplete="off"><button type="button" class="btn sm pri" id="sc-holgo">Включить каникулы</button></div>'
+      + '<div class="cline wr" id="sc-holerr" role="alert"></div></div>'
+      + '<div class="cline">В закрытое окно вместо «Закрыть сейчас» — «Открыть на…»: 15 мин · 30 мин · 1 ч · до конца окна. Действие поверх расписания живёт до своего срока и пишется в журнал событий.</div>';
+    return h+'</div>';
+  }
+  // ACTIONS OVER A SCHEDULE — one builder and one wiring for its screen (full: + holidays) and the device tab (mockup: the two a
+  // parent needs right there). Open now ⇒ «Закрыть сейчас…» (+ «Отложить», when the week is about to get stricter); otherwise
+  // «Открыть на…». Not synced or switched off ⇒ locked: the router refuses actions it cannot keep by the clock.
+  // `st` — the state the actions are for: the device tab passes «closed» for a device its day limit closed («Открыть на…» adds time)
+  // Above a hand action stand «закрыто всем» and holidays (access-sched.sh sc_effective; the router refuses an action under them):
+  // under «закрыто всем» the one action is «Открыть всем», on holidays — «Отменить каникулы» (the schedule screen has it in the row).
+  // «Отложить» — near the closing only (≤ 60 min, the router's epochs): far ahead it would rest the week and the limit for hours.
+  function schActsHtml(it, d, full, st){
+    var dis=(schLive(d) && it.on) ? '' : ' disabled', h='', nx=it.next && it.next[0];
+    st=st||it.st;
+    if(schLive(d) && it.on && it.why==='all') return '<div class="acts sc-acts" style="justify-content:flex-start;flex-wrap:wrap"><button type="button" class="btn" data-scact="allopen">Открыть всем</button></div>';
+    if(schLive(d) && it.on && it.why==='hol') return full ? '' : '<div class="acts sc-acts" style="justify-content:flex-start;flex-wrap:wrap"><button type="button" class="btn" data-scact="holoff">Отменить каникулы</button></div>';
+    // «limited» is both: stricter (close it all) and looser (open it) are offered (BE7000 08.10.2026: only «Открыть на…» was)
+    if(st!=='closed') h+='<button type="button" class="btn" data-scact="close" aria-haspopup="menu"'+dis+'>'+icUse('i-lock','s')+'Закрыть сейчас…</button>';
+    // the schedule's own screen while its day limit closes some device: «Открыть на…» too — the journal line sends the parent
+    // here to add time (BE7000 08.10.2026: the schedule was «открыто», so only «Закрыть сейчас…» was offered)
+    if(st!=='open' || (full && schOverN(it, d)>0)) h+='<button type="button" class="btn" data-scact="open" aria-haspopup="menu"'+dis+'>Открыть на…</button>';
+    if(st==='open' && (it.why==='win' || it.why==='base') && nx && SCH_RK[nx.s]>0 && nx.ue!=null && d.ne!=null && nx.ue-d.ne<=3600) h+='<button type="button" class="btn" data-scact="post"'+dis+'>Отложить закрытие на 30 мин</button>';
+    if(full) h+='<button type="button" class="btn gh" data-scact="hol"'+dis+'>Каникулы…</button>';
+    return '<div class="acts sc-acts" style="justify-content:flex-start;flex-wrap:wrap">'+h+'</div>';
+  }
+  // a holidays switch bumps the schedule's version: the draft open on its screen keeps its edits (the toggle does the same)
+  // …only onto a draft that WAS the version before this action (r.ver = its ver + 1): a draft built from an older one (another tab
+  // saved since) keeps its old version, and its «Сохранить» is refused as stale instead of silently undoing that save (review
+  // s.112, round 2)
+  function schVerKeep(it, r){ if(r && r.ok && r.ver!=null && _schDraft && _schDraft.key===it.id && +r.ver===_schDraft.ver+1) _schDraft.ver=r.ver; }
+  // `whole` — the device tab: the action is over the WHOLE schedule (every device of it), and its menus say so
+  function schActsWire(root, it, rep, whole){
+    function ovr(op, arg, l){ postAction('sched_ovr', null, l, {id:it.id, op:op, arg:arg||''}, function(){ rep(); }); }
+    var n=(it.devs||[]).length, hd=whole ? function(v){ return tkL(v+' всё расписание «'+it.name+'» · '+schDevN(n), (v==='Закрыть' ? 'Close' : 'Open')+' the whole schedule «'+it.name+'» · '+n+' '+(n===1 ? 'device' : 'devices')); } : function(){ return null; };
+    Array.prototype.forEach.call(root.querySelectorAll('[data-scact]'), function(b){
+      var a=b.getAttribute('data-scact');
+      b.addEventListener('click', function(){
+        if(a==='close') schCloseMenu(b, function(t){ ovr('close', t, 'закрываю…'); }, hd('Закрыть'));
+        else if(a==='open') schOpenMenu(b, it, function(v){ ovr('open', v, 'открываю…'); }, hd('Открыть'));
+        else if(a==='post') ovr('postpone', '30', 'откладываю закрытие…');
+        else if(a==='clear') ovr('clear', '', 'возвращаю расписание…');
+        else if(a==='holoff') postAction('sched_hol', null, 'отменяю каникулы…', {id:it.id, date:'off'}, function(r){ schVerKeep(it, r); rep(); });
+        else if(a==='allopen') postAction('sched_all', null, 'открываю всем…', {arg:'off'}, function(){ rep(); });
+        else if(a==='hol'){ var f=document.getElementById('sc-holf'); if(f){ f.hidden=!f.hidden; if(!f.hidden) document.getElementById('sc-hold').focus(); } }
+      });
+    });
+  }
+  function schWinRows(dr){
+    if(!dr.wins.length) return '<div class="cline">Окон нет — весь день действует состояние «вне окон».</div>';
+    return dr.wins.map(function(w, i){
+      return '<div class="lrow"><div class="grow"><div class="nm" translate="no">'+esc(schDaysWord(w.d)+' · '+w.a+'–'+w.b)+'</div>'
+        + (schMin(w.b)<=schMin(w.a) ? '<div class="ds">через полночь — до утра следующего дня</div>' : '')+'</div>'
+        + '<span class="dir '+(SCH_ST[w.s]||SCH_ST.open)[2]+'" translate="no"><i></i><span>'+esc(schStWord(w.s))+'</span></span>'
+        + '<button type="button" class="btn sm gh" data-scwdel="'+i+'" aria-label="'+esc(tkL('убрать окно','remove the window'))+'">✕</button></div>';
+    }).join('');
+  }
+  function schStSeg(id, cur, d){
+    var st=['open'].concat(schLimOn(d) || cur==='limited' ? ['limited'] : []).concat(['closed']);
+    return '<div class="segbar sm" id="'+id+'" role="group">'+st.map(function(s){ return dvSeg('data-'+id, s, '<span>'+(s==='open'?'открыто':s==='limited'?'ограничено':'закрыто')+'</span>', cur); }).join('')+'</div>';
+  }
+  function schFormHtml(d, it, dr, devs){
+    var h='<div class="vwrap c3">';
+    if(it) h+=schHeadHtml(d, it);
+    h+='<div class="card w2" id="sc-week"><div class="wt">Неделя</div>'
+      + '<div class="f"><label for="sc-name">Имя расписания</label><input id="sc-name" maxlength="60" autocomplete="off" value="'+esc(dr.name)+'" placeholder="Дети"></div>'
+      + '<div id="sc-bars" style="margin-top:12px">'+schWeekHtml({base:dr.base, wins:dr.wins}, d)+'</div>'
+      + '<div id="sc-wins" style="margin-top:12px">'+schWinRows(dr)+'</div></div>';
+    h+='<div class="card" id="sc-edit"><div class="wt">Изменить неделю</div>'
+      + '<div class="cline" style="margin-top:0">Вне окон</div>'+schStSeg('sc-base', dr.base, d)
+      + '<div class="cline">Новое окно</div>'
+      + '<div class="segbar sm" id="sc-days" role="group" aria-label="Дни недели">'+SCH_ORD.map(function(x){ return '<div class="seg'+(dr.nw.d.indexOf(String(x))>=0 ? ' on' : '')+'" data-scd="'+x+'">'+SCH_DN[x]+'</div>'; }).join('')+'</div>'
+      + '<div class="f2 keep" style="margin-top:11px"><div class="f"><label for="sc-a">С</label><input id="sc-a" type="time" value="'+esc(dr.nw.a)+'" autocomplete="off"></div>'
+      + '<div class="f"><label for="sc-b">До</label><input id="sc-b" type="time" value="'+esc(dr.nw.b)+'" autocomplete="off"></div></div>'
+      + '<div class="row" style="gap:9px;margin-top:10px;flex-wrap:wrap">'+schStSeg('sc-ws', dr.nw.s, d)
+      + '<button type="button" class="btn pri" id="sc-wadd">Добавить окно</button></div>'
+      + '<div class="cline wr" id="sc-werr" role="alert"></div>'
+      + '<div class="cline">Пересеклись окна — действует более строгое. Окно, которое кончается раньше, чем началось, идёт через полночь.</div></div>';
+    h+=schLimHtml(d, it, dr);
+    var mine=dr.devs, other=devs.filter(function(v){ var m=String(v.mac||'').toLowerCase(), o=m && schOfMac(m, d); return m && mine.indexOf(m)<0 && (!o || (it && o.id===it.id)); });
+    var priv=mine.filter(function(m){ return schMacPriv(m); });
+    h+='<div class="card" id="sc-devs"><div class="wt"><span>Устройства</span><span class="sp"></span><span class="chip">'+mine.length+'</span></div>'
+      + (mine.length ? mine.map(function(m){ var x=schDevNm(m, devs);
+          return '<div class="lrow"><span class="av">'+icUse('i-dev','s','',true)+'</span><div class="grow"><div class="nm"><span class="sens" translate="no">'+esc(x.nm)+'</span>'
+            + (schMacPriv(m) ? ' <span class="badge inh" title="'+esc(tkL('MAC выдуман самим телефоном для этой сети и может смениться','the phone made this MAC up for this network and may change it'))+'">'+esc(tkL('частный адрес','private address'))+'</span>' : '')+'</div>'
+            + '<div class="ds"><span class="mono sens">'+esc(m.toUpperCase())+'</span> · <span>'+(x.on ? 'в сети' : 'не в сети')+'</span>'
+            + (it && schUseWord(it, m) ? ' · <span translate="no">'+esc(schUseWord(it, m))+'</span>' : '')
+            // closed by the limit — said in this line: a chip beside the name squeezed it to 0 px and pushed ✕ past the card's edge
+            // at 320 px (review s.113, round 4)
+            + (it && schLive(d) && it.on && schOver(it, m) ? ' · <b translate="no">'+esc(tkL('закрыто — лимит на сегодня исчерпан','closed — today\'s limit used up'))+'</b>' : '')+'</div></div>'
+            + '<button type="button" class="btn sm gh" data-scdel="'+esc(m)+'" aria-label="'+esc(tkL('убрать из расписания','remove from the schedule'))+'">✕</button></div>'; }).join('')
+        : '<div class="cline">Устройств пока нет — расписанию некого закрывать.</div>')
+      + (priv.length ? noteBox('<b>Частный адрес Wi-Fi.</b> Устройство с таким MAC может его сменить и выпасть из расписания — выключите частный адрес для этой сети в настройках телефона.', 'warn') : '')
+      + '<div class="row" style="gap:9px;margin-top:11px;align-items:flex-end"><div class="grow f"><label for="sc-dadd">Добавить устройство без расписания</label><select id="sc-dadd">'
+      + '<option value="">—</option>'+devPickSort(other).map(function(v){ var m=String(v.mac).toLowerCase(); return '<option value="'+esc(m)+'">'+esc(devName(v)+' · '+m.toUpperCase())+'</option>'; }).join('')
+      + '</select></div><button type="button" class="btn" id="sc-daddgo"'+((other.length && mine.length<(d.dmax||32)) ? '' : ' disabled')+'>Добавить</button></div>'
+      + (mine.length>=(d.dmax||32) ? '<div class="cline">'+esc(tkL('устройств в расписании не больше ','devices in a schedule at most '))+(d.dmax||32)+'</div>' : '')+'</div>';
+    // DAY LIMIT (mockup «Лимит в день»): minutes of real activity per weekday / weekend day — part of the draft, saved with it
+    // A limit the choices do not have (a backup, a hand edit — the router takes any 0..1440) is offered as is: shown as «без
+    // лимита», the next «Сохранить» would silently drop it (BE7000 08.10.2026, a 3-minute test limit).
+    function limSel(id, v){
+      v=v|0;
+      var opts=SCH_LIM_OPT.indexOf(v)>=0 ? SCH_LIM_OPT : SCH_LIM_OPT.concat([v]).sort(function(a, b){ return a-b; });
+      return '<select id="'+id+'" class="sc-lim">'+opts.map(function(m){ return '<option value="'+m+'"'+(m===(v|0) ? ' selected' : '')+'>'+esc(m ? schMinWord(m) : tkL('без лимита','no limit'))+'</option>'; }).join('')+'</select>';
+    }
+    h+='<div class="card" id="sc-lim"><div class="wt">Лимит в день</div>'
+      + '<div class="kv"><div class="grow"><div class="k">Будни</div><div class="v">не больше стольких минут в интернете</div></div><div class="f">'+limSel('sc-lwd', dr.lim.wd)+'</div></div>'
+      + '<div class="kv"><div class="grow"><div class="k">Выходные</div><div class="v">суббота и воскресенье</div></div><div class="f">'+limSel('sc-lwe', dr.lim.we)+'</div></div>'
+      + '<div class="cline">Считаются минуты, когда устройство действительно качало: видео, соцсети, загрузки. Фоновая синхронизация, переписка и лёгкие игры качают мало и в счёт не идут. Лимит кончился — закрыто до конца дня; «Открыть на…» добавляет время.</div></div>';
+    // SAFE SEARCH (mockup «Безопасный поиск»): one switch, part of the draft — the router's filter answers the search engines'
+    // names with their own safe front doors all day except closed time (access-sched.sh, state «safe»); YouTube moderate, a strict
+    // switch is planned. Without the filter component the switch is kept but acts nowhere — said on the card.
+    h+='<div class="card" id="sc-safe"><div class="wt">Безопасный поиск</div>'
+      + (schLimOn(d) ? '' : noteBox('<b>Нужен компонент «Фильтр по категориям».</b> Без него безопасный поиск не включится.', 'warn'))
+      + '<div class="kv swrow"><div class="grow"><div class="k">Поиск и YouTube — в безопасном режиме</div><div class="v">Google, Яндекс, Bing, DuckDuckGo, YouTube</div></div>'
+      + '<label class="sw"><input type="checkbox" id="sc-safe-on" aria-label="'+esc(tkL('безопасный поиск','safe search'))+'"'+(dr.safe ? ' checked' : '')+'><i></i></label></div>'
+      + '<div class="cline">Весь день, кроме закрытого времени: имена этих устройств отвечает фильтр роутера, правила по доменам продолжают работать. YouTube — умеренный режим.</div>'
+      + '<div style="margin-top:11px">'+noteBox('Шифрованный DNS, включённый в браузере вручную, идёт мимо роутера — его не подменить.', 'info')+'</div></div>';
+    h+='<div class="card"><div class="wt">Что расписание не остановит</div>'
+      + '<div class="lrow"><div class="grow"><div class="nm">Мобильный интернет</div><div class="ds">телефон с выключенным Wi-Fi роутеру не виден</div></div></div>'
+      + '<div class="lrow"><div class="grow"><div class="nm">Новый MAC</div><div class="ds">частный адрес Wi-Fi или сменённый MAC — для роутера новое устройство, расписания у него нет</div></div></div>'
+      // without the filter «ограничено» closes nothing at all — a row about getting past it would talk of a lock that is not there
+      + (schLimOn(d) ? '<div class="lrow"><div class="grow"><div class="nm">Свой VPN на устройстве</div><div class="ds">обходит «ограничено»; «закрыто» не обходит</div></div></div>' : '')+'</div>';
+    h+='<div class="card wfull"><div class="cline wr" id="sc-err" role="alert" style="margin-top:0"></div><div class="acts" style="justify-content:flex-start">'
+      + '<button type="button" class="btn pri" id="sc-save">'+(it ? 'Сохранить' : 'Создать расписание')+'</button>'
+      + (it ? '<button type="button" class="btn gh" id="sc-del">'+icUse('i-trash','s')+'Удалить расписание</button>' : '<button type="button" class="btn gh" id="sc-cancel">Отмена</button>')+'</div></div>';
+    return h+'</div>';
+  }
+  function schMacPriv(m){ return /^.[26ae]/i.test(String(m||'')); }   // the locally administered bit (lease-lib.sh::mac_is_random)
+  // «ОГРАНИЧЕНО» (mockup «Ограничено — что закрыто»): the mode, the categories the ROUTER offers (`d.cats`: its table, the panel
+  // only words them) as pills like the days of a window, any POOL of the geo catalogue, own sites and addresses a line each, and what
+  // it cannot do said on the card. Data comes from the geo catalogue (the router downloads it after a save): until then a pill or a
+  // pool says «скачивается» — `it.pend` / `it.gpend`. No filter on the router ⇒ the card says what is missing and leads to
+  // «Компоненты»: «ограничено» is not offered in the week then (schLimOn).
+  // POOLS: a search over the catalogue the «Гео» screen reads (`rtLoadGeoKeys` — one cache per tab, loaded on the first search:
+  // 1.5 s and 305 KB on BE7000, not for every show); what a chosen pool IS (kind, label) the router says in `it.geo`.
+  // «ALLOW» (mockup: «скоро»): names only — an address cannot be «allowed only» (an allowed site lives on any CDN address); the router
+  // closes by address the categories that carry addresses (`c.addr`) unless they are allowed. Said on the card.
+  function schLimHtml(d, it, dr){
+    var cats=Array.isArray(d.cats) ? d.cats : [], pend=(it && it.pend) || [], al=dr.lmode==='allow';
+    var h='<div class="card w2" id="sc-lmt"><div class="wt">'+(al ? 'Ограничено — что разрешено' : 'Ограничено — что закрыто')+'</div>';
+    if(!schLimOn(d)) h+=noteBox('<b>Нужен компонент «Фильтр по категориям».</b> Без него «ограничено» не закрывает ничего — устройство остаётся открытым целиком.', 'warn')
+      + '<div class="acts" style="justify-content:flex-start;margin-top:9px"><button type="button" class="btn" data-cact="rr-pkg">Компоненты</button></div>';
+    // the mode — two tiles of the mockup (what each one does is said on the tile itself)
+    h+='<div class="opt c2" id="sc-lmode" role="group" aria-label="'+esc(tkL('Режим «ограничено»','The «limited» mode'))+'"'+(schLimOn(d) ? '' : ' style="margin-top:13px"')+'>'
+      + optTile('data-sc-lmode', 'block', !al, 'i-ban', 'Закрыть выбранное', 'категории и сайты ниже не открываются, остальное работает')
+      + optTile('data-sc-lmode', 'allow', al, 'i-lock', 'Только разрешённое', 'открыто лишь выбранное — мессенджеры, школа, карты')+'</div>'
+      + '<div class="cline">Категории — из каталога гео-категорий</div>'
+      + '<div class="segbar sm" id="sc-cats" role="group" aria-label="'+esc(tkL('Категории','Categories'))+'">'
+      + cats.map(function(c){ var on=dr.cats.indexOf(c.id)>=0, pd=on && pend.indexOf(c.id)>=0;
+          return '<div class="seg'+(on ? ' on' : '')+'" data-sccat="'+esc(c.id)+'" role="button" tabindex="0" aria-pressed="'+(on ? 'true' : 'false')+'">'
+            + '<span>'+esc(trNow(String(c.name)))+'</span>'+(pd ? '<span class="sub">'+esc(tkL(' · скачивается',' · downloading'))+'</span>' : '')+'</div>'; }).join('')
+      + '</div>'
+      + '<div class="cline">Любой пул из каталога гео — сервис, страна, «заблокировано в РФ»</div>'
+      + '<div id="sc-geo">'+schGeoChips(d, it, dr)+'</div>'
+      + '<div class="f" style="margin-top:9px"><label for="sc-gq">Найти в каталоге</label><input id="sc-gq" type="search" autocomplete="off" spellcheck="false" translate="no" placeholder="telegram, discord, cn…" value="'+esc(dr.gq)+'"></div>'
+      + '<div id="sc-gres"></div>'
+      + '<div class="f" style="margin-top:12px"><label for="sc-sites">'+(al ? 'Свои сайты — по одному в строке' : 'Свои сайты и адреса — по одному в строке')+'</label>'
+      + '<textarea id="sc-sites" spellcheck="false" autocapitalize="off" translate="no" placeholder="roblox.com">'+esc(dr.sites)+'</textarea></div>'
+      + (al ? noteBox('Разрешено только выбранное: остальные сайты на устройстве не откроются. Проверки связи телефона и время разрешены всегда. Мессенджеры, не разрешённые здесь, закрыты и по адресам их серверов. Адреса в этом режиме не нужны — разрешает фильтр имён. Свой VPN на устройстве или шифрованный DNS, включённый в браузере вручную, это обойдёт.', 'info')
+            : noteBox('«Ограничено» закрывает через DNS роутера, мессенджеры, адресные пулы и свои адреса — ещё и по адресу: свой VPN на устройстве или шифрованный DNS, включённый в браузере вручную, его обойдёт. «Закрыто» так не обойти — оно закрывает устройство целиком. Вступает за несколько минут: устройство помнит адреса, которые уже узнало.', 'info'));
+    return h+'</div>';
+  }
+  // the chosen pools: a chip each (what the router says it is; «скачивается» until its data is on the router), ✕ takes it off; an
+  // ADDRESS pool in «block» closes everything on those addresses — the warning stands beside the chips it is about
+  function schGeoChips(d, it, dr){
+    var gp=(it && it.gpend) || [], al=dr.lmode==='allow', max=(d.pmax|0) || 32;
+    var h=dr.geo.length ? '<div class="xchips" style="margin-top:6px">'+dr.geo.map(function(g, i){
+        return '<span class="chip zp-cat" title="'+esc(trNow(geoSrcL({key:g.k, type:g.t})))+'"><span translate="no">'+esc(g.l || g.k)+'</span><span class="n">'+esc(g.kind==='cidr' ? tkL('адреса','addresses') : tkL('домены','domains'))
+          + (gp.indexOf(g.k)>=0 ? esc(tkL(' · скачивается',' · downloading')) : '')+'</span>'
+          + '<button type="button" class="zp-cat-off" data-scgdel="'+i+'" aria-label="'+esc(tkL('убрать пул','remove the pool'))+'" title="'+esc(tkL('убрать пул','remove the pool'))+'">✕</button></span>'; }).join('')+'</div>'
+      : '<div class="cline" style="margin-top:4px">Пулов не выбрано.</div>';
+    if(dr.geo.length>=max) h+='<div class="cline">'+esc(tkL('пулов не больше ','pools at most '))+max+'</div>';
+    var adr=dr.geo.filter(function(g){ return g.kind==='cidr'; });
+    if(adr.length && al) h+=noteBox('Адресные пулы в «только разрешённом» ничего не меняют: разрешает фильтр имён, по адресам и так всё открыто.', 'info');
+    else if(adr.length) h+=noteBox('<b>Адресный пул закрывает всё на этих адресах — вместе с соседями.</b> Для сети одного сервиса (как у Telegram) это то, что нужно; сети CDN и страны закроют и посторонние сайты.', 'warn');
+    return h;
+  }
+  // a search over the catalogue (`rtGeoKeys`) by the «Гео» screen's own matcher (geoQMatch: label, description, key); the label's
+  // exact and prefix hits first; 8 rows — the rest is «уточните запрос»
+  function schGeoFind(q){
+    q=geoQNorm(q); if(!q || !rtGeoKeys) return [];
+    var hit=[];
+    Object.keys(rtGeoKeys).forEach(function(k){
+      var it=rtGeoKeys[k]; if(!geoQMatch(it, q)) return;
+      var l=String(it.label || k).toLowerCase();
+      hit.push({r:(l===q) ? 0 : (l.indexOf(q)===0) ? 1 : 2, it:it});
+    });
+    hit.sort(function(a, b){ return a.r-b.r || String(a.it.label).length-String(b.it.label).length || String(a.it.key).localeCompare(String(b.it.key)); });
+    return hit;
+  }
+  function schGeoRes(d, dr, q){
+    if(!String(q||'').trim()) return '';
+    if(!rtGeoKeys) return '<div class="cline">'+esc(trNow('каталог гео не получен — попробуйте ещё раз'))+'</div>';
+    var hit=schGeoFind(q);
+    if(!hit.length) return '<div class="cline">'+esc(trNow('в каталоге такого нет'))+'</div>';
+    var have={}; dr.geo.forEach(function(g){ have[g.k]=1; });
+    return hit.slice(0, 8).map(function(x){ var it=x.it;
+        return '<div class="lrow'+(have[it.key] ? ' dis' : '')+'"'+(have[it.key] ? '' : ' role="button" tabindex="0" data-scgadd="'+esc(it.key)+'"')+'>'
+          + '<div class="grow"><div class="nm" translate="no">'+esc(it.label || it.key)+'</div>'
+          + '<div class="ds">'+esc(trNow(geoSrcL(it)))+' · '+esc(it.kind==='cidr' ? tkL('адреса','addresses') : tkL('домены','domains'))+'</div></div>'
+          + (have[it.key] ? '<span class="chip">'+esc(tkL('выбран','chosen'))+'</span>' : '<span class="chip acc">'+esc(tkL('добавить','add'))+'</span>')+'</div>'; }).join('')
+      + (hit.length>8 ? '<div class="cline">'+esc(tkL('ещё совпадений: ','more matches: '))+(hit.length-8)+esc(tkL(' — уточните запрос',' — narrow the search'))+'</div>' : '');
+  }
+  // THE save of a schedule — the editor and the device tab (add / remove a device) send the whole schedule against its version, in
+  // the form cgi-bin/action carries: windows «days.HHMM.HHMM.o|l|c» by `;`, devices by `,`, the name base64.
+  // `lim` — {wd, we} minutes of the day limit (weekdays / weekend, 0 = none).
+  // `lx` — {lmode, cats, geo, sites, safe} of «limited» and safe search (the editor); absent ⇒ the keys are not sent and the router
+  // keeps the schedule's own.
+  function schSpec(id, ver, name, on, base, wins, devs, lim, lx){
+    var p={id:id, ver:ver, name_b64:b64utf8(String(name)), enabled:on ? 1 : 0, base:base,
+            wins:wins.map(function(w){ return w.d+'.'+w.a.replace(':','')+'.'+w.b.replace(':','')+'.'+w.s.charAt(0); }).join(';'), devs:devs.join(','),
+            lim_wd:(lim && lim.wd)|0, lim_we:(lim && lim.we)|0};
+    if(lx){ p.lmode=lx.lmode||'block'; p.cats=(lx.cats||[]).join(','); p.geo=(lx.geo||[]).map(function(g){ return g.k; }).join(','); p.sites_b64=b64utf8(String(lx.sites||'')); p.safe=lx.safe ? 1 : 0; }
+    return p;
+  }
+  function schSegVal(id){ var s=document.querySelector('#'+id+' .seg.on'); return s ? s.getAttribute('data-'+id) : ''; }
+  function schFormWire(body, d, it, dr, devs){
+    function el(id){ return document.getElementById(id); }
+    // a router answer that comes after the human left repaints nothing (schScrOpen with an id skips the «still shown?» check)
+    var rep=navIfShown('rt-sched-p', schScrOpen);
+    function repaintWeek(){
+      el('sc-bars').innerHTML=schWeekHtml({base:dr.base, wins:dr.wins}, d);
+      el('sc-wins').innerHTML=schWinRows(dr); wireWinDel();
+    }
+    function wireWinDel(){
+      Array.prototype.forEach.call(body.querySelectorAll('[data-scwdel]'), function(b){
+        b.addEventListener('click', function(){
+          var i=+b.getAttribute('data-scwdel'); dr.wins.splice(i, 1); dr.dirty=true; repaintWeek();
+          var n=body.querySelector('[data-scwdel="'+Math.min(i, dr.wins.length-1)+'"]') || el('sc-wadd'); if(n) n.focus();   // focus stays in the list
+        });
+      });
+    }
+    // the name — a draft on `input` (not `change`: Chrome sends `change` to a field the redraw carries away, after the success)
+    el('sc-name').addEventListener('input', function(){ nwTyped(); dr.name=this.value; dr.dirty=true; });
+    el('sc-lwd').addEventListener('change', function(){ dr.lim.wd=+this.value||0; dr.dirty=true; });
+    // own sites — a draft on `input` (see the name above)
+    el('sc-sites').addEventListener('input', function(){ nwTyped(); dr.sites=this.value; dr.dirty=true; });
+    Array.prototype.forEach.call(body.querySelectorAll('#sc-cats [data-sccat]'), function(s){
+      function flip(){
+        var c=s.getAttribute('data-sccat'), i=dr.cats.indexOf(c);
+        if(i>=0) dr.cats.splice(i, 1); else dr.cats.push(c);
+        s.classList.toggle('on', i<0); s.setAttribute('aria-pressed', i<0 ? 'true' : 'false'); dr.dirty=true;
+      }
+      s.addEventListener('click', flip);
+      s.addEventListener('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); flip(); } });
+    });
+    wireCacts(el('sc-lmt'));
+    if(it) wireCacts(el('sc-head'));   // the head's filter note carries the «Компоненты» door too
+    // the mode redraws the screen from the draft (the card's words change with it)
+    Array.prototype.forEach.call(body.querySelectorAll('[data-sc-lmode]'), function(t){
+      function pick(){ var v=t.getAttribute('data-sc-lmode'); if(v===dr.lmode) return; dr.lmode=v; dr.dirty=true; schShow(d, it, devs); }
+      t.addEventListener('click', pick);
+      t.addEventListener('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); pick(); } });
+    });
+    // pools: the chips and the search results are repainted in place — the search field keeps its text and focus
+    function scGeoPaint(){
+      el('sc-geo').innerHTML=schGeoChips(d, it, dr);
+      Array.prototype.forEach.call(body.querySelectorAll('[data-scgdel]'), function(b){
+        b.addEventListener('click', function(){
+          var i=+b.getAttribute('data-scgdel'); dr.geo.splice(i, 1); dr.dirty=true; scGeoPaint(); scGeoFind();
+          var n=body.querySelector('[data-scgdel="'+Math.min(i, dr.geo.length-1)+'"]') || el('sc-gq'); if(n) n.focus();
+        });
+      });
+    }
+    function scGeoFind(){
+      var q=el('sc-gq').value, out=el('sc-gres');
+      out.innerHTML=schGeoRes(d, dr, q);
+      Array.prototype.forEach.call(out.querySelectorAll('[data-scgadd]'), function(r){
+        function add(){
+          var k=r.getAttribute('data-scgadd'), g=rtGeoKeys && rtGeoKeys[k];
+          if(!g || dr.geo.some(function(x){ return x.k===k; })) return;
+          if(dr.geo.length>=((d.pmax|0) || 32)){ showToast(tkL('пулов не больше ','pools at most ')+((d.pmax|0) || 32), false); return; }
+          dr.geo.push({k:k, kind:g.kind, t:g.type, l:g.label || k}); dr.dirty=true; scGeoPaint(); scGeoFind(); el('sc-gq').focus();
+        }
+        r.addEventListener('click', add);
+        r.addEventListener('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); add(); } });
+      });
+    }
+    el('sc-gq').addEventListener('input', function(){
+      nwTyped(); dr.gq=this.value;
+      if(rtGeoKeys){ scGeoFind(); return; }
+      el('sc-gres').innerHTML='<div class="cline">'+esc(trNow('загружаю каталог гео…'))+'</div>';
+      rtLoadGeoKeys().then(function(){ if(screenAlive(body)) scGeoFind(); });
+    });
+    scGeoPaint();
+    if(dr.gq && rtGeoKeys) scGeoFind();   // the search a redraw found typed in (the draft keeps it)
+    // the router asked again when its next change is due (schAgain) — the draft keeps every input across that redraw
+    if(it) schAgain(body, d, it, rep);
+    el('sc-lwe').addEventListener('change', function(){ dr.lim.we=+this.value||0; dr.dirty=true; });
+    el('sc-safe-on').addEventListener('change', function(){ dr.safe=this.checked ? 1 : 0; dr.dirty=true; });
+    wireSeg('sc-base', 'data-sc-base', function(v){ dr.base=v; dr.dirty=true; repaintWeek(); });
+    wireSeg('sc-ws', 'data-sc-ws', function(v){ dr.nw.s=v; });
+    el('sc-a').addEventListener('input', function(){ nwTyped(); dr.nw.a=this.value; });
+    el('sc-b').addEventListener('input', function(){ nwTyped(); dr.nw.b=this.value; });
+    Array.prototype.forEach.call(body.querySelectorAll('#sc-days [data-scd]'), function(s){
+      s.setAttribute('role','button'); s.setAttribute('tabindex','0'); s.setAttribute('aria-pressed', s.classList.contains('on') ? 'true' : 'false');
+      function flip(){
+        s.classList.toggle('on'); s.setAttribute('aria-pressed', s.classList.contains('on') ? 'true' : 'false');
+        dr.nw.d=Array.prototype.map.call(body.querySelectorAll('#sc-days .seg.on'), function(x){ return x.getAttribute('data-scd'); }).sort().join('');
+      }
+      s.addEventListener('click', flip);
+      s.addEventListener('keydown', function(e){ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); flip(); } });
+    });
+    el('sc-wadd').addEventListener('click', function(){
+      var days=Array.prototype.map.call(body.querySelectorAll('#sc-days .seg.on'), function(s){ return s.getAttribute('data-scd'); }).sort().join('');
+      var a=el('sc-a').value, b=el('sc-b').value, s=schSegVal('sc-ws')||'closed', er=el('sc-werr');
+      if(!days){ er.textContent=trNow('выберите хотя бы один день'); return; }
+      if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(a) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(b)){ er.textContent=trNow('время — часы и минуты, например 22:00'); return; }
+      if(dr.wins.length>=(d.wmax||24)){ er.textContent=trNow('окон не больше')+' '+(d.wmax||24); return; }
+      er.textContent='';
+      dr.wins.push({d:days, a:a, b:b, s:s}); dr.dirty=true; repaintWeek();
+    });
+    wireWinDel();
+    Array.prototype.forEach.call(body.querySelectorAll('[data-scdel]'), function(b){
+      b.addEventListener('click', function(){
+        var m=b.getAttribute('data-scdel'), i=dr.devs.indexOf(m); dr.devs=dr.devs.filter(function(x){ return x!==m; }); dr.dirty=true; schShow(d, it, devs);
+        var bd=document.getElementById('modal-body'), n=bd && (bd.querySelectorAll('[data-scdel]')[Math.min(i, dr.devs.length-1)] || document.getElementById('sc-dadd')); if(n) n.focus();
+      });
+    });
+    el('sc-daddgo').addEventListener('click', function(){
+      var m=el('sc-dadd').value; if(!m || dr.devs.indexOf(m)>=0) return;
+      dr.devs.push(m); dr.dirty=true; schShow(d, it, devs);
+    });
+    el('sc-save').addEventListener('click', function(){
+      var nm=String(dr.name||'').trim(), er=el('sc-err');
+      if(!nm){ er.textContent=trNow('нужно имя расписания'); el('sc-name').focus(); return; }
+      er.textContent='';
+      // the DRAFT's version: it may be ahead of the screen's `it` by the tab's own toggle / holidays (schVerKeep)
+      var p=schSpec(it ? it.id : 'new', it ? dr.ver : 0, nm, dr.on, dr.base, dr.wins, dr.devs, dr.lim, {lmode:dr.lmode, cats:dr.cats, geo:dr.geo, sites:dr.sites, safe:dr.safe});
+      // ONE save in flight per draft: the answer comes at once, but the screen moves on 1.2 s later — a second click in between
+      // created the schedule twice (review s.112, round 2); `sent` dies with the draft or with the answer
+      if(dr.sent) return;
+      var sent=postAction('sched_save', null, it ? 'сохраняю расписание…' : 'создаю расписание…', p, function(r){
+        dr.sent=false;
+        if(!r || !r.ok){ if(r && r.msg && screenAlive(er)) er.textContent=trNow(String(r.msg)); return; }
+        // lines of «Свои сайты» the router could not read as a site — said, not silently lost
+        if((r.dropped|0)>0) showToast(tkL('не похожи на сайт или адрес и пропущены — строк: ','not a site or an address and skipped — lines: ')+(r.dropped|0), false);
+        // only THIS draft goes: the human may already be editing another schedule (its draft must survive this answer)
+        if(_schDraft===dr){ _schDraft=null; _schNewTpl=null; _schNewDev=''; }
+        // the human left while the router saved: its answer must neither pull them back nor rewrite another screen's address
+        if(!navShows('rt-sched-p') || navSplit(_navKey).a!==(it ? it.id : '')) return;
+        if(!it) navReplace(navKey('rt-sched-p', r.id));
+        schScrOpen(r.id);
+      }, function(){ dr.sent=false; });
+      if(sent) dr.sent=true;
+    });
+    if(el('sc-cancel')) el('sc-cancel').addEventListener('click', function(){ _schDraft=null; navUp(); });
+    if(!it) return;
+    el('sc-del').addEventListener('click', function(){
+      postAction('sched_del', tkL('Удалить расписание «'+it.name+'»?\n\nЕго устройства сразу станут открыты.', 'Delete the schedule «'+it.name+'»?\n\nIts devices become open at once.'), 'удаляю расписание…', {id:it.id},
+        function(r){ if(r && r.ok){ if(_schDraft===dr) _schDraft=null; if(navShows('rt-sched-p') && navSplit(_navKey).a===it.id){ navReplace('rt-sched'); openSched(); } } });
+    });
+    var on=el('sc-on');
+    on.addEventListener('change', function(){
+      swPost(on, 'sched_toggle', null, on.checked ? 'включаю расписание…' : 'выключаю расписание…', {id:it.id, on:on.checked ? 1 : 0}, function(r){
+        if(r && r.ok && r.ver!=null && _schDraft && _schDraft.key===it.id && +r.ver===_schDraft.ver+1){ _schDraft.ver=r.ver; _schDraft.on=on.checked ? 1 : 0; }
+        rep();
+      });
+    });
+    schActsWire(el('sc-head'), it, rep);
+    el('sc-hold').addEventListener('input', nwTyped);
+    el('sc-holgo').addEventListener('click', function(){
+      var v=el('sc-hold').value;
+      if(!/^\d{4}-\d\d-\d\d$/.test(v)){ el('sc-holerr').textContent=trNow('выберите дату'); return; }
+      el('sc-holerr').textContent='';
+      // a refusal stays beside the button with the date it is about (a redraw closed the form a second after saying it)
+      postAction('sched_hol', null, 'включаю каникулы…', {id:it.id, date:v}, function(r){
+        if(r && !r.ok){ if(r.msg && screenAlive(el('sc-holerr'))) el('sc-holerr').textContent=trNow(String(r.msg)); return; }
+        schVerKeep(it, r); rep();
+      });
+    });
   }
 
   // ---- КЭШ проверок серверов (пинг/доступность/скорость) — ПЕРСИСТ НА РОУТЕРЕ (.srv-checks),
@@ -5620,6 +7293,262 @@
   var I18N_ATTRS=['title','placeholder','aria-label','data-tip'];
   var _i18nOrig=(typeof WeakMap!=='undefined')?new WeakMap():null;   // текстовый узел → ru-оригинал
   var I18N_EN={
+    "расписание cron · свои скрипты":"cron schedule · your own scripts",
+    "Список — от роутера: на этом есть sh (busybox ash) и Lua 5.1. «По первой строке #!» — интерпретатор из неё.":"The list is the router's: this one has sh (busybox ash) and Lua 5.1. «By the #! line» — the interpreter from that line.",
+    "Список — от роутера: на этом есть только sh (busybox ash). «По первой строке #!» — интерпретатор из неё.":"The list is the router's: this one has only sh (busybox ash). «By the #! line» — the interpreter from that line.",
+    // ─── Access schedules («Расписания доступа», 08.10.2026): screens, the device tab, the home card, the router's answers (access-sched.sh) ───
+    "Расписания":"Schedules","Расписание доступа":"Access schedule",
+    "Ночь без интернета":"A night without internet","закрыто каждую ночь с 23:00 до 07:00":"closed every night from 23:00 to 07:00",
+    "Будни и сон":"Weekdays and sleep","по будням ночью закрыто, в выходные — ночью дольше":"closed at night on weekdays, longer at night on weekends",
+    "Учёба и сон":"School and sleep","ночью закрыто, в учебные часы — без соцсетей, видео и игр":"closed at night; in school hours without social media, video and games",
+    "Только в эти часы":"Only these hours","закрыто всегда, кроме окон, которые вы зададите":"always closed except the windows you set",
+    "Без интернета":"No internet","закрыто всегда; в домашней сети видно — камеры, принтер, умный дом":"always closed; seen in the home network — cameras, a printer, the smart home",
+    "Расписания сейчас не действуют: роутер ещё не знает, который час.":"The schedules are not acting now: the router does not know the time yet.",
+    "Своих часов у него нет — время приходит из сети после загрузки. Как только оно сверится, расписания начнут действовать сами: закрыть интернет по неверным часам хуже, чем не закрыть.":"It has no clock of its own — the time comes from the network after a boot. Once it is synced, the schedules start acting by themselves: closing the internet by a wrong clock is worse than not closing.",
+    "Расписаний пока нет. Расписание — это устройства и неделя: когда им открыт интернет, а когда закрыт. Начните с готового или создайте своё.":"No schedules yet. A schedule is devices and a week: when their internet is open and when it is closed. Start from a template or create your own.",
+    "Новое расписание":"New schedule","Открыть всем":"Open for all",
+    "Расписания сейчас не действуют: Enodia снята с расписания.":"The schedules are not acting now: Enodia is off the schedule.",
+    "В crontab нет строки, которой роутер раз в минуту проверяет окна, — открыть закрытое в срок было бы некому, поэтому не закрыто ничего. «Включить VPN» возвращает её вместе с остальным.":"The crontab has no line by which the router checks the windows every minute — nobody would open the closed in time, so nothing is closed. «Turn the VPN on» brings it back with the rest.",
+    "Enodia снята с расписания — «Включить VPN» возвращает её.":"Enodia is off the schedule — «Turn the VPN on» brings it back.",
+    "Не действуют: Enodia снята с расписания.":"Not acting: Enodia is off the schedule.",
+    "«Ограничено» и безопасный поиск сейчас не действуют:":"«Limited» and safe search are not acting now:",
+    "нет компонента «Фильтр по категориям». Эти устройства открыты целиком.":"the «Category filter» component is missing. These devices are fully open.",
+    "фильтр по категориям не ответил после перезапуска. Эти устройства открыты целиком; роутер пробует снова каждую минуту.":"the category filter did not answer after a restart. These devices are fully open; the router tries again every minute.",
+    "стоит прежняя сборка фильтра по категориям. Эти устройства открыты целиком — обновите компонент «Фильтр по категориям».":"an older build of the category filter is installed. These devices are fully open — update the «Category filter» component.",
+    "на роутере нет geo.sh — обновите скрипты роутера":"there is no geo.sh on the router — update the router's scripts","нет данных расписания":"no schedule data",
+    "потом — снова закрыто вручную":"then closed by hand again","Отменить каникулы":"Cancel the holidays","Отменить":"Cancel","С":"From","До":"To",
+    "сейчас закрыто всем — сначала «Открыть всем»":"closed for all now — «Open for all» first",
+    "сейчас действует ручное действие — сначала верните по расписанию":"a hand action is acting now — first go back to the schedule",
+    "у расписания каникулы — сначала отмените их":"the schedule is on holidays — cancel them first",
+    "расписание выключено — включите его":"the schedule is switched off — switch it on",
+    "расписания сейчас не действуют: Enodia снята с расписания — включите VPN":"the schedules are not acting now: Enodia is off the schedule — turn the VPN on",
+    "закрытие ещё не скоро — отложить можно за час до него":"the closing is not soon — it can be postponed an hour before it","Закрыть всем сейчас…":"Close for all now…",
+    "«Закрыть всем сейчас» — пауза для всех устройств из всех включённых расписаний, и на каникулах тоже: на 30 минут, на час, до утра или пока не откроете. Потом каждое расписание идёт своим чередом.":"«Close for all now» pauses every device of every switched-on schedule, on holidays too: for 30 minutes, an hour, till morning or until you open. Then each schedule goes its own way.",
+    "Как это работает":"How it works","Устройство узнаётся по MAC":"A device is known by its MAC","правило не уедет на соседа, когда сменится адрес":"the rule does not move to a neighbour when the address changes",
+    "«Закрыто» — закрыто всё":"«Closed» closes everything",
+    "сильнее всей маршрутизации: ни правила по портам, ни свой VPN на устройстве не выпустят наружу. Домашняя сеть остаётся":"stronger than all the routing: neither port rules nor a VPN on the device let it out. The home network stays",
+    "Не остановит":"Will not stop","мобильный интернет телефона и новый MAC":"a phone's mobile internet and a new MAC","Начать с готового":"Start from a template",
+    "Время роутера":"Router time","Сейчас на роутере":"Now on the router","сверено":"synced","не сверено":"not synced",
+    "Окна считаются по этим часам. Своих часов у роутера нет: после загрузки время приходит из сети, и пока оно не сверено, расписания":"Windows are counted by this clock. The router has no clock of its own: after a boot the time comes from the network, and until it is synced the schedules",
+    "— закрыть интернет среди дня по неверным часам хуже, чем не закрыть.":"— closing the internet in the middle of the day by a wrong clock is worse than not closing.",
+    "закрываю всем…":"closing for all…","открываю всем…":"opening for all…","закрываю…":"closing…","открываю…":"opening…",
+    "не удалось обновить экран расписания":"could not refresh the schedule screen","роутер не ответил — открываю список расписаний":"the router did not answer — opening the list of schedules",
+    "расписание удалено — открываю список":"the schedule was deleted — opening the list",
+    "Расписание действует":"The schedule acts","выключенное хранится, но ничего не закрывает":"a switched-off one is kept but closes nothing",
+    "Расписание сейчас не действует:":"The schedule is not acting now:",
+    "роутер ещё не знает, который час. Действия поверх расписания станут доступны, когда время сверится.":"the router does not know the time yet. Actions over the schedule become available once the time is synced.",
+    "действие поверх расписания — до своего срока":"an action over the schedule — until its own end","Вернуть по расписанию":"Back to the schedule",
+    "окна и лимит расписания в эти дни не действуют":"the schedule's windows and limit do not act on these days",
+    "Расписание не действует до этого дня включительно":"The schedule does not act up to and including this day","Включить каникулы":"Start the holidays",
+    "В закрытое окно вместо «Закрыть сейчас» — «Открыть на…»: 15 мин · 30 мин · 1 ч · до конца окна. Действие поверх расписания живёт до своего срока и пишется в журнал событий.":"In a closed window «Open for…» replaces «Close now»: 15 min · 30 min · 1 h · until the window ends. An action over the schedule lives until its own end and goes to the event log.",
+    "Закрыть сейчас…":"Close now…","Открыть на…":"Open for…","Отложить закрытие на 30 мин":"Postpone the closing by 30 min","Каникулы…":"Holidays…","Закрыть…":"Close…",
+    "откладываю закрытие…":"postponing the closing…","возвращаю расписание…":"back to the schedule…","отменяю каникулы…":"cancelling the holidays…","включаю каникулы…":"starting the holidays…",
+    "Окон нет — весь день действует состояние «вне окон».":"No windows — the «outside windows» state acts all day.",
+    "через полночь — до утра следующего дня":"past midnight — until the next morning",
+    "открыто":"open","ограничено":"limited","закрыто":"closed",
+    "Имя расписания":"Schedule name","Дети":"Kids","Изменить неделю":"Change the week","Вне окон":"Outside windows","Новое окно":"New window","Добавить окно":"Add a window",
+    "Пересеклись окна — действует более строгое. Окно, которое кончается раньше, чем началось, идёт через полночь.":"Windows overlap — the stricter one acts. A window that ends before it starts runs past midnight.",
+    "Устройств пока нет — расписанию некого закрывать.":"No devices yet — the schedule has nobody to close.",
+    "Частный адрес Wi-Fi.":"Private Wi-Fi address.",
+    "Устройство с таким MAC может его сменить и выпасть из расписания — выключите частный адрес для этой сети в настройках телефона.":"A device with such a MAC may change it and drop out of the schedule — turn the private address off for this network in the phone's settings.",
+    "Добавить устройство без расписания":"Add a device without a schedule",
+    "Что расписание не остановит":"What a schedule will not stop","Мобильный интернет":"Mobile internet","телефон с выключенным Wi-Fi роутеру не виден":"a phone with Wi-Fi off is not seen by the router",
+    "Новый MAC":"A new MAC","частный адрес Wi-Fi или сменённый MAC — для роутера новое устройство, расписания у него нет":"a private Wi-Fi address or a changed MAC is a new device for the router, without a schedule",
+    "Свой VPN на устройстве":"A VPN on the device","обходит «ограничено»; «закрыто» не обходит":"gets past «limited»; not past «closed»",
+    "Создать расписание":"Create the schedule","Удалить расписание":"Delete the schedule",
+    "выберите хотя бы один день":"choose at least one day","время — часы и минуты, например 22:00":"the time is hours and minutes, e.g. 22:00","окон не больше":"windows at most",
+    "нужно имя расписания":"a schedule name is needed","сохраняю расписание…":"saving the schedule…","создаю расписание…":"creating the schedule…","удаляю расписание…":"deleting the schedule…",
+    "включаю расписание…":"switching the schedule on…","выключаю расписание…":"switching the schedule off…","выберите дату":"choose a date",
+    "Роутер не ответил про расписания — спрошу ещё раз.":"The router did not answer about schedules — asking again.",
+    "У этого устройства нет MAC — расписанию не к чему привязаться.":"This device has no MAC — a schedule has nothing to hold on to.",
+    "роутер ещё не знает, который час.":"the router does not know the time yet.",
+    "Устройство не входит ни в одно расписание — интернет ему открыт всегда.":"The device is in no schedule — its internet is always open.",
+    "Добавить в расписание":"Add to a schedule","Новое для этого устройства":"New for this device","В этом расписании":"In this schedule",
+    "Открыть расписание":"Open the schedule","Убрать из расписания":"Remove from the schedule","убираю из расписания…":"removing from the schedule…","добавляю в расписание…":"adding to the schedule…",
+    "Расписаний нет. Расписание закрывает устройствам интернет по времени — ночью, в учебные часы или всегда, кроме выбранных окон.":"No schedules. A schedule closes devices' internet by the time — at night, in school hours or always except chosen windows.",
+    "Не действуют: время роутера ещё не сверено.":"Not acting: the router clock is not synced yet.",
+    "Так же и закрытое окно":"So does a closed window of an","расписания доступа":"access schedule",": устройство не выходит наружу никаким путём.":": the device goes out by no path at all.",
+    "Ещё здесь":"Also here","открыть расписания доступа":"open access schedules","когда устройству можно в интернет — дети, приставка, камеры":"when a device may go online — kids, a console, cameras",
+    "Все расписания":"All schedules",
+    "Лимит в день":"Daily limit","Будни":"Weekdays","Выходные":"Weekend","не больше стольких минут в интернете":"at most this much time online",
+    "суббота и воскресенье":"Saturday and Sunday",
+    "Считаются минуты, когда устройство действительно качало: видео, соцсети, загрузки. Фоновая синхронизация, переписка и лёгкие игры качают мало и в счёт не идут. Лимит кончился — закрыто до конца дня; «Открыть на…» добавляет время.":"Only the minutes the device really transferred count: video, social networks, downloads. Background sync, chats and light games transfer little and do not count. When the limit runs out it is closed till the end of the day; «Open for…» adds time.",
+    "неверный лимит":"wrong limit","лимит — не больше суток":"a limit is at most a day",
+    // the router's refusals (access-sched.sh, cgi-bin/action): fixed answers; the ones with a value inside are rules below
+    "на роутере нет access-sched.sh — обновите скрипты роутера":"access-sched.sh is not on the router — update the router scripts",
+    "время роутера ещё не сверено — расписания не действуют":"the router clock is not synced yet — the schedules do not act",
+    "расписание изменили в другой вкладке — откройте его заново":"the schedule was changed in another tab — open it again",
+    "расписание удалено — откройте список заново":"the schedule was deleted — open the list again",
+    "расписания сейчас меняет другой запрос — повторите":"another request is changing the schedules right now — try again",
+    "неверный номер расписания":"wrong schedule number","нет такого расписания":"no such schedule",
+    "неверный выключатель":"wrong switch value","неверное состояние вне окон":"wrong state outside windows","неверное время окна":"wrong window time",
+    "неверный срок":"wrong term","неверная дата":"wrong date","дата уже прошла":"the date has passed",
+    "сейчас не открыто — откладывать нечего":"not open now — nothing to postpone","закрытия впереди нет":"no closing ahead",
+    "у этого расписания закрытое время не кончается — выберите срок":"this schedule's closed time does not end — choose a term",
+    "не удалось записать расписание":"could not write the schedule","неверное имя расписания":"wrong schedule name",
+    "неверный режим «ограничено»":"wrong «limited» mode",
+    // «Ограничено — что закрыто» (the DNS filter of schedules); category names come from the router's table (access-sched.sh SC_CATS)
+    "Ограничено — что закрыто":"Limited — what is closed","Ограничено — что разрешено":"Limited — what is allowed",
+    "Закрыть выбранное":"Close the chosen","Только разрешённое":"Only the allowed",
+    "категории и сайты ниже не открываются, остальное работает":"the categories and sites below do not open, the rest works",
+    "открыто лишь выбранное — мессенджеры, школа, карты":"only the chosen is open — messengers, school, maps",
+    "Безопасный поиск":"Safe search","Поиск и YouTube — в безопасном режиме":"Search and YouTube — in safe mode","Google, Яндекс, Bing, DuckDuckGo, YouTube":"Google, Yandex, Bing, DuckDuckGo, YouTube",
+    "Без него безопасный поиск не включится.":"Without it safe search does not turn on.",
+    "Весь день, кроме закрытого времени: имена этих устройств отвечает фильтр роутера, правила по доменам продолжают работать. YouTube — умеренный режим.":"All day except closed time: the router's filter answers these devices' names, the domain rules keep working. YouTube — moderate mode.",
+    "Шифрованный DNS, включённый в браузере вручную, идёт мимо роутера — его не подменить.":"Encrypted DNS switched on in a browser by hand goes past the router — it cannot be replaced.",
+    "неверный выключатель безопасного поиска":"wrong safe search switch",
+    "Любой пул из каталога гео — сервис, страна, «заблокировано в РФ»":"Any pool of the geo catalogue — a service, a country, «blocked in Russia»",
+    "Найти в каталоге":"Find in the catalogue","Пулов не выбрано.":"No pools chosen.",
+    "Свои сайты и адреса — по одному в строке":"Own sites and addresses — one per line",
+    "каталог гео не получен — попробуйте ещё раз":"the geo catalogue did not come — try again","в каталоге такого нет":"nothing like that in the catalogue",
+    "загружаю каталог гео…":"loading the geo catalogue…",
+    "Разрешено только выбранное: остальные сайты на устройстве не откроются. Проверки связи телефона и время разрешены всегда. Мессенджеры, не разрешённые здесь, закрыты и по адресам их серверов. Адреса в этом режиме не нужны — разрешает фильтр имён. Свой VPN на устройстве или шифрованный DNS, включённый в браузере вручную, это обойдёт.":"Only the chosen is allowed: other sites will not open on the device. Phone connectivity checks and the clock are always allowed. Messengers not allowed here are also closed by their servers' addresses. Addresses are not needed in this mode — the name filter allows. A VPN on the device, or encrypted DNS switched on in a browser by hand, gets past it.",
+    "«Ограничено» закрывает через DNS роутера, мессенджеры, адресные пулы и свои адреса — ещё и по адресу: свой VPN на устройстве или шифрованный DNS, включённый в браузере вручную, его обойдёт. «Закрыто» так не обойти — оно закрывает устройство целиком. Вступает за несколько минут: устройство помнит адреса, которые уже узнало.":"«Limited» closes through the router's DNS, messengers, address pools and own addresses by address too: a VPN on the device, or encrypted DNS switched on in a browser by hand, gets past it. «Closed» cannot be got past — it closes the whole device. It takes a few minutes to act: the device remembers the addresses it has already learned.",
+    "Адресные пулы в «только разрешённом» ничего не меняют: разрешает фильтр имён, по адресам и так всё открыто.":"Address pools change nothing in «only the allowed»: the name filter allows, by address everything is open anyway.",
+    "Адресный пул закрывает всё на этих адресах — вместе с соседями.":"An address pool closes everything on those addresses — neighbours too.",
+    "Для сети одного сервиса (как у Telegram) это то, что нужно; сети CDN и страны закроют и посторонние сайты.":"For a network of one service (like Telegram's) that is what is wanted; CDN networks and countries close unrelated sites too.",
+    "пулов больше":"pools more than","неизвестный пул":"unknown pool","неверный пул":"wrong pool","своих сайтов и адресов больше":"own sites and addresses more than",
+    "«Ограничено» — закрыто выбранное":"«Limited» — the chosen is closed","категории и сайты из расписания, остальное работает":"the schedule's categories and sites, the rest works",
+    "Нужен компонент «Фильтр по категориям».":"The «Category filter» component is needed.",
+    "Без него «ограничено» не закрывает ничего — устройство остаётся открытым целиком.":"Without it «limited» closes nothing — the device stays fully open.",
+    "Категории — из каталога гео-категорий":"Categories — from the geo-category catalogue",
+    "Мессенджеры":"Messengers","Видео":"Video","Игры":"Games","Развлечения":"Entertainment","Для взрослых":"Adult",
+    "Свои сайты — по одному в строке":"Own sites — one per line",
+    // ─── «Задачи» — cron manager (07.10.2026): screens, labels, the router's fixed answers (tasks.sh) ───
+    "Задачи":"Tasks","Новая задача":"New task","Задача":"Task","Задачи выполняются с правами root и без проверок:":"Tasks run as root, unchecked:",
+    "ошибочный скрипт или правка чужой строки могут нарушить работу роутера, VPN или интернета. Отвечаете за них вы.":"a wrong script or an edit of a foreign line can break the router, the VPN or the internet. They are your responsibility.",
+    "Файл crontab":"Crontab file","Ваши задачи":"Your tasks","Создать задачу":"Create a task",
+    "Enodia снята с расписания:":"Enodia is off the schedule:",
+    "эту строку уже ведёт одна из ваших задач — откройте её в списке":"one of your tasks already runs this line — open it in the list",
+    "в crontab нет её строки самовосстановления — задачи не запускаются, а строки, взятые под управление, работают в нём как обычные. После деактивации расписание возвращает «Включить VPN».":"its self-healing line is not in the crontab — tasks do not run, and the lines taken under management run in it as plain ones. After a deactivation, «Turn the VPN on» brings the schedule back.",
+    "Задач пока нет. Задача — свой скрипт, файл на роутере или команда; запускается по расписанию, при загрузке или кнопкой.":"No tasks yet. A task is your own script, a file on the router or a command; it runs on a schedule, at boot or by a button.",
+    "Эти строки подсистемы переписывают сами — при установке, обновлении и включении VPN: правка здесь продержалась бы до первого такого события. Менять можно то расписание, у которого есть дорога; в текстовой вкладке «Файл crontab» правятся и они.":"These lines are rewritten by their subsystems — on install, update and turning the VPN on: an edit here would last until the first such event. A schedule with a door can be changed there; in the «Crontab file» tab they are editable too.",
+    "Строк Enodia в crontab нет — переустановите систему или нажмите «Починить правила».":"No Enodia lines in the crontab — reinstall the system or press «Repair rules».",
+    "Чужие строки":"Foreign lines",
+    "Прошивка Xiaomi и всё, что добавлено не через панель. Вывод и ошибки этих строк cron выбрасывает; «Взять под управление» на экране строки сделает из неё задачу — с историей запусков и письмом при ошибке. Часть строк прошивки она может вернуть при своём обновлении.":"Xiaomi firmware and everything added outside the panel. Cron throws away the output and errors of these lines; «Take over» on the line's screen turns it into a task — with a run history and a letter on failure. The firmware may bring some of its lines back on its update.",
+    "Чужих строк нет.":"No foreign lines.","Самовосстановление":"Self-healing",
+    "после перезагрузки поднимает всё обратно, дальше молчит":"brings everything back after a reboot, then stays quiet","Сторож":"Watchdog",
+    "следит за туннелем и уводит на резерв":"watches the tunnel and moves to a backup","Учёт трафика":"Traffic accounting",
+    "поднимает панель, если она упала":"brings the panel up if it went down","меняется в «Источниках списков»":"changed in «List sources»",
+    "Обновление подписок":"Subscription updates","меняется в «Подписках»":"changed in «Subscriptions»","держит SSH":"keeps SSH",
+    "без неё SSH закроется после перезагрузки":"without it SSH closes after a reboot",
+    "Весь файл как есть — правьте что угодно. Строки Enodia подсистемы перепишут при установке, обновлении и включении VPN, а строки ваших задач панель выводит из их настроек: поправленные здесь, они вернутся при следующем сохранении задачи — меняйте их на вкладке «Задачи».":"The whole file as is — edit anything. Enodia lines will be rewritten by their subsystems on install, update and turning the VPN on, and your tasks' lines are derived from their settings: edited here, they come back on the task's next save — change them on the «Tasks» tab.",
+    "Перед записью роутер проверяет каждую строку: пять полей расписания и команда. Ошибка хотя бы в одной — файл не записывается, а номер строки и причина появляются здесь. Сохранение действует сразу, перезапускать ничего не нужно.":"Before writing, the router checks every line: five schedule fields and a command. An error in any line — the file is not written, and the line number and the reason appear here. Saving takes effect at once, nothing needs a restart.",
+    "Сохранить файл":"Save the file","Копировать":"Copy","читаю crontab…":"reading the crontab…",
+    "роутер не ответил — откройте вкладку ещё раз":"the router did not respond — open the tab again","crontab скопирован":"crontab copied",
+    "сохраняю crontab…":"saving the crontab…","не удалось обновить экран задачи":"could not refresh the task screen",
+    "роутер не ответил — открываю список задач":"the router did not respond — opening the task list","Пустой скрипт":"Empty script",
+    "sh · Остановить облачные сервисы Xiaomi":"sh · Stop Xiaomi cloud services","sh · Перезапустить Wi-Fi":"sh · Restart Wi-Fi",
+    "sh · Перезагрузить роутер":"sh · Reboot the router","Lua · Записать строку в системный журнал":"Lua · Write a line to the system log",
+    "Каждые N минут":"Every N minutes","Каждые N часов":"Every N hours","Ежедневно":"Daily","По дням недели":"By weekday","Ежемесячно":"Monthly",
+    "Своё выражение":"Own expression","Расписание":"Schedule","минута":"minute","час":"hour","день месяца":"day of month","месяц":"month",
+    "день недели":"weekday","Каждые, минут":"Every, minutes","Каждые, часов":"Every, hours","В минуту":"At minute","Время":"Time",
+    "Дни недели":"Weekdays","День месяца":"Day of month","Вс":"Su","Пн":"Mo","Вт":"Tu","Ср":"We","Чт":"Th","Пт":"Fr","Сб":"Sa",
+    "Пять полей справа — как в crontab: списки через запятую, диапазоны через дефис, шаг — «*/N» или «a-b/N». День недели 0–6, воскресенье — 0.":"The five fields on the right are as in a crontab: lists with commas, ranges with a hyphen, a step is «*/N» or «a-b/N». Weekday 0–6, Sunday is 0.",
+    "Название задачи":"Task name","Включена":"Enabled",
+    "Выключенная задача остаётся в списке, а её строки в cron нет.":"A disabled task stays in the list, but it has no cron line.",
+    "Что запускать":"What to run","Свой скрипт":"Own script","Файл на роутере":"A file on the router","Язык":"Language",
+    "по первой строке #!":"by the #! line","Начать с примера":"Start from an example","Вставить":"Insert","Скрипт":"Script",
+    "Синтаксис роутер проверит при сохранении. Переводы строк Windows — если вставили из Блокнота — уберутся сами.":"The router checks the syntax on save. Windows line breaks — if you pasted from Notepad — are removed automatically.",
+    "Путь к файлу":"File path","Аргументы":"Arguments","Запускать как":"Run as","Открыть и изменить сам файл":"Open and edit the file itself",
+    "пишется прямо в файл на роутере; прежняя версия остаётся рядом с суффиксом .bak":"written straight into the file on the router; the previous version stays next to it with a .bak suffix",
+    "Команда — одной строкой, как в crontab":"Command — one line, as in a crontab",
+    "Выполняется через sh: работают и &&, и перенаправления. Длинную команду удобнее сделать скриптом.":"Runs through sh: && and redirections work. A long command is easier as a script.",
+    "Когда":"When","по расписанию":"on schedule","По расписанию":"On schedule","При загрузке роутера":"At router boot",
+    "один раз после перезагрузки — когда поднимутся сеть и VPN":"once after a reboot — when the network and VPN are up",
+    "Задержка после загрузки, секунд":"Delay after boot, seconds",
+    "Выключите и расписание, и загрузку — задача будет запускаться только кнопкой.":"Turn off both the schedule and boot — the task will run by the button only.",
+    "Как запускать":"How to run","Ограничение по времени":"Time limit",
+    "Не уложилась — роутер обрывает задачу вместе со всем, что она запустила.":"Over the limit — the router stops the task along with everything it started.",
+    "1 мин":"1 min","30 мин":"30 min","Если прошлый запуск ещё идёт":"If the previous run is still going","дождаться":"wait","рядом":"alongside",
+    "Приоритет":"Priority","Низкий не отнимает процессор у VPN и панели.":"Low does not take the CPU from the VPN and the panel.","обычный":"normal",
+    "низкий":"low","Ждать сверки часов":"Wait for the clock sync",
+    "После перезагрузки часы роутера стоят на прошлом, пока не сверятся с интернетом.":"After a reboot the router's clock is in the past until it syncs with the internet.",
+    "до сверки запуск по расписанию пропускается":"scheduled runs are skipped until the sync",
+    "Рабочий каталог и переменные окружения":"Working directory and environment variables","Рабочий каталог":"Working directory",
+    "Переменные — по одной в строке":"Variables — one per line","Пароли и токены держите здесь, а не в тексте скрипта: в бэкап без ключей переменные не попадают.":"Keep passwords and tokens here rather than in the script: variables are left out of a backup without keys.","Вывод и письма":"Output and letters","Хранить вывод":"Keep output",
+    "последний":"the last one","5 запусков":"5 runs","не хранить":"don't keep",
+    "До 32 КБ на запуск, в оперативной памяти: флеш роутера на запуски не тратится, после перезагрузки история начинается заново.":"Up to 32 KB per run, in RAM: the router's flash is not spent on runs, after a reboot the history starts over.",
+    "Письмо":"Letter","никогда":"never","при ошибке":"on failure","каждый раз":"every time",
+    "Ошибка — ненулевой код выхода или обрыв по времени. О задаче — не чаще письма в час: повторы приходят числом в следующем.":"A failure is a non-zero exit code or a time-limit stop. At most one letter an hour per task: repeats arrive as a count in the next one.",
+    "Почта настраивается в «Уведомлениях».":"Mail is set up in «Notifications».",
+    "Успешные — в журнал событий":"Successful runs — to the events journal",
+    "ошибки и обрывы попадают туда всегда; о задаче — не чаще раза в час":"failures and stops always go there; at most once an hour per task","Последние запуски":"Recent runs","Запустить сейчас":"Run now",
+    "Дублировать":"Duplicate","Удалить задачу":"Delete the task","Создать и запустить":"Create and run",
+    "Запусков с загрузки роутера не было. История и вывод живут в оперативной памяти: после перезагрузки начинаются заново.":"No runs since the router booted. History and output live in RAM: after a reboot they start over.",
+    "Вывод запуска":"Run output","Заменить текст скрипта примером?":"Replace the script text with the example?",
+    "сначала откройте файл кнопкой «Проверить»":"open the file with «Check» first",
+    "Записать файл на роутере?\n\nПрежняя версия останется рядом с суффиксом .bak.":"Write the file on the router?\n\nThe previous version will stay next to it with a .bak suffix.",
+    "сохраняю файл…":"saving the file…","введите название задачи":"enter the task name","скрипт пустой":"the script is empty",
+    "скрипт больше 16 КБ — положите его файлом на роутер":"the script is over 16 KB — put it on the router as a file",
+    "путь к файлу — полный, от /":"the file path must be full, from /","введите команду":"enter the command",
+    "задержка — число секунд, не больше 3600":"the delay is a number of seconds, at most 3600","сохраняю задачу…":"saving the task…",
+    "создаю задачу…":"creating the task…","останавливаю задачу…":"stopping the task…","запускаю задачу…":"starting the task…",
+    "копирую задачу…":"copying the task…","удаляю задачу…":"deleting the task…","включаю задачу…":"enabling the task…",
+    "выключаю задачу…":"disabling the task…",
+    "Строка станет задачей: история запусков с выводом, ограничение по времени, письмо при ошибке, запуск при загрузке и место в бэкапе. Файл останется где лежит, строка в crontab заменится строкой задачи, а при удалении или отключении Enodia вернётся обычной строкой — закомментированной, если задача выключена или без Enodia работать не может.":"The line becomes a task: a run history with output, a time limit, a letter on failure, a run at boot and a place in the backup. The file stays where it is; the crontab line is replaced by the task's line and comes back as a plain line when Enodia is removed or deactivated — commented out if the task is disabled or can't work without Enodia.",
+    "Взять под управление":"Take over","Исправить строку":"Fix the line","Сохранить строку":"Save the line","Удалить строку":"Delete the line",
+    "Чужая строка — не задача панели: её вывод и ошибки cron выбрасывает, и что она делает и удаётся ли, отсюда не видно.":"A foreign line is not a panel task: cron throws away its output and errors, so what it does and whether it succeeds can't be seen from here.",
+    "cron эту строку пропускает: в ней нет пяти полей расписания и команды. Исправьте её в поле ниже или удалите.":"cron skips this line: it has no five schedule fields and a command. Fix it in the field below or delete it.",
+    "выключенная остаётся в файле строкой с «#» в начале":"a disabled one stays in the file as a line starting with «#»",
+    "включаю строку…":"enabling the line…","выключаю строку…":"disabling the line…","сохраняю строку…":"saving the line…",
+    "удаляю строку…":"deleting the line…","делаю задачу из строки…":"turning the line into a task…",
+    "строка пустая — для удаления есть своя кнопка":"the line is empty — deleting has its own button",
+    "чужую строку узнают по содержимому — адреса у неё нет":"a foreign line is identified by its content — it has no address",
+    "ваша задача не удалась или оборвана по времени; успешные — если так выбрано у самой задачи":"your task failed or hit its time limit; successful runs — if chosen in the task itself",
+    "задача сохранена":"task saved","задача создана":"task created","задача создана и запущена":"task created and started",
+    "задача сохранена и запущена":"task saved and started","задача удалена":"task deleted","задача включена":"task enabled",
+    "задача выключена":"task disabled","копия создана выключенной":"the copy was created disabled","задача запущена":"task started",
+    "останавливаю задачу":"stopping the task","строка сохранена":"line saved","строка удалена":"line deleted","строка включена":"line enabled",
+    "строка выключена":"line disabled","строка стала задачей":"the line became a task","crontab сохранён":"crontab saved",
+    "файл сохранён, прежняя версия — рядом с суффиксом .bak":"file saved, the previous version is next to it with a .bak suffix",
+    "такой задачи нет":"no such task",
+    "задачи сейчас меняет другой запрос — повторите через минуту":"tasks are being changed by another request — try again in a minute",
+    "название длиннее 80 знаков":"the name is longer than 80 characters","неверные данные задачи":"invalid task data",
+    "скрипт больше 16 КБ":"the script is over 16 KB","Lua на этом роутере нет":"there is no Lua on this router",
+    "задача уже выполняется":"the task is already running","задача сейчас не выполняется":"the task is not running now",
+    "строка изменилась с тех пор, как вы открыли экран — обновите его":"the line changed since you opened the screen — refresh it",
+    "строки Enodia меняет их владелец — расписание правится на их экране":"Enodia lines are changed by their owner — the schedule is edited on its screen",
+    "это строка задачи — меняйте саму задачу":"this is a task's line — change the task itself",
+    "на роутере нет tasks.sh — обновите скрипты роутера":"there is no tasks.sh on the router — update the router scripts",
+    "в расписании нужно ровно пять полей: минута, час, день месяца, месяц, день недели":"a schedule needs exactly five fields: minute, hour, day of month, month, weekday",
+    "@-сокращения busybox cron не понимает — нужны пять полей; «при загрузке» — настройка задачи":"busybox cron does not understand @-shortcuts — five fields are needed; «at boot» is a task setting",
+    "строки-переменные cron этого роутера не понимает — переменные задаются в настройках задачи":"this router's cron does not understand variable lines — variables are set in the task settings",
+    "нужны пять полей расписания и команда":"five schedule fields and a command are needed","нет команды":"no command",
+    "задача из crontab":"a task from crontab","нет расписания":"no schedule",
+    // the router's other refusals (tasks.sh, the task CGI) — every one is checked by dev/tasks-i18n-test.js
+    "в расписании — только цифры, названия, пробелы и * / , -":"a schedule has only digits, names, spaces and * / , -",
+    "в строке #! нет интерпретатора":"the #! line names no interpreter","нет данных задачи":"no task data",
+    "неверный номер задачи":"invalid task number","неверный вид задачи":"invalid task kind","неверный язык":"invalid language",
+    "неверная настройка наложения":"invalid overlap setting","неверный приоритет":"invalid priority",
+    "неверная настройка писем":"invalid email setting","неверная настройка вывода":"invalid output setting",
+    "задержка — число секунд":"the delay is a number of seconds","задержка — не больше 3600 секунд":"the delay is at most 3600 seconds",
+    "ограничение по времени — число секунд":"the time limit is a number of seconds",
+    "ограничение по времени — не больше суток":"the time limit is at most a day",
+    "рабочий каталог — полный путь, от /":"the working directory is a full path, from /",
+    "путь, команда и аргументы — одной строкой":"the path, the command and the arguments are one line each",
+    "не удалось создать каталог задач в памяти":"could not create the tasks folder in RAM",
+    "не удалось создать временный каталог":"could not create a temporary folder",
+    "команда длиннее 2000 знаков — сделайте её скриптом":"the command is longer than 2000 characters — make it a script",
+    "переменных больше 4 КБ":"the variables are over 4 KB",
+    "такой задачи нет — её удалили, пока вы правили":"no such task — it was deleted while you were editing",
+    "не удалось записать скрипт на флеш — места нет?":"could not write the script to flash — out of space?",
+    "не удалось записать переменные на флеш — места нет?":"could not write the variables to flash — out of space?",
+    "не удалось записать задачу на флеш":"could not write the task to flash","не удалось записать задачу":"could not write the task",
+    "задача сохранена, но расписание не записалось (crontab)":"the task is saved, but the schedule was not written (crontab)",
+    "задача удалена, но расписание не записалось (crontab)":"the task is deleted, but the schedule was not written (crontab)",
+    "неверное действие":"invalid action","не удалось записать копию":"could not write the copy","нет строки":"no line",
+    "пустая строка — для удаления есть своя кнопка":"an empty line — deleting has its own button",
+    "строку задачи так не завести — создайте задачу":"a task line can't be added this way — create a task",
+    "не удалось записать crontab":"could not write the crontab","нет текста":"no text",
+    "файл больше 16 КБ — правьте его по SSH":"the file is over 16 KB — edit it over SSH",
+    "crontab изменился, пока вы его правили — откройте вкладку заново":"the crontab changed while you were editing it — open the tab again",
+    "путь — полный, от /":"the path is a full one, from /","файл не текстовый":"the file is not text","неверная строка":"invalid line",
+    "неверный текст":"invalid text","неверная версия файла":"invalid file version","нет пути к файлу":"no file path",
+    "путь — одной строкой":"the path is one line",
+    "Сохранить пустой crontab?\n\nИз файла уйдут все строки — прошивки, Enodia и ваши. Без строки самовосстановления Enodia задачи перестанут запускаться, а взятые под управление вернутся в файл обычными строками.":
+      "Save an empty crontab?\n\nEvery line leaves the file — the firmware's, Enodia's and yours. Without Enodia's self-healing line the tasks stop running, and the ones taken under management come back into the file as plain lines.",
+    "нет версии файла — откройте вкладку заново":"no file version — open the tab again",
     // ─── Экран сервера (cn-server, 25.09.2026): карточки, числа, имя, отказы роутера rename_config / get_config_info ───
     "читаю конфиг…":"reading the config…","Конфиг целиком":"The whole config",
     "не удалось обновить экран сервера":"could not refresh the server screen",
@@ -5687,7 +7616,7 @@
     ", вставленный вместо ссылки, тоже принимается.":" pasted instead of a link is accepted too.",
     "Редактора конфига у AmneziaWG нет":"AmneziaWG has no config editor",
     "принимает конфиг только целиком, и полуправка оставила бы интерфейс без рукопожатия. Поправленный конфиг загрузите заново — панель спросит, заменить ли им прежний. Endpoint и MTU — на экране сервера.":"accepts a config only as a whole, and a partial edit would leave the interface without a handshake. Upload the fixed config again — the panel will ask whether to replace the old one. Endpoint and MTU are on the server screen.",
-    "Дополнительные выходы (второй и третий путь наружу) живут своим экраном раздела «Соединение»: список серверов и список выходов отвечают на разные вопросы.":"Additional exits (a second and third way out) live on their own screen in «Connection»: the server list and the exit list answer different questions.",
+    "Дополнительные выходы (ещё пути наружу, до шести) живут своим экраном раздела «Соединение»: список серверов и список выходов отвечают на разные вопросы.":"Additional exits (more ways out, up to six) live on their own screen in «Connection»: the server list and the exit list answer different questions.",
     "Поиск сервера или группы":"Search servers or groups",
     "Активный закреплён сверху и не уезжает при поиске и сортировке. Бейдж собирается из самого конфига: протокол · защита · транспорт · flow.":"The active server is pinned on top and stays put when you search or sort. The badge is built from the config itself: protocol · security · transport · flow.",
     "добавлены вручную":"added manually","ещё не скачивалась":"not downloaded yet","Показать или скрыть серверы группы":"Show or hide the group's servers",
@@ -5757,6 +7686,28 @@
     "за 7 дней · считает роутер по счётчикам интерфейсов":"for 7 days · counted by the router from interface counters",
     "за 30 дней · считает роутер по счётчикам интерфейсов":"for 30 days · counted by the router from interface counters",
     "за год · считает роутер по счётчикам интерфейсов":"for the year · counted by the router from interface counters",
+    // — «Устройства» (traffic-dev.sh, 09.10.2026): the footer is glued to the window, as above —
+    "за сегодня · считает прошивка роутера по MAC-адресу":"for today · counted by the router's firmware per MAC address",
+    "за 7 дней · считает прошивка роутера по MAC-адресу":"for 7 days · counted by the router's firmware per MAC address",
+    "за 30 дней · считает прошивка роутера по MAC-адресу":"for 30 days · counted by the router's firmware per MAC address",
+    "за год · считает прошивка роутера по MAC-адресу":"for the year · counted by the router's firmware per MAC address",
+    "Этот роутер устройства ещё не считает — обновите панель на роутере, и разрез появится.":"This router does not count devices yet — update the panel on the router and the cut will appear.",
+    "Прошивка сейчас не отвечает про устройства.":"The firmware is not answering about devices right now.",
+    "Служба trafficd молчит — показано то, что роутер успел записать.":"The trafficd service is silent — shown is what the router managed to record.",
+    "Время на роутере ещё не сверено.":"The router's clock is not synced yet.",
+    "Новые байты устройств лягут в свой день, как только оно сверится.":"New device bytes will land on their day as soon as it syncs.",
+    "за этот период через роутер ничего не прошло":"nothing went through the router in this period",
+    "Роутер начал считать устройства сегодня — за сегодня это не с начала дня.":"The router started counting devices today — today's figures do not start at midnight.",
+    "роутер начнёт считать устройства с ближайшего шага учёта — раз в пять минут":"the router starts counting devices at the next accounting step — every five minutes",
+    "имени не сообщает":"reports no name","Прочие":"Other",
+    "устройства сверх 16 за день — их объём целиком здесь":"devices beyond 16 a day — their whole volume is here",
+    "Это трафик через роутер, а не «в интернет».":"This is traffic through the router, not «to the internet».",
+    "Прошивка считает всё, что устройство передало через роутер: и показ на телевизор, и обмен с домашним NAS. Поэтому сумма по устройствам не обязана совпасть со «Всего» наверху: там нет домашнего обмена, а здесь — трафика самого роутера (обновления, проверки туннеля).":"The firmware counts everything a device moved through the router: casting to the TV and traffic with a home NAS too. So the sum over devices does not have to match «Total» above: that has no home traffic, and this has none of the router's own (updates, tunnel checks).",
+    "— дни до этого в разрезе пусты, и доли за длинное окно посчитаны только по тем дням, что есть.":"— the days before are empty in this cut, and shares over a long window are counted only over the days there are.",
+    "Телефон со «случайным» MAC в каждой сети здесь — отдельное устройство: другого имени, кроме MAC, у роутера для него нет.":"A phone with a «random» MAC per network is a separate device here: the router has no other name for it than the MAC.",
+    "Статистика":"Statistics","Трафик через роутер":"Traffic through the router",
+    "У этого устройства нет MAC — роутеру не по чему его считать.":"This device has no MAC — the router has nothing to count it by.",
+    "Это трафик через роутер, а не «в интернет»: домашний обмен (показ на телевизор, NAS) в нём тоже.":"This is traffic through the router, not «to the internet»: home traffic (casting to the TV, a NAS) is in it too.",
     "Конфиги":"Configs","Сети":"Networks","Всего":"Total","Через туннель":"Through the tunnel","Сейчас":"Now",
     "туннеля нет":"no tunnel","меряю…":"measuring…","через туннель":"through the tunnel",
     "весь трафик через провайдера: и то, что ушло в туннели, и то, что пошло мимо них":"all traffic through the ISP: both what went into the tunnels and what went past them",
@@ -5775,10 +7726,6 @@
     "Пока не считается.":"Not counted yet.",
     "Интерфейс у туннеля один, а серверов много: awg0 остаётся awg0 и после переключения. Единственный честный путь — фиксировать счётчик В МОМЕНТ смены конфига и засчитывать объём тому серверу, который был активен. Это отметка на роутере, а не арифметика в панели, — поэтому разрез ждёт своей очереди, а не рисуется примерно.":"The tunnel has one interface and many servers: awg0 stays awg0 after a switch. The only honest way is to snapshot the counter AT THE MOMENT the config changes and credit the volume to the server that was active. That is a mark on the router, not arithmetic in the panel — so this cut waits its turn instead of being drawn approximately.",
     "Считать пришлось бы по счётчикам сетевых интерфейсов, а это ЭФИР: туда попадут и обмен между устройствами, и широковещание — сумма по сетям выйдет больше, чем через провайдера. Разрез полезный, но подписывать его придётся «в сети», а не «в интернет», и сделать это надо аккуратно.":"It would have to be counted from the network interfaces' counters, and that is THE AIR: traffic between devices and broadcasts land there too — the sum over networks comes out larger than what went through the ISP. The cut is useful, but it has to be labelled «on the network», not «to the internet», and that must be done carefully.",
-    "Роутер этого не считает — и мы говорим это прямо, а не рисуем нули.":"The router does not count this — and we say so plainly instead of drawing zeros.",
-    "Мешает аппаратный ускоритель: установленные соединения уходят в NSS/ECM мимо netfilter, и счётчики правил по адресам почти не тикают — числа из них были бы не «примерными», а случайными. Оба пути (счётчики точки доступа — только Wi-Fi и только пока клиент в эфире — и статистика самого ускорителя) требуют замера на железе.":"The hardware accelerator is in the way: established connections go into NSS/ECM past netfilter, and per-address rule counters barely tick — numbers taken from them would not be «approximate» but random. Both ways (the access point's own counters — Wi-Fi only, and only while the client is on the air — and the accelerator's statistics) need measuring on real hardware.",
-    "за минуту наблюдения видно, куда ходит одно устройство — на его экране":"a minute of watching shows where a single device goes — on its own screen",
-    "посмотреть, кто в сети и что запрашивает":"see who is on the network and what they request",
     "Этот роутер разрез по выходам ещё не считает — обновите панель на роутере, и он появится.":"This router does not count the per-exit cut yet — update the panel on the router and it will appear.",
     "Этот роутер считает выходы только за сегодня.":"This router counts exits for today only.",
     "Окна за неделю, месяц и год добавлены в более новой версии панели — обновите её на роутере, и периоды включатся.":"The week, month and year windows were added in a newer panel version — update it on the router and the periods will switch on.",
@@ -5787,7 +7734,10 @@
     "приём и отдача: через несущую, через провайдера и через каждый дополнительный выход":"received and sent: through the carrier, through the ISP and through every additional exit",
     "не ведётся: дельты снимаются раз в пять минут и складываются в сутки":"not kept: deltas are taken every five minutes and added up into days",
     "в настройках на роутере — счёт переживает и перезагрузку, и обновление":"in the settings on the router — the count survives both a reboot and an update",
-    "одна строка в сутки; сырьё закачек и кэш на флеш не пишутся никогда":"one line per day; download payloads and caches are never written to flash",
+    "строка в сутки и строка на устройство за сутки (около 15 КБ в месяц на десяток устройств)":"a line per day and a line per device per day (about 15 KB a month for ten devices)",
+    "— сырьё закачек и кэш на /data не пишем никогда":"— download payloads and caches never go to /data",
+    "счётчики прошивки по MAC — и через аппаратный ускоритель тоже; сутки копятся в памяти и сохраняются раз в 4 часа":"the firmware's counters per MAC — through the hardware accelerator too; the day builds up in memory and is saved every 4 hours",
+    "до 16 устройств в день":"up to 16 devices a day","остальные — «прочие»":"the rest — «other»",
     // Короткие метки «почему выход не везёт» (длинные фразы того же ответа — на экране самого выхода).
     "компонент не установлен":"component not installed","ядро без NFQUEUE":"kernel without NFQUEUE",
     "идёт основным":"goes via the main tunnel","не отвечает":"not responding","идёт напрямую":"goes direct","правил нет":"no rules",
@@ -5888,7 +7838,7 @@
     // — раздел «Соединение»: двери и карточка «Сейчас» (шаг 3b переноса) —
     "Транспорт":"Transport","чем выходим: 5 движков, что установлено":"what we go out with: 5 engines, what is installed",
     "пулы vless:// · автообновление по расписанию":"vless:// pools · scheduled auto-update",
-    "второй и третий путь наружу для части трафика":"a second and a third way out for part of the traffic",
+    "ещё пути наружу для части трафика":"more ways out for part of the traffic",
     "Сменить протокол":"Change protocol","Сменить сервер":"Change server",
     // — экран «Транспорт» —
     "Чем выходим наружу":"How traffic leaves",
@@ -5954,10 +7904,11 @@
     "«Только текст» — тот же срез одним файлом: от наших логов в нём последние строки, системного журнала нет. Собирается быстрее; прикладывайте его файлом — в сообщение он не поместится.":
       "«Text only» is the same snapshot as a single file: it has the last lines of our logs and no system log. It builds faster; attach it as a file — it will not fit into a message.",
     "Что внутри":"What's inside","Версия и состояние подсистем":"Version and subsystem state",
-    "что установлено и что несёт трафик: транспорт, дополнительные выходы, десинк, доступ домой, шифрованный DNS; включены ли письма и о чём; у секретных файлов — только «есть ли»":
-      "what is installed and what carries traffic: transport, extra exits, desync, home access, encrypted DNS; whether emails are on and what about; for secret files — only whether they exist",
+    "что установлено и что несёт трафик: транспорт, дополнительные выходы, десинк, доступ домой, шифрованный DNS, учёт трафика по устройствам; включены ли письма и о чём; у секретных файлов — только «есть ли»":
+      "what is installed and what carries traffic: transport, extra exits, desync, home access, encrypted DNS, per-device traffic accounting; whether emails are on and what about; for secret files — only whether they exist",
     "Правила ядра":"Kernel rules","маршрутизация, метки, цепочки, наборы адресов и проба прямого пути":"routing, marks, chains, address sets and a direct-path probe",
     "Клиенты сети":"Network clients","адреса домашней сети и производитель по MAC; имена из аренд заменены метками":"home network addresses and the vendor by MAC; names from leases are replaced with labels",
+    "Расписания доступа":"Access schedules","сверено ли время роутера, что сейчас закрыто и правила в ядре; имена расписаний не входят":"whether the router clock is synced, what is closed now and the kernel rules; schedule names are not included",
     "сессии и паузы после неудачных входов; пароль и его хэш не читаются":"sessions and pauses after failed sign-ins; the password and its hash are not read",
     "Внешний адрес":"External address","проба маршрута; адрес замаскирован":"route probe; the address is masked",
     "Ресурсы и расписание":"Resources and schedule","память, флеш, накопитель, раскладка, задания cron и локи":"memory, flash, drive, layout, cron jobs and locks",
@@ -6165,9 +8116,10 @@
     // Что показывает каждая карточка (таблица CARD_INFO) — подписи строк экрана.
     "доли выходов и кто через них ходит":"exit shares and who goes through them",
     "объём за период и график по дням":"volume per period and the per-day chart",
-    "состояние второго и третьего пути":"the state of the second and third path",
+    "состояние дополнительных путей наружу":"the state of the additional ways out",
     "остаток трафика и срок действия":"traffic left and the expiry date",
     "кто подключён и куда идёт его трафик":"who is connected and where their traffic goes",
+    "что сейчас открыто и закрыто по расписаниям":"what the schedules keep open and closed now",
     "последние записи центра уведомлений":"the latest entries from the notification centre",
     "кто занимает оперативную память":"what takes up the RAM",
     "что панель делала в этой вкладке":"what the panel did in this tab",
@@ -6731,6 +8683,8 @@
     "обход блокировок без VPN-сервера — пакеты правит сам роутер, без прокси":"bypassing blocks without a VPN server — the router itself rewrites the packets, no proxy",
     "шифрует DNS-запросы всей сети":"encrypts the DNS queries of the whole network",
     "вход в панель по HTTPS, в том числе снаружи":"panel sign-in over HTTPS, from outside too",
+    "закрывает детям выбранные категории сайтов в окнах «ограничено» расписаний доступа":"closes the chosen site categories for children in the «limited» windows of access schedules",
+    "Фильтр по категориям":"Category filter","фильтр по категориям":"category filter",
     "поставим":"will install","доставим":"will complete","снимем":"will remove",
     "не хватает части файлов — такой протокол не поднимется; план доставит недостающее":"some of its files are missing — such a protocol will not come up; the plan will add what is missing",
     "установлен ≠ включён: включить протокол — здесь":"installed ≠ enabled: turn a protocol on here",
@@ -7436,7 +9390,7 @@
     "Роутер не ответил на вопрос, чем кончилось снятие.":"The router didn't answer how taking down ended.",
     "Роутер не сообщил, чем кончилось снятие.":"The router didn't report how taking down ended.",
     "К выбору":"Back to the choice",
-    "правила — устройства, сети, адреса, порты и домены, группы и гео-категории; дополнительные выходы и их десинк; режим резервирования; закреплённые адреса; Zapret и пулы проверок десинка; шифрованный DNS, свои имена и параметры сети; списки и их источники; расписания обновлений и ветка обновления панели; что держать на роутере, а не на накопителе; выключены ли уведомления; язык, тема и карточки главной; история трафика; положение тумблера VPN":"rules — devices, networks, addresses, ports and domains, groups and geo categories; additional exits and their desync; the failover mode; pinned addresses; Zapret and the desync check pools; encrypted DNS, custom names and network parameters; lists and their sources; update schedules and the panel update branch; what to keep on the router rather than on the drive; whether notifications are off; language, theme and home-screen cards; traffic history; the position of the VPN switch",
+    "правила — устройства, сети, адреса, порты и домены, группы и гео-категории; дополнительные выходы и их десинк; режим резервирования; закреплённые адреса; Zapret и пулы проверок десинка; шифрованный DNS, свои имена и параметры сети; списки и их источники; задачи и расписания доступа; расписания обновлений и ветка обновления панели; что держать на роутере, а не на накопителе; выключены ли уведомления; язык, тема и карточки главной; история трафика; положение тумблера VPN":"rules — devices, networks, addresses, ports and domains, groups and geo categories; additional exits and their desync; the failover mode; pinned addresses; Zapret and the desync check pools; encrypted DNS, custom names and network parameters; lists and their sources; tasks and access schedules; update schedules and the panel update branch; what to keep on the router rather than on the drive; whether notifications are off; language, theme and home-screen cards; traffic history; the position of the VPN switch",
     "конфиги серверов AmneziaWG, Xray и Hysteria2, какие протокол и сервер выбраны, подписки, пароль почты для уведомлений, ключи «доступа домой» — сервера и всех устройств (сам сервер после восстановления выключен, включают его вручную) — и сертификат HTTPS панели, чтобы браузеры не спрашивали о доверии заново":"configs of AmneziaWG, Xray and Hysteria2 servers, which protocol and server are selected, subscriptions, the mail password for notifications, the “home access” keys — of the server and every device (the server itself stays off after a restore; you turn it on by hand) — and the panel HTTPS certificate, so browsers don’t ask about trust again",
     "Выгрузить":"Export",
     "Что войдёт":"What goes in",
@@ -7922,14 +9876,14 @@
     "Основной":"Main",
     // fail() слот-вербов cgi-bin/action + groups.sh slot (правило dev15: все fail переведены);
     // «нет такой группы»/«битый id» — старый пробел groups.sh, закрыт заодно.
-    "доп-выход: 0, 2, 3 или 4":"extra exit: 0, 2, 3 or 4",
+    "доп-выход: 0 или 2..7":"extra exit: 0 or 2..7",
     "битый id выхода":"bad exit id",
     "неизвестный транспорт":"unknown transport","весь трафик через VPS":"all traffic via VPS","Правка конфига не сохранена — выйти без сохранения?":"The config edit is not saved — leave without saving?",
     "Этот сервер стал активным, пока вы правили конфиг. VPN выключен — сохранение несущую не тронет, экран обновится после него.":"This server became active while you were editing the config. The VPN is off — saving won't touch the carrier; the screen updates after it.","реестр занят другой операцией — повторите":"the exit registry is busy with another operation — try again",
     "битое имя конфига":"bad config name",
     "нужно имя":"name required",
     "поле: name|transport|config|fallback":"field: name|transport|config|fallback",
-    "слот: 0|2|3|4":"slot: 0|2|3|4",
+    "слот: 0|2..7":"slot: 0|2..7",
     "нет такой группы":"no such group",
     "битый id":"bad id",
     "доп-выход только для групп «в VPN»":"an extra exit is only for «via VPN» groups",
@@ -9209,6 +11163,54 @@
   // буквы внутри слов). i18nStr применяет их подряд и, если в итоге остаётся кириллица, ВОЗВРАЩАЕТ
   // оригинал (не показываем ru/en-мешанину).
   var I18N_RULES=[
+    // ─── «Задачи» (07.10.2026): the router's composed answers (tasks.sh) — FIRST, before the short tokens below ───
+    // Its REASONS as rules, not only keys: an exact key matches a whole string, and the router puts a reason after a wrapper
+    // («строка 3: », «расписание: », «минута: ») — the whole toast stayed Russian (review s.106, round 2; dev/tasks-i18n-test.js).
+    [/(^|: )в расписании — только цифры, названия, пробелы и \* \/ , -$/,"$1a schedule has only digits, names, spaces and * / , -"],
+    [/(^|: )в расписании нужно ровно пять полей: минута, час, день месяца, месяц, день недели$/,"$1a schedule needs exactly five fields: minute, hour, day of month, month, weekday"],
+    [/(^|: )@-сокращения busybox cron не понимает — нужны пять полей; «при загрузке» — настройка задачи$/,"$1busybox cron does not understand @-shortcuts — five fields are needed; «at boot» is a task setting"],
+    [/(^|: )строки-переменные cron этого роутера не понимает — переменные задаются в настройках задачи$/,"$1this router's cron does not understand variable lines — variables are set in the task settings"],
+    [/(^|: )нужны пять полей расписания и команда$/,"$1five schedule fields and a command are needed"],
+    [/(^|: )нет команды$/,"$1no command"],
+    [/(^|: )Lua на этом роутере нет$/,"$1there is no Lua on this router"],
+    [/(^|: )в строке #! нет интерпретатора$/,"$1the #! line names no interpreter"],
+    // the panel's own delete questions: the task's name and the crontab line are DATA, the words around them are ours
+    [/^Удалить задачу «([^»]*)»\?\n\nСкрипт и настройки удалятся с роутера, строка уйдёт из crontab\.$/,"Delete task «$1»?\n\nThe script and settings are removed from the router, its line leaves crontab."],
+    [/^Удалить строку из crontab\?\n\n/,"Delete the line from crontab?\n\n"],
+    [/\n\nбез неё SSH закроется после перезагрузки$/,"\n\nwithout it SSH closes after a reboot"],
+    [/^расписание: /,"schedule: "],
+    [/^строка (\d+): /,"line $1: "],
+    [/^файла нет: /,"no such file: "],
+    [/(^|: )ошибка синтаксиса: строка (\d+)/,"$1syntax error: line $2"],
+    [/(^|: )ошибка синтаксиса: /,"$1syntax error: "],
+    [/^после снятия «#» строка не годится: /,"without «#» the line is not valid: "],
+    [/(^|: )интерпретатора из строки #! на роутере нет: /,"$1the #! interpreter is not on the router: "],
+    [/^переменная — ИМЯ=значение, латиницей: /,"a variable is NAME=value, in Latin letters: "],
+    [/^строку не разобрать: /,"the line can't be parsed: "],
+    [/^это ссылка на (.*) — откройте сам файл$/,"this is a link to $1 — open the file itself"],
+    [/^неверные данные задачи \(([a-z_0-9]+)\)$/,"invalid task data ($1)"],
+    [/^неверные данные расписания \(([a-z_0-9]+)\)$/,"invalid schedule data ($1)"],
+    // access-sched.sh refusals that carry a number or a name: an exact key never matches them (review s.112)
+    [/^расписаний не больше (\d+)$/,"at most $1 schedules"],[/^окон больше (\d+)$/,"more than $1 windows"],
+    [/^устройств больше (\d+)$/,"more than $1 devices"],[/^пулов больше (\d+)$/,"more than $1 pools"],
+    [/^своих сайтов и адресов больше (\d+)$/,"more than $1 own sites and addresses"],[/^имя длиннее (\d+) знаков$/,"the name is longer than $1 characters"],
+    [/^устройство ([0-9a-f:]+) уже в расписании «([^»]*)»$/,"the device $1 is already in the schedule «$2»"],
+    [/^неизвестная категория: (.+)$/,"unknown category: $1"],[/^неверный пул: (.+)$/,"wrong pool: $1"],[/^неизвестный пул: (.+)$/,"unknown pool: $1"],
+    [/^неверный MAC: (.+)$/,"wrong MAC: $1"],[/^неверное окно: (.+)$/,"wrong window: $1"],
+    [/^не удалось создать (\S+)$/,"could not create $1"],[/^нет каталога расписаний$/,"no schedules directory"],
+    [/день недели \(0–6, воскресенье — 0\): /,"weekday (0–6, Sunday is 0): "],
+    [/день месяца: /,"day of month: "],
+    [/минута: /,"minute: "],
+    [/час: /,"hour: "],
+    [/месяц: /,"month: "],
+    [/вне диапазона /,"out of range "],
+    [/не число: /,"not a number: "],
+    [/пустой элемент списка: /,"empty list item: "],
+    [/шаг — только после «\*» или диапазона \(например 0-59\/10\): /,"a step only after «*» or a range (e.g. 0-59/10): "],
+    [/шаг — число: /,"a step is a number: "],
+    [/шаг — от 1: /,"a step starts at 1: "],
+    [/диапазон — по возрастанию: /,"a range must ascend: "],
+    [/пустое поле/,"empty field"],
     // Строка ожидания перезапуска в «Компонентах» — ЦЕЛИКОМ и первой: короткие правила ниже переводят её куски раньше.
     [/^Жду, пока роутер закончит свою работу с туннелем \(проверка сторожа, восстановление или другая смена\), — до (\d+) мин$/,
      "Waiting for the router to finish its own work with the tunnel (a watchdog check, a recovery or another switch) — up to $1 min"],
@@ -9655,7 +11657,7 @@
     // (имя человек задал сам — переводу не подлежит, поэтому подставляем как есть).
     [/→ выход /g,"→ exit "],
     [/→ основной туннель/g,"→ the main tunnel"],
-    [/IP (\S+) -> ЦЕЛИКОМ через VPN \(выход №([234])\)/g,"IP $1 → ENTIRELY through the VPN (exit #$2)"],
+    [/IP (\S+) -> ЦЕЛИКОМ через VPN \(выход №([2-7])\)/g,"IP $1 → ENTIRELY through the VPN (exit #$2)"],
     [/выход выключен \(идут основным\):/g,"exit is off (going through the main one):"],
     [/→ мимо VPN целиком/g,"→ fully bypassing the VPN"],
     [/IP (\S+) -> мимо VPN, но ручные правила \(домены\/адреса\/группы «в VPN»\) действуют/g,
@@ -9676,7 +11678,7 @@
     ["связи ещё не было","no connection yet"],["на связи","connected"],
     ["Заблокированные домены","Blocked domains"],
     // Пилюля шапки при 2-3 сломанных выходах (одиночная форма — точным ключом выше).
-    [/(\d+) выхода не работают/g,"$1 exits are down"],
+    [/(\d+) (?:выхода|выходов) не работают/g,"$1 exits are down"],
     ["Переключить транспорт на","Switch the transport to"],
     ["VPN сейчас выключен — переключение включит его.","The VPN is currently off — switching will turn it on."],
     ["VPN сейчас выключен и останется выключенным — туннель поднимется, когда вы его включите.","The VPN is currently off and stays off — the tunnel comes up when you turn it on."],
@@ -9884,7 +11886,6 @@
     ["Сегодня всего через интернет (WAN):","Today total via internet (WAN):"],
     ["прошивка","firmware"],["сохраняю настройку","saving setting"],["настройка сохранена","setting saved"],
     ["Копится на роутере, переживает ребут.","Accumulated on the router, survives reboot."],
-    ["По устройствам недоступно (аппаратный ускоритель NSS).","Per-device unavailable (hardware NSS accelerator)."],
     ["метод: сетевой пинг по порту","method: network ping on port"],
     ["метод: TCP-подключение к порту","method: TCP connect to port"],
     ["метод: ICMP-пинг","method: ICMP ping"],["метод: ICMP","method: ICMP"],
@@ -10141,7 +12142,7 @@
     ["План: ставим [","Plan: installing ["],["], снимаем [","], removing ["],[", из них обновляем [",", of which updating ["],
     // Обновление связки (29.09.2026): заголовок и строка бинаря «Обновляю xray: 26.1 → 26.2…», «работает прежняя» и итог nfqws.
     ["Сейчас работает прежняя сборка (","The previous build is running now ("],
-    [") — новая заработает после перезапуска компонента; проще всего перезагрузить роутер.",") — the new one starts working after the component restarts; the simplest way is to reboot the router."],
+    [") — новая заработает после перезапуска компонента: кнопка «Перезапустить» в его строке, а где её нет — перезагрузка роутера.",") — the new one starts working after the component restarts: the «Restart» button in its row, or, where there is none, a router reboot."],
     ["Обновляю ","Updating "],["прежняя сборка","previous build"],["свежая сборка","new build"],
     ["Отказ:","Refused:"],["неизвестный компонент: ","unknown component: "],
     // Перезапуск на установленную сборку (05.10.2026): журнал движка, ответ CGI и вопрос перед запуском.
@@ -10157,7 +12158,7 @@
     ["Перезапущено, но не отвечает: ","Restarted but not responding: "],[" — сторож проверит и починит на своём тике"," — the watchdog will check and repair it on its tick"],
     ["Перезапуск не удался: ","Restart failed: "],["Не вышло: ","Did not work: "],["Готово: ","Done: "],
     ["тёплый резерв AmneziaWG","AmneziaWG warm reserve"],["основной канал","main channel"],   // «дополнительный выход №» — выше, до «выход №»
-    ["шифрованный DNS","encrypted DNS"],
+    ["шифрованный DNS","encrypted DNS"],["фильтр по категориям","category filter"],
     ["Перезапуск запущен — ход виден на экране «Компоненты»","Restart started — progress is shown on the «Components» screen"],
     ["→ перезапуск: ","→ restart: "],["Перезапустить ","Restart "],[" на установленной сборке?"," on the installed build?"],
     ["Ненадолго прервётся:","Briefly interrupted:"],["Перезагружать роутер не нужно.","No need to reboot the router."],
@@ -10168,6 +12169,7 @@
     ["«доступ домой»","«home access»"],
     [" — на секунду, правила не трогаем"," — for a second, rules stay untouched"],[" — несколько секунд без имён"," — a few seconds without name lookups"],
     [" — на секунду, открытая по HTTPS страница переподключится"," — for a second, a page opened over HTTPS will reconnect"],
+    [" — на секунду, устройства с «ограничено» переспросят имена"," — for a second, devices in «limited» will ask for names again"],
     [" — на несколько секунд, его трафик пока пойдёт запасным путём"," — for a few seconds, its traffic takes its fallback path meanwhile"],
     [" указан и на установку, и на удаление"," is listed both for install and for removal"],
     ["Нельзя снять ","Cannot remove "],
@@ -10216,7 +12218,7 @@
     // Экран «Компоненты»: имя строки «что можно снять» для читалки (`aria-label`) и подсказка накопителя в сведении плана.
     [/^Снять «/,"Remove «"],["» — освободит ","» — frees "],[/^свободно там /,"free there: "],
     ["Применить изменения?","Apply changes?"],["Снимем с роутера: ","Will remove from the router: "],["Скачаем и поставим: ","Will download and install: "],["Поставим из загруженных файлов: ","Will install from the uploaded files: "],["Обновим: ","Will update: "],
-    ["Обновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — проще всего перезагрузить роутер.","The update replaces the files, but a running component switches to the new build only after a restart — the simplest way is to reboot the router."],
+    ["Обновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — кнопкой «Перезапустить» в его строке, а где её нет — перезагрузкой роутера.","The update replaces the files, but a running component switches to the new build only after a restart — with the «Restart» button in its row, or, where there is none, by rebooting the router."],
     ["Активную несущую и дополнительные выходы операция не переключает.","The operation does not switch the active carrier or the extra exits."],
     // закачка заранее (packages.sh::cmd_apply): сперва всё в ОЗУ, потом снятия — правила раньше общих «Скачиваю »/«Ставлю »
     ["Скачиваю заранее: ","Downloading ahead: "],["Всё нужное скачано — меняю набор.","Everything needed is downloaded — changing the set."],
@@ -11675,14 +13677,18 @@
     if(/^(direct|bypass|dns)([-_ .]|$)/.test(t)) return 'bypass';   // тоже целым словом: «directory», «dnsproxy» — не «мимо»
     return 'vpn:0';
   }
+  // ONE request in flight: the schedules' pool search asks on every keystroke while the catalogue loads (305 KB, ~1.5 s of CGI on
+  // BE7000) — eight letters were eight parallel catalogues (review s.112)
+  var _rtGeoP=null;
   function rtLoadGeoKeys(){
     if(rtGeoKeys) return Promise.resolve();
-    return fetchJson('/cgi-bin/data?section=geo').then(function(d){
+    if(_rtGeoP) return _rtGeoP;
+    return (_rtGeoP=fetchJson('/cgi-bin/data?section=geo').then(function(d){
       // Ответ не той формы (`{need_login}`, `{error}` старого CGI) — это «каталог не отдали», а не пустой каталог: иначе до
       // перезагрузки вкладки каждая категория читалась бы «нет в каталоге», а geoip выпадали бы ещё на разборе.
       if(rpBadResp(d) || Object.prototype.toString.call(d.items)!=='[object Array]'){ rtGeoKeys=null; return; }
       rtGeoKeys={}; d.items.forEach(function(it){ if(it && it.key) rtGeoKeys[it.key]=it; });
-    }).catch(function(){ rtGeoKeys=null; });
+    }).catch(function(){ rtGeoKeys=null; }).then(function(){ _rtGeoP=null; }));
   }
   // ============================================================================
   // ШАГ 4d-3 ПЕРЕНОСА: ИМПОРТ ПРАВИЛ — СВОЙ ЭКРАН С АДРЕСОМ (`rt-import`).
@@ -12539,7 +14545,7 @@
     if(pinned){
       own=own.filter(function(n){ return n!==pinned; });
       for(var tg in byTag){ byTag[tg]=byTag[tg].filter(function(n){ return n!==pinned; }); }
-      h+='<div class="card srv-pinned"><div class="ct">Активный сервер</div>'+serverCard(pinned, grp, cfgDisp('xray', pinned, subs), subLabelOf(pinned, subs), true)
+      h+='<div class="card wfull srv-pinned"><div class="ct">Активный сервер</div>'+serverCard(pinned, grp, cfgDisp('xray', pinned, subs), subLabelOf(pinned, subs), true)
         + '<div class="tiny" style="margin-top:9px">Активный закреплён сверху и не уезжает при поиске и сортировке. Бейдж собирается из самого конфига: протокол · защита · транспорт · flow.</div></div>';
     }
     var tags=subs.map(function(s){return s.tag;}); if(own.length) tags.push('__own__');
@@ -12583,7 +14589,7 @@
     grp=grp||{}; subs=subs||[];
     var list=grp.servers||[], h='';
     if(key==='xray') h=subListControls(subs.length, list.length)+xrayServers(grp, list, subs, info, now);
-    else h='<div class="card"><div class="ct">Конфиги '+names[key]+' <span class="sub dotb">'+srvStatus(grp)+'</span></div>'
+    else h='<div class="card w2"><div class="ct">Конфиги '+names[key]+' <span class="sub dotb">'+srvStatus(grp)+'</span></div>'
       + (list.length ? list.map(function(name){
           // Настоящее имя (эмодзи/флаги) — и у Hysteria2: её конфиг может приехать из подписки (иначе «sub-de-nidjerlandy»).
           return serverRow(key, name, grp, cfgDisp(key, name, subs)); }).join('') : '<div class="lempty">нет конфигов</div>')
@@ -12720,7 +14726,7 @@
         + '<div class="tiny srv-hint" data-tab="xray"'+(tab==='xray'?'':' hidden')+'>Клик по серверу — активировать. Действия — в меню «⋮».</div>'
         + '<div class="tiny srv-hint" data-tab="other"'+(tab==='xray'?' hidden':'')+'>Клик по серверу — активировать; «›» — экран сервера.</div>'
         + srvPanes('awg', d.awg, d.subs, tab, subInfo, subNow) + srvPanes('xray', d.xray, d.subs, tab, subInfo, subNow) + srvPanes('hy2', d.hy2, d.subs, tab, subInfo, subNow)
-        + noteBox('Дополнительные выходы (второй и третий путь наружу) живут своим экраном раздела «Соединение»: список серверов и список выходов отвечают на разные вопросы.','info')
+        + noteBox('Дополнительные выходы (ещё пути наружу, до шести) живут своим экраном раздела «Соединение»: список серверов и список выходов отвечают на разные вопросы.','info')
         + '</div>';
       // Переключение вкладок: показать выбранную, скрыть остальные; «Проверить все» — по числу конфигов выбранной.
       Array.prototype.forEach.call(body.querySelectorAll('.srv-tab'), function(tb){
@@ -12888,7 +14894,7 @@
       // карточки — своим узлом: смена расписания перечитывает только настройки (prefsCardReload), а экран целиком стирал
       // набранную ссылку «Добавить подписку» (ревью шага 5c, круг 3).
       if(subs.length) h+='<div class="card"><div class="wt">Автообновление</div><div id="subs-sched-b"></div></div>';
-      h+='<div class="card"><div class="wt">Добавить подписку</div>'+subAddInputs()+'</div>';
+      h+='<div class="card wfull"><div class="wt">Добавить подписку</div>'+subAddInputs()+'</div>';
       body.innerHTML=h+'</div>';
       wireCacts(body);
       subsSchedFill(t0);
@@ -12958,7 +14964,7 @@
     var mine=function(n){ return ownerTag(n, tags)===tag; };
     var xs=(gx.servers||[]).filter(mine), hs=(gh.servers||[]).filter(mine), n=xs.length+hs.length;
     var h='<div class="vwrap">'
-      + '<div class="card w2"><div class="wt">Подписка</div>'+subRow(s, now, null)
+      + '<div class="card wfull"><div class="wt">Подписка</div>'+subRow(s, now, null)
       + '<div class="acts">'
       +   '<button type="button" class="btn sm gh" data-sa="refresh">Обновить серверы</button>'
       +   '<button type="button" class="btn sm gh" data-sa="routing">Правила маршрутизации…</button>'
@@ -12969,7 +14975,7 @@
       +   '<span class="grow"></span><button type="button" class="btn sm bad" data-sa="del">Удалить подписку</button>'
       + '</div><div class="cline">'+SUBS_NOTE+'</div></div>';
     // Карточка сама — группа (`.sub-acc`, развёрнута всегда): заголовок с данными (`.ct`), число — в `.sub-cnt` (его пишут прогоны).
-    h+='<div class="card w2 sub-acc open" data-tag="'+esc(tag)+'">'
+    h+='<div class="card wfull sub-acc open" data-tag="'+esc(tag)+'">'
       + '<div class="ct">Серверы подписки <span class="sub dotb sub-cnt">'+n+' серв.</span><span class="sp"></span>'
       + (n ? '<button type="button" class="btn sm gh" data-sa="check">Проверить</button>' : '')
       + (xs.length ? '<button type="button" class="btn sm gh" data-sa="speed">Тест скорости</button>' : '')
@@ -14065,13 +16071,13 @@
   // Имя доп-выхода по коду `sN`. Номер человеку ни о чём не говорит — выход он называл сам;
   // выключенный/удалённый выход в enabledSlots не попадает, тогда честнее номер, чем чужое имя.
   function devSlotName(code){
-    var m=/^s([234])$/.exec(code||''); if(!m) return '';
+    var m=/^s([2-7])$/.exec(code||''); if(!m) return '';
     var nm=''; enabledSlots.forEach(function(s){ if(String(s.id)===m[1]) nm=s.name; });
     return nm || ('выход №'+m[1]);
   }
   // Имя выхода писал ЧЕЛОВЕК? (разбор у slotNamed) — для чипов и плиток, у которых на руках только код `sN`.
   function devSlotNamed(code){
-    var m=/^s([234])$/.exec(code||''); if(!m) return false;
+    var m=/^s([2-7])$/.exec(code||''); if(!m) return false;
     var on=false; enabledSlots.forEach(function(s){ if(String(s.id)===m[1]) on=!!s.named; });
     return on;
   }
@@ -14207,7 +16213,8 @@
   // «мимо» уводит напрямую и устройство, поставленное целиком в VPN. Ступени — те же `RP_LADDER`, что на странице раздела;
   // здесь на каждую отвечено для одного устройства (`dvWho` — кто забирает весь его остальной трафик).
   // ============================================================================
-  var DV_TABS=[['route','Маршрут'],['ports','Порты'],['watch','Что запрашивает']];
+  // «Расписание» (access schedules) between «Порты» and «Что запрашивает» — the mockup's order; «Статистика» waits for its counters.
+  var DV_TABS=[['route','Маршрут'],['ports','Порты'],['sched','Расписание'],['stat','Статистика'],['watch','Что запрашивает']];
   var _dvTab={ip:'', tab:'route'}, _dvF=null, _dvGen=0, _dvGlob=null;
   function dvTabOf(ip){ return _dvTab.ip===String(ip) ? _dvTab.tab : 'route'; }
   function dvTabSet(ip, tab){ _dvTab={ip:String(ip), tab:tab}; }
@@ -14286,7 +16293,7 @@
   // везёт: помеченное уходит в неё и не доходит никуда; '' — роутер ещё не сообщил. Ревью шага 4b, круг 1: лестница и
   // «Наследует» обещали «в туннель» там, где строка «Весь остальной трафик» того же экрана говорила «напрямую».
   function vpnPath(){ if(cur.live===null) return ''; if(vpnCarries()) return 'ok'; return otherWords().k==='direct' ? 'direct' : 'void'; }
-  function slotNum(code){ var m=/^s?([234])$/.exec(String(code||'')); return m ? m[1] : ''; }
+  function slotNum(code){ var m=/^s?([2-7])$/.exec(String(code||'')); return m ? m[1] : ''; }
   // КУДА ИДЁТ ПОМЕЧЕННОЕ ВЫХОДОМ n: 'slot' — выход везёт; 'direct' / 'void' / путь основного туннеля — по состоянию несущей
   // (`slot_state`: fallback — в основной; direct и down — `ip rule` нет или несущей нет, метка проваливается в main; dead —
   // не отвечает). Выключенный или удалённый выход: свои сайты и «целиком» откатываются на основной (rebuild_dev/rebuild_force),
@@ -14429,7 +16436,7 @@
   }
   // Чип — в своём узле (`data-dvc`): опрос статуса и тик Wi-Fi перерисовывают его поверх, не трогая строку с кнопкой и форму.
   function dvChipBox(key, html){ return '<span class="dv-c" data-dvc="'+key+'">'+html+'</span>'; }
-  // dir хранится машинно (vpn|direct|block|s2..s4) — подпись доп-выхода берём из его ИМЕНИ,
+  // dir хранится машинно (vpn|direct|block|s2..s7) — подпись доп-выхода берём из его ИМЕНИ,
   // а не из номера: в карточке выходов человек назвал его сам, номер ему ни о чём не говорит.
   // Подпись — для тоста: чип строки рисует dvDirChip.
   function dpDirLabel(dir){
@@ -14563,7 +16570,7 @@
     }).join('');
     return rpSect('i-at', 'Свои сайты и адреса', 'только для этого устройства — сильнее его режима, сети и общих списков', drules.length,
       (rows || '<div class="lempty">своих правил нет — устройство идёт по общим спискам и своему режиму</div>')
-      + '<div class="dv-form" id="dv-oform">'+dvOwnFormHtml(f)+'</div>', '', ' data-dvp="route"', 'dv-site');
+      + '<div class="dv-form" id="dv-oform">'+dvOwnFormHtml(f)+'</div>', '', ' data-dvp="route"', 'dv-site', 'w2');
   }
   function dvOwnFormHtml(f){
     var sl=devSlotChoices(); f.dvSlot=dvFormSlot(f.dvSlot);
@@ -14859,7 +16866,7 @@
     [['vpn','в VPN'],['direct','напрямую'],['bypass','мимо'],['block','заблокировано']].forEach(function(x){
       if(have[x[0]] || cf.route===x[0]) r+=dvSeg('data-dwr',x[0],x[1],rc);
     });
-    [2,3,4].forEach(function(i){ if(have['slot'+i] || cf.route==='slot'+i) r+=dvSeg('data-dwr','slot'+i,dvSlotNm('s'+i),rc); });
+    [2,3,4,5,6,7].forEach(function(i){ if(have['slot'+i] || cf.route==='slot'+i) r+=dvSeg('data-dwr','slot'+i,dvSlotNm('s'+i),rc); });
     var dd=dvSeg('data-dwx','0','все',cf.dead?'1':'0')+dvSeg('data-dwx','1','<span>не отвечают</span>'+(nd?' · '+nd:''),cf.dead?'1':'0');
     var o=dvSeg('data-dws','dead','сначала молчащие',cf.sort)+dvSeg('data-dws','ip','по адресу',cf.sort)+dvSeg('data-dws','port','по порту',cf.sort);
     function row(l, id, segs){ return '<div class="dw-f"><span class="dw-fl">'+l+'</span><div class="segbar sm" id="'+id+'">'+segs+'</div></div>'; }
@@ -14912,7 +16919,7 @@
   // Чип маршрута строки. Выход — через rpDirSlot (`own`: метку выхода роутер уже нашёл в ядре — «целиком» её не перебил); прямой
   // путь с десинком — чипом десинка: это не голый прямой путь.
   function dwChip(rt, via, dsy){
-    var m=/^slot([234])$/.exec(rt||''); if(m) return rpDirSlot(m[1], true);
+    var m=/^slot([2-7])$/.exec(rt||''); if(m) return rpDirSlot(m[1], true);
     if((rt==='direct' || rt==='bypass') && (dsy || via==='десинк' || via==='десинк устройства')) return rpDir('desync');
     if(rt==='vpn' && vpnPath()==='void') return rpDir('void');
     return (rt==='vpn' || rt==='bypass' || rt==='direct' || rt==='block') ? rpDir(rt) : '';
@@ -15168,7 +17175,7 @@
       if(g!==_dvGen || !screenAlive(a) || !_dvLast || _dvLast.ip!==ip) return;
       var L=_dvLast; L.gl=s;
       rpPut(a, dvInhHtml(L.dev, L.net, s, L.rany));
-      if(b) rpPut(b, dvLadHtml(L.dev, L.rules, L.drules, L.net, s, L.ready, L.rany));
+      if(b) rpPut(b, dvLadHtml(L.dev, L.rules, L.drules, L.net, s, L.ready, L.rany)+'<div id="dv-schnote">'+_dvSchNote+'</div>');
     });
   }
   var _dvLast=null;
@@ -15182,19 +17189,23 @@
     _dvCurKey=dvCurKey();
     // Новая разметка — формы «в группу» больше нет; опрос вкладки начнётся заново по новому поколению.
     var S=dwState(ip); S.grpOpen=false; dwHalt();
+    if(!_dvSch || _dvSch.ip!==ip) _dvSchNote='';   // another device: its schedule's note is not this one's
     body.innerHTML='<div class="vwrap">'+dvHeadHtml(dev, st, rules.length, tab)
       + devForeignHtml(dev, rules.length, drules.length)+devOwnerHtml(dev, rules.length, drules.length)
       + dvModeCard(dev, ready, net, rules.concat(rany))+dvOwnCard(drules, f, guest)
       + '<div class="'+rpSectOpen('dv-inh')+'" data-rsk="dv-inh" data-dvp="route" id="dv-inh">'+dvInhHtml(dev, net, gl, rany)+'</div>'
-      + '<div class="card w2" data-dvp="route" id="dv-lad">'+dvLadHtml(dev, rules, drules, net, gl, ready, rany)+'</div>'
+      + '<div class="card w2" data-dvp="route" id="dv-lad">'+dvLadHtml(dev, rules, drules, net, gl, ready, rany)+'<div id="dv-schnote">'+_dvSchNote+'</div></div>'
       + dvKeepCard(dev)
       + dvPortsCard(rules, guest, rany)+dvPortCard(f)
+      + '<div class="tpane" data-dvp="sched" id="dv-sch">'+RP_WAIT+'</div>'
+      + '<div class="tpane" data-dvp="stat" id="dv-stat">'+dvStatHtml(dev, (_dvStat && _dvStat.mac===String(dev.mac||'').toLowerCase()) ? _dvStat.d : null)+'</div>'
       + dwCardsHtml()+'</div>';
     dvTabShow(body, tab);
     wireCacts(body);
     wireSeg('dv-tabs', 'data-dvt', function(t){
       dvTabSet(ip, t); dvTabShow(body, t);
       if(t==='watch') dwShow(ip); else dwHalt();
+      if(t==='stat') dvStatLoad(dev);
     });
     dvOwnFormWire(ip); dvPortFormWire(ip);
     var wsd=document.getElementById('dv-wsd');
@@ -15202,7 +17213,9 @@
     // Первый ответ станции экран уже нарисовал — тик начнёт через 5 с (поколение отсекает цикл прежней разметки).
     var wg=++wsGen; setTimeout(function(){ wsTick(ip, wg); }, 5000);
     if(tab==='watch') dwShow(ip);
+    if(tab==='stat') dvStatLoad(dev);
     if(!gl) dvGlobPaint(ip);
+    dvSchLoad(ip, dev, d.devices||[], rep);
     body.addEventListener('input', function(e){
       var t=e.target; if(!t) return;
       if(t.id==='dv-oval') f.dvVal=t.value; else if(t.id==='dv-pports') f.ports=t.value;
@@ -15273,6 +17286,139 @@
     else if(a==='port-add') dvPortAdd(ip, rep);
     else if(a==='own-del' && (r=drules[i])) dvPost('dev_dst_del', null, ip+' → снимаю правило '+r.val, {ip:ip, val:r.val}, rep);
     else if(a==='port-del' && (r=rules[i])) dvPost('port_del', null, ip+' → снимаю правило по портам', {ip:ip, proto:r.proto, ports:r.ports}, rep);
+    else if(a==='sch-new' || a==='sch-add' || a==='sch-rm') dvSchAct(a, ip, rep);
+    else if(a==='traffic'){ tsCut=3; openTraffic(); }   // «Все устройства» of the statistics tab — the screen «Трафик» on its devices' cut
+  }
+  // ── ВКЛАДКА «СТАТИСТИКА» (traffic by device; mockup rt-dev tab 3, in the feature by the user's word 09.10.2026) — the device's
+  // bytes through the router in the four windows of the screen «Трафик» and its share of the house, answered by the router for ONE
+  // MAC (`?dmac=`, traffic-dev.sh json-mac). Asked when the tab is shown, not with every paint of the screen: nothing else needs it.
+  // The last answer is drawn at once on a repaint (`_dvStat`), then asked again. No daily chart: charts belong to «Трафик».
+  var _dvStat=null, _dvStatGen=0;
+  function dvStatHtml(dev, d){
+    var h='<div class="card w2"><div class="wt">Трафик через роутер</div>';
+    if(!dev.mac) return h+'<div class="cline">У этого устройства нет MAC — роутеру не по чему его считать.</div></div>';
+    if(!d) return h+'<div class="lempty">загрузка…</div></div>';   // no data-loading: a hidden tab is not «the screen waits» (scrHold)
+    if(d.err) return h+'<div class="cline">'+esc(noteText(d.err===2))+'</div></div>';
+    if(d.ok!==true || !d.w) return h+noteBox(d.msg ? esc(trNow(String(d.msg))) : 'Этот роутер устройства ещё не считает — обновите панель на роутере, и разрез появится.', 'warn')+'</div>';
+    function w(k, j){ var a=d.w[k]||[]; return Number(a[j])||0; }
+    h+='<div class="stats" style="margin-top:4px">'+TS_PER.map(function(p){
+        return '<div class="s"><div class="l">'+p[1]+'</div><div class="v">'+humanBytes(w(p[0],0)+w(p[0],1))+'</div></div>'; }).join('')+'</div>';
+    // The share of the house over 7 days — of everything the router counted per device in that window (devices + «прочие»).
+    var me=w('week',0)+w('week',1), all=w('week',2)+w('week',3);
+    var line=all>0 ? tkL('За 7 дней — '+tsShare(me, all)+' всего, что прошло через роутер · ↓ '+humanBytes(w('week',0))+' · ↑ '+humanBytes(w('week',1))+'.',
+                         'Over 7 days — '+tsShare(me, all)+' of everything through the router · ↓ '+humanBytes(w('week',0))+' · ↑ '+humanBytes(w('week',1))+'.')
+                   : tkL('За 7 дней через роутер ничего не прошло.', 'Nothing went through the router over 7 days.');
+    if(d.since) line+=' '+tkL('Считается с '+tdDay(d.since)+'.', 'Counted since '+tdDay(d.since)+'.');   // `line` goes through esc() below
+    // Both languages by tkL; NOT translate="no" — the byte units inside still go through the dictionary's unit rules.
+    h+='<div class="tiny" style="margin-top:10px">'+esc(line)+'</div>';
+    if(d.src===false) h+='<div style="margin-top:10px">'+noteBox('<b>Прошивка сейчас не отвечает про устройства.</b> Служба trafficd молчит — показано то, что роутер успел записать.', 'warn')+'</div>';
+    h+='<div class="cline" style="margin-top:8px">Это трафик через роутер, а не «в интернет»: домашний обмен (показ на телевизор, NAS) в нём тоже.</div>';
+    return h+'<div class="acts" style="justify-content:flex-start"><button type="button" class="btn gh" data-dva="traffic">Все устройства</button></div></div>';
+  }
+  function dvStatLoad(dev){
+    var mac=String(dev.mac||'').toLowerCase(), g=++_dvStatGen;
+    if(!mac) return;
+    // …and the answer is drawn only while the screen is still THIS device's (its hidden pane of another device stays alive)
+    function mine(){ return g===_dvStatGen && !!_dvLast && String(_dvLast.dev.mac||'').toLowerCase()===mac; }
+    fetchJson('/cgi-bin/traffic?dmac='+mac).then(function(d){
+      var b=document.getElementById('dv-stat');
+      if(!mine() || !screenAlive(b)) return;
+      _dvStat={mac:mac, d:d}; b.innerHTML=dvStatHtml(dev, d);
+    }, function(e){
+      var b=document.getElementById('dv-stat');
+      if(!mine() || !screenAlive(b)) return;
+      // a refusal keeps an answer already drawn for this device
+      if(!(_dvStat && _dvStat.mac===mac)) b.innerHTML=dvStatHtml(dev, {err:(e && e.net) ? 2 : 1});
+    });
+  }
+  // ── ВКЛАДКА «РАСПИСАНИЕ» (access schedules, mockup rt-dev tab 08.10.2026) — the device's side of a schedule: which one, what now,
+  // the actions a parent needs right here, the week. EDITING lives on the schedule: several devices share it, and a second editor here
+  // would be a second copy. The router's list answer (section=sched) is asked on every showing of the screen.
+  var _dvSch=null, _dvSchNote='';
+  function dvSchHtml(dev, d, devs){
+    if(!d || d.ok!==true || !Array.isArray(d.items))
+      return '<div class="card w2"><div class="wt">Расписание доступа</div><div class="cline">'+esc(trNow((d && d.msg) ? String(d.msg) : 'Роутер не ответил про расписания — спрошу ещё раз.'))+'</div></div>';
+    var mac=String(dev.mac||'').toLowerCase();
+    if(!mac) return '<div class="card w2"><div class="wt">Расписание доступа</div><div class="cline">У этого устройства нет MAC — расписанию не к чему привязаться.</div></div>';
+    // A private MAC is warned about by the screen's own header (devPinHtml) — not a second time here.
+    var it=schOfMac(mac, d), h=!d.clock ? noteBox('<b>Расписание сейчас не действует:</b> роутер ещё не знает, который час.', 'warn')
+      : d.tick===0 ? noteBox('<b>Расписание сейчас не действует:</b> Enodia снята с расписания — «Включить VPN» возвращает её.', 'warn') : '';
+    if(!it){
+      var opts=d.items.filter(function(x){ return (x.devs||[]).length<(d.dmax||32); });
+      return h+'<div class="card w2"><div class="wt">Расписание доступа</div>'
+        + '<div class="cline" style="margin-top:0">Устройство не входит ни в одно расписание — интернет ему открыт всегда.</div>'
+        + (opts.length ? '<div class="row" style="gap:9px;margin-top:11px;align-items:flex-end"><div class="grow f"><label for="dv-schpick">Добавить в расписание</label><select id="dv-schpick">'
+            + opts.map(function(x){ return '<option value="'+esc(x.id)+'" translate="no">'+esc(x.name)+'</option>'; }).join('')+'</select></div>'
+            + '<button type="button" class="btn" data-dva="sch-add">Добавить</button></div>' : '')
+        // the router's cap (d.max): at it a new schedule is refused after the whole form is filled — said and locked, as the list does
+        + (d.items.length>=(d.max||16) ? '<div class="cline">'+esc(tkL('Расписаний не больше ','At most '))+(d.max||16)+esc(tkL(' — чтобы создать новое, удалите одно из расписаний.',' schedules — delete one to create a new one.'))+'</div>' : '')
+        + '<div class="acts" style="justify-content:flex-start"><button type="button" class="btn'+(opts.length ? ' gh' : ' pri')+'" data-dva="sch-new"'+(d.items.length>=(d.max||16) ? ' disabled' : '')+'>'+icUse('i-plus','s')+'Новое для этого устройства</button></div></div>';
+    }
+    var nx=it.next && it.next[0], line=schDevSay(it, mac, d).t, more=(it.devs||[]).length-1, over=schLive(d) && it.on && schOver(it, mac);
+    if(!over && schLive(d) && it.on && (it.why==='win' || it.why==='base') && nx) line=schStWord(it.st)+' · '+schVerb(nx.s)+' '+tkL('в ','at ')+schWhen(nx, d.now);
+    var sub=[(schLive(d) && it.on && !over && (it.why==='win' || it.why==='base')) ? schIn(nx, d) : '', schUseWord(it, mac), more>0 ? tkL('в этом расписании ещё '+schDevN(more), more+' more in this schedule') : ''].filter(Boolean).join(' · ');
+    h+='<div class="card w2" id="dv-schc"><div class="wt"><span class="wt-long"><span>Расписание доступа</span>&nbsp;«<span translate="no">'+esc(it.name)+'</span>»</span></div>'
+      + '<div class="dv-schst" translate="no">'+esc(line)+'</div>'+(sub ? '<div class="cline" style="margin-top:2px" translate="no">'+esc(sub)+'</div>' : '')
+      + schActsHtml(it, d, false, over ? 'closed' : it.st)+'<div style="margin-top:14px">'+schWeekHtml(it, d)+'</div></div>';
+    h+='<div class="card"><div class="wt">В этом расписании</div>'
+      + (it.devs||[]).map(function(m){ var x=schDevNm(m, devs);
+          return '<div class="lrow"><span class="av">'+icUse('i-dev','s','',true)+'</span><div class="grow"><div class="nm"><span class="sens" translate="no">'+esc(x.nm)+'</span>'
+            + (m===mac ? ' <span class="chip">это устройство</span>' : '')+'</div><div class="ds">'+(x.on ? 'в сети' : 'не в сети')+'</div></div></div>'; }).join('')
+      + '<div class="acts" style="justify-content:flex-start;flex-wrap:wrap"><button type="button" class="btn gh" data-cact="sch:'+esc(it.id)+'">Открыть расписание</button>'
+      + '<button type="button" class="btn gh" data-dva="sch-rm">Убрать из расписания</button></div></div>';
+    return h;
+  }
+  // The route tab's ladder hears of the schedule too (mockup): it is not a step of the ladder (mangle decides the path, the schedule
+  // REJECTs in filter FORWARD) — it stands above all of it, said once under the ladder.
+  function dvSchNoteHtml(dev, d){
+    var it=(d && d.ok===true) ? schOfMac(dev.mac, d) : null;
+    if(!it || !it.on) return '';
+    return '<div style="margin-top:9px">'+noteBox('<b>'+esc(tkL('Сильнее всей лестницы — расписание доступа «','Above the whole ladder — the access schedule «'))+'<span translate="no">'+esc(it.name)+'</span>».</b> '
+      + esc(tkL('В его закрытое окно устройство не выходит наружу никаким путём. Сейчас: ','In its closed window the device goes out by no path at all. Now: '))+'<span translate="no">'+esc(schLow(schDevSay(it, dev.mac, d).t))+'</span>.', 'info')+'</div>';
+  }
+  // the pane from an answer: a repaint of the same device starts from its previous answer (no «Загрузка…» flash), the fresh one follows
+  function dvSchPut(ip, dev, d, devs, rep){
+    var b=document.getElementById('dv-sch'); if(!b) return;
+    _dvSch={ip:ip, dev:dev, d:d};
+    var fsig=focusMark();
+    b.innerHTML=dvSchHtml(dev, d, devs);
+    schFocusActs(b, fsig, '#dv-schc .acts.sc-acts');
+    schAgain(b, d, (d && d.ok===true) ? schOfMac(dev.mac, d) : null, function(){ dvSchLoad(ip, dev, devs, rep); });
+    var it=(d && d.ok===true) ? schOfMac(dev.mac, d) : null;
+    if(it) schActsWire(b, it, rep, true);
+    _dvSchNote=dvSchNoteHtml(dev, d);
+    var n=document.getElementById('dv-schnote'); if(n) n.innerHTML=_dvSchNote;
+  }
+  function dvSchLoad(ip, dev, devs, rep){
+    var g=_dvGen;
+    if(_dvSch && _dvSch.ip===ip) dvSchPut(ip, dev, _dvSch.d, devs, rep);
+    schLoad().then(function(d){
+      var b=document.getElementById('dv-sch');
+      if(g!==_dvGen || !screenAlive(b)) return;
+      // an answer that is not the list (ok:false mid-update) is a refusal too: the drawn state and its buttons stay, asked again in
+      // half a minute — drawn as an error, it took the tab's actions with it (review s.113, confirming)
+      if((!d || d.ok!==true) && _dvSch && _dvSch.ip===ip && _dvSch.d && _dvSch.d.ok===true){ schAgain(b, null, null, function(){ dvSchLoad(ip, dev, devs, rep); }, 30); return; }
+      dvSchPut(ip, dev, d, devs, rep);
+    }, function(e){
+      var b=document.getElementById('dv-sch');
+      if(g!==_dvGen || !screenAlive(b)) return;
+      // a refusal (a 503 «busy», the network) keeps a state already drawn and asks again in half a minute: a click on the tab only
+      // shows it, and «откройте вкладку ещё раз» was a dead end (review s.113, round 5)
+      if(!(_dvSch && _dvSch.ip===ip)) b.innerHTML=dvSchHtml(dev, {ok:false, msg:pnErrText(e)}, devs);
+      schAgain(b, null, null, function(){ dvSchLoad(ip, dev, devs, rep); }, 30);
+    });
+  }
+  // add / remove = a save of the WHOLE schedule against its version (the router refuses a stale one) — the editor's own verb
+  function dvSchAct(a, ip, rep){
+    var S=_dvSch; if(!S || S.ip!==ip || !S.d || S.d.ok!==true) return;
+    var mac=String(S.dev.mac||'').toLowerCase(); if(!mac) return;
+    if(a==='sch-new'){ schNew(null, mac); return; }
+    var it=(a==='sch-rm') ? schOfMac(mac, S.d) : S.d.items.filter(function(x){ var p=document.getElementById('dv-schpick'); return p && x.id===p.value; })[0];
+    if(!it) return;
+    var devs=(it.devs||[]).filter(function(m){ return m!==mac; }); if(a==='sch-add') devs.push(mac);
+    var p=schSpec(it.id, it.ver, it.name, it.on, it.base, it.wins||[], devs, it.lim);
+    dvPost('sched_save', a==='sch-rm' ? tkL('Убрать устройство из расписания «'+it.name+'»?\n\nИнтернет ему станет открыт всегда.', 'Remove the device from the schedule «'+it.name+'»?\n\nIts internet becomes open always.') : null,
+      a==='sch-rm' ? 'убираю из расписания…' : 'добавляю в расписание…', p, rep);
   }
   // СВОЁ ИМЯ УСТРОЙСТВА. Пустая строка — снять и вернуть имя, которое устройство сообщает само (или MAC); отмена — ничего.
   // Проверку длины и снятие кавычек делает роутер (dev-names.sh) — здесь только обрезка пробелов, чтобы «пусто» было пусто.
@@ -15493,7 +17639,7 @@
   //   · выход ОБЩЕГО правила не работает при «весь трафик в VPN» — метка VPN_FORCE стоит раньше меток выходов;
   //   · выход НА ДЕСИНКЕ общее правило ведёт (у группы и категории свой набор, nfqws ломает рукопожатия его адресов),
   //     а устройство целиком — нет, поэтому здесь нет ветки `slotNoMark`.
-  // `dir`: vpn|bypass|block|desync|off, `slot`: 0|2..4. «Выкл» чипа не даёт вовсе — в каталоге гео их тысяча.
+  // `dir`: vpn|bypass|block|desync|off, `slot`: 0|2..7. «Выкл» чипа не даёт вовсе — в каталоге гео их тысяча.
   // КУДА ПРАВИЛО УХОДИТ СЕЙЧАС — ОДНИМ КЛЮЧОМ, и из него рисуется чип (`rpDirNow`) И считаются числа сводки: до круга 2
   // счётчик «через десинк-выход» знал про выключенный выход, но не про «весь трафик в VPN» и не про выключенный
   // тумблером VPN — карточка обещала десинк там, где строка рядом уже говорила «идёт основным туннелем».
@@ -15512,7 +17658,7 @@
       if(cur.full) return 'main';
       return (cur.vpnOff || cur.transport==='zapret') ? 'direct' : 'split';
     }
-    if(dir!=='vpn' && !/^s?[234]$/.test(String(dir))) return '';   // действие от версии новее панели — не выдумываем путь
+    if(dir!=='vpn' && !/^s?[2-7]$/.test(String(dir))) return '';   // действие от версии новее панели — не выдумываем путь
     var n=parseInt(String(slot||dir||'').replace(/^s/,''),10)||0;
     if(!n || cur.full || rpSlotOff(n)) return 'main';   // выключенный и удалённый выход groups.sh/geo.sh уводят в основной
     if(cur.vpnOff) return 'direct';                     // cmd_off снимает `ip rule` всех марок и гасит выходы
@@ -15614,8 +17760,10 @@
     // неотличим от «устройство на кабеле» (этим различием живёт оговорка «режим сети не получен»).
     // Режимы сетей (`section=wifi`) — для чипа строки устройства (сеть «мимо» и гостевая сильнее режима устройства, `dvNet`), как у
     // «Обзора»; их отказ роняет только эту точность.
-    else p=soft(Promise.all([rpSlots(), fetchJson('/cgi-bin/data?section=devices'), rpSta(),
-                             rpWifi().then(function(x){ return x; }, function(){ return {__fail:true}; })]).then(function(r){ var d=r[1]; if(d && typeof d==='object'){ d.__ws=wsIndex(r[2]); d.__wsOk=!!(r[2] && r[2].ok); d.__wf=r[3]; } return d; }));
+    // access schedules beside the list, not inside it (schDevRepaint): the rows repaint when their schedules' states change
+    else { schDevRepaint('rp', function(){ if(_rpLast.dev && document.getElementById('rp-dev')) rpRepaint('dev'); });
+      p=soft(Promise.all([rpSlots(), fetchJson('/cgi-bin/data?section=devices'), rpSta(),
+                             rpWifi().then(function(x){ return x; }, function(){ return {__fail:true}; })]).then(function(r){ var d=r[1]; if(d && typeof d==='object'){ d.__ws=wsIndex(r[2]); d.__wsOk=!!(r[2] && r[2].ok); d.__wf=r[3]; } return d; })); }
     p.then(function(d){
       if(g!==_rpGen[sc]) return;        // пока ждали, ушёл запрос новее — его ответ и нарисует
       var b=document.getElementById('rp-'+sc); if(!b) return;
@@ -15797,8 +17945,9 @@
       + '<div class="b">'+body+'</div>';
   }
   function rpSectOpen(key){ return 'sect rp-sect'+(rpShut(key) ? '' : ' open'); }
-  function rpSect(ic, nm, ds, cnt, body, act, attr, key){
-    return '<div class="'+rpSectOpen(key)+'"'+(key ? ' data-rsk="'+key+'"' : '')+(attr||'')+'>'+rpSectInner(ic, nm, ds, cnt, body, act, !rpShut(key), key)+'</div>';
+  // cls — a deck class (`w2`): a section in the deck is a card like any other and needs the «2+1» pairing too (mockup 08.10.2026).
+  function rpSect(ic, nm, ds, cnt, body, act, attr, key, cls){
+    return '<div class="'+rpSectOpen(key)+(cls ? ' '+cls : '')+'"'+(key ? ' data-rsk="'+key+'"' : '')+(attr||'')+'>'+rpSectInner(ic, nm, ds, cnt, body, act, !rpShut(key), key)+'</div>';
   }
   function rpSectToggle(sc){
     var on=!sc.classList.contains('open'); sectOpenSet(sc, on);
@@ -16161,8 +18310,13 @@
   // экрана устройства (`dvRest`): «Напрямую» при выключенном VPN и мимо-режимах, сервер — целиком в туннель, «Никуда», выход.
   // Прежде список ставил чип «куда остальное» — у всех устройств «Напрямую», и это читалось как «устройство мимо VPN».
   function devChip(rs){ return rs.norm ? rpDir('dsplit') : (rs.d||''); }
+  // A device in an access schedule (the router's last list answer, `_sch`): its row says so after the address, and while the
+  // schedule KEEPS it closed or limited the chip is the schedule's — «closed» beats any route (decision 01.10.2026: chip = device
+  // state). Not synced or switched off — the schedule acts on nothing, the route chip stays.
+  function devSchOf(dev){ var it=dev && dev.mac ? schOfMac(dev.mac) : null; return it ? {it:it, act:!!(_sch.clock && it.on && (it.st!=='open' || schOver(it, dev.mac)))} : null; }
+  function devSchDs(s){ return s ? ' · <span>'+esc(tkL('расписание','schedule'))+'</span> «<span translate="no">'+esc(s.it.name)+'</span>»' : ''; }
   function devRow(dev, nP, nD, full, ws, net, ready, ports){
-    var nm=devName(dev);
+    var nm=devName(dev), sc=devSchOf(dev);
     // СТРОКА «ОБЗОРА» — КАК В МАКЕТЕ: знак устройства, имя, адрес и сеть, справа — состояние устройства (`devChip`). Тип устройства
     // роутер не знает — знак общий.
     if(!full){
@@ -16170,8 +18324,8 @@
       return lrowGo('dev:'+dev.ip, 'открыть правила устройства')
         + '<div class="av">'+icUse('i-dev','s','',true)+'</div>'
         + '<div class="grow"><div class="nm"><span class="sens" translate="no">'+esc(nm)+'</span></div>'
-        + '<div class="ds"><span class="sens">'+esc(dev.ip)+'</span>'+(ss ? ' · <span class="sens">'+esc(ss)+'</span>' : '')+'</div></div>'
-        + devChip(rest) + CHEV + '</div>';
+        + '<div class="ds"><span class="sens">'+esc(dev.ip)+'</span>'+(ss ? ' · <span class="sens">'+esc(ss)+'</span>' : '')+devSchDs(sc)+'</div></div>'
+        + (sc && sc.act ? schDevChip(sc.it, dev.mac, _sch) : devChip(rest)) + CHEV + '</div>';
     }
     // СТРАНИЦА «МАРШРУТИЗАЦИИ» — та же строка (макет): знак, имя, адрес и сводка, справа — тот же чип состояния (`devChip`). Режим
     // словами в описании не повторяем — его несёт чип; своих правил — числом. MAC рядом с именем — ради
@@ -16183,8 +18337,8 @@
       + '<div class="grow"'+dim+'><div class="nm"><span class="sens" translate="no">'+esc(nm)+'</span>'
       + ((dev.mac && devNamed(dev)) ? '<span class="mono sens rp-mac">'+esc(dev.mac.toUpperCase())+'</span>' : '')+'</div>'
       + '<div class="ds"><span class="sens">'+esc(dev.ip)+'</span>'+((!dev.mode || dev.mode==='split') ? ' · <span>наследует сеть</span>' : '')
-      + (nR ? ' · <span>+'+nR+' '+unitF(nR, 'правил')+'</span>' : '')+devFlags(dev)+'</div></div>'
-      + devChip(rs) + CHEV + '</div>';
+      + (nR ? ' · <span>+'+nR+' '+unitF(nR, 'правил')+'</span>' : '')+devSchDs(sc)+devFlags(dev)+'</div></div>'
+      + (sc && sc.act ? schDevChip(sc.it, dev.mac, _sch) : devChip(rs)) + CHEV + '</div>';
   }
   function rpPaintDev(box, d){
     rqDevFill();   // «для кого спрашиваем» у проверялки — из этого же ответа, второго запроса нет
@@ -16644,11 +18798,17 @@
       + '<div class="card"><div class="wt">Кто кого перебивает</div>'
       + rpLadHtml()
       + '<div style="margin-top:11px">'+noteBox('<b>«Мимо VPN» сильнее «в VPN» из списков, групп, категорий и режима «целиком»</b> — откуда бы он ни пришёл. Широкая категория «мимо» (например, ru) уведёт напрямую даже устройство, поставленное целиком в VPN; перебить её могут только правила по портам (устройства и всего роутера) и правила самого устройства — сайт, исключение.','warn')+'</div>'
-      + '<div style="margin-top:9px">'+noteBox('Блокировка срабатывает раньше всей лестницы: домен не получает адреса вовсе (DNS), а подсети категорий «блок» и списков блокировки отбрасываются, куда бы их ни вели.','info')+'</div></div>'
+      // Two sentences, two nodes: the translation looks a key up by the whole node.
+      + '<div style="margin-top:9px">'+noteBox('<span>Блокировка срабатывает раньше всей лестницы: домен не получает адреса вовсе (DNS), а подсети категорий «блок» и списков блокировки отбрасываются, куда бы их ни вели.</span> '
+      + '<span>Так же и закрытое окно</span> <button type="button" class="ilink" data-cact="sched">расписания доступа</button><span>: устройство не выходит наружу никаким путём.</span>','info')+'</div></div>'
       + '<div class="card"><div class="wt">Источники правил</div>'
       + lrowGo('geo','открыть гео-категории')+'<div class="grow"><div class="nm">Гео-категории</div><div class="ds">страны и сервисы</div></div>'+CHEV+'</div>'
       + lrowGo('sources','открыть менеджер источников')+'<div class="grow"><div class="nm">Менеджер источников</div><div class="ds">свои списки доменов и подсетей</div></div>'+CHEV+'</div>'
       + lrowGo('groups','открыть группы правил')+'<div class="grow"><div class="nm">Группы правил</div><div class="ds">именованные наборы</div></div>'+CHEV+'</div>'
+      + '</div>'
+      // «Ещё здесь» (mockup): access schedules live in routing — «may THIS device go out now», and devices live here.
+      + '<div class="card"><div class="wt">Ещё здесь</div>'
+      + lrowGo('sched','открыть расписания доступа')+'<div class="grow"><div class="nm">Расписания доступа</div><div class="ds">когда устройству можно в интернет — дети, приставка, камеры</div></div>'+CHEV+'</div>'
       + '</div>';
   }
   function rpAddHtml(){
@@ -17782,7 +19942,7 @@
         body.innerHTML='<div class="vwrap"><div class="card w2">'+noteBox('Роутер не умеет дополнительные выходы: его скрипты старее этой возможности. Обновите систему («Роутер → Обновление»).','warn')+'</div></div>';
         return;
       }
-      var slots=d.slots, max=d.max|0, h='<div class="vwrap"><div class="card"><div class="wt">Выходы</div>';
+      var slots=d.slots, max=d.max|0, h='<div class="vwrap"><div class="card wfull"><div class="wt">Выходы</div>';
       if(!slots.length) h+='<div class="lempty">выходов пока нет — все правила идут основным транспортом</div>';
       slots.forEach(function(s){
         // Точка = ЧЕСТНОЕ состояние (slots.sh state), а не строка реестра: включённый выход с неподнявшейся
@@ -17800,7 +19960,7 @@
       h+='</div>';
       // Форма добавления (пока есть место). Доступные транспорты = ready ∩ SLOT_CAPABLE.
       var capable=(d.ready||[]).filter(function(t){ return SLOT_CAPABLE[t]; });
-      h+='<div class="card"><div class="wt">Добавить выход</div>';
+      h+='<div class="card wfull"><div class="wt">Добавить выход</div>';
       if(d.full) h+='<div class="cline">достигнут лимит выходов ('+d.max+')</div>';
       // Прежний текст звал ставить Zapret — единственным лекарством. На ядре 4.4 это совет по
       // кругу: nfqws там ставится, а NFQUEUE в ядре вырезан, и выход на нём не поднимется
@@ -17895,7 +20055,7 @@
         + '<div class="cline">'+(desync?'<span>Готовый набор — гео-категория сервиса: её сайты пойдут через этот выход.</span> ':'')+'<span>«Свой пул» создаёт группу, сразу привязанную к выходу; сайты в неё добавляются в «Маршрутизации».</span></div>';
     }
     h+='</div>';
-    h+='<div class="card"><div class="wt">Что через него идёт</div>'
+    h+='<div class="card w2"><div class="wt">Что через него идёт</div>'
       + '<div class="kv"><div class="grow"><div class="k">Группы правил</div><div class="v"><b>'+(s.groups|0)+'</b></div></div><button type="button" class="act" data-xa="groups">Группы</button></div>'
       + '<div class="kv"><div class="grow"><div class="k">Гео-категории</div><div class="v"><b>'+(s.geo|0)+'</b></div></div><button type="button" class="act" data-xa="geo">Гео-списки</button></div>'
       + '</div>';
@@ -18670,7 +20830,8 @@
   function srcCatCard(src, o){
     var en=blkOn(src), cnt=src.count||0;
     var v = o.v!=null ? o.v : (en&&cnt ? '<span>в пуле:</span> <b>'+cnt+'</b> <span>'+o.unit+'</span>' : (en?'включён':'выключен'));
-    return '<div class="card'+(en?' w2':'')+'" id="'+o.p+'"><div class="wt">'+o.title+'</div>'
+    // o.cls — an extra deck class for the ENABLED card only (`r2`: the short cards after it stand beside it; mockup 08.10.2026).
+    return '<div class="card'+(en?' w2':'')+(en && o.cls ? ' '+o.cls : '')+'" id="'+o.p+'"><div class="wt">'+o.title+'</div>'
       + '<div class="kv swrow"><div class="grow"><div class="k">'+o.sub+'</div><div class="v">'+v+'</div></div>'
       +   '<label class="sw"><input type="checkbox" id="'+o.p+'-en" aria-label="'+o.sub+'"'+(en?' checked':'')+'><i></i></label></div>'
       + '<div class="cline">'+o.text+'</div>'+(o.more||'')
@@ -18775,7 +20936,7 @@
     // --- Вредоносные адреса (ipblock) ---
     if(!ip) h+=blkFailCard('Вредоносные адреса');
     else {
-      h+=srcCatCard(ip, {p:'blk-ip', title:'Вредоносные адреса', sub:'Блокировка по адресам', v:blkStateHtml(ip, 'подсетей'),
+      h+=srcCatCard(ip, {p:'blk-ip', cls:'r2', title:'Вредоносные адреса', sub:'Блокировка по адресам', v:blkStateHtml(ip, 'подсетей'),
         text:'Отбрасывает соединения с адресами и подсетями из списков угроз — в обе стороны, для всех устройств сети. Списки только IPv4: '
           +'строки IPv6 из источников отбрасываются. Приватные диапазоны вырезаются из любого списка, а серверы туннеля, шлюз провайдера, DNS и домашние подсети не блокируются никогда.',
         more:blkGuardHtml(ip)+'<div style="margin-top:11px">'+noteBox('Включение идёт с самопроверкой и автооткатом: если после применения пропадёт связь, блокировка снимется сама и экран скажет почему. '
@@ -18787,7 +20948,7 @@
       var live=(typeof ip.addr_live==='boolean') ? ip.addr_live : (ip.critical_count|0)>0;
       if(blkOn(ip) || live || (ip.allow_count|0)>0){
         var crit=Array.isArray(ip.critical) ? ip.critical.filter(function(c){ return c && c.ip; }) : [];
-        h+='<div class="card w2" id="blk-prot"><div class="wt">Защита сети</div>'
+        h+='<div class="card wfull" id="blk-prot"><div class="wt">Защита сети</div>'
           + '<div class="cline">Эти адреса роутер не заблокирует, даже если они попадут в список: без них оборвались бы туннель, интернет или домашняя сеть. '
           + 'Список собирается сам — при каждом обновлении и при смене сервера.</div>';
         if(crit.length) crit.forEach(function(c){
@@ -18817,7 +20978,7 @@
     if(gb===null)
       h+='<div class="card" id="blk-geo"><div class="wt">Ещё блокируют гео-категории</div><div class="cline wr">Не удалось узнать, какие гео-категории блокируют: роутер не ответил.</div></div>';
     else if(gb.length)
-      h+='<div class="card w2" id="blk-geo"><div class="wt">Ещё блокируют гео-категории</div>'
+      h+='<div class="card" id="blk-geo"><div class="wt">Ещё блокируют гео-категории</div>'
         + '<div class="cline">Категории с действием «Блок» закрывают свои домены и подсети так же, как списки выше, а правятся в «Гео-списках».</div>'
         + gb.map(rpGeoRow).join('')+'</div>';
     h+=listSchedCard();
@@ -18953,7 +21114,8 @@
   // за чекбоксом «показывать служебные» — по просьбе пользователя (июль 2026) показываем ВСЕГДА, фильтр убран.
   var GEO_DOM_RE=/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;   // валидный одиночный домен
   // Синтаксис v2ray в поиске: geosite:/geoip:/domain:/full: — префикс срезаем, ищем по имени категории.
-  function geoCleanQuery(){ return (geoQuery||'').trim().toLowerCase().replace(/^(?:geosite|geoip|domain|full):/,''); }
+  function geoQNorm(q){ return String(q||'').trim().toLowerCase().replace(/^(?:geosite|geoip|domain|full):/,''); }
+  function geoCleanQuery(){ return geoQNorm(geoQuery); }
   function openGeo(){
     openModal(null, {route:'rt-geo', deck:true});
     var body=document.getElementById('modal-body'); loading(body);
@@ -19020,8 +21182,8 @@
     // заводил вторую цепочку запросов к самому тяжёлому эндпоинту там, где сборка уже кончилась.
     if(b && screenAlive(b)) geoLoad(b);
   }
-  function geoQMatch(it){
-    var q=geoCleanQuery(); if(!q) return true;
+  function geoQMatch(it, q){   // q — a cleaned query (the schedules' search); none — the screen's own
+    q=(q==null) ? geoCleanQuery() : q; if(!q) return true;
     return (it.label||'').toLowerCase().indexOf(q)>=0 || (it.desc||'').toLowerCase().indexOf(q)>=0 || (it.key||'').toLowerCase().indexOf(q)>=0;
   }
   function geoMatch(it){
@@ -20007,7 +22169,7 @@
       // выходов общей проводкой переходов (`data-cact`, `wireCacts`): там и заводят тот самый десинк рядом с живым VPN.
       +   '<div style="margin-top:12px">'+noteBox('<b>Установлен ≠ активен.</b> <span>Поставить или снять движок — в разделе «Роутер → Компоненты»; здесь только выбор активного. Десинк-транспорты (ByeDPI, Zapret) работают без сервера: выбрав такой ОСНОВНЫМ, вы выходите через провайдера — туннеля в этот момент нет, десинк стоит вместо него, а не рядом. Это ограничение только основного транспорта:</span> '
       +     '<button type="button" class="ilink" data-cact="exits">дополнительным выходом</button> <span>тот же десинк работает при живом VPN, и на этом держится схема «сайт → Zapret, видео → ByeDPI».</span>')+'</div></div>'
-      + '<div class="card"><div class="wt">Параметры активного транспорта</div><div id="tp-mtu">'+mh+'</div></div>'
+      + '<div class="card w2"><div class="wt">Параметры активного транспорта</div><div id="tp-mtu">'+mh+'</div></div>'
       + '<div class="card"><div class="wt">Если активный транспорт умрёт</div><div id="tp-fo"></div></div>'
       + '</div>';
     document.getElementById('tp-opt')._h=oh; document.getElementById('tp-mtu')._h=mh;
@@ -20098,7 +22260,7 @@
       // «СЕЙЧАС» — во ВСЕХ режимах: на резерве роутер бывает и в «Резерв», и после смены режима на «Выкл».
       // УЗЕЛ ИМЕНОВАН НАРОЧНО: содержимое блока целиком временнОе, и перерисовывает его общий опрос
       // статуса (paint), а не второй запрос отсюда.
-      html+='<div class="card"><div class="wt">Сейчас</div><div id="fo-now">'+foNowHtml(st)+'</div></div>';
+      html+='<div class="card w2 r2"><div class="wt">Сейчас</div><div id="fo-now">'+foNowHtml(st)+'</div></div>';
       // «КУДА ВЕРНЁТСЯ» — только в режиме home, потому что только там это что-то значит.
       // Дом двухуровневый: сервер (.failover-home) возвращает switch-vpn, транспорт
       // (.transport-home) — сторож. Второй задаётся ТОЛЬКО ручным выбором протокола, и когда он
@@ -20197,6 +22359,7 @@
     addr:   ['Сменился внешний адрес', 'только при открытом входе снаружи: в письме — новая ссылка на панель'],
     subs:   ['Подписки', 'активный сервер сменился или пропал из подписки, обновление не прошло, не хватило места'],
     lists:  ['Списки адресов', 'утренняя сводка, сбой обновления, блокировка по адресам снята автоматически'],
+    tasks:  ['Задачи', 'ваша задача не удалась или оборвана по времени; успешные — если так выбрано у самой задачи'],
     system: ['Служебное', 'роутер сам вернул снесённые правила, шифрованный DNS не включился или перестал отвечать, раскладка накопителя не сменилась']
   };
   var NF_KEYS=['nt-host', 'nt-port', 'nt-tls', 'nt-user', 'nt-to', 'nt-pass'];
@@ -20533,7 +22696,7 @@
         + '<div style="margin-top:7px">Если роутер стоит за вашим же вторым роутером или за модемом провайдера — пробросьте на нём UDP-порт на этот роутер, тогда сработает внешний адрес. Если приватный адрес выдал сам провайдер (CGNAT), поможет только «белый» IP: обычно это платная услуга. DDNS тут не спасёт — он решает смену адреса, а не его приватность.</div>','warn'));
       if(on && run && !d.port_open) warns.push(noteBox('Порт наружу закрыт — правила фаервола могли смыться (перезагрузка роутера или изменение настроек в стоковой вебморде). Выключите и включите доступ домой, чтобы поставить их заново.','warn'));
       if(warns.length) h+='<div class="card"><div class="wt">Что мешает подключиться</div>'+warns.join('')+'</div>';
-      h+='<div class="card w2"><div class="wt">Устройства</div>';
+      h+='<div class="card wfull"><div class="wt">Устройства</div>';
       if(!peers.length) h+='<div class="lempty">пока ни одного — добавьте телефон и отсканируйте QR-код</div>';
       peers.forEach(function(p){
         // Рукопожатие — только у включённого устройства на работающем сервере: у выключенного и при неподнятом сервере роутер отдаёт
@@ -20887,7 +23050,7 @@
           + '<div style="margin-top:11px">'+noteBox('Результаты проверок хранятся на роутере, а не в браузере: открыв панель с телефона, вы видите те же числа. Упавший сервер переключает сторож на роутере — балансер лишь выбирает быстрый из живых и только внутри текущего протокола.','info')+'</div>';
       }
       h+='</div>';
-      h+='<div class="card"><div class="wt">После «Проверить все»</div>';
+      h+='<div class="card w2"><div class="wt">После «Проверить все»</div>';
       if(!fresh) h+='<div class="cline">роутер не сообщил настройки</div>';
       else {
         h+='<div class="kv swrow"><div class="grow"><div class="k">Сортировать по пингу</div><div class="v">после «Проверить все» на вкладке Xray экрана «Серверы и конфиги» рабочие поднимаются наверх внутри своей группы; прогон с этого экрана порядок не меняет</div></div>'
@@ -21131,7 +23294,7 @@
     var tf=pa.totp||{}, tfON=!!tf.on, tfKnow=(tf.engine!==false), tON=!!pa.tls_on, tRUN=!!pa.tls_running, inst=!!pa.installed, port=(pa.tls_port|0)||8443;
     // Открыть наружу можно при живом терминаторе И втором факторе; уже открытый не запирается никогда — закрыть можно всегда.
     var wON=!!pa.wan_on, wCan=wON || (tON && tRUN && tfON), busyO=(pa.pkg_busy===true && !pa.installing), lan=String(pa.lan||'');
-    var h='<div class="vwrap"><div class="card w2" id="pa-open"'+(pa.installing ? ' data-inst="1"' : '')+'><div class="wt">Как открывается</div>';
+    var h='<div class="vwrap"><div class="card w2 r2" id="pa-open"'+(pa.installing ? ' data-inst="1"' : '')+'><div class="wt">Как открывается</div>';
     // Короткого адреса без порта нет и не будет: 80 и 443 держит заводская веб-морда, а в её конфиг мы не лезем (решение 27.08.2026).
     h+=pnKv('Адрес', '<span class="mono">http://'+esc(lan)+':'+((pa.port|0)||8088)+'</span> <span>· порт нужен: 80 и 443 занимает заводская веб-морда роутера</span>');
     // HTTPS. Без программы терминатора тумблер включать нечем — он заперт, а установка стоит прямо под ним (движок компонентов).
@@ -21212,7 +23375,7 @@
     // ВОШЕДШИЕ УСТРОЙСТВА. Сессию рождает КАЖДЫЙ вход (форма входа), а не только подтверждённый кодом, — список живёт здесь, а не
     // под вторым фактором. Ленивый: отдельный запрос, а число приходит в общем ответе и видно сразу.
     var n=tf.sessions|0;
-    h+='<div class="card w2" id="pa-dev"><div class="wt">Устройства с активным входом</div>'
+    h+='<div class="card wfull" id="pa-dev"><div class="wt">Устройства с активным входом</div>'
       + '<div class="cline"><span>Устройств с активным входом:</span> <b>'+n+'</b></div><div id="pa-sess"></div>'
       + '<div class="acts"><button type="button" class="btn sm gh" data-paa="list" id="pa-list">Показать устройства</button><div class="grow"></div>'
       + (n>1 ? '<button type="button" class="btn sm gh" data-paa="others">Выйти на остальных</button>' : '')
@@ -21474,9 +23637,10 @@
       // Имена языков — на своём языке и без перевода (в словаре — тождество): человек, не читающий текущий, узнаёт свой.
       + pnKv('Язык / Language', 'English is in beta — core screens are translated, the rest stays Russian')
       + '<div class="segbar" id="pv-lang" role="group" aria-label="Язык / Language">'+dvSeg('data-pvl', 'ru', 'Русский', lg)+dvSeg('data-pvl', 'en', 'English', lg)+'</div>'
-      + '<div class="cline">Смена языка перезагружает страницу: так всё перерисовывается сразу на новом языке.</div></div>';
-    h+='<div class="card" id="pv-cards"><div class="wt">Карточки главной</div>'
-      + lrowGo('cards')+'<div class="grow"><div class="nm">Состав, ширина и порядок</div><div class="ds">какие карточки видны на «Обзоре» и в каком порядке — хранится на роутере</div></div>'+CHEV+'</div></div>';
+      + '<div class="cline">Смена языка перезагружает страницу: так всё перерисовывается сразу на новом языке.</div>';
+    // «Карточки главной» — the tail of «Оформление» (mockup 08.10.2026: as its own tiny card it left «Режим стримера» alone in a row).
+    h+='<div id="pv-cards"><div class="wt" style="margin-top:16px">Карточки главной</div>'
+      + lrowGo('cards')+'<div class="grow"><div class="nm">Состав, ширина и порядок</div><div class="ds">какие карточки видны на «Обзоре» и в каком порядке — хранится на роутере</div></div>'+CHEV+'</div></div></div>';   // row · «Карточки главной» wrapper · «Оформление» card
     h+='<div class="card" id="pv-str"><div class="wt">Режим стримера</div>'
       + pnKv('Скрыть чувствительные данные', 'адреса, серверы, имена сетей и почта размываются — для записи экрана', pnSw('pv-streamer', 'Скрыть чувствительные данные', streamerOn, false), 'swrow')
       + '<div style="margin-top:11px">'+noteBox('Работает только в этом браузере: это защита от случайного показа на записи, а не от чтения данных с роутера.', 'info')+'</div></div>';
@@ -21601,9 +23765,11 @@
   // единая точка отказа» в карте проекта): его читают ровно тогда, когда смотрят, куда уходит DNS. Раздельный резолв рунета —
   // исключение из «всё» (его имена идут мимо туннеля), и фраза обязана это сказать, а не обобщить.
   function nwNowCardHtml(){
-    return '<div class="card" id="nw-now"><div class="wt">DNS сейчас</div>'
+    // A full-width STRIP, its facts and the warning in columns (mockup 08.10.2026: one column of three stood 360 px tall beside two
+    // empty ones; «Соединение» and «Роутер» open with a low strip too). #nw-now-b is display:contents — its rows are grid cells.
+    return '<div class="card wfull" id="nw-now"><div class="wt">DNS сейчас</div><div class="fauto nw-now-cols">'
       + '<div id="nw-now-b"><div class="cline" data-loading="1">Загрузка…</div></div>'
-      + '<div style="margin-top:11px">'+noteBox('<b>DNS — единая точка отказа.</b> Если сервер VPN умрёт, а прямой режим не включится, перестанет резолвиться всё — российские сайты тоже, если не включён их раздельный резолв. Поэтому сторож умеет снимать туннель и возвращать прямой DNS сам.','info')+'</div></div>';
+      + '<div>'+noteBox('<b>DNS — единая точка отказа.</b> Если сервер VPN умрёт, а прямой режим не включится, перестанет резолвиться всё — российские сайты тоже, если не включён их раздельный резолв. Поэтому сторож умеет снимать туннель и возвращать прямой DNS сам.','info')+'</div></div></div>';
   }
   // Карточку и чип двери «Шифрованный DNS» рисует ответ `tech` (опрос ленты, `techPaintAll`). Нет ответа ещё — «Загрузка»;
   // роутер не ответил и ответил не то (`{need_login}`, `{error}` CGI старее ленты) — РАЗНЫЕ исходы и разные слова (разбор у
@@ -22520,7 +24686,8 @@
     byedpi:'обход блокировок без VPN-сервера — через прокси на роутере',
     zapret:'обход блокировок без VPN-сервера — пакеты правит сам роутер, без прокси',
     doh:'шифрует DNS-запросы всей сети',
-    tls:'вход в панель по HTTPS, в том числе снаружи'
+    tls:'вход в панель по HTTPS, в том числе снаружи',
+    filter:'закрывает детям выбранные категории сайтов в окнах «ограничено» расписаний доступа'
   };
   // Ответ той формы: у гейта входа есть вырожденная ветка с кодом 200 и телом `{need_login:true}`, и по ней экран нарисовал бы
   // «ничего не установлено». Движок, которого нет (`engine:false`), форму держит.
@@ -22700,7 +24867,7 @@
   }
   function dkPlaceHtml(st, dk){
     var v=dkVol(st), sok=dkStoreOk(st) && st.engine!==false, dok=!dk.__err && dk.engine!==false;
-    var h='<div class="card w2" id="dk-place"><div class="wt">Место</div>';
+    var h='<div class="card w2 r2" id="dk-place"><div class="wt">Место</div>';
     // Флеш роутера. Код на флеше — том тот же, что у разбивки (clean.sh), и числа берём у неё: «весят» и «занято» обязаны
     // быть про одно измерение. Код на накопителе — флеш меряет usb-offload (`data_*`).
     var ft=0, ff=0;
@@ -22858,7 +25025,7 @@
   // подтверждением после клика: вопрос в окне читают вполглаза, а здесь плитка не сработает, пока согласие не отмечено.
   function dkModeHtml(st){
     if(!dkStoreOk(st) || st.engine===false || st.on!==true) return '';
-    var h='<div class="card w2" id="dk-mode"><div class="wt">Что держать на накопителе</div>';
+    var h='<div class="card wfull" id="dk-mode"><div class="wt">Что держать на накопителе</div>';
     if(storeLost(st)) return h+dkLine('Раскладку не сменить, пока накопитель не найден: переезд в обе стороны требует живого накопителя.')+'</div>';
     // Режим приезжает от БУТСТРАПА; пусто — его на роутере нет (установка старее фичи), и менять раскладку нечем.
     if(st.ready!==true || (st.mode!=='bins' && st.mode!=='full')) return '';
@@ -22925,7 +25092,7 @@
     {id:'stocklogs', l:'Системный лог роутера',  k:'stocklogs_b', h:'не наш: стоковый лог на флеше. Единственная история, переживающая перезагрузку, — она же уезжает в «Скачать логи». Флеш его сжимает, поэтому освободится примерно втрое меньше, чем весит'}
   ];
   function dkCleanHtml(st, dk){
-    var h='<div class="card w2" id="dk-clean"><div class="wt">Что можно освободить</div>';
+    var h='<div class="card wfull" id="dk-clean"><div class="wt">Что можно освободить</div>';
     if(dk.__err) return h+dkLine(dk.__err==='net' ? 'Роутер не ответил — что чистить, неизвестно. Откройте экран ещё раз.'
       : 'Что чистить, получить не удалось: роутер ответил не то. Если вход в панель истёк — обновите страницу.', true)+'</div>';
     if(dk.engine===false) return h+dkLine('Чистить роутер не умеет — обновите скрипты роутера.')+'</div>';
@@ -23231,7 +25398,7 @@
   }
   // ---- карточка «Что должно стоять» ----
   function pkgListHtml(d){
-    var h='<div class="card w2" id="pkg-list"><div class="wt">Что должно стоять</div>';
+    var h='<div class="card w2 r2" id="pkg-list"><div class="wt">Что должно стоять</div>';
     (d.pkgs||[]).forEach(function(p){ h+=pkgRowHtml(p); });
     h+=DK_SEP+pkgCheckRow()+DK_SEP+pkgUpRow(d);
     // Установлен ≠ активен — и дверь туда, где включают: «поставил, а ничего не изменилось» — вопрос, который здесь задают первым.
@@ -23341,7 +25508,7 @@
     var op=pkgOp; if(pkgRunning || !op || !(Number(op.at)>0) || !op.log.length) return '';
     var st=op.state, v=(st==='OK') ? {d:'', w:'готово'} : (st==='FAIL') ? {d:' bad', w:'не удалось'} : (st==='RUNNING') ? {d:' warn', w:'прервана'} : {d:' off', w:''};
     var last=String(op.log[op.log.length-1]||'').replace(/^\[\d\d:\d\d:\d\d\] /, '');
-    var h='<div class="card w2" id="pkg-last"><div class="wt">Последняя операция</div>'
+    var h='<div class="card wfull" id="pkg-last"><div class="wt">Последняя операция</div>'
       + '<div class="lrow"><span class="dot'+v.d+'"></span><div class="grow"><div class="nm" id="pkg-last-now" tabindex="-1">'+pkgOpTitle(pkgIds(op.ins), pkgIds(op.del), v.w ? ' — <span>'+v.w+'</span>' : '', pkgIds(op.upd), pkgIds(op.rst))
       + '</div><div class="ds"><span>'+esc(fmtAge(Math.max(0, (Number(op.now)||0)-(Number(op.at)||0))))+'</span></div></div></div>';
     if(st==='FAIL') h+='<div class="cline wr">'+esc(last)+'</div>';
@@ -23500,9 +25667,10 @@
     server:'«доступ домой» — на несколько секунд, клиенты переподключатся сами',
     zapret:'Zapret (nfqws) — на секунду, правила не трогаем',
     doh:'шифрованный DNS — несколько секунд без имён',
-    tls:'HTTPS панели — на секунду, открытая по HTTPS страница переподключится'
+    tls:'HTTPS панели — на секунду, открытая по HTTPS страница переподключится',
+    filter:'фильтр по категориям — на секунду, устройства с «ограничено» переспросят имена'
   };
-  function pkgRstCut(u){ var m=/^slot([2-4])$/.exec(u); return m ? 'дополнительный выход №'+m[1]+' — на несколько секунд, его трафик пока пойдёт запасным путём' : (PKG_RST_CUT[u]||u); }
+  function pkgRstCut(u){ var m=/^slot([2-7])$/.exec(u); return m ? 'дополнительный выход №'+m[1]+' — на несколько секунд, его трафик пока пойдёт запасным путём' : (PKG_RST_CUT[u]||u); }
   function pkgRestart(id){
     if(busy || pkgRunning) return;
     var p=null; ((pkgData||{}).pkgs||[]).forEach(function(q){ if(q.id===id) p=q; });
@@ -23558,7 +25726,7 @@
     if(put.length) q+=(pkgFromUp(put) ? 'Поставим из загруженных файлов: ' : 'Скачаем и поставим: ')+put.map(pkgLabelOf).join(', ')+'\n';
     if(up.length) q+='Обновим: '+up.map(pkgLabelOf).join(', ')+'\n';
     q+='\nАктивную несущую и дополнительные выходы операция не переключает.';
-    if(up.length) q+='\nОбновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — проще всего перезагрузить роутер.';
+    if(up.length) q+='\nОбновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — кнопкой «Перезапустить» в его строке, а где её нет — перезагрузкой роутера.';
     if(!askConfirm(q)) return;
     pkgLaunch('pkg_apply', 'ins='+(df.ins.join(',')||'-')+'&del='+(df.del.join(',')||'-'),
       {busy:'меняю компоненты…', log:'→ компоненты: ставим ['+(df.ins.join(', ')||'—')+'], снимаем ['+(df.del.join(', ')||'—')+']',
@@ -23925,7 +26093,7 @@
   var bkSec=false, bkRes=null, bkRun=null, bkPolling=false, bkTries=0, BK_POLL=2000, BK_MAX=90, bkT0=0;
   // Предупреждение о файле с ключами — ОДНО на оба места, где его выгружают («Бэкап» и «Удаление»): второе молчало (ревью 6d, круг 2).
   var BK_SEC_WARN='Такой файл открывает ваши серверы любому, у кого он окажется: не выкладывайте его и не показывайте при записи экрана.';
-  var BK_WHAT='правила — устройства, сети, адреса, порты и домены, группы и гео-категории; дополнительные выходы и их десинк; режим резервирования; закреплённые адреса; Zapret и пулы проверок десинка; шифрованный DNS, свои имена и параметры сети; списки и их источники; расписания обновлений и ветка обновления панели; что держать на роутере, а не на накопителе; выключены ли уведомления; язык, тема и карточки главной; история трафика; положение тумблера VPN';
+  var BK_WHAT='правила — устройства, сети, адреса, порты и домены, группы и гео-категории; дополнительные выходы и их десинк; режим резервирования; закреплённые адреса; Zapret и пулы проверок десинка; шифрованный DNS, свои имена и параметры сети; списки и их источники; задачи и расписания доступа; расписания обновлений и ветка обновления панели; что держать на роутере, а не на накопителе; выключены ли уведомления; язык, тема и карточки главной; история трафика; положение тумблера VPN';
   var BK_SEC='конфиги серверов AmneziaWG, Xray и Hysteria2, какие протокол и сервер выбраны, подписки, пароль почты для уведомлений, ключи «доступа домой» — сервера и всех устройств (сам сервер после восстановления выключен, включают его вручную) — и сертификат HTTPS панели, чтобы браузеры не спрашивали о доверии заново';
   function openBackup(){
     var fsig=focusMark();
@@ -23983,7 +26151,7 @@
   var BK_NEVER='<div id="bk-never">'+noteBox('<b>Не входят никогда:</b> пароль панели и второй фактор, вход в панель снаружи, режим поддержки и журнал событий. Перенос настроек не должен переносить доступ к роутеру, а в журнале — ваш внешний адрес.','info')+'</div>';
   function bkLastHtml(){
     var r=bkRes, s=bkRun; if(!r && !s) return '';
-    var h='<div class="card w2" id="bk-last"><div class="wt">Последний импорт</div>';
+    var h='<div class="card wfull" id="bk-last"><div class="wt">Последний импорт</div>';
     // Отказ и потерянный ответ — вместе со строкой хода: отказ «ещё идёт» следит за чужим применением, а потерянный ответ узнаёт у
     // роутера, дошёл ли файл (прежде карточка навсегда оставалась «неизвестно» — ревью шага 6d, круг 2).
     if(r && !r.ok) return h+dkLine(r.lost ? 'Файл до роутера не дошёл (или роутер перезагрузился) — повторите импорт.'
@@ -24098,9 +26266,9 @@
   // Та же карточка обслуживает ОСНОВНУЮ несущую byedpi и ДОП-ВЫХОД (слот) — у выхода свой ciadpi
   // со своей стратегией (.byedpi-args-s<id>), но пресеты, тестер и таблица результатов общие.
   // Отдельная копия карточки под выход разъехалась бы с этой при первой же правке.
-  var bpSlot='';            // '' = основная несущая; '2'|'3'|'4' = доп-выход
+  var bpSlot='';            // '' = основная несущая; '2'..'7' = доп-выход
   var bpSlotName='';        // имя выхода для заголовка экрана
-  function bpSlotOk(s){ return (s==='2'||s==='3'||s==='4'); }
+  function bpSlotOk(s){ return /^[2-7]$/.test(s); }
   function openByedpi(slot, name, named){
     // Строгая валидация: openByedpi часто идёт колбэком в postAction/wireCard, куда прилетает
     // ответ или событие — «непохоже на id выхода» трактуем как основную несущую.
@@ -24527,7 +26695,7 @@
   }
   function dsPoolLoadCands(ctx){
     // ЕДИНЫЙ источник кандидатов для всех трёх целей (`slots.sh domains`): пусто = основная
-    // несущая byedpi (enodia_list/группы/гео), 2|3|4 = доп-выход, zapret = всё, что десинкает
+    // несущая byedpi (enodia_list/группы/гео), 2..7 = доп-выход, zapret = всё, что десинкает
     // общий nfqws. Стор пула ключуется тем же slot — цель и её пул не расходятся.
     var cs=ctx.slot||'';
     return fetchJson('/cgi-bin/data?section=probe_cands'+(cs?('&slot='+encodeURIComponent(cs)):''))
@@ -24703,12 +26871,12 @@
     g.setAttribute('data-gk', k); g.innerHTML=dsGateHtml(ctx.pfx, avail, gate); dsWireRun(ctx);
   }
   function dsSweepHtml(o){
-    var h='<div class="card w2"><div class="wt">Проверка в браузере</div><div class="cline">'+o.intro+'</div>';
+    var h='<div class="card wfull"><div class="wt">Проверка в браузере</div><div class="cline">'+o.intro+'</div>';
     h+='<div id="'+o.pfx+'-sweep-gate" data-gk="'+esc(dsGateKey(o.pfx, o.avail, o.gate))+'">'+dsGateHtml(o.pfx, o.avail, o.gate)+'</div>';
     h+='<div id="'+o.pfx+'-pool" style="margin-top:9px"></div></div>';
     // РЕЗУЛЬТАТ — СВОЕЙ КАРТОЧКОЙ ВО ВСЮ ШИРИНУ: таблица по категориям шире колонки колоды. Пока проверки не было (или её
     // отменили) — карточки нет вовсе: пустая рамка «Результат» читалась бы как «прогон был, и ничего не нашлось».
-    h+='<div class="card w2" id="'+o.pfx+'-sweep-card" style="display:none"><div class="wt">Результат проверки</div><div id="'+o.pfx+'-sweep-out"></div></div>';
+    h+='<div class="card wfull" id="'+o.pfx+'-sweep-card" style="display:none"><div class="wt">Результат проверки</div><div id="'+o.pfx+'-sweep-out"></div></div>';
     return h;
   }
   // ПОКАЗАН ЛИ ЭКРАН ЦЕЛИ ПРОВЕРКИ. Узлы результата, кнопок и пула ищутся по префиксу, а префикс `bp` общий у основной несущей и
@@ -24739,9 +26907,9 @@
     document.getElementById(ctx.pfx+'-sweep-go').addEventListener('click', function(){ dsRunSweep(ctx, out); });
   }
   function dsStop(){ if(dsRun){ dsAbort=true; logLine('останавливаю браузер-свип…', null); } }
-  // Слот для ВЕРБОВ свипа: их принимают только byedpi-вербы и только 2|3|4. Ключ цели ctx.slot
+  // Слот для ВЕРБОВ свипа: их принимают только byedpi-вербы и только 2..7. Ключ цели ctx.slot
   // шире (ещё и 'zapret' — это стор пула и источник кандидатов, не аргумент верба).
-  function dsVerbSlot(ctx){ return /^[234]$/.test(String(ctx.slot||'')) ? ctx.slot : ''; }
+  function dsVerbSlot(ctx){ return /^[2-7]$/.test(String(ctx.slot||'')) ? ctx.slot : ''; }
   function dsRunSweep(ctx, out){
     dsOut(ctx, '<div class="cline">Готовлю свип…</div>');
     fetchJson(dsPoolUrl(ctx)).catch(function(){ return {urls:[]}; }).then(function(res){
@@ -25074,7 +27242,7 @@
     // Стратегия + проверка — ОБЩИЙ блок «Десинк» (тот же, что в экране ByeDPI): различия
     // zapret живут в параметрах (nfqws вместо ciadpi, свой charset флагов, свои вербы свипа).
     var zpCurRaw = d.isdefault?'':(d.args||'');
-    h+='<div class="card"><div class="wt">Стратегия десинка nfqws</div>'
+    h+='<div class="card w2"><div class="wt">Стратегия десинка nfqws</div>'
       + '<div class="kv"><div class="grow"><div class="k">Сейчас</div><div class="v"><b>'+(d.isdefault?'по умолчанию':'своя')+'</b></div></div></div>';
     h+=dsStrategyHtml({pfx:'zp', presets:d.presets||[], cur:zpCurRaw,
       hint:'Выберите пресет или задайте флаги nfqws вручную; @tls и @quic — встроенные фейк-пакеты.',
@@ -25451,9 +27619,10 @@
   var CARD_INFO={
     flow:    'доли выходов и кто через них ходит',
     traffic: 'объём за период и график по дням',
-    exits:   'состояние второго и третьего пути',
+    exits:   'состояние дополнительных путей наружу',
     subs:    'остаток трафика и срок действия',
     devices: 'кто подключён и куда идёт его трафик',
+    sched:   'что сейчас открыто и закрыто по расписаниям',
     events:  'последние записи центра уведомлений',
     ram:     'кто занимает оперативную память',
     log:     'что панель делала в этой вкладке'
@@ -25480,7 +27649,8 @@
     // строкой потребовало бы правила-регулярки на каждое возможное число (а заодно и границы
     // слова рядом с кириллицей — той самой, что не совпадает никогда). Слово переводится ключом,
     // число живёт в своём узле и переводить его не надо.
-    // КОЛОДА МАКЕТА (ov-cards): «Показаны» — широкой карточкой, «Можно вернуть» — рядом, пояснения и «Вернуть как было» — своей.
+    // КОЛОДА МАКЕТА (ov-cards): «Показаны» — широкой карточкой, «Можно вернуть» — рядом, пояснения и «Вернуть как было» — the tail of
+    // «Можно вернуть» (mockup 08.10.2026: as their own card they stood alone in a row beside two empty columns).
     var h='<div class="vwrap"><div class="card w2"><div class="wt">Показаны <span class="chip">'+on.length+'</span></div>';
     if(!on.length){
       h+='<div class="lempty">Все карточки выключены — на «Обзоре» осталась только шапка. Верните нужные ниже.</div>';
@@ -25489,7 +27659,7 @@
     if(!off.length){
       h+='<div class="lempty">Все карточки на главной — выключать ничего не пришлось.</div>';
     } else off.forEach(function(c){ h+=ovCardRow(c); });
-    h+='</div><div class="card">'
+    h+='<div style="height:12px"></div>'
       // ГДЕ ХРАНИТСЯ — ЭТО ЧАСТЬ ОТВЕТА, А НЕ СНОСКА: раскладка на роутере значит, что выключенная
       // на ноутбуке карточка пропадёт и на телефоне, — и человек имеет право знать это ДО того,
       // как выключит.
@@ -25631,6 +27801,7 @@
   wireCard('card-support', openSupport);
   wireCard('card-diag',    function(){ openDiag(); });
   wireCard('card-console', openConsole);
+  wireCard('card-tasks', openTasks);
   wireCard('card-info',    openSysinfo);
   wireCard('card-uninstall', openUninstall);
   wireCard('card-access',  function(){ openAccess(); });
@@ -25681,7 +27852,7 @@
     rt:[],
     nw:['card-wifi','card-dns','card-hosts','card-blocking','card-tune'],
     // «Роутер» (шаг 6a) — двери порядком макета; бэкап переехал сюда из «Панели», удаление — из «Настроек».
-    rr:['card-packages','card-update','card-disk','card-ram','card-backup','card-diag','card-support','card-console','card-info','card-uninstall'],
+    rr:['card-packages','card-update','card-disk','card-ram','card-backup','card-diag','card-support','card-console','card-tasks','card-info','card-uninstall'],
     // «Панель» (шаг 7a) — двери; экрана «Настройки» больше нет: его куски разошлись по разделам. «Журнал действий» — шаг 7b.
     pn:['card-access','card-view','card-notify','card-events','card-actlog']
   };
@@ -25698,7 +27869,7 @@
     // «Маршрутизация» — не двери, а сама страница правил (шаг 4a; разбор у rpShow).
     rt:function(){ return rpPageHtml(); },
     // «Сеть» — карточка «DNS сейчас» над дверями (шаг 5a; наполняет её опрос ленты — `nwNowPaint`).
-    nw:function(){ return '<div class="vwrap fill">'+nwNowCardHtml()+'</div>'; },
+    nw:function(){ return '<div class="vwrap">'+nwNowCardHtml()+'</div>'; },
     // «Роутер» — карточка железа над дверями (шаг 6a; меры — из опроса статуса, остальное — `rrShow`).
     rr:function(){ return rrNowCardHtml(); }
   };
@@ -26032,7 +28203,7 @@
                     arg:function(a){ return SRV_ARG.test(a); }, open:function(a){ srvScrOpen(a); }},
     // Подписка и выход — по метке и номеру, а имя экрана (метку, имя выхода) знает только роутер: разрешитель
     // сперва спрашивает его, как у пира. Проверки аргумента — те же, что в cgi-bin/action (метка [a-z0-9-]{1,16},
-    // номер выхода 2..4).
+    // номер выхода 2..7).
     'cn-sub':      {back:'cn-subs', t:'Подписка', need:1, via:'openSub', arg:function(a){ return subTagOk(a); }, open:function(a){ subScrOpen(a); }},
     'cn-exits':    {back:'cn', t:'Дополнительные выходы',         open:function(){ openExits(); }},
     'cn-exit':     {back:'cn-exits', t:'Выход', need:1, via:'openExit', arg:function(a){ return bpSlotOk(a); }, open:function(a){ exitScrOpen(a); }},
@@ -26071,6 +28242,15 @@
     'rr-support':  {back:'rr', t:'Режим поддержки',               open:function(){ openSupport(); }},
     'rr-diag':     {back:'rr', t:'Диагностика',                   open:function(){ openDiag(); }},
     'rr-console':  {back:'rr', t:'Консоль',                       open:function(){ openConsole(); }},
+    'rr-tasks':    {back:'rr', t:'Задачи',                        open:function(){ openTasks(); }},
+    // Задача — по номеру `tN`; имя и настройки знает роутер, разрешитель сперва спрашивает его (как у группы). Открытие
+    // ничего на роутере не меняет — адрес законен. Чужая строка crontab адреса не получает: её узнают по содержимому.
+    'rr-task':     {back:'rr-tasks', t:'Задача', need:1, via:'openTask', arg:function(a){ return /^t[0-9]{1,6}$/.test(a); }, open:function(a){ taskScrOpen(a); }},
+    'rr-task-new': {back:'rr-tasks', t:'Новая задача',            open:function(){ openTaskNew(); }},
+    // Access schedules live in «Маршрутизация» (mockup): «may THIS device go out now» — and devices live there. A schedule — by
+    // its number `sN`, an empty argument — a new one (a template or a preset device are the panel's draft, not the address).
+    'rt-sched':    {back:'rt', t:'Расписания доступа',            open:function(){ openSched(); }},
+    'rt-sched-p':  {back:'rt-sched', t:'Расписание', via:'schShow', arg:function(a){ return a==='' || /^s[0-9]{1,6}$/.test(a); }, open:function(a){ schScrOpen(a); }},
     'pn-notify':   {back:'pn', t:'Уведомления',                   open:function(){ openNotify(); }},
     'rr-backup':   {back:'rr', t:'Бэкап настроек',                open:function(){ openBackup(); }},
     'pn-events':   {back:'pn', t:'События',                       open:function(){ openEvents(); }},

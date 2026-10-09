@@ -38,7 +38,7 @@ port_src_ok() {
 	[ "$1" -le 255 ] && [ "$2" -le 255 ] && [ "$3" -le 255 ] && [ "$4" -le 255 ]
 }
 port_proto_ok() { case "$1" in udp|tcp|both) return 0 ;; *) return 1 ;; esac; }
-port_dir_ok()   { case "$1" in vpn|direct|block|s2|s3|s4) return 0 ;; *) return 1 ;; esac; }
+port_dir_ok()   { case "$1" in vpn|direct|block|s[2-7]) return 0 ;; *) return 1 ;; esac; }
 # Список портов: `all` или через запятую `N` / `N-M` (1..65535) — В НОРМАЛИЗОВАННОЙ форме (пробелов и ведущих
 # нулей нет: сперва `port_list_norm`, это делают все вызывающие). Форма — строкой целиком: пустой элемент
 # («443,,80») прежде проходил — разбор по пробелам его просто терял.

@@ -27,7 +27,7 @@
 #   Пользователь выбирает ДЕЙСТВИЕ на элемент: vpn | bypass | block | off (по умолч. off).
 #   Реестр (actions.tsv на /data, переживает ребут) = выбор действия + доп-выход:
 #   key<TAB>action<TAB>cnt<TAB>ts<TAB>slot. slot (Ф1b, зеркало groups.sh) — доп-ВЫХОД категории:
-#   0 = основной (geo_vpn как раньше), 2..4 = слот (geo_vpn_s<N>, метит mark-core / врайрит
+#   0 = основной (geo_vpn как раньше), 2..7 = слот (geo_vpn_s<N>, метит mark-core / врайрит
 #   zapret-слот); ТОЛЬКО для action=vpn. Поле ПОСЛЕДНЕЕ — cut -f2..4 и awk $3/$4 не задеты.
 #   URL/имя/тип/kind берём из каталога по ключу (каталог — источник истины по источникам).
 #   Все включённые CIDR-элементы сводятся в ТРИ ipset (geo_vpn/geo_out/geo_block); все включённые
@@ -323,7 +323,7 @@ reg_set() {
 	# slot переживает смену действия ТОЛЬКО пока действие vpn (слот применим лишь к «в VPN»);
 	# уход в bypass/block сбрасывает в 0 — вернувшись в vpn, юзер выбирает выход заново.
 	_s=$(printf '%s' "$_old" | cut -f5)
-	case "$_s" in 2|3|4) ;; *) _s=0 ;; esac
+	case "$_s" in [2-7]) ;; *) _s=0 ;; esac
 	[ "$_a" = vpn ] || _s=0
 	grep -v "^$_k$TAB" "$REG" 2>/dev/null > "$REG.tmp"
 	[ "$_a" = off ] || printf '%s\t%s\t%s\t%s\t%s\n' "$_k" "$_a" "$_c" "$_t" "$_s" >> "$REG.tmp"
@@ -593,11 +593,19 @@ ensure_cache() {
 				v2fly:*) fetch_v2fly "${_u#v2fly:}" "$_raw" ;;       # уже norm_geosite'нуто внутри
 				*)       fetch_url "$_u" "$_raw.dl" && norm_geosite < "$_raw.dl" > "$_raw"; rm -f "$_raw.dl" 2>/dev/null ;;
 			esac
-			[ -s "$_raw" ] && sort -u "$_raw" > "$_cf"
-			rm -f "$_raw" 2>/dev/null
+			# rename, never rewrite in place: `>` truncates first, and the schedules' filter reloading in that window would
+			# load half a category — or none (review s.112)
+			[ -s "$_raw" ] && sort -u "$_raw" > "$_cf.$$" && mv -f "$_cf.$$" "$_cf"
+			rm -f "$_raw" "$_cf.$$" 2>/dev/null
 		else
 			_raw="$RAM/.raw.$_k"
-			if fetch_url "$_u" "$_raw"; then norm_cidr < "$_raw" | sort -u > "$_cf"; fi
+			if fetch_url "$_u" "$_raw"; then
+				norm_cidr < "$_raw" | sort -u > "$_cf.$$" && mv -f "$_cf.$$" "$_cf"
+				# the IPv6 lines beside it, bogons cut (`<key>@6`): norm_cidr keeps IPv4 only, and a consumer closes a messenger by its
+				# network in both families. Written even empty — «fetched, the source has no v6» (CONSUMERS below)
+				norm_cidr6 < "$_raw" | strip_bogon6 | sort -u > "$_cf@6.$$" && mv -f "$_cf@6.$$" "$_cf@6"
+				rm -f "$_cf.$$" "$_cf@6.$$" 2>/dev/null
+			fi
 			rm -f "$_raw" 2>/dev/null
 		fi
 	fi
@@ -669,7 +677,7 @@ build_dns() {  # build_dns <домены-vpn> <домены-out> <домены-b
 	[ -n "$4" ] && [ -s "$4" ] && sed "s|.*|ipset=/&/$SET_DSY|" "$4" >> "$DNSCONF.new"
 	# Домены слот-категорий (Ф1b): ipset=/дом/geo_vpn_s<N> — dnsmasq кладёт живые A-записи в сет
 	# слота. Едут в тот же conf ⇒ снимок SNAP_DNS накрывает их автоматически (офлайн-ребут).
-	for _bn in 2 3 4; do
+	for _bn in 2 3 4 5 6 7; do
 		[ -s "$RAM/.dom-vpn-s$_bn" ] && sed "s|.*|ipset=/&/geo_vpn_s$_bn|" "$RAM/.dom-vpn-s$_bn" >> "$DNSCONF.new"
 	done
 	mv "$DNSCONF.new" "$DNSCONF"
@@ -697,6 +705,93 @@ snap_q() {
 	return 0
 }
 
+# --- CONSUMERS: category data for other subsystems (access schedules' «Ограничено») ------------------------------------
+# geo.sh is the ONE owner of category DATA (fetch, the v2fly include tree, snapshots); another subsystem must not grow a second
+# copy. A consumer names the keys it needs (`want`) and reads READY files (`ready`) — never a fetch on its own path: the
+# schedule tick runs every minute and must not wait on an include tree that takes minutes. The fetch runs in geo's own jobs:
+# `wanted` (the consumer's save starts it in the background) and every `update` (boot, daily, the panel) refreshes them.
+# Not through do_build: its pass ends with a dnsmasq restart — ~2.5 s without names for the whole house per schedule save.
+# A key's consumer FORMS (want_forms): a domain key — its cache file; a cidr key — `<key>@4` and `<key>@6` beside its cache, bogons
+# cut HERE (the consumer fills sets from them, and the data owner cuts once — not a per-minute tick); `@6` may be empty.
+WANT_DIR="$GEO/want"                    # one file per consumer: a key per line
+WSNAP="$GEO/.wsnap.$RESOLVER_VER"       # gz snapshots of wanted keys; keyed by the resolver version (new logic = stale data)
+WSNAP_MAX=1048576                       # bytes of one gz snapshot; a bigger key lives in RAM only (a journal line, as snap_flash)
+WSNAP_TOTAL=${WSNAP_TOTAL:-4194304}                     # bytes of all of them (32 pools × 16 schedules could not reach /data's 20 MB otherwise)
+WSNAP_RESERVE=2097152                   # free bytes the volume keeps after a snapshot (store-lib.sh fs_free_b; none = no check)
+want_keys() { cat "$WANT_DIR"/* 2>/dev/null | tr -d '\r' | grep . | sort -u; }
+# Is the key one the catalogue OFFERS? The patterns of cat_url/cat_kind take any name after a prefix (v2fly-anything would pass and
+# stay «downloading» for ever), so the enumerated lists are asked too — the same files catalog_lines reads, no list built.
+cat_known() {
+	case "$1" in
+		v2fly-*) _ckf="$V2CAT_SNAP"; [ -s "$_ckf" ] || _ckf="$V2CAT_BAKED"; tr -d '\r' < "$_ckf" 2>/dev/null | grep -qxF -- "${1#v2fly-}" ;;
+		rfip-*)  _ckf="$RFIP_SNAP"; [ -s "$_ckf" ] || _ckf="$RFIP_BAKED"; tr -d '\r' < "$_ckf" 2>/dev/null | grep -qxF -- "${1#rfip-}" ;;
+		rfgs-*)  _ckf="$RFGS_SNAP"; [ -s "$_ckf" ] || _ckf="$RFGS_BAKED"; tr -d '\r' < "$_ckf" 2>/dev/null | grep -qxF -- "${1#rfgs-}" ;;
+		??)      country_codes | tr ' ' '\n' | grep -qxF -- "$1" ;;
+		*)       [ -n "$(cat_url "$1")" ] && [ -n "$(cat_kind "$1")" ] ;;
+	esac
+}
+want_forms() {   # <key> → «<file name in CACHE> <kind>» per consumer form
+	case "$(cat_kind "$1")" in
+		domain) echo "$1 domain" ;;
+		cidr)   echo "$1@4 cidr"; echo "$1@6 cidr6" ;;
+	esac
+}
+# _wanted_pass <refetch> — under GEO_LOCK: every wanted key into the RAM cache (refetch=1: again) and its snapshot to the flash;
+# snapshots of keys nobody wants any more, and of older resolver versions, go away
+_wanted_pass() {
+	_wk=$(want_keys)
+	for _wo in "$GEO"/.wsnap.*; do [ -d "$_wo" ] && [ "$_wo" != "$WSNAP" ] && rm -rf "$_wo"; done
+	for _ws in "$WSNAP"/*.gz; do
+		[ -f "$_ws" ] || continue
+		_wn=${_ws##*/}; _wn=${_wn%.gz}; _wn=${_wn%@[46]}
+		printf '%s\n' "$_wk" | grep -qxF "$_wn" || rm -f "$_ws"
+	done
+	[ -n "$_wk" ] || return 0
+	mkdir -p "$WSNAP" 2>/dev/null
+	for _wn in $_wk; do
+		_wr=$1; _wkd=$(cat_kind "$_wn")
+		# a cidr key cached without its v6 form (the main path fetched it before that form existed): fetched again, once
+		[ "$_wkd" = cidr ] && [ ! -f "$CACHE/$_wn@6" ] && _wr=1
+		_wc=$(ensure_cache "$_wn" "$_wr")
+		if [ "$_wkd" = cidr ]; then
+			# `@4` only from a cache that is here: after a reboot `ready` put the forms back from the snapshots while the cache is
+			# gone, and an offline pass must not empty them
+			if [ -f "$_wc" ]; then
+				strip_bogon < "$_wc" 2>/dev/null | sort -u > "$_wc@4.$$" && mv -f "$_wc@4.$$" "$_wc@4"
+				rm -f "$_wc@4.$$" 2>/dev/null
+			fi
+			[ -f "$_wc@4" ] || continue
+			[ -f "$_wc@6" ] || : > "$_wc@6"
+		else
+			[ -s "$_wc" ] || continue
+		fi
+		for _wf in $(want_forms "$_wn" | awk '{ print $1 }'); do
+			# a snapshot is rewritten only when the data changed: the flash is written by content, not by the clock
+			gzip -c "$CACHE/$_wf" > "$RAM/.wsnap.$$" 2>/dev/null || { rm -f "$RAM/.wsnap.$$"; continue; }
+			_wsz=$(wc -c < "$RAM/.wsnap.$$" | tr -d ' ')
+			# the total of the OTHER snapshots + this one, and the volume's reserve — over either: RAM only, said like a big key
+			_wtot=$(for _wq in "$WSNAP"/*.gz; do [ -f "$_wq" ] && [ "$_wq" != "$WSNAP/$_wf.gz" ] && wc -c < "$_wq"; done | awk '{ t += $1 } END { print t + 0 }')
+			_wfree=$(command -v fs_free_b >/dev/null 2>&1 && fs_free_b "$WSNAP")
+			if [ "$_wsz" -gt "$WSNAP_MAX" ] || [ $(( _wtot + _wsz )) -gt "$WSNAP_TOTAL" ] || { [ -n "$_wfree" ] && [ "$_wfree" -gt 0 ] && [ "$_wfree" -lt $(( _wsz + WSNAP_RESERVE )) ]; }; then
+				rm -f "$RAM/.wsnap.$$" "$WSNAP/$_wf.gz"
+				if [ -f "$ENODIA_DIR/events.sh" ]; then
+					sh "$ENODIA_DIR/events.sh" add geo-want-snap-skip 86400 \
+						"Категория расписания не переживёт перезагрузку" \
+						"Категория «$_wn» слишком велика для снимка на флеш. Сейчас она работает, но после перезагрузки роутера начнёт закрываться не сразу — сперва её нужно будет заново скачать (несколько минут)." >/dev/null 2>&1
+				fi
+				continue
+			fi
+			# by md5: a busybox without `cmp` would rewrite every snapshot on every pass (the flash is written by content)
+			if [ -f "$WSNAP/$_wf.gz" ] && [ "$(gunzip -c "$WSNAP/$_wf.gz" 2>/dev/null | md5sum)" = "$(md5sum < "$CACHE/$_wf" 2>/dev/null)" ]; then
+				rm -f "$RAM/.wsnap.$$"
+			else
+				mv -f "$RAM/.wsnap.$$" "$WSNAP/$_wf.gz"
+			fi
+		done
+	done
+	return 0
+}
+
 # --- сборка: агрегировать включённые ключи → сеты/conf → снимки → правила -------------
 # refetch=1 (update) перекачивает кэш; refetch=0 (apply) собирает из существующего кэша (быстро).
 # _build_pass — ОДИН проход; ВСЕГДА под локом do_build (см. ниже).
@@ -718,7 +813,7 @@ _build_pass() {
 	# (CIDR → geo_vpn_s<N>, домены → dnsmasq ipset=/дом/geo_vpn_s<N>), а не в общий geo_vpn.
 	# Привязка к выключенному/удалённому слоту → категория едет ОСНОВНЫМ выходом (geo_vpn), а не
 	# молча напрямую: слот = альтернативный выход, его отказ не роняет приватность (fallback=main).
-	for _sn in 2 3 4; do : > "$RAM/.agg-vpn-s$_sn"; : > "$RAM/.dom-vpn-s$_sn"; done
+	for _sn in 2 3 4 5 6 7; do : > "$RAM/.agg-vpn-s$_sn"; : > "$RAM/.dom-vpn-s$_sn"; done
 	_any_slot=0
 	_en_slots=" "
 	[ -f "$ENODIA_DIR/slots.sh" ] && _en_slots=" $(sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | cut -f1 | tr '\n' ' ') "
@@ -726,7 +821,7 @@ _build_pass() {
 		while IFS="$TAB" read -r _k _a _c _t _s; do
 			[ -n "$_k" ] || continue
 			[ -n "$(cat_url "$_k")" ] || continue        # ключа нет НИ У ОДНОГО провайдера (реально устарел) — игнор
-			case "$_s" in 2|3|4) ;; *) _s=0 ;; esac
+			case "$_s" in [2-7]) ;; *) _s=0 ;; esac
 			[ "$_s" != 0 ] && case "$_en_slots" in *" $_s "*) ;; *) _s=0 ;; esac
 			if [ "$(cat_kind "$_k")" = domain ]; then
 				case "$_a" in
@@ -770,7 +865,7 @@ _build_pass() {
 	# Слот-агрегаты: сорт+дедуп, сет наполняем если есть члены (CIDR или домены — dnsmasq требует
 	# СУЩЕСТВУЮЩИЙ сет до рестарта, set_sync его создаёт и пустым) ИЛИ сет уже жив (иначе IP отвязанной
 	# категории залипли бы в старом сете — зеркало groups.sh). Снимок на флеш — офлайн-ребут переживает.
-	for _sn in 2 3 4; do
+	for _sn in 2 3 4 5 6 7; do
 		_sf="$RAM/.agg-vpn-s$_sn"; _df="$RAM/.dom-vpn-s$_sn"
 		sort -u "$_sf" > "$_sf.s" 2>/dev/null && mv "$_sf.s" "$_sf"
 		sort -u "$_df" > "$_df.s" 2>/dev/null && mv "$_df.s" "$_df"
@@ -805,8 +900,10 @@ _build_pass() {
 	dns_reload
 	# NSS/ECM-offload держит установленные соединения на старом маршруте до таймаута — сброс обязателен.
 	ct_flush
+	# the consumers' keys ride every refetch (boot, daily, «Обновить»); AFTER the routing above — they must not delay it
+	if [ "$_refetch" = 1 ]; then _wanted_pass 1 >/dev/null 2>&1; fi
 	rm -f "$_vpn" "$_out" "$_blk" "$_dsy" "$_dv" "$_do" "$_db" "$_dd" 2>/dev/null
-	for _sn in 2 3 4; do rm -f "$RAM/.agg-vpn-s$_sn" "$RAM/.dom-vpn-s$_sn" 2>/dev/null; done
+	for _sn in 2 3 4 5 6 7; do rm -f "$RAM/.agg-vpn-s$_sn" "$RAM/.dom-vpn-s$_sn" 2>/dev/null; done
 	# ustate DONE ставит ОБЁРТКА (do_build) после ПОСЛЕДНЕГО прохода: иначе dirty-повтор мигнул бы
 	# панели «готово» в середине работы и та перестала бы поллить.
 	printf 'гео применено: CIDR в VPN %s / мимо %s / блок %s / десинк %s; домены маршрут %s / блок %s%s%s\n' \
@@ -857,7 +954,7 @@ do_reapply() {
 	[ -s "$SNAP_DNSBLK" ] && { cp "$SNAP_DNSBLK" "$DNSBLK" 2>/dev/null; _any=1; adblock_resync; }
 	# Слот-снимки (Ф1b): CIDR слота обратно в geo_vpn_s<N>. Врайринг (марка/NFQUEUE) — забота
 	# heal 5.13b (transport.sh slots-up идёт ПОСЛЕ geo-reapply — порядок уже правильный).
-	for _sn in 2 3 4; do
+	for _sn in 2 3 4 5 6 7; do
 		[ -s "$GEO/.snap-vpn-s$_sn" ] && { set_fill "geo_vpn_s$_sn" "$GEO/.snap-vpn-s$_sn"; _any=1; }
 	done
 	[ "$_any" = 1 ] || return 0
@@ -868,7 +965,7 @@ do_reapply() {
 	grep -q "/$SET_DSY\$" "$DNSCONF" 2>/dev/null && set_ensure "$SET_DSY"
 	# То же для слот-сетов, на которые ссылается DNS-снимок (категория из одних доменов: CIDR-снимка
 	# слота нет, а ipset=-строка есть — без сета dnsmasq ругается и правило мертво).
-	for _sn in 2 3 4; do
+	for _sn in 2 3 4 5 6 7; do
 		grep -q "/geo_vpn_s$_sn\$" "$DNSCONF" 2>/dev/null && set_ensure "geo_vpn_s$_sn"
 	done
 	wire_rules
@@ -1059,7 +1156,7 @@ emit_json() {
 			a=act[$2]; if(a=="") a="off"
 			c=cnt[$2]; if(c !~ /^[0-9]+$/) c=0
 			t=ts[$2];  if(t !~ /^[0-9]+$/) t=0
-			s=slt[$2]; if(s !~ /^[2-4]$/) s=0
+			s=slt[$2]; if(s !~ /^[2-7]$/) s=0
 			if(f) printf(","); f=1
 			printf("{\"type\":\"%s\",\"key\":\"%s\",\"label\":\"%s\",\"kind\":\"%s\",\"approx\":\"%s\",\"desc\":\"%s\",\"action\":\"%s\",\"count\":%s,\"ts\":%s,\"slot\":%s}",$1,$2,$3,$4,$6,$7,a,c,t,s)
 		}
@@ -1098,7 +1195,7 @@ emit_active() {
 			_aty=$(cat_type "$_ak"); [ -n "$_aty" ] || continue
 			case "$_ac" in ''|*[!0-9]*) _ac=0 ;; esac
 			case "$_at" in ''|*[!0-9]*) _at=0 ;; esac
-			case "$_as" in 2|3|4) ;; *) _as=0 ;; esac
+			case "$_as" in [2-7]) ;; *) _as=0 ;; esac
 			[ "$_af" = 1 ] && printf ','
 			_af=1
 			printf '{"type":"%s","key":"%s","label":"%s","kind":"%s","action":"%s","count":%s,"ts":%s,"slot":%s}' \
@@ -1131,10 +1228,10 @@ case "$1" in
 		' "$REG" "$_cf" 2>/dev/null
 		rm -f "$_cf" 2>/dev/null
 		;;
-	slot)  # slot <key> <0|2|3|4> — привязать категорию к доп-выходу (0 = основной; только action=vpn).
+	slot)  # slot <key> <0|2..7> — привязать категорию к доп-выходу (0 = основной; только action=vpn).
 	       # Пишет ТОЛЬКО реестр (мгновенно, как set) — пересборку зовёт фронт следом (geo_apply).
 		[ -n "$(cat_url "$2")" ] || { echo "неизвестный ключ гео"; exit 1; }
-		case "$3" in 0|2|3|4) ;; *) echo "слот: 0|2|3|4"; exit 1 ;; esac
+		case "$3" in 0|[2-7]) ;; *) echo "слот: 0|2..7"; exit 1 ;; esac
 		_ln=$(reg_get "$2"); [ -n "$_ln" ] || { echo "категория выключена — сначала выберите действие"; exit 1; }
 		if [ "$3" != 0 ] && [ "$(printf '%s' "$_ln" | cut -f2)" != vpn ]; then
 			echo "доп-выход только для действия «в VPN»"; exit 1
@@ -1142,6 +1239,89 @@ case "$1" in
 		awk -F"$TAB" -v OFS="$TAB" -v k="$2" -v s="$3" '$1==k{$5=s} {print}' "$REG" > "$REG.new" && mv "$REG.new" "$REG"
 		echo "выход: $([ "$3" = 0 ] && echo 'Основной' || echo "слот №$3")"
 		;;
+	# want <consumer> [<key>…] — the consumer's whole set of keys (none = it wants nothing); domain and cidr keys alike — each
+	# kind comes to the consumer in its own forms (want_forms)
+	want)
+		case "$2" in ''|*[!a-z0-9-]*) echo "потребитель: [a-z0-9-]"; exit 1 ;; esac
+		_wc="$2"; shift 2
+		# a key the catalogue does not know is SKIPPED (said once on stdout), not a refusal of all: one stale or hand-edited pool
+		# of a schedule stopped the downloads of every schedule's categories (review s.112, round 3)
+		_wok=""; _wbad=""
+		for _wn in "$@"; do
+			case "$_wn" in */*|.*|*[!a-z0-9._!-]*) _wbad="$_wbad $_wn"; continue ;; esac   # a key becomes a file name
+			if [ -n "$(cat_url "$_wn")" ] && [ -n "$(cat_kind "$_wn")" ]; then _wok="$_wok $_wn"; else _wbad="$_wbad $_wn"; fi
+		done
+		[ -z "$_wbad" ] || echo "неизвестный ключ гео:$_wbad — пропущен"
+		mkdir -p "$WANT_DIR" 2>/dev/null
+		if [ -z "$_wok" ]; then rm -f "$WANT_DIR/$_wc"; exit 0; fi
+		printf '%s\n' $_wok | sort -u > "$WANT_DIR/.$_wc.$$" && mv -f "$WANT_DIR/.$_wc.$$" "$WANT_DIR/$_wc" ;;
+	# ready <key>… — «<key><TAB><kind><TAB><path>» for every READY form of the keys (want_forms): the RAM cache, or the flash
+	# snapshot put back into it. A key with neither is left out (the consumer goes without it until `wanted` brings it) — never a
+	# fetch here. A cidr key is ready by its `@4` (a `cidr` line); its `cidr6` line follows only then, and only when `@6` is not
+	# empty. One call for all keys: the schedule tick asks every minute while a device is limited.
+	ready)
+		shift
+		for _wn in "$@"; do
+			case "$_wn" in */*|.*|*[!a-z0-9._!-]*) continue ;; esac
+			[ -n "$(cat_url "$_wn")" ] || continue
+			_wrd=0
+			for _wf in $(want_forms "$_wn" | awk '{ print $1 }'); do
+				_wc="$CACHE/$_wf"
+				if [ ! -f "$_wc" ] && [ -f "$WSNAP/$_wf.gz" ]; then
+					gunzip -c "$WSNAP/$_wf.gz" > "$_wc.$$" 2>/dev/null && mv -f "$_wc.$$" "$_wc"
+					rm -f "$_wc.$$" 2>/dev/null
+				fi
+				case "$_wf" in
+					*@4) if [ -f "$_wc" ]; then _wrd=1; printf '%s\tcidr\t%s\n' "$_wn" "$_wc"; fi ;;
+					*@6) if [ "$_wrd" = 1 ] && [ -s "$_wc" ]; then printf '%s\tcidr6\t%s\n' "$_wn" "$_wc"; fi ;;
+					*)   if [ -s "$_wc" ]; then printf '%s\tdomain\t%s\n' "$_wn" "$_wc"; fi ;;
+				esac
+			done
+		done
+		exit 0 ;;
+	# about <key>… — «<key><TAB><kind><TAB><type><TAB><label>» for every key the catalogue offers (cat_known): what a consumer
+	# checks a key by before keeping it, and shows it as — without reading the whole catalogue (`list` is 1.5 s on BE7000)
+	about)
+		shift
+		for _wn in "$@"; do
+			case "$_wn" in */*|.*|*[!a-z0-9._!-]*) continue ;; esac
+			cat_known "$_wn" || continue
+			printf '%s\t%s\t%s\t%s\n' "$_wn" "$(cat_kind "$_wn")" "$(cat_type "$_wn")" "$(cat_label "$_wn")"
+		done
+		exit 0 ;;
+	# wanted — fetch what the consumers want and is not in RAM yet (a background job of the consumer's save). Waits for the geo
+	# lock instead of riding a build: a build pass ends with a dnsmasq restart the save must not cost the house.
+	wanted)
+		_wi=0
+		until ls_lock_take "$GEO_LOCK" "$RAM/.wanted.wait" 1; do
+			_wi=$((_wi + 1)); [ "$_wi" -le 720 ] || exit 1   # an hour: an update of everything is the longest holder
+			sleep 5
+		done
+		rm -f "$RAM/.wanted.wait" 2>/dev/null
+		trap 'ls_lock_drop "$GEO_LOCK"' EXIT
+		trap 'exit 1' INT TERM HUP PIPE
+		# `refresh` — every wanted key fetched AGAIN: the daily lists job on a router with no Гео action (an `update` refreshes
+		# them in its pass; without actions nothing ran it, and Telegram's network stayed at its first download — review s.112)
+		# …and AGAINST THE UPSTREAM'S NEWEST COMMIT, as `update` does: the URLs are pinned to the commit in $SHAS (jsDelivr
+		# `@<sha>` never changes), and without moving the pin «again» re-fetched the same bytes every day (review s.113, round 4)
+		_wpr=0; if [ "${2:-}" = refresh ]; then resolve_upstream; set_source_urls; _wpr=1; fi
+		# A consumer that saved WHILE we ran (its `wanted` found us running and left) — a pass reads the keys once at its start, and
+		# the new key waited for the daily job (review s.113, round 4): the pass again while the wanted set moved, refetch only once
+		_wpi=0
+		while :; do
+			_wps=$(want_keys | md5sum)
+			_wanted_pass "$_wpr"; _wpr=0
+			[ "$(want_keys | md5sum)" = "$_wps" ] && break
+			_wpi=$((_wpi + 1)); [ "$_wpi" -lt 8 ] || break
+		done
+		trap - EXIT INT TERM HUP PIPE; ls_lock_drop "$GEO_LOCK"
+		# A build that arrived while we held the lock only left its mark (do_build: «учту свежий выбор в ней») and returned — the
+		# holder is the one to run it, and that holder was us: a «Гео» action, «Обновить», the 5:00 update or `wire` after a
+		# reload was lost otherwise (review s.112, round 3). A fresh build of the mark's kind; do_build loops on a new mark itself.
+		if [ -f "$GEO_DIRTY" ]; then
+			case "$(cat "$GEO_DIRTY" 2>/dev/null | tr -d ' \r\n')" in 1) exec sh "$0" update ;; *) exec sh "$0" apply ;; esac
+		fi
+		exit 0 ;;
 	apply)   do_build 0 ;;     # собрать из кэша (быстро; после смены действия)
 	update)  resolve_upstream; set_source_urls; v2fly_enumerate; do_build 1 ;;   # SHA+даты → пиновка URL → перечислить v2fly (rf=baked) → перекачать (пиновано) + собрать
 	reapply) do_reapply ;;     # офлайн из снимка (boot)
@@ -1182,8 +1362,8 @@ case "$1" in
 	freshness) resolve_upstream; echo ok ;;    # обновить $SHAS (sha+даты; панель зовёт async при открытии)
 	*)
 		echo "geo.sh — гео-категории (страны/сервисы/заблок-в-РФ → в VPN / мимо VPN / блок)"
-		echo "  list | active | set <key> <vpn|bypass|block|desync|off> | slot <key> <0|2|3|4> | apply | update | reapply | enabled"
-		echo "  desync-list"
+		echo "  list | active | set <key> <vpn|bypass|block|desync|off> | slot <key> <0|2..7> | apply | update | reapply | enabled"
+		echo "  desync-list | want <consumer> [<key>…] | ready <key>… | about <key>… | wanted"
 		echo "  provider <type> | provider-set <type> <pid> | freshness"
 		exit 1
 		;;

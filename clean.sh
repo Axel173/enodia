@@ -203,7 +203,7 @@ snap_targets() {
 
 # Логи В ОЗУ. Список ЯВНЫЙ, а не `/tmp/*.log`: рядом лежат СТОКОВЫЕ логи Xiaomi
 # (wifi_analysis.log, ssh_patch.log, *.bootcheck.log) — обрезать чужое мы не вправе.
-RAM_LOGS="enodia-dnsq enodia-restore enodia-startup enodia-store-mode enodia-watchdog enodia-pkg-restart
+RAM_LOGS="enodia-dnsq enodia-restore enodia-startup enodia-store-mode enodia-watchdog enodia-pkg-restart enodia-dns-filter
 enodia-byedpi enodia-byedpi-test-run enodia-byedpi-fetch enodia-doh enodia-hev enodia-hysteria
 enodia-iplist-update enodia-notify enodia-notify-event enodia-panel-tls enodia-subs-update
 enodia-support enodia-switch-vpn-setup enodia-transport-awg-setup enodia-xiaomi-bypass
@@ -227,7 +227,7 @@ subs-update support switch-vpn-setup transport-awg-setup xiaomi-bypass zapret-nf
 # кнопка «очистить логи» их не видела — а именно они пишутся так же бойко, как основные.
 # Имена ПРОИЗВОДНЫЕ, но перечень остаётся явным: маску `/tmp/*.log` брать по-прежнему нельзя.
 RAM_LOGS_SLOT="xray enodia-hev enodia-hysteria enodia-byedpi hev hysteria byedpi"  # демоны с пер-слотовым инстансом (+ имена до префикса)
-RAM_SLOT_IDS="2 3 4"                        # диапазон номеров выходов (slots.sh)
+RAM_SLOT_IDS="2 3 4 5 6 7"                     # диапазон номеров выходов (slots.sh)
 RAM_XTEST_PORTS="10812 10813 10814 10815 10816 10817 10818 10819"   # xray-test.sh
 ramlog_targets() {
     for _n in $RAM_LOGS; do [ -s "/tmp/$_n.log" ] && echo "/tmp/$_n.log"; done

@@ -10,7 +10,7 @@
 # они не были связаны с тем, что РЕАЛЬНО едет через десинк, поэтому таблица мерила чужой трафик, а
 # пятый сервис нельзя было добавить без правки скрипта. ЕДИНСТВЕННЫЙ источник пула —
 # `slots.sh domains <цель>` (его же читают кандидаты браузер-свипа и карточка Zapret): 0 = основная
-# несущая · 2|3|4 = доп-выход · zapret = общий nfqws. Пуст пул ⇒ тест честно ОТКАЗЫВАЕТСЯ идти.
+# несущая · 2..7 = доп-выход · zapret = общий nfqws. Пуст пул ⇒ тест честно ОТКАЗЫВАЕТСЯ идти.
 #
 # КАК МЕРЯЕМ (важно понимать ограничение). Поднимаем КАНДИДАТА ciadpi на ОТДЕЛЬНОМ порту 10809
 # (боевой, если byedpi активен, слушает 10808 — его НЕ трогаем) и стучимся через него `curl
@@ -37,7 +37,7 @@
 # снимается. Грабли: нет nohup/setsid → фон через start-stop-daemon -b -m -p (запускает CGI).
 #
 # Использование:
-#   byedpi-test.sh run [цель]  — прогнать тест по пулу цели (0 = основная несущая, деф.; 2|3|4 —
+#   byedpi-test.sh run [цель]  — прогнать тест по пулу цели (0 = основная несущая, деф.; 2..7 —
 #                                доп-выход; zapret — общий nfqws)
 #   byedpi-test.sh stop        — прервать
 #   byedpi-test.sh state       — текущее состояние (IDLE|RUNNING n/N|DONE|ERR|STOPPED)
@@ -76,7 +76,7 @@ RES_DIR=/tmp/enodia-byedpi-test-res           # временные файлы п
 OWNER_MARK=/tmp/enodia-byedpi-test.owneradded # есть файл = owner-RETURN добавили МЫ (снять на выходе)
 POOL_FILE=/tmp/enodia-byedpi-test-pool.lst    # пул доменов ЦЕЛИ (наполняет build_pool)
 POOL_CAP=24                                   # кап доменов в пуле (тест по сотням был бы неприлично долгим)
-TARGET=0                                      # цель теста: 0 | 2|3|4 | zapret (ставит run)
+TARGET=0                                      # цель теста: 0 | 2..7 | zapret (ставит run)
 TARGET_LABEL=""                               # подпись столбца/цели (ставит build_pool)
 
 # Дефолты настроек (перекрываются .byedpi-test.conf). Диапазоны — как в приложении.
@@ -99,7 +99,7 @@ target_label() {
 }
 target_known() {
     case "$1" in
-        0|2|3|4|zapret) return 0 ;;
+        0|[2-7]|zapret) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -206,14 +206,14 @@ run_pool() {
 pool_max() { n=$(pool | wc -l); echo $((n * T_REQUESTS)); }
 
 run() {
-    TARGET="${1:-0}"   # цель: 0 = основная несущая (деф.) | 2|3|4 = доп-выход | zapret = общий nfqws
+    TARGET="${1:-0}"   # цель: 0 = основная несущая (деф.) | 2..7 = доп-выход | zapret = общий nfqws
     # Трапы ставим ТОЛЬКО в run (иначе state/stop чистили бы чужой запущенный тест). На сигнал —
     # ВЫХОДИМ (`exit`), а не просто чистим: иначе sh после хендлера ПРОДОЛЖИЛ БЫ цикл (трап не
     # прерывает выполнение) → run спаунил бы следующего кандидата и затирал STATE уже после stop.
     trap 'cleanup' EXIT
     trap 'exit 143' INT TERM
     [ -x "$CIADPI" ] || { echo ERR > "$STATE"; : > "$LOG"; log "нет бинаря ciadpi — установите набор с ByeDPI"; return 1; }
-    target_known "$TARGET" || { echo ERR > "$STATE"; : > "$LOG"; log "неизвестная цель «$TARGET» (0|2|3|4|zapret)"; return 1; }
+    target_known "$TARGET" || { echo ERR > "$STATE"; : > "$LOG"; log "неизвестная цель «$TARGET» (0|2..7|zapret)"; return 1; }
     load_conf
     : > "$LOG"; echo RUNNING > "$STATE"
     # Пул ЦЕЛИ — единственный источник проб. Пусто ⇒ ОТКАЗ, а не фолбэк на «общеизвестные сайты»:
@@ -251,7 +251,7 @@ run() {
     # (у него свой ciadpi), иначе общая .byedpi-args. Иначе таблица сравнивала бы кандидатов с
     # чужой стратегией и «Текущая» подсвечивалась бы не там.
     _cf="$ENODIA_STATE/.byedpi-args"
-    case "$TARGET" in 2|3|4) _cf="$ENODIA_STATE/.byedpi-args-s$TARGET" ;; esac
+    case "$TARGET" in [2-7]) _cf="$ENODIA_STATE/.byedpi-args-s$TARGET" ;; esac
     cust=$(grep -vE '^[[:space:]]*#' "$_cf" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')
     if [ -n "$cust" ] && ! grep -qF "$TAB$cust" "$cand"; then
         printf 'Текущие свои%s%s\n' "$TAB" "$cust" >> "$cand"
@@ -306,7 +306,7 @@ run() {
 emit_config() {
     load_conf
     av=""
-    for t in 0 2 3 4 zapret; do
+    for t in 0 2 3 4 5 6 7 zapret; do
         _n=$(sh "$ENODIA_DIR/slots.sh" domains "$t" "$POOL_CAP" 2>/dev/null | wc -l | tr -d ' ')
         case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
         av="$av${av:+,}{\"k\":\"$t\",\"l\":\"$(json_escape "$(target_label "$t")")\",\"n\":$_n}"
@@ -325,5 +325,5 @@ case "$1" in
         cleanup; echo STOPPED > "$STATE"; log "прервано пользователем" ;;
     state) cat "$STATE" 2>/dev/null || echo IDLE ;;
     config) emit_config ;;
-    *) echo "usage: $0 run [0|2|3|4|zapret]|stop|state|config"; exit 2 ;;
+    *) echo "usage: $0 run [0|2..7|zapret]|stop|state|config"; exit 2 ;;
 esac

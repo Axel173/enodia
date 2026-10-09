@@ -681,7 +681,7 @@ zt_ensure_slot_set() {
 }
 cmd_slot_up() {   # <id> <config-игнор> — поднять zapret-десинк для сетов слота
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) log "slot-up: битый id '$_id'"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "slot-up: битый id '$_id'"; return 1 ;; esac
     [ -x "$NFQWS" ] || { log "slot-up: НЕТ бинаря $NFQWS — установите (панель «Zapret»)"; return 1; }
     # …и БИНАРЯ МАЛО — второй признак обязателен здесь ровно так же, как в cmd_t_up: nfqws едет
     # бутстрапом, поэтому на ядре без NFQUEUE (AX3600, 4.4) файл на месте, а очереди нет. Замерено
@@ -718,7 +718,7 @@ cmd_slot_up() {   # <id> <config-игнор> — поднять zapret-деси�
 }
 cmd_slot_down() {   # <id> — снять zapret-десинк слота
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) return 1 ;; esac
     for _s in $(zt_slot_sets "$_id"); do nfq_set_rules "$_s" del; done
     # nfqws/анти-петля ОБЩИЕ: гасим, только если не нужны НИ транспорту, НИ ДРУГОМУ zapret-слоту,
     # НИ устройствам «целиком в десинк» (правила по источнику живут отдельно от слотов).

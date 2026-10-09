@@ -261,6 +261,28 @@ cap_run() {
 	return "$_crr"
 }
 wui_run() { cap_run web-ui.sh "$@"; _wur=$?; WUI_OUT=$CAP_OUT; return "$_wur"; }
+# owner_relay <script> [args] — the OWNER's one-line JSON answer relayed as is (tasks.sh, access-sched.sh: they validate and
+# answer, this CGI only carries). Through cap_run: uhttpd's SIGKILL of a lost client must not cut a registry write halfway on
+# SIGPIPE. cap_run merges stderr into the same file, so a stray warning (`mv: …`) before the answer must not turn it into
+# «error: {…}» — the last line that is a JSON object is the answer (review s.106); anything else is a refusal with its last line.
+owner_relay() {
+	cap_run "$@"
+	_orj=$(printf '%s\n' "$CAP_OUT" | grep '^{' | tail -n 1)
+	case "$_orj" in '{'*) printf '%s\n' "$_orj" ;; *) fail "$(printf '%s' "$CAP_OUT" | tail -n 1 | jesc 300)" ;; esac
+	exit 0
+}
+# in_dir — a private 700 directory for the request's input files -> IN_DIR (removed on exit). /tmp is shared, and a symlink laid
+# on a predictable name would turn our write into a write into its target (the cap_run class); dirs of killed CGIs (a dead pid
+# in the name) are swept here, as cap_run does with its own.
+in_dir() {
+	for _ind in /tmp/enodia-cgi-in.*; do
+		[ -e "$_ind" ] || [ -L "$_ind" ] || continue
+		[ -d "/proc/${_ind##*.}" ] || rm -rf "$_ind" 2>/dev/null
+	done
+	IN_DIR="/tmp/enodia-cgi-in.$$"; rm -rf "$IN_DIR" 2>/dev/null
+	( umask 077; mkdir "$IN_DIR" ) 2>/dev/null || fail "не удалось создать временный каталог"
+	trap 'rm -rf "$IN_DIR"' EXIT
+}
 wf_why() { _wy=$(printf '%s\n' "$1" | tail -n 1); printf '%s' "${_wy:-не удалось}" | jesc 300; }
 tok=$(field token)
 act=$(field action)
@@ -488,6 +510,108 @@ case "$act" in
 		printf '{"ok":true,"code":0,"msg":"Роутер перезагружается… панель вернётся через ~40-60 с (обновите страницу)."}\n'
 		exit 0 ;;
 
+	# --- «ЗАДАЧИ» (cron manager, tasks.sh). Like the console, the user's own code runs as root BY DESIGN (decision 07.10.2026:
+	# risk is on the user, no extra confirmation — the gate is the panel login + CSRF). The CGI only CARRIES: fields go into a
+	# spec file in a private 700 directory (the cap_run class: /tmp is shared, a symlink laid on a predictable name would turn
+	# our write into a write into its target), free text stays base64 all the way to tasks.sh, and every value is validated
+	# THERE — the owner. Answers are the owner's JSON, relayed as is (they carry the new task's id).
+	task_save|task_del|task_toggle|task_dup|task_run|task_stop|task_get|cron_line_set|cron_line_toggle|cron_adopt|cron_raw_get|cron_raw_save|task_file_get|task_file_put)
+		[ -f "$ENODIA_DIR/tasks.sh" ] || fail "на роутере нет tasks.sh — обновите скрипты роутера"
+		tk_relay() { owner_relay tasks.sh "$@"; }   # the owner's JSON as is (owner_relay above)
+		# the base64 alphabet; EMPTY passes — an optional field the panel leaves out («свой скрипт» sends no target_b64).
+		# `grep` cannot say that: empty input has no line to match, so every «свой скрипт» save was refused (BE7000
+		# 07.10.2026; the mock server validated in Python and never ran this line). A newline is outside the class too.
+		b64f() { case "$1" in *[!A-Za-z0-9+/=]*) return 1 ;; esac; return 0; }
+		tid=$(field id)
+		case "$act" in task_save) ;; task_del|task_toggle|task_dup|task_run|task_stop|task_get)
+			printf '%s' "$tid" | grep -qE '^t[0-9]{1,6}$' || fail "неверный номер задачи" ;; esac
+		# private input dir (in_dir above) — only the verbs that write a file there
+		case "$act" in task_save|cron_raw_save|task_file_put) in_dir; tkin=$IN_DIR ;; esac
+		case "$act" in
+			task_save)
+				: > "$tkin/spec"
+				for _k in id run enabled kind lang boot delay timeout overlap prio clockwait keep mail journal; do
+					_v=$(field "$_k"); case "$_v" in *[!A-Za-z0-9]*) fail "неверные данные задачи ($_k)" ;; esac
+					[ -n "$_v" ] && printf '%s=%s\n' "$_k" "$_v" >> "$tkin/spec"
+				done
+				for _k in name_b64 target_b64 args_b64 sched_b64 workdir_b64 body_b64 env_b64; do
+					_v=$(urldecode "$(field "$_k")"); b64f "$_v" || fail "неверные данные задачи ($_k)"
+					# a SENT empty field is a value too: «no variables» clears them — dropped, it read as «not sent» and the old
+					# variables stayed (review s.106); an absent field stays absent (the owner keeps what it has)
+					if [ -n "$_v" ] || printf '%s' "$body" | tr '&' '\n' | grep -q "^$_k="; then printf '%s=%s\n' "$_k" "$_v" >> "$tkin/spec"; fi
+				done
+				tk_relay save "$tkin/spec" ;;
+			task_del)    tk_relay del "$tid" ;;
+			task_toggle) case "$(field on)" in 1) tk_relay toggle "$tid" on ;; 0) tk_relay toggle "$tid" off ;; *) fail "нужно 0|1" ;; esac ;;
+			task_dup)    tk_relay dup "$tid" ;;
+			task_run)    tk_relay run-bg "$tid" ;;
+			task_stop)   tk_relay stop "$tid" ;;
+			task_get)    tk_relay get-json "$tid" ;;
+			cron_raw_get) tk_relay raw-get ;;
+			cron_line_set|cron_line_toggle|cron_adopt)
+				_old=$(urldecode "$(field old)"); b64f "$_old" && [ -n "$_old" ] || fail "нет строки"
+				case "$act" in
+					cron_line_set) _new=$(urldecode "$(field new)"); b64f "$_new" || fail "неверная строка"; tk_relay line-set "$_old" "$_new" ;;
+					cron_line_toggle) tk_relay line-toggle "$_old" ;;
+					*) tk_relay adopt "$_old" ;;
+				esac ;;
+			cron_raw_save)
+				_v=$(urldecode "$(field text)"); b64f "$_v" || fail "неверный текст"
+				# the version the tab READ is required: without it an empty editor (still reading) saved over the whole file (round 2)
+				_rv=$(field rev); case "$_rv" in '') fail "нет версии файла — откройте вкладку заново" ;; *[!0-9a-f]*) fail "неверная версия файла" ;; esac
+				printf '%s' "$_v" > "$tkin/text"; tk_relay raw-save "$tkin/text" "$_rv" ;;
+			task_file_get|task_file_put)
+				_p=$(urldecode "$(field path)"); b64f "$_p" && [ -n "$_p" ] || fail "нет пути к файлу"
+				_p=$(printf '%s' "$_p" | base64 -d 2>/dev/null); one_line "$_p" || fail "путь — одной строкой"
+				if [ "$act" = task_file_get ]; then tk_relay file-get "$_p"; fi
+				_v=$(urldecode "$(field text)"); b64f "$_v" || fail "неверный текст"
+				printf '%s' "$_v" > "$tkin/text"; tk_relay file-put "$_p" "$tkin/text" ;;
+		esac ;;
+
+	# --- ACCESS SCHEDULES (access-sched.sh). The CGI only CARRIES: each value is URL-decoded and charset-checked here, its meaning
+	# (a window, a MAC, a term) is checked by the owner, whose JSON answer is relayed as is. Free text (the name) stays base64.
+	sched_save|sched_del|sched_toggle|sched_ovr|sched_all|sched_hol)
+		[ -f "$ENODIA_DIR/access-sched.sh" ] || fail "на роутере нет access-sched.sh — обновите скрипты роутера"
+		sid=$(field id)
+		case "$act" in
+			sched_all) ;;
+			sched_save) [ "$sid" = new ] || printf '%s' "$sid" | grep -qE '^s[0-9]{1,6}$' || fail "неверный номер расписания" ;;
+			*) printf '%s' "$sid" | grep -qE '^s[0-9]{1,6}$' || fail "неверный номер расписания" ;;
+		esac
+		# a term: minutes, HH:MM, end, off or 0 — letters, digits and a colon only
+		# (into SC_ARG, not through `$(…)`: `fail` inside a subshell would print its refusal into the variable and exit only there)
+		sc_arg() { SC_ARG=$(urldecode "$(field "$1")"); case "$SC_ARG" in ''|*[!0-9a-z:]*) fail "неверный срок" ;; esac; }
+		case "$act" in
+			sched_save)
+				in_dir
+				printf 'id=%s\n' "$sid" > "$IN_DIR/spec"
+				for _k in ver enabled base wins devs lim_wd lim_we; do
+					_v=$(urldecode "$(field "$_k")"); case "$_v" in *[!A-Za-z0-9.:\;,]*) fail "неверные данные расписания ($_k)" ;; esac
+					printf '%s=%s\n' "$_k" "$_v" >> "$IN_DIR/spec"
+				done
+				_v=$(urldecode "$(field name_b64)"); case "$_v" in ''|*[!A-Za-z0-9+/=]*) fail "неверное имя расписания" ;; esac
+				printf 'name_b64=%s\n' "$_v" >> "$IN_DIR/spec"
+				# «limited»: ONLY the keys the request carries — absent means «keep the schedule's own» (a panel tab opened before
+				# an update knows nothing of them and must not wipe the categories); empty means «none»
+				for _k in lmode cats geo sites_b64 safe; do
+					echo "$body" | tr '&' '\n' | grep -q "^$_k=" || continue
+					_v=$(urldecode "$(field "$_k")")
+					case "$_k:$_v" in lmode:*[!a-z]*|cats:*[!a-z,]*|geo:*[!a-z0-9._!,-]*|sites_b64:*[!A-Za-z0-9+/=]*|safe:*[!01]*) fail "неверные данные расписания ($_k)" ;; esac
+					printf '%s=%s\n' "$_k" "$_v" >> "$IN_DIR/spec"
+				done
+				owner_relay access-sched.sh save "$IN_DIR/spec" ;;
+			sched_del)    owner_relay access-sched.sh del "$sid" ;;
+			sched_toggle) case "$(field on)" in 1) owner_relay access-sched.sh toggle "$sid" on ;; 0) owner_relay access-sched.sh toggle "$sid" off ;; *) fail "нужно 0|1" ;; esac ;;
+			sched_ovr)
+				_op=$(field op); case "$_op" in close|open|postpone|clear) ;; *) fail "неизвестное действие" ;; esac
+				if [ "$_op" = clear ]; then owner_relay access-sched.sh ovr "$sid" clear; fi
+				sc_arg arg; owner_relay access-sched.sh ovr "$sid" "$_op" "$SC_ARG" ;;
+			sched_all)    sc_arg arg; owner_relay access-sched.sh all "$SC_ARG" ;;
+			sched_hol)
+				_ar=$(field date); case "$_ar" in off|20[0-9][0-9]-[01][0-9]-[0-3][0-9]) ;; *) fail "неверная дата" ;; esac
+				owner_relay access-sched.sh hol "$sid" "$_ar" ;;
+		esac ;;
+
 	# --- SSH-КОНСОЛЬ (root). Полный доступ ПО ЯВНОМУ ВЫБОРУ пользователя: команда исполняется
 	# как есть (sh -c) с правами root — это НЕ инъекция, а назначение фичи (гейт = HTTP-Basic +
 	# CSRF-токен + доверенная LAN). Предупреждение об осторожности показывает панель. Неинтерактивно
@@ -533,16 +657,22 @@ case "$act" in
 			done
 			if [ ! -s "$cof.rc" ]; then
 				[ -e "$cof.cut" ] || : > "$cof.k"
-				ctree="$cpid"; cq="$cpid"
-				while [ -n "$cq" ]; do
-					cn=""
-					for cp in $cq; do
-						for cf in $(grep -l "^PPid:[[:space:]]*$cp\$" /proc/[0-9]*/status 2>/dev/null); do
-							cc=${cf#/proc/}; cc=${cc%/status}; cn="$cn $cc"
+				# The tree walk's owner — daemon-lib.sh::proc_tree (shared with the task runner); an older library without it — the
+				# former walk.
+				[ -n "$CBN_LIB" ] || { CBN_LIB=1; if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi; }
+				if command -v proc_tree >/dev/null 2>&1; then ctree=$(proc_tree "$cpid")
+				else
+					ctree="$cpid"; cq="$cpid"
+					while [ -n "$cq" ]; do
+						cn=""
+						for cp in $cq; do
+							for cf in $(grep -l "^PPid:[[:space:]]*$cp\$" /proc/[0-9]*/status 2>/dev/null); do
+								cc=${cf#/proc/}; cc=${cc%/status}; cn="$cn $cc"
+							done
 						done
+						ctree="$ctree$cn"; cq=$cn
 					done
-					ctree="$ctree$cn"; cq=$cn
-				done
+				fi
 				kill -TERM $ctree 2>/dev/null; sleep 1; kill -KILL $ctree 2>/dev/null
 			fi
 			# CGI жив — он прочтёт вывод и уберёт времянки сам; мёртв — убираем мы (запас на чтение живым CGI).
@@ -1322,11 +1452,11 @@ case "$act" in
 	# отсекая shell-метасимволы ($ ; | & ` ( ) < > " ' \ * ? и пр.) = защита от инъекции.
 	# Пусто → вернуть авто-дефолт (rm файла). Применяем сразу, если ByeDPI активен (reload
 	# перезапускает только ciadpi, несущая не рвётся); иначе сохраняем — применится при up.
-	# Поле slot=2|3|4 (опц.) переводит ту же ветку на стратегию ДОП-ВЫХОДА (.byedpi-args-s<id>):
+	# Поле slot=2..7 (опц.) переводит ту же ветку на стратегию ДОП-ВЫХОДА (.byedpi-args-s<id>):
 	# у каждого byedpi-выхода свой ciadpi со своим десинком, и подбирать его надо отдельно от
 	# основной несущей. Валидация/charset/перезапуск — ОДИН код на оба случая (разъехались бы).
 	# Пул проб браузер-свипа: список строк `url⇥w⇥h` (base64 — URL несут / ? & и в form-поле
-	# резались бы). Цель = slot: пусто (основная несущая byedpi) · 2|3|4 (доп-выход) · zapret
+	# резались бы). Цель = slot: пусто (основная несущая byedpi) · 2..7 (доп-выход) · zapret
 	# (общий nfqws). Пустой список = пул снят, и свип у этой цели идти НЕ будет: вшитых наборов
 	# больше нет — мерить домены, про которые неизвестно, едут ли они через десинк, значит врать.
 	# Схему пускаем ТОЛЬКО https: DPI режет TLS-хэндшейк по SNI, и проба по открытому http
@@ -1334,7 +1464,7 @@ case "$act" in
 	# Ссылка бывает двух видов — на картинку (сверяем размер) и на корень сайта (сверяем сам факт
 	# соединения); вид выводит панель ИЗ ССЫЛКИ, отдельного поля здесь намеренно нет.
 	set_probe_pool)
-		psl=$(field slot); case "$psl" in ''|2|3|4|zapret) ;; *) fail "битый id выхода" ;; esac
+		psl=$(field slot); case "$psl" in ''|[2-7]|zapret) ;; *) fail "битый id выхода" ;; esac
 		pf="$ENODIA_STATE/.probe-pool"
 		case "$psl" in '') ;; zapret) pf="$ENODIA_STATE/.probe-pool-zapret" ;; *) pf="$ENODIA_STATE/.probe-pool-s$psl" ;; esac
 		raw=$(urldecode "$(field data)" | base64 -d 2>/dev/null | tr -d '\r')
@@ -1360,7 +1490,7 @@ EOF
 		mv "$pf.new" "$pf" || fail "не удалось сохранить пул проб"
 		printf '{"ok":true,"code":0,"msg":"пул проб сохранён: %s","n":%s}\n' "$n" "$n"; exit 0 ;;
 	set_byedpi_args)
-		bsl=$(field slot); case "$bsl" in ''|2|3|4) ;; *) fail "битый id выхода" ;; esac
+		bsl=$(field slot); case "$bsl" in ''|[2-7]) ;; *) fail "битый id выхода" ;; esac
 		af="$ENODIA_STATE/.byedpi-args"; [ -n "$bsl" ] && af="$ENODIA_STATE/.byedpi-args-s$bsl"
 		args=$(urldecode "$(field args)")
 		args=$(printf '%s' "$args" | tr '\r\n' '  ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\{1,\}/ /g')
@@ -2040,9 +2170,9 @@ EOF
 			dev_split)  sh "$ENODIA_DIR/apply-bypass.sh" del-ip "$ip" >/dev/null 2>&1; run apply-bypass.sh force-del-ip "$ip" ;;
 			dev_bypass) sh "$ENODIA_DIR/apply-bypass.sh" force-del-ip "$ip" >/dev/null 2>&1; run apply-bypass.sh add-ip "$ip" ;;
 			dev_desync) run apply-bypass.sh desync-add-ip "$ip" ;;
-			# slot — необязателен: пусто/0 = основной туннель, s2|s3|s4 = доп-выход.
+			# slot — необязателен: пусто/0 = основной туннель, s2..s7 = доп-выход.
 			# Выключенный выход движок сам уводит на основной (гейт в rebuild_force).
-			dev_force)  slot=$(field slot); case "$slot" in s[234]) ;; *) slot="" ;; esac
+			dev_force)  slot=$(field slot); case "$slot" in s[2-7]) ;; *) slot="" ;; esac
 			            sh "$ENODIA_DIR/apply-bypass.sh" del-ip "$ip" >/dev/null 2>&1; run apply-bypass.sh force-add-ip "$ip" "$slot" ;;
 		esac ;;
 
@@ -2076,10 +2206,10 @@ EOF
 			run groups.sh dev-del "$ip" "$val"
 		else
 			dir=$(field dir)
-			echo "$dir" | grep -qE '^(vpn|direct|block|s[234])$' || fail "куда: в VPN, напрямую, блокировать или в доп-выход"
+			echo "$dir" | grep -qE '^(vpn|direct|block|s[2-7])$' || fail "куда: в VPN, напрямую, блокировать или в доп-выход"
 			slot=0
 			case "$dir" in
-				s[234]) slot=${dir#s}; dir=vpn ;;
+				s[2-7]) slot=${dir#s}; dir=vpn ;;
 				direct) dir=bypass ;;
 			esac
 			owner_note "$ip" >/dev/null 2>&1
@@ -2116,7 +2246,7 @@ EOF
 			|| fail "порты: 443, 3478-3480 или «все»"
 		if [ "$act" = port_add ]; then
 			dir=$(field dir)
-			echo "$dir" | grep -qE '^(vpn|direct|block|s[234])$' || fail "куда: в VPN, напрямую, блокировать или в доп-выход"
+			echo "$dir" | grep -qE '^(vpn|direct|block|s[2-7])$' || fail "куда: в VPN, напрямую, блокировать или в доп-выход"
 			# `any` — правило на всю сеть, а не на устройство: владельца у него нет.
 			[ "$ip" = any ] || owner_note "$ip" >/dev/null 2>&1
 			run apply-bypass.sh port-add "$ip" "$proto" "$ports" "$dir"
@@ -2201,7 +2331,7 @@ EOF
 		# два do_apply на каждую из N групп). Ответ МАШИННЫЙ: {"ok",…,"id":"gN","n":<членов>};
 		# человеческий текст строит панель (её строки и так переводятся i18n-слоем).
 		dir=$(field dir); case "$dir" in vpn|bypass) ;; *) fail "направление: в VPN или мимо VPN" ;; esac
-		slot=$(field slot); case "$slot" in ''|0) slot=0 ;; 2|3|4) ;; *) fail "доп-выход: 0, 2, 3 или 4" ;; esac
+		slot=$(field slot); case "$slot" in ''|0) slot=0 ;; [2-7]) ;; *) fail "доп-выход: 0 или 2..7" ;; esac
 		name=$(urldecode "$(field name)"); [ -n "$name" ] || fail "нужно имя группы"
 		# Состав едет base64-блобом (как grp_members/bulk_*): в нём переводы строк, а тело формы urlencoded.
 		content=$(urldecode "$(field content)" | base64 -d 2>/dev/null)
@@ -2228,7 +2358,7 @@ EOF
 			            run groups.sh rename "$gid" "$name" ;;
 			grp_dir)    dir=$(field dir); case "$dir" in vpn|bypass) ;; *) fail "направление: в VPN или мимо VPN" ;; esac
 			            run groups.sh dir "$gid" "$dir" ;;
-			grp_slot)   slot=$(field slot); case "$slot" in 0|2|3|4) ;; *) fail "доп-выход: 0, 2, 3 или 4" ;; esac
+			grp_slot)   slot=$(field slot); case "$slot" in 0|[2-7]) ;; *) fail "доп-выход: 0 или 2..7" ;; esac
 			            run groups.sh slot "$gid" "$slot" ;;
 			grp_toggle) en=$(field enabled); case "$en" in 0|1) ;; *) fail "нужно 0|1" ;; esac
 			            run groups.sh toggle "$gid" "$en" ;;
@@ -2254,7 +2384,7 @@ EOF
 		run dev-names.sh set "$mac" "$name" ;;
 
 	# --- Доп-выходы (слоты мульти-транспорта, slots.sh) -----------------------
-	# id — строгий 2|3|4; транспорт/fallback — whitelist; config — имя файла (^[A-Za-z0-9._-]+$)
+	# id — строгий 2..7; транспорт/fallback — whitelist; config — имя файла (^[A-Za-z0-9._-]+$)
 	# или '-' (нет конфига). Имя НЕ валидируем — slots.sh хранит его base64 и в eval не подставляет.
 	slot_add)
 		name=$(urldecode "$(field name)")
@@ -2265,7 +2395,7 @@ EOF
 		fb=$(field fallback); case "$fb" in main|direct) ;; *) fb=main ;; esac
 		run slots.sh add "$name" "$tpt" "$cfg" "$fb" ;;
 	slot_toggle|slot_del|slot_set)
-		sid=$(field id); case "$sid" in 2|3|4) ;; *) fail "битый id выхода" ;; esac
+		sid=$(field id); case "$sid" in [2-7]) ;; *) fail "битый id выхода" ;; esac
 		case "$act" in
 			slot_toggle) en=$(field enabled); case "$en" in 0|1) ;; *) fail "нужно 0|1" ;; esac
 			             if [ "$en" = 1 ]; then run slots.sh enable "$sid"; else run slots.sh disable "$sid"; fi ;;
@@ -2284,9 +2414,9 @@ EOF
 		esac ;;
 	slot_pool)
 		# «Свой пул…» на десинк-выходе: создать «в VPN»-группу, СРАЗУ привязанную к слоту
-		# (домены юзер добавит в редакторе группы). id строгий 2|3|4; имя не валидируем —
+		# (домены юзер добавит в редакторе группы). id строгий 2..7; имя не валидируем —
 		# groups.sh санирует (san) и в eval не подставляет.
-		sid=$(field id); case "$sid" in 2|3|4) ;; *) fail "битый id выхода" ;; esac
+		sid=$(field id); case "$sid" in [2-7]) ;; *) fail "битый id выхода" ;; esac
 		name=$(urldecode "$(field name)")
 		[ -n "$name" ] || fail "нужно имя пула"
 		run groups.sh add-bound "$sid" "$name" ;;
@@ -2703,12 +2833,12 @@ EOF
 	# Цикл драйвит ФРОНТ (begin → apply×N → end). Возможен ТОЛЬКО когда byedpi несёт трафик (иначе
 	# браузер пойдёт мимо десинка = бессмысленно). Стратегия (args) санитизируется тем же charset'ом,
 	# что set_byedpi_args (идёт неквотированно в exec ciadpi). По end/протуху lock — исходная восстанавливается.
-	# ЦЕЛЬ свипа — slot=2|3|4 (ДОП-ВЫХОД со своей стратегией) либо пусто (основная несущая). Гард
+	# ЦЕЛЬ свипа — slot=2..7 (ДОП-ВЫХОД со своей стратегией) либо пусто (основная несущая). Гард
 	# у них РАЗНЫЙ и это принципиально: основной свип требует «byedpi = активный транспорт», а
 	# выход живёт своей несущей и при awg-основном, ему нужно лишь «выход включён».
 	byedpi_sweep_begin)
 		[ -f "$ENODIA_DIR/transport-byedpi.sh" ] || fail "transport-byedpi.sh не установлен (обновите панель)"
-		bsw=$(field slot); case "$bsw" in 2|3|4) ;; *) bsw="" ;; esac
+		bsw=$(field slot); case "$bsw" in [2-7]) ;; *) bsw="" ;; esac
 		if [ -n "$bsw" ]; then
 			sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | grep -q "^$bsw	byedpi	" \
 				|| fail "браузер-свип выхода возможен только когда выход ВКЛЮЧЁН"
@@ -2722,7 +2852,7 @@ EOF
 			&& printf '{"ok":true,"code":0,"msg":"свип начат"}\n' || fail "не удалось начать свип"
 		exit 0 ;;
 	byedpi_sweep_apply)
-		bsw=$(field slot); case "$bsw" in 2|3|4) ;; *) bsw="" ;; esac
+		bsw=$(field slot); case "$bsw" in [2-7]) ;; *) bsw="" ;; esac
 		if [ -n "$bsw" ]; then
 			sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | grep -q "^$bsw	byedpi	" || fail "выход выключен — свип прерван"
 		else
@@ -2738,7 +2868,7 @@ EOF
 		printf '{"ok":true,"code":0,"up":%s}\n' "$up"; exit 0 ;;
 	byedpi_sweep_end)
 		[ -f "$ENODIA_DIR/transport-byedpi.sh" ] || fail "transport-byedpi.sh не установлен"
-		bsw=$(field slot); case "$bsw" in 2|3|4) ;; *) bsw="" ;; esac
+		bsw=$(field slot); case "$bsw" in [2-7]) ;; *) bsw="" ;; esac
 		sh "$ENODIA_DIR/transport-byedpi.sh" sweep-end "$bsw" >/dev/null 2>&1
 		printf '{"ok":true,"code":0,"msg":"свип завершён, исходная стратегия восстановлена"}\n'; exit 0 ;;
 
@@ -3015,17 +3145,17 @@ EOF
 		# пересборку фронт зовёт следом (geo_apply), как после geo_set.
 		key=$(field key); slot=$(field slot)
 		echo "$key" | grep -qE '^[a-z0-9-]+$' || fail "недопустимый ключ"
-		case "$slot" in 0|2|3|4) ;; *) fail "доп-выход: 0, 2, 3 или 4" ;; esac
+		case "$slot" in 0|[2-7]) ;; *) fail "доп-выход: 0 или 2..7" ;; esac
 		[ -f "$ENODIA_DIR/geo.sh" ] || fail "geo.sh не установлен (обновите панель)"
 		run geo.sh slot "$key" "$slot" ;;
 	geo_preset)
 		# Чип-пресет на десинк-выходе (Ф1b): включить/выключить гео-категорию (v2fly-*) с привязкой
 		# к слоту одним действием. on=1: set vpn + slot (реестр, синхронно) → фоновая пересборка
 		# (do_build медленный при первом резолве v2fly-каталога). on=0: set off. Ключ — узкий
-		# whitelist пресетов (v2fly-youtube|discord|telegram), slot строгий 2|3|4.
+		# whitelist пресетов (v2fly-youtube|discord|telegram), slot строгий 2..7.
 		key=$(field key); slot=$(field slot); on=$(field on)
 		case "$key" in v2fly-youtube|v2fly-discord|v2fly-telegram) ;; *) fail "неизвестный пресет" ;; esac
-		case "$slot" in 2|3|4) ;; *) fail "битый выход" ;; esac
+		case "$slot" in [2-7]) ;; *) fail "битый выход" ;; esac
 		case "$on" in 0|1) ;; *) fail "нужно 0|1" ;; esac
 		[ -f "$ENODIA_DIR/geo.sh" ] || fail "geo.sh не установлен (обновите панель)"
 		if [ "$on" = 1 ]; then

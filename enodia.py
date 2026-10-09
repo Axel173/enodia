@@ -42,7 +42,7 @@ from collections import namedtuple
 
 # Версия PC-стороны проекта. Держится В СИНХРОНЕ с `version` в pyproject.toml и requirements.txt
 # (копии сознательные — uv-путь и pip-путь; разъезд ловит C35). См. CHANGELOG.md.
-PROJECT_VERSION = "1.0.1"
+PROJECT_VERSION = "1.1.0"
 
 # --- Зависимость paramiko (in-process SSH) — с авто-доустановкой ---
 # paramiko ОБЯЗАТЕЛЕН (in-process SSH). Если его нет — НЕ падаем молча с кодом 1: на
@@ -345,6 +345,9 @@ BIN_NAMES = (
     # в прошивке отсутствует, а собранный нами не заводится из-за вендорски патченого
     # struct ustream (разбор — dev/tls/NOTES.md). Тоже чистая опция, OFF по умолчанию.
     "panel-tls.user",
+    # dns-filter — the DNS filter of access schedules' «limited» (our code, dev/dns-filter; static musl, both arches, ~40 KB).
+    # An option too: runs only while some device is limited.
+    "dns-filter.user",
 )
 # Бинари собраны под ДВЕ арки и лежат в bin/<арка>/ (плоского bin/*.user больше нет).
 # Значение = (e_machine, EI_CLASS) из ELF-заголовка — по ним же опознаём роутер.
@@ -3146,7 +3149,7 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
     ROUTER_LOGS = ("enodia-startup", "enodia-watchdog", "enodia-switch-vpn-setup",
                    "enodia-iplist-update", "enodia-notify", "enodia-notify-event",
                    "enodia-byedpi", "enodia-hev", "enodia-hysteria", "enodia-zapret-nfqws",
-                   "enodia-doh", "enodia-support", "enodia-subs-update", "enodia-panel-tls",
+                   "enodia-doh", "enodia-support", "enodia-subs-update", "enodia-panel-tls", "enodia-dns-filter",
                    "xray", "xray-access",
                    "switch-vpn-setup", "iplist-update", "notify", "notify-event",
                    "byedpi", "hev", "hysteria", "zapret-nfqws", "doh", "support")

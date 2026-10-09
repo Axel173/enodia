@@ -23,11 +23,18 @@ panel on the router itself.
   is done in the browser.
 - Split routing by domains, subnets, geo categories and rule groups, separately for devices and
   Wi-Fi networks.
-- Several VPN protocols and up to three additional exits through other servers.
+- Several VPN protocols and up to six additional exits through other servers.
 - Bypassing blocks without your own server: ByeDPI and Zapret.
 - Home access: the router works as an AmneziaWG server, a phone connects with a QR code.
 - Encrypted DNS (DoH/DoT), ad blocking, panel login with two-factor authentication.
 - Watchdog: restarts the tunnel, switches to a backup server, emails you about failures.
+- Access schedules for children and consoles: when a device may go online, a daily minute limit and «limited»
+  windows — the chosen categories (social networks, messengers, video, games, any pool of the geo catalogue, own sites and
+  addresses) are closed, the rest works; or the other way round — only the allowed is open; safe search for Google, Yandex,
+  Bing, DuckDuckGo and YouTube.
+- Your own scheduled tasks: a script, a file or a command — on a cron schedule, at boot or by a button, with a
+  run history and an email on failure; the router's whole crontab is visible and editable in the panel.
+- Traffic for today, the week, the month and the year: through the tunnel and direct, by exit and by device.
 - Updates from the panel as a signed package from GitHub.
 - Protocols or the whole system can live on a USB stick.
 - The panel is in Russian and English, with light and dark themes.

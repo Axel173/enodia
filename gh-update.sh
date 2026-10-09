@@ -310,7 +310,9 @@ gh_socks_release() {
 # собираем, ПОКА жив родитель: после его смерти их PPid = 1. `.dl` снимаем и без живого фона: файл лежит рядом с местом установки
 # до самого `mv` (проверки размера, ELF и суммы — секунды), а это пик 20-МБ /data.
 gh_bg_stop() {
-    if [ -n "$GH_BGPID" ]; then
+    if [ -n "$GH_BGPID" ] && command -v proc_tree >/dev/null 2>&1; then   # the walk's owner — daemon-lib.sh
+        kill $(proc_tree "$GH_BGPID") 2>/dev/null
+    elif [ -n "$GH_BGPID" ]; then   # an older daemon-lib.sh without proc_tree: the former walk, byte for byte
         _gbk="$GH_BGPID"; _gbq="$GH_BGPID"
         while [ -n "$_gbq" ]; do
             _gbn=""

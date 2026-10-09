@@ -103,7 +103,8 @@ level_of() {
 		# «fail» ГДЕ УГОДНО в ключе, а не только в конце: ключ доп-выхода — `slot-fail-2`, он
 		# кончается НОМЕРОМ, и прежние глобы (*-fail|*fail) его не брали ⇒ письмо «доп-выход
 		# недоступен» лежало в центре уведомлений нейтральным info. Замерено на AX3600 17.08.2026.
-		*fail*|awg0-down|awg-noraise|subs-nospace) echo err ;;
+		task-ok-*)                echo info ;;   # the user's task finished (tasks.sh): «fail» is not in it, named for C33 anyway
+		*fail*|awg0-down|awg-noraise|subs-nospace) echo err ;;   # task-fail-<id> (tasks.sh) lands here too
 		# Ключи, у которых беда не названа словом «fail». Их НЕ выводит никакой глоб — только
 		# перечисление, и новый ключ по умолчанию попадает в info: заводя событие о поломке или
 		# деградации, впиши его СЮДА, иначе панель покажет его наравне с «подписки обновлены».
@@ -113,7 +114,10 @@ level_of() {
 		# тревожного слова в ключе нет, значит глоб их не возьмёт — только это перечисление.
 		# doh-dot-fallback — выбран DoT, а порт 853 не проходит: DNS шифруется, но по DoH (doh-lib.sh).
 		# hev-restart-* — залипшую прослойку TUN→прокси сторож перезапустил сам (slot-tun-lib.sh): работает, но соединения рвались.
-		transport-missing|geo-snap-skip|doh-auto-off|doh-dot-fallback|subs-active-gone|cross-switch|rule-heal|hev-restart-*) echo warn ;;
+		# sched-clock — access schedules are not acting: the router clock is not synced yet (access-sched.sh, once per boot).
+		# sched-filter — «limited» is not acting (no filter component / it did not start) or acts again; geo-want-snap-skip — a
+		# category of a schedule too big for its flash snapshot (geo.sh _wanted_pass).
+		transport-missing|geo-snap-skip|geo-want-snap-skip|doh-auto-off|doh-dot-fallback|subs-active-gone|cross-switch|rule-heal|hev-restart-*|sched-clock|sched-filter) echo warn ;;
 		*)                        echo info ;;
 	esac
 }
@@ -126,7 +130,7 @@ level_of() {
 # написали. Загрузка, после которой VPN НЕ поднялся (boot-fail), — сбой VPN, а не «роутер загрузился».
 # Ключ без своей ветки уходит в `system`, и C107 краснеет на таком ключе у любого вызывателя: молчаливый
 # дефолт сделал бы новый ключ о поломке «служебным», и выключенное «служебное» глушило бы его письмо.
-CLASSES="down switch wan boot addr subs lists system"
+CLASSES="down switch wan boot addr subs lists tasks system"
 class_of() {
 	case "$1" in
 		vpn-failopen|switch-failopen|failover-fail|awg0-down|awg-noraise|transport-missing|boot-fail|vpn-restored|slot-fail-*|slot-ok-*) echo down ;;
@@ -136,7 +140,9 @@ class_of() {
 		panel-wan-ip)             echo addr ;;   # шлёт только открытый «вход снаружи»: в письме — новая ссылка на панель
 		subs-*)                   echo subs ;;
 		iplist-*|ipblock-*|geo-*) echo lists ;;
-		rule-heal|clock-step|store-mode-fail|doh-auto-off|doh-enable-failed|doh-dot-fallback|doh-dot-back|hev-restart-*) echo system ;;
+		task-*)                   echo tasks ;;   # the user's own tasks (tasks.sh): failure / done — the mail choice is also per task
+		# sched-<id> / sched-clock — access schedules (access-sched.sh): the journal only, it sends no mail
+		rule-heal|clock-step|store-mode-fail|doh-auto-off|doh-enable-failed|doh-dot-fallback|doh-dot-back|hev-restart-*|sched-*) echo system ;;
 		*)                        echo system ;;
 	esac
 }

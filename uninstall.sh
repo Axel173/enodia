@@ -104,7 +104,12 @@ run() { [ -f "$ENODIA_DIR/$1" ] || return 0; _s="$1"; shift; sh "$ENODIA_DIR/$_s
 # PANEL_WAN/PANEL_WAN_DNAT здесь НЕТ намеренно: это цепочки ПАНЕЛИ, а не VPN — при деактивации
 # панель остаётся жить вместе со входом снаружи; на полном удалении их снимает `web-ui.sh wan-off`.
 CHAINS_MANGLE="VPN_EXCLUDE VPN_FORCE VPN_PORTS VPN_KEEP VPN_DEV ENODIA_ZAPRET"
-CHAINS_FILTER="ENODIA_BLK ENODIA_GEOBLK VPNSRV_IN VPNSRV_FWD VPNSRV_WAN"
+# ENODIA_SCHED — access schedules (REJECT per MAC); its owner `access-sched.sh unwire` takes both families in step_rules, the
+# word here is the IPv4 safety net for a missing owner (the IPv6 one is a line in step_rules).
+CHAINS_FILTER="ENODIA_BLK ENODIA_GEOBLK ENODIA_SCHED ENODIA_SCHED_DNSIN VPNSRV_IN VPNSRV_FWD VPNSRV_WAN"
+# nat: ENODIA_SCHED_DNS — the DNS of «limited» devices REDIRECTed to the schedules' filter (the same owner unwires it; this is
+# the net for a missing one, both families, with the IPv6 INPUT fallback ENODIA_SCHED_IN6)
+CHAINS_NAT="ENODIA_SCHED_DNS"
 # Родители, из которых вызываются наши filter-цепочки: штатные INPUT/FORWARD + пустой хук fw3
 # `input_wan_rule` (в него вешаются правила «снаружи» — панели и «доступа домой»).
 CHAIN_PARENTS="INPUT FORWARD input_wan_rule"
@@ -123,15 +128,15 @@ SET_PREFIXES="enodia_ iplist_ grp_ geo_ zapret_ blocklist_ xiaomi_"
 # переживший демон будет уже нечем.
 DAEMON_DIRS="$ENODIA_DIR $ENODIA_BIN"
 [ "${BIN_DIR:-$ENODIA_BIN}" != "$ENODIA_BIN" ] && DAEMON_DIRS="$DAEMON_DIRS $BIN_DIR"
-DAEMONS="amneziawg-go xray hysteria byedpi hev nfqws https-dns-proxy dot-proxy"
+DAEMONS="amneziawg-go xray hysteria byedpi hev nfqws https-dns-proxy dot-proxy dns-filter"
 # panel-tls — инфраструктура ПАНЕЛИ, а не VPN. `deactivate` обещает «панель работает», а вход в
 # неё мог идти по HTTPS: убив терминатор, мы рвём сессию человеку ровно в тот момент, когда он
 # нажал кнопку, и вернёт его только cron `web-ui.sh start` (до 5 минут). На `purge` панель и так
 # снимается, поэтому там он остаётся в списке — страховкой на случай, если web-ui.sh не отработал.
 DAEMONS_PURGE="panel-tls"
 # Интерфейсы: awg0/awgN/awgs0 (amneziawg) + xtun/xtunN (tun2socks). Свои таблицы — 1000 и 100N.
-IFACES="awg0 awg2 awg3 awg4 awgs0 xtun xtun2 xtun3 xtun4"
-TABLES="1000 1002 1003 1004"
+IFACES="awg0 awg2 awg3 awg4 awg5 awg6 awg7 awgs0 xtun xtun2 xtun3 xtun4 xtun5 xtun6 xtun7"
+TABLES="1000 1002 1003 1004 1005 1006 1007"
 # НАШИ `ip rule` ВНЕ $TABLES — их доборка по номеру таблицы не видит В ПРИНЦИПЕ: одно смотрит в
 # table 200, второе вообще в СТОКОВУЮ main. Обе строки пережили полное удаление на живом AX3600
 # (16.08.2026), при том что отчёт обещал «роутер вернулся к стоковому состоянию», а доборка
@@ -270,11 +275,27 @@ FW_ZONE=awg
 step_rules() {
     log "Снимаю правила…"
     run support.sh down                                   # удалённый доступ («режим поддержки»)
-    for _id in 2 3 4; do
+    for _id in 2 3 4 5 6 7; do
         run transport.sh slot-down "$_id"
         run slots.sh unwire "$_id"
     done
     run vpn-server.sh down                                # awgs0 + VPNSRV_* + правила пиров
+    run access-sched.sh unwire                            # access schedules: REJECT per MAC, both families
+    if command -v ip6tables >/dev/null 2>&1; then         # …and the IPv6 net for a missing owner (CHAINS_FILTER is IPv4)
+        while ip6tables -D FORWARD -j ENODIA_SCHED 2>/dev/null; do :; done
+        ip6tables -F ENODIA_SCHED 2>/dev/null; ip6tables -X ENODIA_SCHED 2>/dev/null
+        while ip6tables -D INPUT -j ENODIA_SCHED_IN6 2>/dev/null; do :; done
+        ip6tables -F ENODIA_SCHED_IN6 2>/dev/null; ip6tables -X ENODIA_SCHED_IN6 2>/dev/null
+        while ip6tables -D INPUT -j ENODIA_SCHED_DNSIN 2>/dev/null; do :; done
+        ip6tables -F ENODIA_SCHED_DNSIN 2>/dev/null; ip6tables -X ENODIA_SCHED_DNSIN 2>/dev/null
+    fi
+    for _f in iptables ip6tables; do
+        command -v "$_f" >/dev/null 2>&1 || continue
+        for _c in $CHAINS_NAT; do
+            while "$_f" -t nat -D PREROUTING -j "$_c" 2>/dev/null; do :; done
+            "$_f" -t nat -F "$_c" 2>/dev/null; "$_f" -t nat -X "$_c" 2>/dev/null
+        done
+    done
     run zapret.sh src-clear                               # NFQUEUE устройств «целиком в десинк» (по источнику)
     run zapret.sh down                                    # nfqws + NFQUEUE + dnsmasq-сниппет
     _t=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
@@ -374,7 +395,7 @@ sweep_run() {        # $1 = count|del ; $2 = keep → цепочки ПАНЕЛ�
         done
     done
     # `ip rule` в наши таблицы. Судим по НОМЕРУ таблицы: форм записи две (базовая fwmark 0x1 и
-    # слотовые 0x2..0x4), а номер таблицы общий у обеих. Цикл — потому что дубли реальны
+    # слотовые 0x2..0x7), а номер таблицы общий у обеих. Цикл — потому что дубли реальны
     # (прерванный прогон ставит правило второй раз); потолок 20 — страховка от вечного цикла,
     # если `ip rule del` в этой сборке не умеет селектор `table`.
     for _tb in $TABLES; do
@@ -546,9 +567,23 @@ step_cron() {        # $1 = keep → строку панели оставляе�
         cron_ours "$_ct" 2>/dev/null | grep -F "$CRON_PANEL" >> "$_ct.new" 2>/dev/null
         _kept=" (строка панели оставлена — ею панель поднимается после ребута)"
     fi
+    # Adopted lines. A task line is ours, the line it replaced was not — the firmware's SSH-access patch among them: removed with
+    # ours, SSH closed after the next reboot (review s.106). The crontab without our lines goes to `tasks.sh apply`, and it writes
+    # it in the SAME write in the tasks' «off» form — the form is the fact «Enodia's schedule is not in the file» (no task lines,
+    # every adopted task as a plain line); cron-restore, install and update put the schedule back, and the next derivation is «on».
+    # Not written (busy, volume full) — our lines go anyway, and the report says what the tasks could not give back.
+    if [ -f "$_ct.new" ] && [ -f "$ENODIA_DIR/tasks.sh" ] && [ -d "$ENODIA_STATE/tasks" ]; then
+        _rel=$(ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" ENODIA_BOOT="$ENODIA_BOOT" sh "$ENODIA_DIR/tasks.sh" apply "$_ct.new" 2>/dev/null)
+        if [ $? = 0 ]; then rm -f "$_ct.new"; [ -z "$_rel" ] || log "$_rel"
+        else log "ВНИМАНИЕ: ${_rel:-tasks.sh не ответил} — строки, взятые задачами из crontab, не отданы: верните их в «Задачах» или по SSH."; fi
+    fi
     [ -f "$_ct.new" ] && mv "$_ct.new" "$_ct"
     /etc/init.d/cron restart >/dev/null 2>&1 || /etc/init.d/crond restart >/dev/null 2>&1
     log "Cron: снято строк $_was$_kept."
+    # Access schedules once more, now that their tick line is gone: a tick that started between step_rules and here put its
+    # rules back, and no tick is left to lift them (review s.112). The owner waits out a tick in flight; with no line in the
+    # crontab every later call of it (a panel action) plans nothing.
+    run access-sched.sh unwire
 }
 
 # Вернуть расписание, снятое деактивацией. ЗАЧЕМ ОТДЕЛЬНЫЙ ВЕРБ: «включить обратно» (панель →
@@ -561,14 +596,21 @@ cmd_cron_restore() {
     # «Доступ домой», включённый до деактивации, возвращается ТЕМ ЖЕ шагом, что и расписание (разбор у cmd_deactivate): намерение
     # снова становится флагом, поднимет сервер переигрыш вызывателя. Отдельно от cron-строк: их могло и не быть.
     if [ -f "$ENODIA_STATE/server/.on-deact" ]; then mv -f "$ENODIA_STATE/server/.on-deact" "$ENODIA_STATE/server/.on" 2>/dev/null; fi
-    [ -s "$CRON_SAVE" ] || { echo "расписание не снималось — возвращать нечего"; return 0; }
     _ct=/etc/crontabs/root
     mkdir -p /etc/crontabs 2>/dev/null
     [ -f "$_ct" ] || : > "$_ct"
-    _n=0
+    _n=0; _ctw=""
+    if [ -s "$CRON_SAVE" ]; then
+    # A working copy next to the file: the restored lines and the tasks' derivation reach the crontab in ONE write (below). Copied
+    # line by line — a file without a trailing \n would glue the first restored line onto its last one.
+    _ctw="$_ct.restore"
+    while IFS= read -r _l || [ -n "$_l" ]; do printf '%s\n' "$_l"; done < "$_ct" > "$_ctw" || { rm -f "$_ctw"; echo "не удалось записать crontab"; return 1; }
     # `|| [ -n "$_l" ]` — файл без хвостового \n иначе потерял бы ПОСЛЕДНЮЮ строку (грабля busybox).
     while IFS= read -r _l || [ -n "$_l" ]; do
         [ -n "$_l" ] || continue
+        # Task lines are DERIVED: `tasks.sh apply` below makes every one of them (and takes back the plain lines given back at
+        # deactivation). By the script key below they all read «tasks.sh», so only the first one ever came back (review s.106).
+        case "$_l" in *"boot.sh tasks.sh run "*) continue ;; esac
         # Сверяем ПО СКРИПТУ, а не по строке целиком. Пока система стояла деактивированной, задачу
         # мог переписать её ВЛАДЕЛЕЦ (панель-то жива: `update-sched.sh` меняет расписание списков и
         # подписок прямо оттуда), и дословный возврат нашей копии дал бы ДВЕ строки на одну задачу —
@@ -590,14 +632,34 @@ cmd_cron_restore() {
             esac
         done
         set +f
-        [ -n "$_sc" ] || _sc="$_l"
-        grep -qF "$_sc" "$_ct" 2>/dev/null && continue
-        printf '%s\n' "$_l" >> "$_ct"
+        # «Already there» = an ACTIVE line of OURS (cron_ours: the bootstrap or the code dir) naming this script as a WHOLE word. A
+        # substring anywhere matched a foreign `/root/autoheal.sh` (or a comment): heal never came back, and the tasks — their form
+        # is the fact «heal's line is in the file» — stayed off on an active router (review s.106, round 5).
+        if [ -n "$_sc" ]; then
+            _scre=$(printf '%s' "$_sc" | sed 's/\./\\./g')
+            grep -v '^[[:space:]]*#' "$_ctw" 2>/dev/null | cron_ours | grep -qE "[ /]${_scre}( |\$)" && continue
+        else
+            grep -qxF -- "$_l" "$_ctw" 2>/dev/null && continue
+        fi
+        printf '%s\n' "$_l" >> "$_ctw"
         _n=$((_n+1))
     done < "$CRON_SAVE"
-    if [ "$_n" != 0 ]; then
-        /etc/init.d/cron restart >/dev/null 2>&1 || /etc/init.d/crond restart >/dev/null 2>&1
     fi
+    # The user's tasks: their form is the fact «Enodia's schedule is in the file» — with it back, task lines return and the plain
+    # lines given back at deactivation are taken back (tasks.sh apply writes the working copy itself, restarting crond on a change).
+    # Called with nothing remembered too: a deactivation that could not write its memory (full flash) must not leave the tasks
+    # silent on an active router (review s.106, round 4). Not written — our lines go in anyway; the next derivation (any task
+    # save, heal at boot) brings the tasks back.
+    if [ -f "$ENODIA_DIR/tasks.sh" ] && [ -d "$ENODIA_STATE/tasks" ]; then
+        if ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" ENODIA_BOOT="$ENODIA_BOOT" sh "$ENODIA_DIR/tasks.sh" apply ${_ctw:+"$_ctw"} >/dev/null 2>&1; then
+            [ -z "$_ctw" ] || rm -f "$_ctw"; _ctw=""
+        fi
+    fi
+    if [ -n "$_ctw" ]; then
+        if [ "$_n" != 0 ]; then mv -f "$_ctw" "$_ct"; /etc/init.d/cron restart >/dev/null 2>&1 || /etc/init.d/crond restart >/dev/null 2>&1
+        else rm -f "$_ctw"; fi
+    fi
+    [ -s "$CRON_SAVE" ] || { echo "расписание не снималось — возвращать нечего"; return 0; }
     rm -f "$CRON_SAVE"
     echo "Расписание возвращено: строк $_n (сторож, самовосстановление, обновление списков)."
     return 0
@@ -878,9 +940,14 @@ step_verify() {      # $1 = дополнительные демоны (как у
         iptables -n -L "$_c" >/dev/null 2>&1
         case $? in 0) _left="$_left filter/$_c" ;; 1) ;; *) _left="$_left filter/$_c(?)" ;; esac
     done
+    for _c in $CHAINS_NAT; do
+        iptables -t nat -n -L "$_c" >/dev/null 2>&1
+        case $? in 0) _left="$_left nat/$_c" ;; 1) ;; *) _left="$_left nat/$_c(?)" ;; esac
+    done
     # Маркировка без цепочек так же смертельна: живое `ip rule` в нашу таблицу = трафик уходит
     # в несуществующую несущую (чёрная дыра вместо «прямого режима»).
-    ip rule show 2>/dev/null | grep -q 'lookup 100[0-4]' && _left="$_left ip-rule"
+    # By $TABLES, the list the removal itself walks: a literal table range here (it stopped at 1004) passed exits 5..7's rules as «clean».
+    ip rule show 2>/dev/null | grep -qE "lookup ($(echo $TABLES | tr ' ' '|'))( |\$)" && _left="$_left ip-rule"
     # Гостевые правила (см. $GUEST_*_SHOW) вердикт тоже касаются: доборка их снимает, значит
     # уцелевшее = снятие отработало не до конца, а не «так и было».
     ip rule show 2>/dev/null | grep -q "$GUEST_RULE_SHOW" && _left="$_left ip-rule/guest"

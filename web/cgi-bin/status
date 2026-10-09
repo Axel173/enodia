@@ -446,5 +446,14 @@ if [ -f "$D/slots.sh" ] && [ -s "$DS/.slots" ]; then
 		esac
 	done
 fi
-printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s}\n' \
-	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now"
+# «Задачи»: how many and how many ended badly on their last run — the door of the router section shows it from this same
+# poll (a failed nightly task must be visible without opening the screen). Files only, no fork of tasks.sh: the registry gives
+# the count, the RAM history the last end; skips and a human's «stop» are not failures.
+tk_n=0; tk_bad=0
+for _tkf in "$DS/tasks"/t*.task; do
+	[ -f "$_tkf" ] || continue
+	tk_n=$((tk_n+1)); _tki=${_tkf##*/}; _tki=${_tki%.task}
+	case "$(tail -n 1 "/tmp/enodia-tasks/$_tki.hist" 2>/dev/null | cut -f6)" in err|killed|cut|nodir) tk_bad=$((tk_bad+1)) ;; esac
+done
+printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"tasks_n":%s,"tasks_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s}\n' \
+	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$tk_n" "$tk_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now"

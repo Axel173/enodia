@@ -25,7 +25,7 @@ LAST="$ENODIA_STATE/.traffic-last"      # сырой прошлый замер: 
                                    # WAN-интерфейса стало бы мусором, и «незаписанной дельтой» объявился
                                    # бы весь кумулятивный счётчик eth0. Строки же читателя не касаются.
 DAILY="$ENODIA_STATE/.traffic-daily"    # посуточно: "epoch YYYY-MM-DD vrx vtx wrx wtx" (+ доп-выходы:
-                                   # "s2rx s2tx s3rx s3tx s4rx s4tx" ДОПИСАНЫ В КОНЕЦ строки и только
+                                   # "s2rx s2tx … s7rx s7tx" ДОПИСАНЫ В КОНЕЦ строки и только
                                    # когда выход с несущей есть — читатели берут поля по номерам $3..$6,
                                    # а на роутере без доп-выходов файл остаётся байт-в-байт прежним)
 LOCK=/tmp/enodia-traffic-acct.lock
@@ -59,6 +59,11 @@ date +%s > "$LOCK"; trap 'rm -f "$LOCK"' EXIT; trap 'exit 1' INT TERM HUP PIPE
 # синхронизации часов учтёт накопленный трафик (дельта считается от .traffic-last).
 # Порог — у владельца (clock-lib.sh::clock_sane, следит C82).
 clock_sane || exit 0
+
+# Traffic BY DEVICE rides this cron line and this lock (one schedule, no second writer of its files): its own step, its own
+# state (traffic-dev.sh). Here, before the interface accounting's early exits — its first run must not wait for theirs.
+# `</dev/null`: nothing below reads stdin, but the child must not either. The script gates on the synced clock itself.
+if [ -f "$ENODIA_DIR/traffic-dev.sh" ]; then sh "$ENODIA_DIR/traffic-dev.sh" tick </dev/null >/dev/null 2>&1; fi
 
 # trim + дефолт: `cat || echo awg` НЕ ловит пустой-но-существующий .transport (t="" → vif=xtun, и
 # трафик awg0 молча считался бы нулём). Зеркало той же строки в cgi-bin/traffic — читатель эту
@@ -104,7 +109,10 @@ set -- $(devbytes "${wan_if:-_}");  wrx=${1:-0}; wtx=${2:-0}
 # выход не прошло ничего», а правда — «этот выход считать нечем». Разводит их читатель (панель).
 SLOTS_FILE="$ENODIA_STATE/.slots"
 TAB=$(printf '\t')
-sif2=""; sif3=""; sif4=""
+# Exit ids = slots.sh MIN_ID..MAX_ID (C130 checks this list). Per-exit state lives in variables NAMED by the id
+# (sif<k>, s<k>rx, ls<k>if …): `eval` only ever sees our own names and a digit from this list or a `[2-7]` case.
+SLOT_IDS="2 3 4 5 6 7"
+for _k in $SLOT_IDS; do eval "sif$_k=''; s${_k}rx=0; s${_k}tx=0; ls${_k}if=''; ls${_k}rx=0; ls${_k}tx=0"; _kmax=$_k; done
 if [ -s "$SLOTS_FILE" ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
     # Поля реестра: id⇥имя(b64)⇥транспорт⇥конфиг⇥fallback⇥on|off. Спрашиваем только ВКЛЮЧЁННЫЕ:
     # у выключенного несущей нет, а `slot-iface` на нём и так ответит отказом — экономим форк.
@@ -116,13 +124,13 @@ if [ -s "$SLOTS_FILE" ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
         # не считается». Гард стоит ноль, а закрывает целый класс.
         _sif=$(sh "$ENODIA_DIR/transport.sh" slot-iface "$_sid" </dev/null 2>/dev/null) || _sif=""
         [ -n "$_sif" ] || continue
-        case "$_sid" in 2) sif2="$_sif" ;; 3) sif3="$_sif" ;; 4) sif4="$_sif" ;; esac
+        case "$_sid" in [2-7]) eval "sif$_sid=\$_sif" ;; esac
     done < "$SLOTS_FILE"
 fi
-s2rx=0; s2tx=0; s3rx=0; s3tx=0; s4rx=0; s4tx=0
-[ -n "$sif2" ] && { set -- $(devbytes "$sif2"); s2rx=${1:-0}; s2tx=${2:-0}; }
-[ -n "$sif3" ] && { set -- $(devbytes "$sif3"); s3rx=${1:-0}; s3tx=${2:-0}; }
-[ -n "$sif4" ] && { set -- $(devbytes "$sif4"); s4rx=${1:-0}; s4tx=${2:-0}; }
+for _k in $SLOT_IDS; do
+    eval "_sif=\$sif$_k"; [ -n "$_sif" ] || continue
+    set -- $(devbytes "$_sif"); eval "s${_k}rx=\${1:-0}; s${_k}tx=\${2:-0}"
+done
 
 # прошлый замер
 lvif=""; lvrx=0; lvtx=0; lwrx=0; lwtx=0; lwif=""
@@ -130,17 +138,14 @@ lvif=""; lvrx=0; lvtx=0; lwrx=0; lwtx=0; lwif=""
 for n in lvrx lvtx lwrx lwtx; do eval "x=\$$n"; case "$x" in ''|*[!0-9]*) eval "$n=0";; esac; done
 # ...и прошлый замер доп-выходов — СТРОКАМИ "s<id> <iface> <rx> <tx>" ниже первой. Первую строку
 # цикл видит тоже, но её первое поле — имя несущей (awg0/xtun), в `case` оно не попадает.
-ls2if=""; ls2rx=0; ls2tx=0; ls3if=""; ls3rx=0; ls3tx=0; ls4if=""; ls4rx=0; ls4tx=0
 if [ -f "$LAST" ]; then
     while read -r _k _i _r _t; do
-        case "$_k" in
-            s2) ls2if="$_i"; ls2rx="$_r"; ls2tx="$_t" ;;
-            s3) ls3if="$_i"; ls3rx="$_r"; ls3tx="$_t" ;;
-            s4) ls4if="$_i"; ls4rx="$_r"; ls4tx="$_t" ;;
-        esac
+        case "$_k" in s[2-7]) _n=${_k#s}; eval "ls${_n}if=\$_i; ls${_n}rx=\$_r; ls${_n}tx=\$_t" ;; esac
     done < "$LAST"
 fi
-for n in ls2rx ls2tx ls3rx ls3tx ls4rx ls4tx; do eval "x=\$$n"; case "$x" in ''|*[!0-9]*) eval "$n=0";; esac; done
+for _k in $SLOT_IDS; do
+    for n in ls${_k}rx ls${_k}tx; do eval "x=\$$n"; case "$x" in ''|*[!0-9]*) eval "$n=0";; esac; done
+done
 
 # WAN-iface ПРОПАЛ (нет дефолт-маршрута: пере-дозвон PPPoE, флап порта, авария провайдера — то
 # есть ровно те моменты, ради которых учёт и ведут). devbytes отдаёт "0 0", и прежний код писал
@@ -159,9 +164,10 @@ had_last=0; [ -f "$LAST" ] && had_last=1
     # Строку выхода пишем ТОЛЬКО когда несущая у него есть: её ОТСУТСТВИЕ и есть признак «считать
     # нечем» для читателя — web/cgi-bin/traffic берёт имя интерфейса ОТСЮДА, чтобы не форкать
     # transport.sh на каждый запрос (панель спрашивает трафик раз в пять секунд).
-    [ -n "$sif2" ] && printf 's2 %s %s %s\n' "$sif2" "$s2rx" "$s2tx"
-    [ -n "$sif3" ] && printf 's3 %s %s %s\n' "$sif3" "$s3rx" "$s3tx"
-    [ -n "$sif4" ] && printf 's4 %s %s %s\n' "$sif4" "$s4rx" "$s4tx"
+    for _k in $SLOT_IDS; do
+        eval "_sif=\$sif$_k; _r=\$s${_k}rx; _t=\$s${_k}tx"
+        [ -n "$_sif" ] && printf 's%s %s %s %s\n' "$_k" "$_sif" "$_r" "$_t"
+    done
     :          # группа не кончается на `[ ] && …`: rc-страж, а не украшение (класс Б5-9)
 } > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
 # ЧЕРЕЗ ВРЕМЕННЫЙ ФАЙЛ, как и посуточный рядом. `> "$LAST"` СНАЧАЛА обрезает файл, и всё это время
@@ -216,29 +222,37 @@ slot_delta() {   # <iface> <rx> <tx> <прошлый iface> <прошлый rx> 
         OFMT="%.0f"; CONVFMT="%.0f";
         printf "%.0f %.0f", (i==li&&r>=lr)?r-lr:(i==li?r:0), (i==li&&t>=lt)?t-lt:(i==li?t:0) }'
 }
-set -- $(slot_delta "$sif2" "$s2rx" "$s2tx" "$ls2if" "$ls2rx" "$ls2tx"); ds2rx=${1:-0}; ds2tx=${2:-0}
-set -- $(slot_delta "$sif3" "$s3rx" "$s3tx" "$ls3if" "$ls3rx" "$ls3tx"); ds3rx=${1:-0}; ds3tx=${2:-0}
-set -- $(slot_delta "$sif4" "$s4rx" "$s4tx" "$ls4if" "$ls4rx" "$ls4tx"); ds4rx=${1:-0}; ds4tx=${2:-0}
-# Хвост из шести полей дописываем в посуточный файл ТОЛЬКО когда считать есть что. На роутере без
+# The deltas reach awk through the ENVIRONMENT (TA_D<k>R / TA_D<k>T): busybox awk has no split(), and a `-v` per
+# exit would be one more hand-kept list of ids. Exits without a carrier get a zero delta and no fork.
+# Хвост дописываем в посуточный файл ТОЛЬКО когда считать есть что. На роутере без
 # доп-выходов (это подавляющее большинство) файл обязан остаться БАЙТ-В-БАЙТ прежним: «выключено —
 # прежний путь байт-в-байт» стоит в проекте дороже единообразия формата, а читатель нули и так
 # видит (отсутствующее поле awk считает нулём).
-nslot=0; [ -n "$sif2$sif3$sif4" ] && nslot=1
+nslot=0
+for _k in $SLOT_IDS; do
+    eval "_i=\$sif$_k; _r=\$s${_k}rx; _t=\$s${_k}tx; _li=\$ls${_k}if; _lr=\$ls${_k}rx; _lt=\$ls${_k}tx"
+    _d="0 0"; [ -n "$_i" ] && { _d=$(slot_delta "$_i" "$_r" "$_t" "$_li" "$_lr" "$_lt"); nslot=1; }
+    set -- $_d; export "TA_D${_k}R=${1:-0}" "TA_D${_k}T=${2:-0}"
+done
 
 now=$(date +%s); today=$(date +%F)
 [ -f "$DAILY" ] || : > "$DAILY"
 # Прибавить дельты к сегодняшней строке (или создать). CONVFMT=%.0f — иначе awk при
 # пересборке $0 отформатировал бы большие числа как "1.23e+09" и побил бы значения.
-# ХВОСТ ДОП-ВЫХОДОВ ($7..$12 = s2rx s2tx s3rx s3tx s4rx s4tx) — ПОЗИЦИОННЫЙ, по НОМЕРУ выхода, а не
+# ХВОСТ ДОП-ВЫХОДОВ — ПОЗИЦИОННЫЙ, по НОМЕРУ выхода, а не
 # по порядку в реестре: выход №3 обязан оставаться третьим и после удаления второго, иначе история
 # молча переедет к соседу. Присваивание $7 при шести полях в строке РАСШИРЯЕТ её (awk пересобирает
 # $0 через OFS/CONVFMT — оба заданы), поэтому день, начавшийся без выходов, дописывается сам.
+# Exit k sits at $(2k+3)/$(2k+4): the first three exits keep $7..$12 as before 05.10.2026, exits 5..7 appended at $13..$18,
+# so a 12-field day of the old format simply grows (the readers take a missing field as zero).
 awk -v today="$today" -v now="$now" -v a="$dvrx" -v b="$dvtx" -v c="$dwrx" -v d="$dwtx" -v ns="$nslot" \
-    -v e="$ds2rx" -v f="$ds2tx" -v g="$ds3rx" -v h="$ds3tx" -v i="$ds4rx" -v j="$ds4tx" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
-  $2==today { $3+=a; $4+=b; $5+=c; $6+=d; if(ns){ $7+=e; $8+=f; $9+=g; $10+=h; $11+=i; $12+=j } seen=1 }
+    -v km="$_kmax" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
+  $2==today { $3+=a; $4+=b; $5+=c; $6+=d
+              if(ns) for(k=2;k<=km;k++){ f=2*k+3; $f+=ENVIRON["TA_D" k "R"]; $(f+1)+=ENVIRON["TA_D" k "T"] }
+              seen=1 }
   { print }
   END { if(!seen){ printf "%.0f %s %.0f %.0f %.0f %.0f", now, today, a, b, c, d
-                   if(ns) printf " %.0f %.0f %.0f %.0f %.0f %.0f", e, f, g, h, i, j
+                   if(ns) for(k=2;k<=km;k++) printf " %.0f %.0f", ENVIRON["TA_D" k "R"]+0, ENVIRON["TA_D" k "T"]+0
                    printf "\n" } }
 ' "$DAILY" > "$DAILY.tmp" && mv "$DAILY.tmp" "$DAILY"
 

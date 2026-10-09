@@ -75,7 +75,7 @@ SETTINGS="$SETTINGS .fullvpn-ips .fullvpn-ifaces .fullvpn-guest"                
 SETTINGS="$SETTINGS .bypass-dst .vpn-dst .port-rules .keep-vpn-ips .enodia-custom.conf" # правила: IP (оба направления!), порты, исключения из выреза, домены
 SETTINGS="$SETTINGS groups geo/actions.tsv"                                          # группы правил и гео-категории
 SETTINGS="$SETTINGS .dhcp-static .dev-names"                                         # закреплённые за устройствами адреса (DHCP-резервации); свои имена устройств
-SETTINGS="$SETTINGS .slots .byedpi-args .byedpi-args-s2 .byedpi-args-s3 .byedpi-args-s4"  # доп-выходы и их стратегии десинка
+SETTINGS="$SETTINGS .slots .byedpi-args .byedpi-args-s2 .byedpi-args-s3 .byedpi-args-s4 .byedpi-args-s5 .byedpi-args-s6 .byedpi-args-s7"  # доп-выходы и их стратегии десинка
 # `.bin-keep` — ИМЕНА бинарей, закреплённых за роутером. В отличие от соседнего `.bin-store` (тот
 # исключён как «про железо») это ПРЕДПОЧТЕНИЕ человека, а не путь к конкретной флешке: список имён
 # переносим, и на роутере без накопителя он безвреден — bin_dest там и так отвечает «резидент».
@@ -87,15 +87,18 @@ SETTINGS="$SETTINGS .bin-keep"                                                  
 # Обратная сторона принята: бэкап ЕЩЁ НЕ мигрированной установки старый выбор не увозит
 # (переименованный `.zapret-cats.migrated` в архив тоже не входит) — миграция всё равно случится.
 SETTINGS="$SETTINGS .zapret-on .zapret-args .desync-ips"                             # Zapret (+ устройства целиком в десинк)
-SETTINGS="$SETTINGS .probe-pool .probe-pool-s2 .probe-pool-s3 .probe-pool-s4 .probe-pool-zapret"  # пулы проб браузер-свипа (+ эталоны калибровки)
+SETTINGS="$SETTINGS .probe-pool .probe-pool-s2 .probe-pool-s3 .probe-pool-s4 .probe-pool-s5 .probe-pool-s6 .probe-pool-s7 .probe-pool-zapret"  # пулы проб браузер-свипа (+ эталоны калибровки)
 SETTINGS="$SETTINGS .split-runet .notify-off .notify-mute"                           # раздельный резолв рунета; «уведомления выключены»; выключенные поводы писем
 SETTINGS="$SETTINGS .doh-on .doh-proto .doh-resolver .doh-auto .doh-nextdns-id"      # шифрованный DNS
 SETTINGS="$SETTINGS .doh-custom-url .doh-custom-sni .doh-custom-ips .doh-custom-dot-port"   # ...и СВОЙ резолвер (адрес + якоря + порт DoT)
 SETTINGS="$SETTINGS .dns-hosts .ipv6-block .tun-mtu .go-memlimit"                    # DNS-hosts, IPv6-блок, MTU, потолок ОЗУ демона
 SETTINGS="$SETTINGS iplist.conf iplist.custom lists"                                 # списки и их источники
 SETTINGS="$SETTINGS .gh-ref .gh-bin-tag .update-interval .subs-interval"  # обновления
+SETTINGS="$SETTINGS tasks"                                                           # «Задачи»: registry, scripts (cron lines are derived); variables — full backup only (export below)
+SETTINGS="$SETTINGS sched"                                                           # access schedules: the registry only (actions «now» — .ovr/.all — stay out, export below)
 SETTINGS="$SETTINGS .prefs .panel-layout"                                            # язык, тема, порядок карточек
 SETTINGS="$SETTINGS .traffic-daily"                                                  # история трафика (посуточно)
+SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                                # traffic by device: closed days + the names of devices gone
 # --- ЧТО НЕ ВХОДИТ И ПОЧЕМУ ------------------------------------------------------------------
 # Блок ниже — не комментарий «на память», а ВТОРАЯ ПОЛОВИНА whitelist'а и единственный способ
 # отличить «забыли дописать» от «решили не возить». Формат строки строгий и машиночитаемый:
@@ -107,6 +110,8 @@ SETTINGS="$SETTINGS .traffic-daily"                                             
 # EXCLUDE: .panel-pass — хэш пароля панели: тот же класс, что .totp* (бэкап ≠ обход входа), а хэш из архива вскрывают офлайн; пароль задают на месте
 # EXCLUDE: .panel-tls .panel-wan .panel-wan-ip — восстановление НЕ должно само открывать роутер в интернет (тот же класс, что server/.on)
 # EXCLUDE: .support-key .support-relay — канал «режима поддержки»; импорт не должен его воскрешать
+# EXCLUDE: .tasks-off — the «off» form of THIS router's crontab (tasks.sh): it describes the plain lines written into this file,
+#          and carried to another router or back in time it would remove or disable what is not there (review s.106, round 3)
 # EXCLUDE: .srv-checks — кэш проверок серверов, протухает за минуты
 # EXCLUDE: xray-s*.json hysteria-s*.yaml hev-s*.yaml — рабочие конфиги доп-выходов: плагин собирает их из конфига реестра `.slots` на подъёме выхода и снимает на спуске
 # EXCLUDE: awg_setup.log — вывод вендоренного установщика AWG: журнал, а не настройка
@@ -121,6 +126,8 @@ SETTINGS="$SETTINGS .traffic-daily"                                             
 #   (дельта = разница двух чужих счётчиков), и когда у WAN там другое имя (eth0 против eth1).
 #   Ровно тот симптом, который уже чинили как «сегодня 14.2 ГБ на свежей установке». Без файла
 #   первый тик просто пропускает интервал (≤5 мин) — это штатное поведение первого запуска.
+# EXCLUDE: .traffic-dev-day — TODAY's per-device split carrying THIS boot's id (traffic-dev.sh): restored on a running router
+#          after its RAM is lost, another boot id reads as «rebooted» and the counters since boot are charged to today again
 # EXCLUDE: .dns-seed-cache — «последний рабочий адрес server-host»: производное резолва (чинится первым же успешным подъёмом), к тому же на ДРУГОМ роутере это чужие адреса
 # EXCLUDE: .ip-owner — снимок «кому принадлежал адрес, когда завели правило»: на ДРУГОМ роутере
 #          MAC'и другие, и каждое восстановленное правило получило бы ложное «правила от другого
@@ -290,8 +297,30 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	# Копируем ТОЛЬКО известные имена (из кода). Файл -> заменяем; каталог -> вливаем содержимое.
 	restored=0
+	# a FULL backup (any secret in it) carries a task's variables when the task has any: there, a task without them has none
+	_tfull=0; for _sf in $SECRETS; do [ -e "$tmp/$_sf" ] && { _tfull=1; break; }; done
 	for f in $SETTINGS $SECRETS; do
 		[ -e "$tmp/$f" ] || continue
+		# «Задачи»: the OWNER merges a task whole (settings, script, variables of one id), keeps the router's variables for a settings
+		# archive of the very same task, gives back a crontab line held by a task the archive replaces, keeps the higher id counter —
+		# and writes the schedule (tasks.sh import; review s.106). The directories are passed IN THE CALL: the owner must write where
+		# this CGI reads, not into its own default — a sandboxed copy of this CGI (dev/backup-import-test.sh) would hit the live registry.
+		if [ "$f" = tasks ] && [ -d "$tmp/tasks" ]; then
+			[ -f "$ENODIA_DIR/tasks.sh" ] && ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" sh "$ENODIA_DIR/tasks.sh" import "$tmp/tasks" "$_tfull" >/dev/null 2>&1 \
+				&& restored=$((restored+1))
+			continue
+		fi
+		# Access schedules: the OWNER writes each schedule through its own load (valid lines only), keeps «one device = one
+		# schedule» across the merge and the higher id counter (access-sched.sh import); same directories-in-the-call rule as above.
+		if [ "$f" = sched ] && [ -d "$tmp/sched" ]; then
+			# its verdict is the JSON, not the exit code: a refusal («busy» — a tick holds the lock) exits 0 with "ok":false
+			if [ -f "$ENODIA_DIR/access-sched.sh" ]; then
+				case "$(ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" sh "$ENODIA_DIR/access-sched.sh" import "$tmp/sched" 2>/dev/null)" in
+					*'"ok":true'*) restored=$((restored+1)) ;;
+				esac
+			fi
+			continue
+		fi
 		if [ -d "$tmp/$f" ]; then
 			mkdir -p "$ENODIA_STATE/$f" 2>/dev/null
 			# Обычные имена — ОДНИМ `cp` (как было): в xray-configs бывает под сотню файлов, и
@@ -437,6 +466,9 @@ fi
 #     истина для cron наступает только после `update-sched.sh apply`. Без него человек видел в
 #     панели свой интервал, а роутер продолжал жить по установочному расписанию.
 [ -f ./update-sched.sh ] && sh ./update-sched.sh apply >/dev/null 2>&1
+#     The user's tasks: `tasks.sh import` above already wrote their lines; derived once more AFTER update-sched's own write of the
+#     crontab (a no-op when nothing changed) — the task lines are the registry's, whoever wrote the file last.
+[ -f ./tasks.sh ] && [ -d "$ENODIA_STATE/tasks" ] && ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" sh "$ENODIA_DIR/tasks.sh" apply >/dev/null 2>&1
 # 5c. Пулы менеджера источников — ОФЛАЙН-подъём из снимков, приехавших в архиве (каталог `lists`
 #     входит в whitelist). Иначе после импорта источники в панели есть, а сами пулы пусты до
 #     ближайшего планового обновления — у zapret-cidr/zapret-dom это неделя. Сеть здесь НЕ нужна:
@@ -577,11 +609,12 @@ RESTORE
 	# Экранируем ВЕСЬ вердикт разом: внутри него имена транспорта и выходов, приехавшие из чужого
 	# архива (см. шапку про jesc).
 	# ЛИМИТ У jesc — В БАЙТАХ (`cut -c` в busybox режет байтами), а текст кириллический: 2000 байт
-	# ≈ 1000 символов. Считаем по максимуму: транспорт + ТРИ доп-выхода (слоты 2..4) + DoH + TLS =
+	# ≈ 1000 символов. Считаем по максимуму: транспорт + ТРИ доп-выхода (до 05.10.2026) + DoH + TLS =
 	# шесть строк ≈ 1200 байт. С прежними 600 хвост молча обрезался бы, и человек не узнал бы ровно
 	# то, ради чего вердикт и заведён (замер: три предупреждения = уже ~500 байт).
+	# Since 05.10.2026 there are up to SIX exits (2..7): nine lines ≈ 1800 bytes, so the cap is 3000.
 	if [ -n "$_warn" ]; then
-		_warn=$(printf '%s' " ВНИМАНИЕ, здесь заработает не всё:$_warn" | jesc 2000)
+		_warn=$(printf '%s' " ВНИМАНИЕ, здесь заработает не всё:$_warn" | jesc 3000)
 	fi
 	# `cert` — судьба сертификата HTTPS (live/stored, разбор у сверки пары; bad уже в warns): экран «Бэкап» говорит о нём строкой,
 	# потому что браузер, не видевший этого сертификата, спросит о доверии заново — и без слова это читалось бы поломкой.
@@ -620,7 +653,26 @@ case "$QUERY_STRING" in *secrets=1*) withsec=1 ;; esac
 list="$SETTINGS"
 [ "$withsec" = 1 ] && list="$SETTINGS $SECRETS"
 present=""
-for f in $list; do [ -e "$ENODIA_STATE/$f" ] && present="$present $f"; done
+for f in $list; do
+	[ -e "$ENODIA_STATE/$f" ] || continue
+	# Task variables are where passwords and tokens go (the form says so): only in a full backup, the rest of `tasks` in both.
+	# By file, not by a tar exclude: busybox tar has --exclude only in some builds.
+	if [ "$f" = tasks ] && [ "$withsec" != 1 ]; then
+		for _tf in "$ENODIA_STATE"/tasks/*; do
+			case "$_tf" in *.env|*.new) continue ;; esac
+			[ -f "$_tf" ] && present="$present tasks/${_tf##*/}"
+		done
+		continue
+	fi
+	# Access schedules: the schedules and the id counter; an action «now» (open for 30 min, close all) is not a setting
+	if [ "$f" = sched ]; then
+		for _sf in "$ENODIA_STATE"/sched/s*.sch "$ENODIA_STATE"/sched/.last-id; do
+			[ -f "$_sf" ] && present="$present sched/${_sf##*/}"
+		done
+		continue
+	fi
+	present="$present $f"
+done
 
 ts=$(date +%Y%m%d-%H%M%S 2>/dev/null)
 case "$ts" in ''|*[!0-9-]*) ts=backup ;; esac

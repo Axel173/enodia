@@ -46,6 +46,11 @@ SHA256SUMS            text eol=lf
 # и на Unix → СТРОГО LF (CRLF в shebang .command ломает запуск; .py чище кроссплатформенно).
 *.py                  text eol=lf
 *.command             text eol=lf
+# Our own C sources (dns-filter, dot-proxy, panel-tls, the DoH patches) — LF: they are built with zig for the router, and the
+# sandboxes mutate them with `$`-anchored sed (dns-filter-test.sh): under core.autocrlf=true a CRLF copy made those mutants
+# «not applied» (09.10.2026), with nothing changed in the code.
+*.c                   text eol=lf
+*.h                   text eol=lf
 # Манифест зависимостей ПК-стороны: читают uv/pip на macOS и Linux. Правила на *.toml не
 # было вовсе — ровно поэтому requirements.txt приехал в репо с CRLF при живом «*.txt eol=lf»
 # (внешний аудит 18.08.2026): без правила git отдаёт файл по core.autocrlf машины.

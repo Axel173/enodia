@@ -27,10 +27,11 @@
 #
 # Размер набора задаёт ПОТРЕБИТЕЛЬ (`SET_HASHSIZE`/`SET_MAXELEM`): у групп наборы мелкие, у гео —
 # агрегаты стран на сотни тысяч подсетей. Читаются В МОМЕНТ ВЫЗОВА, поэтому порядок «сорснуть
-# библиотеку / выставить переменные» значения не имеет.
+# библиотеку / выставить переменные» значения не имеет. The family is the consumer's too
+# (`SET_FAMILY=inet6`; empty = inet, the former form byte for byte): the access schedules' address sets live in both families.
 #
 # Потребители: groups.sh, geo.sh (у каждого guarded-source + шим на прежнее поведение — файла
-# может не оказаться после частичного apply-scripts).
+# может не оказаться после частичного apply-scripts); access-sched.sh (static only — its sets have no dnsmasq side).
 
 SET_SNAP=${SET_SNAP:-/tmp/.enodia-set-snap}
 
@@ -51,9 +52,20 @@ _sl_same() {  # _sl_same <файл> <файл> — «содержимое оди
 	esac
 }
 
+set_drop() {  # set_drop <set> — the set and its snapshot away (a set recreated later must not inherit «the content is the same»)
+	ipset destroy "$1" 2>/dev/null; _sl_dr=$?
+	rm -f "$SET_SNAP-$1.cidr" "$SET_SNAP-$1.dom" 2>/dev/null
+	return $_sl_dr
+}
+
+# v4 values a hash:net takes (v6 lines pass as they are: their form is the writer's); busybox awk: -F splits, no split()
+# …a leading zero normalised to its decimal, as lists-lib.sh::cidr4_ok does (ipset would read `076` as octal and `08` as a host name)
+_sl_vals() { awk -F'[./]' '/:/ { print; next } NF >= 4 && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255 && (NF == 4 || ($5 >= 1 && $5 <= 32)) {
+	if ($0 ~ /(^|[.\/])0[0-9]/) { o = ($1 + 0) "." ($2 + 0) "." ($3 + 0) "." ($4 + 0); if (NF >= 5) o = o "/" ($5 + 0); print o } else print }'; }
+
 set_ensure() {  # set_ensure <набор> — создать, если его ещё нет
 	ipset list -n 2>/dev/null | grep -qx "$1" && return 0
-	ipset create "$1" hash:net hashsize "${SET_HASHSIZE:-1024}" maxelem "${SET_MAXELEM:-65536}" 2>/dev/null
+	ipset create "$1" hash:net ${SET_FAMILY:+family "$SET_FAMILY"} hashsize "${SET_HASHSIZE:-1024}" maxelem "${SET_MAXELEM:-65536}" 2>/dev/null
 }
 
 # set_fill <набор> <файл CIDR> [файл динамики] — атомарная замена содержимого.
@@ -67,12 +79,18 @@ set_fill() {
 	_sl_s="$1"; _sl_f="$2"; _sl_x="${3:-}"
 	set_ensure "$_sl_s"
 	ipset destroy "${_sl_s}_new" 2>/dev/null
-	ipset create "${_sl_s}_new" hash:net hashsize "${SET_HASHSIZE:-1024}" maxelem "${SET_MAXELEM:-65536}" 2>/dev/null || return 1
+	ipset create "${_sl_s}_new" hash:net ${SET_FAMILY:+family "$SET_FAMILY"} hashsize "${SET_HASHSIZE:-1024}" maxelem "${SET_MAXELEM:-65536}" 2>/dev/null || return 1
+	# A restore that stopped at a line it could not read filled the new set in HALF: that is not a set to swap in (review s.112 —
+	# one typo among own addresses emptied the rest, Telegram's network included). The old one stays, the caller writes no
+	# snapshot, the next call tries again. The pipe's status is ipset's (the last command).
+	# Values ipset cannot read never reach it (_sl_vals: an octet over 255, a mask over 32 or /0 — groups.sh stores what is shaped
+	# like an address): restore STOPS at such a line, so one typo in one group emptied the set every «in VPN» group shares
+	# (review s.112, round 2). What is left and still refused is refused whole.
 	if [ -s "$_sl_f" ]; then
-		awk -v s="${_sl_s}_new" '/^[0-9]/{print "add " s " " $1}' "$_sl_f" | ipset restore -exist 2>/dev/null
+		awk '/^[0-9]/{print $1}' "$_sl_f" | _sl_vals | awk -v s="${_sl_s}_new" '{print "add " s " " $0}' | ipset restore -exist 2>/dev/null || { ipset destroy "${_sl_s}_new" 2>/dev/null; return 1; }
 	fi
 	if [ -n "$_sl_x" ] && [ -s "$_sl_x" ]; then
-		awk -v s="${_sl_s}_new" '/^[0-9]/{print "add " s " " $1}' "$_sl_x" | ipset restore -exist 2>/dev/null
+		awk '/^[0-9]/{print $1}' "$_sl_x" | _sl_vals | awk -v s="${_sl_s}_new" '{print "add " s " " $0}' | ipset restore -exist 2>/dev/null || { ipset destroy "${_sl_s}_new" 2>/dev/null; return 1; }
 	fi
 	# Код возврата ЧЕСТНЫЙ и решает swap, а не последующий destroy: по нему вызывающий понимает,
 	# можно ли записывать снимок «состав такой-то». Провалившийся swap (нет памяти, чужой набор с

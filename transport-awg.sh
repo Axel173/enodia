@@ -270,13 +270,13 @@ remove_awg_routing() {
 
 # ---- awg-СЛОТ (доп-выход, мульти-транспорт Ф2) ----------------------------------
 # Дизайн: заметки разработки «мультитранспорт-дизайн». «Выход» слота = (awg, configs/<cfg>.conf):
-# СВОЯ несущая awg<id> (id 2..4; awg0 = основной), свой UAPI-сокет, свой IP из конфига, default в
+# СВОЯ несущая awg<id> (id 2..7; awg0 = основной), свой UAPI-сокет, свой IP из конфига, default в
 # table 100<id>. Марку 0x<id> и `ip rule fwmark -> table 100<id>` ставит mark-core (transport.sh
 # после slot-up его переигрывает) — тут ТОЛЬКО карриер: подъём awgN + FORWARD/MASQUERADE + вывод
 # endpoint'а из-под маркировки (анти-петля). БЕЗ DNS (один dnsmasq через основной слот, дизайн §DNS),
 # БЕЗ guest/firewall-зоны (это awg0-специфика awg_setup.sh). КЛЮЧЕВОЕ ОТЛИЧИЕ от awg_setup.sh:
 # НИКАКОГО `killall amneziawg-go` (убил бы awg0 и другие слоты!) — гасим ТОЛЬКО демон СВОЕГО awgN.
-slot_iface()   { echo "awg$1"; }               # id 2..4 -> awg2/awg3/awg4
+slot_iface()   { echo "awg$1"; }               # id 2..7 -> awg2..awg7
 slot_table()   { echo "100$1"; }               # id 2 -> 1002 ...
 slot_srcconf() { echo "$ENODIA_STATE/configs/$1.conf"; }   # исходный конфиг страны/сервера
 slot_ifconf()  { echo "$ENODIA_BIN/awg$1.conf"; }        # сгенерированный stripped conf для setconf
@@ -445,7 +445,7 @@ slot_remove_routing() {   # $1 = id
 # Контракт слота (transport.sh _slot_dispatch): slot-up <id> <cfg> / slot-down <id>.
 cmd_slot_up() {   # $1 = id, $2 = cfg
     _id="$1"; _cfg="$2"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     [ -n "$_cfg" ] && [ "$_cfg" != '-' ] || { log "слот №$_id: awg-выходу нужен конфиг (configs/<имя>.conf)"; return 1; }
     # КЛЮЧ ЗАНЯТ — НЕ ПОДНИМАЕМ (последний рубеж; форма отказывает раньше — slots.sh add/set/enable). Сюда доходит то, что мимо
     # формы: импорт бэкапа с чужого роутера, ручная правка `.slots`, перезалитый файл конфига. Поднятый выход на чужом ключе
@@ -471,7 +471,7 @@ cmd_slot_up() {   # $1 = id, $2 = cfg
 }
 cmd_slot_down() {   # $1 = id
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     _if=$(slot_iface "$_id")
     slot_remove_routing "$_id"
     [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1   # снять анти-петлю слота
@@ -504,7 +504,7 @@ slot_reg_is() {   # $1 = id ; $2 = cfg
 SLOT_PROBE_WAIT=15   # с: живой сервер отвечает за доли секунды; не дошедшую инициацию WireGuard повторяет через 5 с
 cmd_slot_probe() {   # $1 = id, $2 = cfg
     _id="$1"; _cfg="$2"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     [ -n "$_cfg" ] && [ "$_cfg" != '-' ] || { log "слот №$_id: awg-выходу нужен конфиг (configs/<имя>.conf)"; return 1; }
     _if=$(slot_iface "$_id")
     # Несущая уже есть — пробовать нечего: её поднял кто-то другой (heal, панель), судить её будет следующий тик по рукопожатию.

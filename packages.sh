@@ -87,7 +87,7 @@ BGPID=/tmp/enodia-proto-install.pid
 RESERVE_B="$DATA_RESERVE_B"   # 2.5 МБ неснижаемого запаса на /data (единственная цифра — в store-lib.sh)
 
 # Реестр связок. Новый компонент = ОДНО слово в PKGS + по строке в трёх case ниже.
-PKGS="awg xray hy2 byedpi zapret doh tls"
+PKGS="awg xray hy2 byedpi zapret doh tls filter"
 
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG"; }
 # СОСТОЯНИЕ ПИШЕМ АТОМАРНО (запись рядом + `mv`): `>` сперва ОБРЕЗАЕТ файл, и читатель, попавший между обрезкой и записью,
@@ -101,13 +101,13 @@ pkg_known()  { case " $PKGS " in *" $1 "*) return 0 ;; esac; return 1; }
 pkg_label()  { case "$1" in
         awg) echo "AmneziaWG" ;; xray) echo "Xray" ;; hy2) echo "Hysteria2" ;;
         byedpi) echo "ByeDPI" ;; zapret) echo "Zapret" ;;
-        doh) echo "Шифрованный DNS" ;; tls) echo "HTTPS панели" ;;
+        doh) echo "Шифрованный DNS" ;; tls) echo "HTTPS панели" ;; filter) echo "Фильтр по категориям" ;;
     esac; }
 # Свои бинари связки (их и удаляем).
 pkg_own()    { case "$1" in
         awg) echo "amneziawg-go awg" ;; xray) echo "xray" ;; hy2) echo "hysteria" ;;
         byedpi) echo "byedpi" ;; zapret) echo "nfqws" ;;
-        doh) echo "https-dns-proxy dot-proxy" ;; tls) echo "panel-tls" ;;
+        doh) echo "https-dns-proxy dot-proxy" ;; tls) echo "panel-tls" ;; filter) echo "dns-filter" ;;
     esac; }
 # ОБЩИЕ бинари: нужны связке, но принадлежат не ей (ref-count при удалении).
 pkg_shared() { case "$1" in xray|hy2|byedpi) echo "hev" ;; esac; }
@@ -166,7 +166,7 @@ pkg_run_old() { for b in $(pkg_files "$1"); do [ "$(bst_field "$b" 5)" = old ] &
 #     of an exit since disabled or moved to another transport. No owner verb reaches it (`slot-down` of a disabled exit refuses,
 #     `down` of an inactive transport would tear the ACTIVE one's routing), so it is named, not restarted — a reboot clears it;
 #   · NOT OURS — in no pidfile at all (a throwaway xray-test.sh instance): it ends by itself.
-RST_ORDER="doh zapret slot2 slot3 slot4 server warm-awg main tls"   # short cuts first; the main tunnel late, the panel's own HTTPS last
+RST_ORDER="doh zapret filter slot2 slot3 slot4 slot5 slot6 slot7 server warm-awg main tls"   # short cuts first; the main tunnel late, the panel's own HTTPS last
 # What the scan reads — top-level, so the sandbox stand points them at its own world (dev/pkg-restart-test.sh), as with LOCK/BGPID.
 RST_PROC=/proc
 RST_PIDDIR=/tmp
@@ -195,7 +195,7 @@ rst_unit() {   # $1 = pid, $2 = бинарь, $3 = активный трансп
                 # multi-transport, where AmneziaWG is implied (transport.sh::implied): there awg0 IS the tunnel, and `cold` on it
                 # would take the home off the VPN while reporting «warm reserve restarted».
                 awg0)     case "$3" in ""|awg) echo main ;; *) echo warm-awg ;; esac ;;
-                awg[2-4]) rst_slot_of "${_rui#awg}" awg ;;
+                awg[2-7]) rst_slot_of "${_rui#awg}" awg ;;
                 # The home server's daemon only while the server is ON (its owner answers): a leftover awgs0 without the intent is
                 # an orphan — `vpn-server.sh restart` would do nothing, and the rescan would call it «still on the previous build».
                 awgs0)    if sh "$ENODIA_DIR/vpn-server.sh" enabled >/dev/null 2>&1; then echo server; else echo orphan; fi ;;
@@ -210,13 +210,14 @@ rst_unit() {   # $1 = pid, $2 = бинарь, $3 = активный трансп
             # earlier one's leftover.
             xray|hysteria|byedpi|hev)
                 case "$3:$_run" in xray:xray|xray:hev|hy2:hysteria|hy2:hev|byedpi:byedpi|byedpi:hev) echo main ;; *) echo orphan ;; esac ;;
-            xray-s[2-4])     rst_slot_of "${_run##*-s}" xray ;;
-            hysteria-s[2-4]) rst_slot_of "${_run##*-s}" hy2 ;;
-            byedpi-s[2-4])   rst_slot_of "${_run##*-s}" byedpi ;;
-            hev-s[2-4])      rst_slot_of "${_run##*-s}" xray hy2 byedpi ;;
+            xray-s[2-7])     rst_slot_of "${_run##*-s}" xray ;;
+            hysteria-s[2-7]) rst_slot_of "${_run##*-s}" hy2 ;;
+            byedpi-s[2-7])   rst_slot_of "${_run##*-s}" byedpi ;;
+            hev-s[2-7])      rst_slot_of "${_run##*-s}" xray hy2 byedpi ;;
             zapret-nfqws)    echo zapret ;;
             doh)             echo doh ;;
             panel-tls)       echo tls ;;
+            dns-filter)      echo filter ;;
         esac
         return 0
     done
@@ -248,7 +249,7 @@ rst_comp() {   # $1 = unit, $2 = активный транспорт → id св
     case "$1" in
         main)              echo "${2:-awg}" ;;
         warm-awg|server)   echo awg ;;
-        slot[2-4])         sh "$ENODIA_DIR/slots.sh" show "${1#slot}" 2>/dev/null | cut -f3 ;;
+        slot[2-7])         sh "$ENODIA_DIR/slots.sh" show "${1#slot}" 2>/dev/null | cut -f3 ;;
         *)                 echo "$1" ;;
     esac
 }
@@ -276,8 +277,8 @@ rst_scan() {   # $@ = связки → RST_UNITS (в порядке RST_ORDER), 
 }
 rst_label() { case "$1" in
         main) echo "основной канал" ;; warm-awg) echo "тёплый резерв AmneziaWG" ;; server) echo "«доступ домой»" ;;
-        slot[2-4]) echo "дополнительный выход №${1#slot}" ;; zapret) echo "Zapret (nfqws)" ;;
-        doh) echo "шифрованный DNS" ;; tls) echo "HTTPS панели" ;; *) echo "$1" ;;
+        slot[2-7]) echo "дополнительный выход №${1#slot}" ;; zapret) echo "Zapret (nfqws)" ;;
+        doh) echo "шифрованный DNS" ;; tls) echo "HTTPS панели" ;; filter) echo "фильтр по категориям" ;; *) echo "$1" ;;
     esac; }
 # CAN A UNIT BE RESTARTED NOW — one answer for the offer (list-json `rst_units`) and the run (cmd_restart): the main carrier only while
 # it CARRIES. No default route in table 1000 means the watchdog holds traffic direct (FAILOPEN — a network state, not the string in
@@ -299,7 +300,7 @@ rst_slot_iface() { _rsi=$(sh "$ENODIA_DIR/transport.sh" slot-iface "$1" 2>/dev/n
 # for its holder — otherwise «0 under any lock» made every ByeDPI restart «Готово», forwarding or not (review, round 2).
 rst_works() {   # $1 = unit
     case "$1" in
-        main|slot[2-4])
+        main|slot[2-7])
             _rwn=0
             while [ "$_rwn" -lt "$RST_HEALTH_TRIES" ]; do
                 if [ "$1" = main ]; then HEALTH_OWN_LOCK=1 sh "$ENODIA_DIR/transport.sh" health >/dev/null 2>&1; _rwc=$?
@@ -318,13 +319,14 @@ rst_one() {   # $1 = unit → код владельца (0 — перезапу�
     case "$1" in
         doh)       sh "$ENODIA_DIR/doh-lib.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;
         zapret)    sh "$ENODIA_DIR/zapret.sh" reload >> "$RST_OWNER_LOG" 2>&1 ;;                   # nfqws only: rules and set stay
-        slot[2-4]) sh "$ENODIA_DIR/transport.sh" slot-down "${1#slot}" >> "$RST_OWNER_LOG" 2>&1
+        slot[2-7]) sh "$ENODIA_DIR/transport.sh" slot-down "${1#slot}" >> "$RST_OWNER_LOG" 2>&1
                    sh "$ENODIA_DIR/transport.sh" slot-up "${1#slot}" >> "$RST_OWNER_LOG" 2>&1 ;;
         server)    sh "$ENODIA_DIR/vpn-server.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;
         # The warm reserve comes back AS a reserve (the watchdog notices the home server by its handshake): not `cold` alone.
         warm-awg)  sh "$ENODIA_DIR/transport.sh" rewarm awg >> "$RST_OWNER_LOG" 2>&1 ;;
         main)      sh "$ENODIA_DIR/transport.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;
         tls)       sh "$ENODIA_DIR/web-ui.sh" tls-reload >> "$RST_OWNER_LOG" 2>&1 ;;
+        filter)    sh "$ENODIA_DIR/access-sched.sh" filter-restart >> "$RST_OWNER_LOG" 2>&1 ;;
         *)         return 1 ;;
     esac
 }
@@ -468,6 +470,10 @@ pkg_hold() {
              [ -f "$ENODIA_DIR/doh-lib.sh" ] && ( . "$ENODIA_DIR/doh-lib.sh"; doh_auto_active ) 2>/dev/null && \
                  { echo "шифрованный DNS сейчас держит DNS сети сам (прямой режим) — сперва выключите «Включать само в прямых режимах»"; return 0; } ;;
         tls) [ -f "$ENODIA_STATE/.panel-tls" ] && { echo "включён HTTPS панели — снимете и потеряете вход"; return 0; } ;;
+        # a schedule with «limited» in its week would go fully OPEN without the filter (fail-open) — the owner answers who
+        filter) if [ -f "$ENODIA_DIR/access-sched.sh" ] && sh "$ENODIA_DIR/access-sched.sh" uses-filter >/dev/null 2>&1; then
+                    echo "его держат расписания с «ограничено» — сперва уберите из них «ограничено»"; return 0
+                fi ;;
     esac
     return 0
 }
@@ -773,7 +779,7 @@ cmd_plan() {
 # остался без него, хотя теперь именно он — единственный экран установки.
 pkg_pids() { case "$1" in
         xray) echo /tmp/enodia-xray.pid ;; hy2) echo /tmp/enodia-hysteria.pid ;; byedpi) echo /tmp/enodia-byedpi.pid ;;
-        doh) echo /tmp/enodia-doh.pid ;; tls) echo /tmp/enodia-panel-tls.pid ;;
+        doh) echo /tmp/enodia-doh.pid ;; tls) echo /tmp/enodia-panel-tls.pid ;; filter) echo /tmp/enodia-dns-filter.pid ;;
     esac; }
 kill_by_pidfile() { [ -f "$1" ] || return 0; start-stop-daemon -K -p "$1" >/dev/null 2>&1; rm -f "$1"; return 0; }
 
@@ -822,7 +828,7 @@ do_install() {      # $1 = связка
         if in_list zapret "$P_UPD"; then
             bst_mark_fresh nfqws
             _ro=$(sh "$GH" bin-status nfqws 2>/dev/null | awk -F'\t' '$5 == "old" { print $1 }')
-            if [ -n "$_ro" ]; then log "Zapret обновлён. Сейчас работает прежняя сборка (nfqws) — новая заработает после перезапуска компонента; проще всего перезагрузить роутер."
+            if [ -n "$_ro" ]; then log "Zapret обновлён. Сейчас работает прежняя сборка (nfqws) — новая заработает после перезапуска компонента: кнопка «Перезапустить» в его строке, а где её нет — перезагрузка роутера."
             else log "Zapret обновлён."; fi
             return 0
         fi
@@ -870,7 +876,7 @@ do_install() {      # $1 = связка
     # иначе «обновил, а ничего не изменилось». Спрашиваем по факту (живой процесс исполняет заменённый файл), а не гадаем.
     if [ -n "$_upd_b" ] && [ -f "$GH" ]; then
         _ro=$(sh "$GH" bin-status $_upd_b 2>/dev/null | awk -F'\t' '$5 == "old" { printf "%s%s", s, $1; s=", " }')
-        [ -n "$_ro" ] && log "Сейчас работает прежняя сборка ($_ro) — новая заработает после перезапуска компонента; проще всего перезагрузить роутер."
+        [ -n "$_ro" ] && log "Сейчас работает прежняя сборка ($_ro) — новая заработает после перезапуска компонента: кнопка «Перезапустить» в его строке, а где её нет — перезагрузка роутера."
     fi
     # «Установлен ≠ активен» — про это надо СКАЗАТЬ, иначе «поставил и ничего не изменилось». Обновлению — не надо: оно не меняет,
     # включён ли компонент, и совет «включить — там-то» уводил бы человека включать уже включённое.
@@ -881,6 +887,7 @@ do_install() {      # $1 = связка
         byedpi) log "ByeDPI установлен. Включить — в «Соединение → Транспорт»." ;;
         doh) log "Компоненты шифрованного DNS установлены. Включить — в «Сеть → Шифрованный DNS»." ;;
         tls) log "Компонент HTTPS установлен. Включить — в «Панель → Доступ к панели»." ;;
+        filter) log "Фильтр по категориям установлен. Действует в окнах «ограничено» — «Маршрутизация → Расписания доступа»." ;;
     esac
     return 0
 }

@@ -763,7 +763,7 @@ fi
 # не умеют слоты → живут по fallback-политике) и переигрывает mark-core: марки слот-сетов +
 # fallback-aware ip rule (main|direct). Нет slots.sh или реестр пуст => секция no-op, поведение прежнее.
 # ВЫКЛЮЧЕННЫЙ VPN гасит и доп-выходы: их ip rule снимает тот же `vpn-toggle off` (обе формы
-# марки, 0x2..0x4), а mark-core мы выше не звали — поднимать несущие слотов было бы работой
+# марки, 0x2..0x7), а mark-core мы выше не звали — поднимать несущие слотов было бы работой
 # вхолостую и следами в ядре там, где обещали «как сток». Транспорта нет вовсе — слот тем более.
 if skip_vpn; then
     echo "$(why_skip) — доп-выходы (слоты) не поднимаю"
@@ -863,6 +863,17 @@ fi
 if [ -f ./web-ui.sh ] && ip -4 addr show "$(lan_if)" 2>/dev/null | grep -q 'inet '; then
     echo "--- панель: второй заход (TLS + доступ снаружи; сама панель уже поднята в 0b) ---"
     sh ./web-ui.sh start 2>&1 3>&- || true
+fi
+
+# 5.18. THE USER'S TASKS («Задачи», tasks.sh). The cron lines are DERIVED from the registry on /data: replayed here on boot and in
+# `replay` (a backup import or a reinstall may have brought the registry without the lines). «At boot» is not cron — busybox crond
+# has no @reboot — so the boot-time tasks start HERE, LAST: the user's script must find the network, DNS and VPN already up, and
+# it must not hold heal (each one in its own background with its own delay; a hanging script is the runner's timeout's business).
+# Not in replay: the router did not reboot. Not under «VPN off»: tasks are not VPN, the human's schedule keeps running.
+if [ -f "$ENODIA_DIR/tasks.sh" ] && [ -d "$ENODIA_STATE/tasks" ]; then
+    echo "--- задачи: расписание из настроек ---"
+    sh "$ENODIA_DIR/tasks.sh" apply 2>&1 3>&- || true
+    [ "$REPLAY" = 0 ] && sh "$ENODIA_DIR/tasks.sh" boot 2>&1 3>&- || true
 fi
 
 # КОНЕЦ REPLAY. Дальше — только бутовое: диагностический срез в лог и письмо «загрузка OK».

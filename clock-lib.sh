@@ -212,8 +212,11 @@ CLOCK_HTTP_TMO=${CLOCK_HTTP_TMO:-3}          # с на источник (кон�
 CLOCK_AGREE=${CLOCK_AGREE:-10}              # на сколько секунд вправе разойтись два источника
 CLOCK_STEP_MIN=${CLOCK_STEP_MIN:-30}        # вперёд двигаем от такого отставания
 CLOCK_BACK_MIN=${CLOCK_BACK_MIN:-300}       # назад — от такого убегания
-CLOCK_SYNC_TRIES=${CLOCK_SYNC_TRIES:-10}    # неудач за загрузку, после которых clock_boot_sync замолкает
+CLOCK_SYNC_TRIES=${CLOCK_SYNC_TRIES:-10}    # неудач за загрузку, после которых clock_boot_sync переходит на редкий шаг
 CLOCK_RETRY_GAP=${CLOCK_RETRY_GAP:-300}     # с аптайма между неудачными попытками (12 с curl не на каждый тик)
+# …и редкий шаг ПОСЛЕ лимита, а не тишина до ребута: расписания доступа действуют ТОЛЬКО по нашей отметке (clock_trusted), и
+# провайдер, вернувшийся через час после отключения света, оставлял их выключенными на весь аптайм (ревью s.112, круг 2)
+CLOCK_RETRY_SLOW=${CLOCK_RETRY_SLOW:-1800}
 CLOCK_STEP=0
 CLOCK_MSG=
 CLOCK_LOCK=/tmp/enodia-clock.lock           # heal и тик сторожа могут сверять ОДНОВРЕМЕННО — писатель часов один
@@ -224,6 +227,18 @@ CLOCK_LOCK=/tmp/enodia-clock.lock           # heal и тик сторожа мо
 command -v wan_iface >/dev/null 2>&1 || wan_iface() { ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'; }
 
 clock_synced() { [ -f "$CLOCK_SYNC_MARK" ]; }
+# «ВРЕМЯ СВЕРЕНО» — the clock was set from the network THIS boot: our HTTP-date sync of two agreeing sources (the mark above;
+# heal at boot, then every watchdog tick until it lands — VPN off and panel-only too). clock_sane alone is not it: after a
+# reboot the clock sits on a file's mtime — a sane-looking date hours or days behind. Whoever ACTS on the wall clock (access
+# schedules close the internet by it, access-sched.sh) gates on this; whoever only measures an age uses age_since.
+# NOT the stock /tmp/ntp.status «ok»: `ntpsetclock` writes it after its htp fallback whenever htpdate exits 0, and htpdate
+# exits 0 without setting the clock (the stock script says so itself; on BE7000 05.09.2026 «ok» stood two days behind). Its
+# `ntp.failed` flag does not tell the two apart either: every run deletes it first, so a run in progress shows «ok» and no
+# «failed» over the htp «ok» of the run before (read on BE7000, review s.112).
+clock_trusted() {
+	clock_sane || return 1
+	clock_synced
+}
 
 # clock_http_date <iface> <url> — эпоха из заголовка Date, пусто = не ответил/не разобрали/
 # дата вне разумного (clock_sane: раньше сборки прошивки или после 2100-го — сервер-шутник,
@@ -310,9 +325,9 @@ clock_boot_sync() {
 	if [ -f "$CLOCK_SYNC_TRIES_F" ]; then read -r _cb_n _cb_last < "$CLOCK_SYNC_TRIES_F" || :; fi
 	case "$_cb_n" in ''|*[!0-9]*) _cb_n=0 ;; esac
 	case "$_cb_last" in ''|*[!0-9]*) _cb_last=0 ;; esac
-	[ "$_cb_n" -lt "$CLOCK_SYNC_TRIES" ] || return 1
+	_cb_gap=$CLOCK_RETRY_GAP; [ "$_cb_n" -lt "$CLOCK_SYNC_TRIES" ] || _cb_gap=$CLOCK_RETRY_SLOW
 	_cb_up=$(uptime_s)
-	[ "$_cb_n" = 0 ] || [ $(( _cb_up - _cb_last )) -ge "$CLOCK_RETRY_GAP" ] || return 1
+	[ "$_cb_n" = 0 ] || [ $(( _cb_up - _cb_last )) -ge "$_cb_gap" ] || return 1
 	_cb_if=$(wan_iface)
 	[ -n "$_cb_if" ] || return 1
 	# ЛОК ПО ПИДУ: heal (0c) и тик сторожа бегут на буте вперемешку, и оба могли бы оказаться внутри

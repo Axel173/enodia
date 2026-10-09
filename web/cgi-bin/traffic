@@ -14,8 +14,8 @@
 # минус выходы» обязано иметь ОДНОГО владельца — панель своего не считает.
 # С `?live=1` — ТОЛЬКО пункт (1), без проходов по посуточному файлу: его просит живая скорость
 # в шапке, когда карточки трафика не видны (разбор у ветки «ЛЁГКИЙ ОТВЕТ» ниже).
-# Per-device НЕТ сознательно: NSS-offload уводит потоки
-# мимо netfilter → учёт по IP недостоверен (карта проекта). Числа — %.0f (awk-double до 2^53),
+# С `?dev=<окно>` / `?dmac=<mac>` — РАЗРЕЗ ПО УСТРОЙСТВАМ, свой ответ у своего владельца (traffic-dev.sh: счётчики прошивки
+# trafficd по MAC; по IP роутер считать не может — NSS-offload уводит потоки мимо netfilter). Числа — %.0f (awk-double до 2^53),
 # НЕ %d (busybox awk %d 32-битный → переполнение на счётчиках >2 ГБ).
 # 2FA-гейт (totp.sh) — см. разбор в cgi-bin/status.
 # uhttpd НЕ ПЕРЕДАЁТ CGI своё окружение (замер на железе 01.09.2026 пробным CGI: все ENODIA_*
@@ -49,6 +49,19 @@ D=${ENODIA_DIR:-/data/usr/app/enodia}
 DS=${ENODIA_STATE:-/data/usr/app/enodia-state}
 LAST="$DS/.traffic-last"
 DAILY="$DS/.traffic-daily"
+# BY DEVICE (`?dev=<window>` — the «Устройства» tab, `?dmac=<mac>` — the device screen): its own answer from its owner
+# (traffic-dev.sh), before every pass below — the tab asks for the devices only, and none of the interface sums is needed.
+# The values are checked by the script (window from a list, MAC by mac_ok); `%3A` — a MAC the browser encoded.
+case "$QUERY_STRING" in
+	*dmac=*|dev=*|*'&dev='*)
+		if [ ! -f "$D/traffic-dev.sh" ]; then printf '{"ok":false,"msg":"traffic-dev.sh не установлен (обновите панель)"}\n'; exit 0; fi
+		case "$QUERY_STRING" in
+			*dmac=*) _tq=${QUERY_STRING#*dmac=}; _tq=${_tq%%&*}; _tq=$(printf '%s' "$_tq" | sed 's/%3[Aa]/:/g')
+			         sh "$D/traffic-dev.sh" json-mac "$_tq" 2>/dev/null ;;
+			*) _tq=${QUERY_STRING#*dev=}; _tq=${_tq%%&*}; sh "$D/traffic-dev.sh" json "$_tq" 2>/dev/null ;;
+		esac
+		exit 0 ;;
+esac
 # trim + дефолт: `cat || echo awg` не ловил пустой-но-существующий .transport (t="" → vif=xtun,
 # и счётчики VPN читались с xtun вместо awg0). См. ту же грабля в cgi-bin/status.
 t=$(cat "$DS/.transport" 2>/dev/null | tr -d ' \r\n')
@@ -132,19 +145,19 @@ src="$DAILY"; [ -f "$src" ] || src=/dev/null
 # (десинк идёт напрямую, его объём физически неотделим от прямого) — вот он и правда без счётчика;
 # а у выключенного в обед её уже нет, зато сегодняшний объём лежит в полях посуточного файла.
 # Итог «считать нечем» складывается ниже из ОБОИХ признаков, а не из одного этого.
-sl_ifs=""; sl2if=""; sl3if=""; sl4if=""
-ls2rx=0; ls2tx=0; ls3rx=0; ls3tx=0; ls4rx=0; ls4tx=0
+# Exit ids = slots.sh MIN_ID..MAX_ID (C130 checks this list) — the same list as the writer's. Per-exit values live in
+# variables NAMED by the id (sl<k>if, ls<k>rx, s<k>r …); `eval` only ever sees our names and a digit from this list
+# or a `[2-7]` case. The daily tail is positional: exit k at $(2k+3)/$(2k+4) — the first three exits keep $7..$12 as before.
+SLOT_IDS="2 3 4 5 6 7"
+for _k in $SLOT_IDS; do eval "sl${_k}if=''; ls${_k}rx=0; ls${_k}tx=0"; _kmax=$_k; done
 if [ -f "$LAST" ]; then
 	while read -r _k _i _r _t; do
-		case "$_k" in
-			s2) sl2if="$_i"; ls2rx="$_r"; ls2tx="$_t" ;;
-			s3) sl3if="$_i"; ls3rx="$_r"; ls3tx="$_t" ;;
-			s4) sl4if="$_i"; ls4rx="$_r"; ls4tx="$_t" ;;
-		esac
+		case "$_k" in s[2-7]) _n=${_k#s}; eval "sl${_n}if=\$_i; ls${_n}rx=\$_r; ls${_n}tx=\$_t" ;; esac
 	done < "$LAST"
 fi
-for n in ls2rx ls2tx ls3rx ls3tx ls4rx ls4tx; do eval "x=\$$n"; case "$x" in ''|*[!0-9]*) eval "$n=0";; esac; done
-sl_ifs="$sl2if$sl3if$sl4if"
+for _k in $SLOT_IDS; do
+	for n in ls${_k}rx ls${_k}tx; do eval "x=\$$n"; case "$x" in ''|*[!0-9]*) eval "$n=0";; esac; done
+done
 # Незаписанная дельта выхода — ТА ЖЕ ЛЕСТНИЦА, что у несущей выше: имя то же и счётчик вырос ⇒
 # разность; счётчик упал ⇒ интерфейс пересоздали, отсчёт от нуля; интерфейса нет ⇒ ноль.
 # Сравнивать имя с прошлым не нужно: оно ОТТУДА ЖЕ и по определению совпадает — здесь мы лишь
@@ -164,11 +177,13 @@ slot_now() {   # <iface> <прошлый rx> <прошлый tx> -> "drx dtx rx 
 # Гард на КАЖДОМ вызове — не дубль внутреннего: `$( )` порождает подоболочку ДО того, как функция
 # успеет выйти по своему `[ -n "$1" ]`, то есть на роутере без выходов (это большинство) мы платили
 # бы тремя форками за три гарантированных нуля — двенадцать раз в минуту.
-us2r=0; us2t=0; us3r=0; us3t=0; us4r=0; us4t=0
-cs2r=0; cs2t=0; cs3r=0; cs3t=0; cs4r=0; cs4t=0
-[ -n "$sl2if" ] && { set -- $(slot_now "$sl2if" "$ls2rx" "$ls2tx"); us2r=${1:-0}; us2t=${2:-0}; cs2r=${3:-0}; cs2t=${4:-0}; }
-[ -n "$sl3if" ] && { set -- $(slot_now "$sl3if" "$ls3rx" "$ls3tx"); us3r=${1:-0}; us3t=${2:-0}; cs3r=${3:-0}; cs3t=${4:-0}; }
-[ -n "$sl4if" ] && { set -- $(slot_now "$sl4if" "$ls4rx" "$ls4tx"); us4r=${1:-0}; us4t=${2:-0}; cs4r=${3:-0}; cs4t=${4:-0}; }
+# The unwritten deltas reach the awk passes below through the ENVIRONMENT (TU<k>R / TU<k>T): busybox awk has no
+# split(), and a `-v` per exit would be one more hand-kept list of ids in every pass.
+for _k in $SLOT_IDS; do
+	eval "_i=\$sl${_k}if; _lr=\$ls${_k}rx; _lt=\$ls${_k}tx"
+	_u="0 0 0 0"; [ -n "$_i" ] && _u=$(slot_now "$_i" "$_lr" "$_lt")
+	set -- $_u; export "TU${_k}R=${1:-0}" "TU${_k}T=${2:-0}"; eval "cs${_k}r=\${3:-0}; cs${_k}t=\${4:-0}"
+done
 
 # --- ЛЁГКИЙ ОТВЕТ (`?live=1`): ТОЛЬКО СЧЁТЧИКИ «СЕЙЧАС» (шаг 2j) ---------------------------------
 # Живой скорости в шапке нужны счётчики и точная отметка — и ничего из того, ради чего этот CGI
@@ -179,14 +194,14 @@ cs2r=0; cs2t=0; cs3r=0; cs3t=0; cs4r=0; cs4t=0
 # Поля — ТЕ ЖЕ ИМЕНА и тот же смысл, что у полного ответа (панель считает скорость одной функцией
 # по любому из двух), а `light` говорит, что сумм и дней тут нет вовсе, а не «они нулевые».
 # Выходы — только с несущей: у выхода без неё вычитать из провода нечего (разбор у slot_now).
-# Разбор строки — словами шелла, без форков: пустое имя несущей даёт три слова вместо четырёх.
+# Exits without a carrier are skipped: there is nothing to subtract from the wire for them (see slot_now).
 case "$QUERY_STRING" in *live=1*)
 	lex=''
-	for _l in "2 $sl2if $cs2r $cs2t" "3 $sl3if $cs3r $cs3t" "4 $sl4if $cs4r $cs4t"; do
-		set -- $_l
-		[ $# -eq 4 ] || continue
-		case "$2" in *[!a-z0-9._-]*) continue ;; esac
-		lex="$lex${lex:+,}{\"id\":$1,\"if\":\"$2\",\"cur_rx\":$3,\"cur_tx\":$4}"
+	for _k in $SLOT_IDS; do
+		eval "_i=\$sl${_k}if; _cr=\$cs${_k}r; _ct=\$cs${_k}t"
+		[ -n "$_i" ] || continue
+		case "$_i" in *[!a-z0-9._-]*) continue ;; esac
+		lex="$lex${lex:+,}{\"id\":$_k,\"if\":\"$_i\",\"cur_rx\":$_cr,\"cur_tx\":$_ct}"
 	done
 	# «Сегодня» шапки «Обзора» — одна строка посуточного файла (сегодняшняя) плюс незаписанная дельта: один проход awk без окон и дней.
 	set -- $(awk -v today="$today" -v uvr="$uvr" -v uvt="$uvt" -v uwr="$uwr" -v uwt="$uwt" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
@@ -197,7 +212,7 @@ case "$QUERY_STRING" in *live=1*)
 esac
 # Суммы по выходам — отдельным проходом по тому же файлу. ГАРД — «ЕСТЬ ЛИ ВЫХОДЫ ВООБЩЕ», а НЕ
 # «есть ли у них несущая сейчас»: выход, выключенный в обед, уже унёс сегодня свои гигабайты, и
-# они лежат в полях $7..$12. Спроси мы только про живые несущие — эти байты вычлись бы из
+# они лежат в полях хвоста ($7 и дальше). Спроси мы только про живые несущие — эти байты вычлись бы из
 # «напрямую» (там их нет) и не показались бы нигде: доли перестали бы сходиться в сто процентов,
 # а объём молча пропал бы с экрана. На роутере без выходов реестра нет и форка не будет.
 #
@@ -211,30 +226,25 @@ esac
 # Опасности в eval тут нет: awk печатает ТОЛЬКО наши имена и ТОЛЬКО числа через `%.0f`, ни один
 # байт из файла состояния в имена не попадает. Инициализация нулями ОБЯЗАТЕЛЬНА и выше eval:
 # awk не запустился (нет файла, нет прав) ⇒ переменных бы не стало вовсе.
-s2r=0; s2t=0; s3r=0; s3t=0; s4r=0; s4t=0      # сегодня
-w2r=0; w2t=0; w3r=0; w3t=0; w4r=0; w4t=0      # 7 дней
-m2r=0; m2t=0; m3r=0; m3t=0; m4r=0; m4t=0      # 30 дней
-y2r=0; y2t=0; y3r=0; y3t=0; y4r=0; y4t=0      # год
+for _k in $SLOT_IDS; do eval "s${_k}r=0; s${_k}t=0; w${_k}r=0; w${_k}t=0; m${_k}r=0; m${_k}t=0; y${_k}r=0; y${_k}t=0"; done   # сегодня · 7 · 30 дней · год
 sxr=0; sxt=0; wxr=0; wxt=0; mxr=0; mxt=0; yxr=0; yxt=0   # суммы всех выходов по окнам
 if [ -s "$DS/.slots" ]; then
 	# Незаписанную дельту прибавляем ВНУТРИ awk: `$(())` у busybox бывает 32-битной, а суточный
 	# объём выхода легко переваливает за 2 ГБ — ровно та грабля, из-за которой весь этот файл
 	# считает через awk-double (точен до 2^53 ≈ 9 ПБ). Она относится к «сейчас» ⇒ входит во ВСЕ
 	# окна, как и u* у несущей ниже.
-	eval "$(awk -v today="$today" -v now="$now" -v u1="$us2r" -v u2="$us2t" -v u3="$us3r" -v u4="$us3t" -v u5="$us4r" -v u6="$us4t" \
+	eval "$(awk -v today="$today" -v now="$now" -v km="$_kmax" \
 	  'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
 	  { ep=$1+0
-	    if($2==today)      { d1+=$7; d2+=$8; d3+=$9; d4+=$10; d5+=$11; d6+=$12 }
-	    if(ep>=now-604800) { a1+=$7; a2+=$8; a3+=$9; a4+=$10; a5+=$11; a6+=$12 }
-	    if(ep>=now-2592000){ b1+=$7; b2+=$8; b3+=$9; b4+=$10; b5+=$11; b6+=$12 }
-	    if(ep>=now-31536000){c1+=$7; c2+=$8; c3+=$9; c4+=$10; c5+=$11; c6+=$12 } }
-	  END{ printf "s2r=%.0f s2t=%.0f s3r=%.0f s3t=%.0f s4r=%.0f s4t=%.0f\n", d1+u1,d2+u2,d3+u3,d4+u4,d5+u5,d6+u6
-	       printf "w2r=%.0f w2t=%.0f w3r=%.0f w3t=%.0f w4r=%.0f w4t=%.0f\n", a1+u1,a2+u2,a3+u3,a4+u4,a5+u5,a6+u6
-	       printf "m2r=%.0f m2t=%.0f m3r=%.0f m3t=%.0f m4r=%.0f m4t=%.0f\n", b1+u1,b2+u2,b3+u3,b4+u4,b5+u5,b6+u6
-	       printf "y2r=%.0f y2t=%.0f y3r=%.0f y3t=%.0f y4r=%.0f y4t=%.0f\n", c1+u1,c2+u2,c3+u3,c4+u4,c5+u5,c6+u6
-	       printf "sxr=%.0f sxt=%.0f wxr=%.0f wxt=%.0f mxr=%.0f mxt=%.0f yxr=%.0f yxt=%.0f\n",
-	         d1+d3+d5+u1+u3+u5, d2+d4+d6+u2+u4+u6, a1+a3+a5+u1+u3+u5, a2+a4+a6+u2+u4+u6,
-	         b1+b3+b5+u1+u3+u5, b2+b4+b6+u2+u4+u6, c1+c3+c5+u1+u3+u5, c2+c4+c6+u2+u4+u6 }' "$src")"
+	    for(k=2;k<=km;k++){ f=2*k+3; r=$f+0; t=$(f+1)+0
+	      if($2==today)       { dr[k]+=r; dt[k]+=t }
+	      if(ep>=now-604800)  { ar[k]+=r; at[k]+=t }
+	      if(ep>=now-2592000) { br[k]+=r; bt[k]+=t }
+	      if(ep>=now-31536000){ cr[k]+=r; ct[k]+=t } } }
+	  END{ for(k=2;k<=km;k++){ ur=ENVIRON["TU" k "R"]+0; ut=ENVIRON["TU" k "T"]+0
+	         printf "s%dr=%.0f s%dt=%.0f w%dr=%.0f w%dt=%.0f m%dr=%.0f m%dt=%.0f y%dr=%.0f y%dt=%.0f\n", k, dr[k]+ur, k, dt[k]+ut, k, ar[k]+ur, k, at[k]+ut, k, br[k]+ur, k, bt[k]+ut, k, cr[k]+ur, k, ct[k]+ut
+	         xd1+=dr[k]+ur; xd2+=dt[k]+ut; xa1+=ar[k]+ur; xa2+=at[k]+ut; xb1+=br[k]+ur; xb2+=bt[k]+ut; xc1+=cr[k]+ur; xc2+=ct[k]+ut }
+	       printf "sxr=%.0f sxt=%.0f wxr=%.0f wxt=%.0f mxr=%.0f mxt=%.0f yxr=%.0f yxt=%.0f\n", xd1, xd2, xa1, xa2, xb1, xb2, xc1, xc2 }' "$src")"
 fi
 
 # суммы по периодам (+ незаписанная дельта u* — она относится к «сейчас» = во все периоды)
@@ -277,7 +287,7 @@ pbool() { [ "$1" = 1 ] && echo true || echo false; }
 # окно графика: week=7 дней, month=30 дней (дневные столбцы), year=12 месяцев (агрегат).
 # Во всех случаях сегодняшний столбец += незаписанная дельта (живой бар). Данные берём из
 # того же посуточного файла (traffic-acct держит 400 дней). busybox awk: только массивы+substr.
-# ВЫХОДЫ ЗА ДЕНЬ (`x` = [выход 2, 3, 4], rx+tx) — ТОЛЬКО у дня, где хвост выходов ЕСТЬ (12 полей):
+# ВЫХОДЫ ЗА ДЕНЬ (`x` = [выход 2 … 7], rx+tx) — ТОЛЬКО у дня, где хвост выходов ЕСТЬ (12+ полей):
 # подсказка графика делит «мимо туннеля» на выходы и «напрямую» лишь там, где делить есть ЧЕМ. День
 # из шести полей — либо выходов без несущей, либо записанный до 10.09.2026, когда хвоста не было
 # вовсе; различить их нечем, и ноль в `x` соврал бы про второй случай. Месяц года получает `x`, только если
@@ -287,26 +297,28 @@ rng=week
 case "$QUERY_STRING" in *chart=year*) rng=year ;; *chart=month*) rng=month ;; esac
 
 if [ "$rng" = year ]; then
-	days=$(awk -v today="$today" -v uvr="$uvr" -v uvt="$uvt" -v uwr="$uwr" -v uwt="$uwt" \
-	  -v u1="$us2r" -v u2="$us2t" -v u3="$us3r" -v u4="$us3t" -v u5="$us4r" -v u6="$us4t" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
+	days=$(awk -v today="$today" -v uvr="$uvr" -v uvt="$uvt" -v uwr="$uwr" -v uwt="$uwt" -v km="$_kmax" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
 	{ k=substr($2,1,7); v[k]+=$3+$4; w[k]+=$5+$6; if(!(k in seen)){seen[k]=1; ord[++n]=k}
-	  nr[k]++; if(NF>=12){ nx[k]++; x2[k]+=$7+$8; x3[k]+=$9+$10; x4[k]+=$11+$12 } }
+	  nr[k]++; if(NF>=12){ nx[k]++; for(j=2;j<=km;j++){ f=2*j+3; x[k "_" j]+=$f+$(f+1) } } }
 	END{ for(k in nr) if(nx[k]==nr[k]) hx[k]=1
 	     tk=substr(today,1,7); if(!(tk in seen)){seen[tk]=1; ord[++n]=tk}
 	     v[tk]+=uvr+uvt; w[tk]+=uwr+uwt;
-	     if(u1+u2+u3+u4+u5+u6>0){ if(!(tk in nr) || (tk in hx)) hx[tk]=1; x2[tk]+=u1+u2; x3[tk]+=u3+u4; x4[tk]+=u5+u6 }
+	     us=0; for(j=2;j<=km;j++){ u[j]=ENVIRON["TU" j "R"]+ENVIRON["TU" j "T"]; us+=u[j] }
+	     if(us>0){ if(!(tk in nr) || (tk in hx)) hx[tk]=1; for(j=2;j<=km;j++) x[tk "_" j]+=u[j] }
 	     s=n-11; if(s<1)s=1;
 	     for(i=s;i<=n;i++){ k=ord[i]; printf "%s{\"d\":\"%s\",\"vpn\":%.0f,\"wan\":%.0f", (i>s?",":""), substr(k,3), v[k], w[k]
-	       if(k in hx) printf ",\"x\":[%.0f,%.0f,%.0f]", x2[k], x3[k], x4[k]
+	       if(k in hx){ printf ",\"x\":["; for(j=2;j<=km;j++) printf "%s%.0f", (j>2?",":""), x[k "_" j]; printf "]" }
 	       printf "}" } }' "$src")
 else
 	N=7; [ "$rng" = month ] && N=30
-	days=$(tail -n "$N" "$src" 2>/dev/null | awk -v today="$today" -v uvr="$uvr" -v uvt="$uvt" -v uwr="$uwr" -v uwt="$uwt" \
-	  -v u1="$us2r" -v u2="$us2t" -v u3="$us3r" -v u4="$us3t" -v u5="$us4r" -v u6="$us4t" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
-	{ vpn=$3+$4; wan=$5+$6; hx=(NF>=12); x2=$7+$8; x3=$9+$10; x4=$11+$12
-	  if($2==today){vpn+=uvr+uvt; wan+=uwr+uwt; if(u1+u2+u3+u4+u5+u6>0){ hx=1; x2+=u1+u2; x3+=u3+u4; x4+=u5+u6 } }
+	days=$(tail -n "$N" "$src" 2>/dev/null | awk -v today="$today" -v uvr="$uvr" -v uvt="$uvt" -v uwr="$uwr" -v uwt="$uwt" -v km="$_kmax" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
+	{ vpn=$3+$4; wan=$5+$6; hx=(NF>=12)
+	  for(j=2;j<=km;j++){ f=2*j+3; x[j]=$f+$(f+1) }
+	  if($2==today){ vpn+=uvr+uvt; wan+=uwr+uwt; us=0
+	    for(j=2;j<=km;j++){ u=ENVIRON["TU" j "R"]+ENVIRON["TU" j "T"]; x[j]+=u; us+=u }
+	    if(us>0) hx=1 }
 	  printf "%s{\"d\":\"%s\",\"vpn\":%.0f,\"wan\":%.0f", (NR>1?",":""), substr($2,6), vpn, wan
-	  if(hx) printf ",\"x\":[%.0f,%.0f,%.0f]", x2, x3, x4
+	  if(hx){ printf ",\"x\":["; for(j=2;j<=km;j++) printf "%s%.0f", (j>2?",":""), x[j]; printf "]" }
 	  printf "}" }')
 fi
 
@@ -344,10 +356,8 @@ SLOTS_FILE="$DS/.slots"
 if [ -s "$SLOTS_FILE" ]; then
 	_tab=$(printf '\t')
 	while IFS="$_tab" read -r _sid _snb _stp _scfg _sfb _sen; do
-		case "$_sid" in 2|3|4) ;; *) continue ;; esac
-		case "$_sid" in 2) _sif="$sl2if"; _sr="$s2r"; _st="$s2t"; _wr="$w2r"; _wt="$w2t"; _mr="$m2r"; _mt="$m2t"; _yr="$y2r"; _yt="$y2t"; _cr="$cs2r"; _ct="$cs2t" ;;
-		                 3) _sif="$sl3if"; _sr="$s3r"; _st="$s3t"; _wr="$w3r"; _wt="$w3t"; _mr="$m3r"; _mt="$m3t"; _yr="$y3r"; _yt="$y3t"; _cr="$cs3r"; _ct="$cs3t" ;;
-		                 *) _sif="$sl4if"; _sr="$s4r"; _st="$s4t"; _wr="$w4r"; _wt="$w4t"; _mr="$m4r"; _mt="$m4t"; _yr="$y4r"; _yt="$y4t"; _cr="$cs4r"; _ct="$cs4t" ;; esac
+		case "$_sid" in [2-7]) ;; *) continue ;; esac
+		eval "_sif=\$sl${_sid}if; _sr=\$s${_sid}r; _st=\$s${_sid}t; _wr=\$w${_sid}r; _wt=\$w${_sid}t; _mr=\$m${_sid}r; _mt=\$m${_sid}t; _yr=\$y${_sid}r; _yt=\$y${_sid}t; _cr=\$cs${_sid}r; _ct=\$cs${_sid}t"
 		# САНИТАЙЗ — ПРОВЕРКОЙ ФОРМЫ, А НЕ `tr`: поля едут в JSON как есть, а приезжают из файла
 		# на флеше, и разорвать строку кавычкой нельзя дать. Через `tr` это было бы ТРИ форка на
 		# выход, а панель дёргает CGI раз в пять секунд — на трёх выходах девять процессов каждые

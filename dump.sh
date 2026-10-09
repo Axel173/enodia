@@ -190,7 +190,7 @@ DUMP_LOGS="enodia-startup enodia-watchdog enodia-switch-vpn-setup enodia-transpo
 enodia-iplist-update enodia-subs-update enodia-notify enodia-notify-event enodia-hev
 enodia-hysteria enodia-byedpi enodia-byedpi-test-run enodia-byedpi-fetch enodia-zapret-nfqws
 enodia-doh enodia-panel-tls enodia-support enodia-xiaomi-bypass enodia-dnsq enodia-restore
-enodia-store-mode enodia-pkg-restart xray xray-access hytest ussl-dbg
+enodia-store-mode enodia-pkg-restart enodia-dns-filter xray xray-access hytest ussl-dbg
 switch-vpn-setup transport-awg-setup iplist-update subs-update notify notify-event hev hysteria
 byedpi byedpi-test-run zapret-nfqws doh panel-tls support xiaomi-bypass"
 # ХВОСТ — имена ДО 02.09.2026 (префикс `enodia-`), и он тут не ради симметрии со списком чистки:
@@ -387,17 +387,17 @@ fi
 # «awg + xray», хотя разбирать чаще приходится ровно их: десинк, доп-выходы и «доступ домой».
 # Все три верба read-only и печатают состояние, а не секреты (ключи пиров дамп не читает — см.
 # шапку: у vpn-server.sh для этого есть `status`, который их не показывает).
-sec "ДОП-ВЫХОДЫ (слоты 2..4 — свой транспорт и свой сервер у каждого)"
+sec "ДОП-ВЫХОДЫ (слоты 2..7 — свой транспорт и свой сервер у каждого)"
 if [ -f "$ENODIA_DIR/slots.sh" ]; then
     sh "$ENODIA_DIR/slots.sh" state 2>/dev/null || echo "(state не отработал)"
     sub "несущие выходов (carriers)"
     sh "$ENODIA_DIR/slots.sh" carriers 2>/dev/null || echo "(нет)"
     sub "слот-марки и таблицы (ip rule)"
-    ip rule 2>/dev/null | grep -E 'fwmark 0x[2-4]' || echo "(слот-правил в ip rule нет)"
+    ip rule 2>/dev/null | grep -E 'fwmark 0x[2-7]' || echo "(слот-правил в ip rule нет)"
     # УЧЁТ ПО ВЫХОДАМ — сюда же, а не в «ресурсы»: разбирают его вместе с самими выходами
     # («карточка показывает не то»), и ответ на это ровно два файла: СЫРОЙ последний замер
     # (первая строка — несущая и WAN, ниже по строке на выход: "s<id> <iface> <rx> <tx>") и
-    # СЕГОДНЯШНЯЯ строка посуточной истории (поля $7..$12 — те же выходы по номерам).
+    # СЕГОДНЯШНЯЯ строка посуточной истории (exit k = fields $(2k+3)/$(2k+4), up to $18 for exit 7).
     # Строки выхода НЕТ = «считать нечем»: у zapret-выхода своей несущей не бывает вовсе, а у
     # выключенного её уже нет — и это ОТВЕТ, а не пропажа.
     sub "учёт трафика по выходам (сырой замер + сегодня)"
@@ -407,6 +407,28 @@ if [ -f "$ENODIA_DIR/slots.sh" ]; then
         "$ENODIA_STATE/.traffic-daily" 2>/dev/null || echo "(.traffic-daily нет)"
 else
     echo "(slots.sh нет — установка до мульти-транспорта)"
+fi
+
+# Traffic by device answers «why is the split empty / wrong» with its STATE, never with names: the files' shape (how many days
+# and devices, the first and last day, the checkpoint's day and boot vs this boot), whether trafficd answers and how many
+# devices it knows, and whether the clock is synced — the tick waits for it. MACs (if any) are masked by redact() as everywhere.
+sec "ТРАФИК ПО УСТРОЙСТВАМ (trafficd → traffic-dev.sh)"
+if [ -f "$ENODIA_DIR/traffic-dev.sh" ]; then
+    _tdh="$ENODIA_STATE/.traffic-dev"
+    if [ -s "$_tdh" ]; then
+        awk 'NF == 4 { n++; d[$1] = 1; if (f == "") f = $1; l = $1; if ($2 == "other") o++ }
+             END { k = 0; for (x in d) k++; printf "история: строк %d, дней %d (с %s по %s), дней с «прочими» %d\n", n, k, f, l, o + 0 }' "$_tdh"
+    else echo "(истории .traffic-dev нет — ни один день ещё не закрыт)"; fi
+    if [ -s "$ENODIA_STATE/.traffic-dev-day" ]; then
+        echo "сохранённый день: $(head -n 1 "$ENODIA_STATE/.traffic-dev-day"), устройств $(awk 'NR > 1' "$ENODIA_STATE/.traffic-dev-day" | grep -c . || true)"
+    else echo "(сохранённого дня .traffic-dev-day нет)"; fi
+    echo "эта загрузка: $(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo '?') · аптайм $(uptime_s) с"
+    echo "ОЗУ: $(ls /tmp/enodia-traffic-dev 2>/dev/null | tr '\n' ' ')· день в ОЗУ: $(head -n 1 /tmp/enodia-traffic-dev/day 2>/dev/null || echo нет)"
+    echo "trafficd сейчас: пар (устройство+адрес) $(sh "$ENODIA_DIR/traffic-dev.sh" snap 2>/dev/null | grep -c . || true)"
+    if command -v clock_trusted >/dev/null 2>&1 && clock_trusted; then echo "часы сверены — тик считает"
+    else echo "часы НЕ сверены — тик ждёт (дельты копятся в счётчиках trafficd)"; fi
+else
+    echo "(traffic-dev.sh нет — установка до разреза по устройствам)"
 fi
 
 sec "ZAPRET / ДЕСИНК (nfqws, NFQUEUE, пулы)"
@@ -637,6 +659,11 @@ if command -v neigh_pairs >/dev/null 2>&1; then
 else
     echo "(нет lease-lib.sh — обновите установку)"
 fi
+
+sec "РАСПИСАНИЯ ДОСТУПА (кому и когда закрыт интернет)"
+# «Почему у ребёнка нет интернета» / «почему расписание не закрыло»: сверены ли часы (без этого не действует ничего), что решил
+# вычислитель и что стоит в ядре — отвечает владелец (access-sched.sh dump), своей копии разбора здесь нет.
+if [ -f "$ENODIA_DIR/access-sched.sh" ]; then sh "$ENODIA_DIR/access-sched.sh" dump 2>&1; else echo "(нет access-sched.sh — обновите установку)"; fi
 
 sec "DNS (dnsmasq)"
 # КАТАЛОГОВ ДВА (грабля проекта): /etc — персист, /tmp — живой, init копирует /etc→/tmp
@@ -951,6 +978,33 @@ fi
 sec "CRON (автозапуск — без него после ребута не поднимется)"
 cat /etc/crontabs/root 2>/dev/null || echo "(crontab пуст?!)"
 
+sec "ЗАДАЧИ (свои задачи из панели — tasks.sh; тексты скриптов НЕ читаем)"
+# The registry answers «what should run», the RAM history «what did run and how it ended». A script's body and variables can
+# hold passwords — only their size goes into a dump that people send for analysis.
+if [ -d "$ENODIA_STATE/tasks" ]; then
+    for _tf in "$ENODIA_STATE/tasks"/t*.task; do
+        [ -f "$_tf" ] || continue
+        _ti=${_tf##*/}; _ti=${_ti%.task}
+        printf '%s: %s\n' "$_ti" "$(grep -E '^(enabled|kind|lang|sched|boot|delay|timeout|overlap|prio|clockwait|keep|mail)=' "$_tf" | tr '\n' ' ')"
+        [ -f "$ENODIA_STATE/tasks/$_ti.body" ] && echo "    скрипт: $(wc -c < "$ENODIA_STATE/tasks/$_ti.body" | tr -d ' ') Б"
+        if grep -q '^origin=' "$_tf"; then echo "    взята из строки crontab"; fi
+        _th=/tmp/enodia-tasks/$_ti.hist
+        if [ -s "$_th" ]; then echo "    последние запуски (время, с, код, повод, №, итог):"; tail -n 3 "$_th" | sed 's/^/      /'
+        else echo "    запусков с загрузки не было"; fi
+    done
+    ls "$ENODIA_STATE/tasks"/t*.task >/dev/null 2>&1 || echo "(задач нет)"
+    # The form — the OWNER's answer (tasks.sh list-json): «off» = Enodia's heal line is not in the crontab (deactivated, removed by
+    # hand) — no task lines, adopted tasks live as plain lines with their mark. A «nothing runs» report starts here.
+    _tform=$(sh "$ENODIA_DIR/tasks.sh" list-json 2>/dev/null | sed -n 's/.*"form":"\([a-z]*\)".*/\1/p')
+    case "$_tform" in
+        on)  echo "форма crontab задач: on (строки задач в crontab)" ;;
+        off) echo "форма crontab задач: off — строки самовосстановления Enodia в crontab нет: задачи не запускаются, взятые из crontab строки работают обычными (метка #enodia-task:)" ;;
+        *)   echo "форма crontab задач: tasks.sh не ответил" ;;
+    esac
+else
+    echo "(задач нет)"
+fi
+
 sec "РАСКЛАДКА (в каком режиме стоит система и откуда идёт cron)"
 # ЗАЧЕМ ЭТА СЕКЦИЯ. Дамп присылают, когда «что-то не работает», а раскладок теперь три: всё на
 # флеше роутера (data), бинари на накопителе (bins) и ВСЁ на накопителе (full). В последней
@@ -1017,7 +1071,7 @@ command -v bin_on_store >/dev/null 2>&1 || bin_on_store() { return 1; }
 # накопителем показывает «xray · роутер» и не объясняет НИЧЕГО: читатель решает, что переезд
 # сломался, и лечит здоровое. Шим на старую библиотеку: «не закреплён».
 command -v bin_pinned >/dev/null 2>&1 || bin_pinned() { return 1; }
-DMP_BINS="amneziawg-go awg xray hysteria hev byedpi nfqws https-dns-proxy dot-proxy panel-tls"
+DMP_BINS="amneziawg-go awg xray hysteria hev byedpi nfqws https-dns-proxy dot-proxy panel-tls dns-filter"
 # СВЕЖА ЛИ СБОРКА — вопрос с одним владельцем (gh-update.sh bin-status: sha стоящего против манифеста, без сети). Без него
 # дамп отвечал «какая версия кода», но не «какая сборка бинаря»: жалоба «DoT уводит на DoH» на dot-proxy до 1.2 и после
 # выглядела одинаково. Прежний апдейтер верба не знает — тогда колонки нет, а не выдуманный ответ.
@@ -1152,9 +1206,10 @@ for lg in $DUMP_LOGS; do
     sub "$lg.log"
     tail -40 "/tmp/$lg.log" 2>/dev/null
 done
-# Пер-слотовые (у доп-выхода СВОЙ инстанс демона и свой лог) — их не было вовсе.
-for i in 2 3 4; do
-    for lg in xray hev hysteria byedpi; do
+# Пер-слотовые (у доп-выхода СВОЙ инстанс демона и свой лог) — их не было вовсе. Names = clean.sh RAM_LOGS_SLOT (the
+# owners' slot_*_log): hev/hysteria/byedpi carry the `enodia-` prefix, and the bare names found only xray (review s.106).
+for i in 2 3 4 5 6 7; do
+    for lg in xray enodia-hev enodia-hysteria enodia-byedpi; do
         [ -s "/tmp/$lg-s$i.log" ] || continue
         sub "$lg-s$i.log (доп-выход №$i)"
         tail -25 "/tmp/$lg-s$i.log" 2>/dev/null

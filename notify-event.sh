@@ -30,6 +30,7 @@
 #                                        перебор VPN-серверов на это время подавлен)
 #   panel-wan-ip                       — web-ui.sh (провайдер сменил внешний адрес: ссылка на
 #                                        панель снаружи протухла, в письме — новая)
+#   task-fail-<id> / task-ok-<id>      — tasks.sh (the user's task failed / finished; mail per the task's own setting)
 #   Полный перечень — у events.sh: там у каждого ключа уровень (level_of) и ПОВОД письма (class_of),
 #   по которому человек выключает письма в панели. Новый ключ вписывают в ОБА case — C33 и C107.
 #

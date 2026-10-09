@@ -179,12 +179,17 @@ web/cgi-bin/diag
 web/cgi-bin/binup
 web-ui.sh
 traffic-acct.sh
+traffic-dev.sh
 support.sh
 devwatch.sh
 dns-hosts.sh
 dns-split.sh
 net-tune.sh
 update-sched.sh
+# «Задачи» — cron manager of the panel: the user's schedule (registry on /data, derived cron lines) and the task runner.
+tasks.sh
+# Access schedules: when a device may go out (registry on /data, per-minute tick of its own cron line, filter FORWARD per MAC).
+access-sched.sh
 # Headless-обновление подписок (cron) + общий слой подписок: их зовут update-sched.sh (job subs)
 # и cgi-bin/action (fetch_sub делегирует закачку — одна копия гарда/gzip-детекта).
 subs-update.sh

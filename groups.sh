@@ -96,7 +96,7 @@ fi
 # --- реестр (TSV на /data): id<TAB>enabled<TAB>dir<TAB>slot<TAB>name[<TAB>src] -----
 # Имя может содержать пробелы (TAB/CR/LF из него вырезаем — иначе поедет разбор строки; кавычки/
 # бэкслеши тоже: JSON отдаём без эскейпа, как emit_wifi).
-# slot — доп-ВЫХОД группы (мульти-транспорт, Ф1): 0 = основной (grp_vpn как раньше), 2..4 =
+# slot — доп-ВЫХОД группы (мульти-транспорт, Ф1): 0 = основной (grp_vpn как раньше), 2..7 =
 # доп-слот (grp_vpn_s<N>, метит mark-core / врайрит zapret-слот). Только для dir=vpn.
 # src  — IPv4 УСТРОЙСТВА, для которого действует группа (нет поля = для всей сети, как было).
 #        Непустой src уводит членов в СВОЙ сет grp_dev_<id> (см. шапку) и разрешает dir=block.
@@ -137,7 +137,7 @@ dev_set() { printf 'grp_dev_%s' "$1"; }   # сет группы устройст
 is_dom()  { dom_ok "$1" || return 1
             echo "$1" | grep -qE '\.([A-Za-z]{2,}|xn--[A-Za-z0-9-]{2,})$' || \
             { echo "$1" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]{1,62}$' && ! echo "$1" | grep -qE '^[0-9]+$'; }; }
-is_slot() { case "$1" in 0|2|3|4) return 0 ;; *) return 1 ;; esac; }
+is_slot() { case "$1" in 0|[2-7]) return 0 ;; *) return 1 ;; esac; }
 valid_id() { echo "$1" | grep -qE '^g[0-9]+$'; }
 
 # Миграция реестра 4-col → 5-col (добавлено поле slot после dir). Старый формат:
@@ -159,7 +159,9 @@ reg_get() { grep "^$1$TAB" "$REG" 2>/dev/null | head -1; }
 # Следующий id — max+1 (детерминированно; удалённые id не переиспользуем, чтобы старый
 # .list-файл-сирота не «прилип» к новой группе). Идиома взята из reg_next_id lists-lib.sh.
 next_id() {
-	_m=$(cut -f1 "$REG" 2>/dev/null | sed -n 's/^g\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)
+	# the number read in awk (decimal): `g012` from an imported registry was octal 10 in ash arithmetic (the next id g11 could be a
+	# live group's) and `g08` an arithmetic error — review s.113, the class of the access schedules' id counter
+	_m=$(cut -f1 "$REG" 2>/dev/null | awk '/^g[0-9]+$/ { n = substr($0, 2) + 0; if (n > m) m = n } END { print m + 0 }')
 	case "$_m" in ''|*[!0-9]*) _m=0 ;; esac
 	printf 'g%s' $((_m + 1))
 }
@@ -342,7 +344,7 @@ _apply_pass() {
 	# Доп-выходы (Ф1): члены группы «в VPN», привязанной к слоту N, идут в СВОЙ сет grp_vpn_s<N>
 	# (его метит mark-core / врайрит zapret-слот), а не в общий grp_vpn. Свои CIDR-накопители на
 	# слот; _any_slot взводится, если хоть одна включённая группа привязана к доп-выходу.
-	for _n in 2 3 4; do : > "$_tp-vpn-s$_n.cidr"; : > "$_tp-vpn-s$_n.dom"; done
+	for _n in 2 3 4 5 6 7; do : > "$_tp-vpn-s$_n.cidr"; : > "$_tp-vpn-s$_n.dom"; done
 	_any_slot=0; _dev_ids=""
 	# Список ВКЛЮЧЁННЫХ доп-выходов (slots.sh). Привязка к выключенному/удалённому слоту → группа
 	# едет ОСНОВНЫМ выходом (grp_vpn), а не молча напрямую: слот = АЛЬТЕРНАТИВНЫЙ выход, его отказ
@@ -357,7 +359,7 @@ _apply_pass() {
 		[ -n "$_id" ] || continue
 		[ "$_en" = 1 ] || continue
 		_f=$(mfile "$_id"); [ -f "$_f" ] || continue
-		case "$_slot" in 2|3|4) ;; *) _slot=0 ;; esac
+		case "$_slot" in [2-7]) ;; *) _slot=0 ;; esac
 		if [ -n "$_src" ]; then
 			# Группа УСТРОЙСТВА: свой сет, общие пулы не трогаем. Гейт выключенного/zapret-выхода
 			# держит apply-bypass (он же владелец правила) — сюда слот входит СЫРЫМ, иначе панель
@@ -408,7 +410,7 @@ _apply_pass() {
 	for _gid in $_dev_ids; do grp_sync "$(dev_set "$_gid")" "$_tp-dev-$_gid.cidr" "$_pairs" || _fail="$_fail $(dev_set "$_gid")"; done
 	# Слот-сеты: заполняем те, что имеют членов ИЛИ уже существуют (иначе IP, потерянные при
 	# отвязке группы от слота, залипли бы в старом сете). Пустой файл = пустой сет (воля юзера).
-	for _n in 2 3 4; do
+	for _n in 2 3 4 5 6 7; do
 		_sf="$_tp-vpn-s$_n.cidr"; _df="$_tp-vpn-s$_n.dom"
 		if [ -s "$_sf" ] || [ -s "$_df" ] || ipset list -n 2>/dev/null | grep -qx "grp_vpn_s$_n"; then
 			grp_sync "grp_vpn_s$_n" "$_sf" "$_pairs" || _fail="$_fail grp_vpn_s$_n"   # домены наполнит dnsmasq — важно, что сет СОЗДАН (зеркало geo.sh)
@@ -432,7 +434,7 @@ _apply_pass() {
 	done
 	rm -f "$_cv" "$_co" "$_pairs" 2>/dev/null
 	for _gid in $_dev_ids; do rm -f "$_tp-dev-$_gid.cidr" 2>/dev/null; done
-	for _n in 2 3 4; do rm -f "$_tp-vpn-s$_n.cidr" "$_tp-vpn-s$_n.dom" 2>/dev/null; done
+	for _n in 2 3 4 5 6 7; do rm -f "$_tp-vpn-s$_n.cidr" "$_tp-vpn-s$_n.dom" 2>/dev/null; done
 	# NSS/ECM-offload держит УЖЕ установленные соединения на старом маршруте до таймаута —
 	# без сброса conntrack изменение группы «не применяется», пока сайт не отвиснет сам.
 	ct_flush
@@ -488,7 +490,7 @@ emit_json() {
 		[ -n "$_id" ] || continue
 		[ "$_first" -eq 1 ] || printf ','
 		_first=0
-		case "$_slot" in 2|3|4) ;; *) _slot=0 ;; esac
+		case "$_slot" in [2-7]) ;; *) _slot=0 ;; esac
 		_f=$(mfile "$_id"); _nd=0; _nc=0
 		IFS="$_old_ifs"
 		if [ -f "$_f" ]; then
@@ -541,13 +543,13 @@ case "$1" in
 		# dir всегда vpn (слот применим только к «в VPN»); группа пустая — домены юзер добавит в
 		# редакторе. do_apply при непустом слоте зовёт slots-up (переиграть врайринг слота).
 		_slot="$2"; shift 2; _name=$(san "$*")
-		is_slot "$_slot" || { echo "слот: 0|2|3|4"; exit 1; }
+		is_slot "$_slot" || { echo "слот: 0|2..7"; exit 1; }
 		[ -n "$_name" ] || { echo "нужно имя группы"; exit 1; }
 		_id=$(next_id)
 		printf '%s\t1\tvpn\t%s\t%s\n' "$_id" "$_slot" "$_name" >> "$REG"
 		: > "$(mfile "$_id")"
 		# Сообщение собираем ДО do_apply: у busybox sh нет `local`, а do_apply гоняет
-		# `while read … _id _slot _name` до EOF (обнуляет их) и `for _n in 2 3 4` — после него
+		# `while read … _id _slot _name` до EOF (обнуляет их) и `for _n in 2 3 4 5 6 7` — после него
 		# _name/_id/_slot пусты, потому add (echo без промежуточного do_apply) не задет, а мы да.
 		_msg="пул «$_name» создан ($_id), выход №$_slot"
 		do_apply >/dev/null
@@ -584,9 +586,9 @@ case "$1" in
 		echo "направление: $([ "$3" = vpn ] && echo 'в VPN' || echo 'мимо VPN')"
 		;;
 
-	slot)  # slot <id> <0|2|3|4> — привязать группу к доп-выходу (0 = основной; только для «в VPN»)
+	slot)  # slot <id> <0|2..7> — привязать группу к доп-выходу (0 = основной; только для «в VPN»)
 		valid_id "$2" || { echo "битый id"; exit 1; }
-		is_slot "$3" || { echo "слот: 0|2|3|4"; exit 1; }
+		is_slot "$3" || { echo "слот: 0|2..7"; exit 1; }
 		_line=$(reg_get "$2"); [ -n "$_line" ] || { echo "нет такой группы"; exit 1; }
 		if [ "$3" != 0 ] && [ "$(printf '%s' "$_line" | cut -f3)" != vpn ]; then
 			echo "доп-выход только для групп «в VPN»"; exit 1
@@ -618,7 +620,7 @@ case "$1" in
 		# чтобы у значения было РОВНО одно направление. Оптовая замена состава мимо них завела бы
 		# один и тот же домен в две группы устройства сразу.
 		[ -n "$(reg_get "$2" | cut -f6)" ] && { echo "это правило устройства — состав меняется на экране устройства (dev-add/dev-del)"; exit 1; }
-		# Счётчик берём ДО do_apply: тот переиспользует свои `_n`/`_id` (`for _n in 2 3 4`,
+		# Счётчик берём ДО do_apply: тот переиспользует свои `_n`/`_id` (`for _n in 2 3 4 5 6 7`,
 		# set_count) — busybox sh без `local` (та же грабля, что в add-bound выше).
 		_added=$(store_members "$(mfile "$2")")
 		do_apply >/dev/null
@@ -632,7 +634,7 @@ case "$1" in
 		# сам — человеческое сообщение ещё и переводится в панели, парсить его нельзя.
 		_dir="$2"; _slot="$3"; shift 3; _name=$(san "$*")
 		case "$_dir" in vpn|bypass) ;; *) echo "направление: vpn|bypass"; exit 1 ;; esac
-		is_slot "$_slot" || { echo "слот: 0|2|3|4"; exit 1; }
+		is_slot "$_slot" || { echo "слот: 0|2..7"; exit 1; }
 		[ "$_dir" = vpn ] || _slot=0    # доп-выход применим только к «в VPN» (зеркало верба dir)
 		[ -n "$_name" ] || { echo "нужно имя группы"; exit 1; }
 		# СОСТАВ — ДО СТРОКИ РЕЕСТРА: `new` обещает группу ВМЕСТЕ с составом, и ноль легших записей (всё отбросила проверка
@@ -662,10 +664,10 @@ case "$1" in
 	# выход) заводится по группе, имя служебное. Заставлять человека сперва «создать группу», а
 	# потом «привязать её к устройству» значило бы показать ему нашу внутреннюю кухню — для
 	# устройства осмысленно ровно одно: список адресов и куда они идут.
-	dev-add)   # dev-add <IP> <vpn|bypass|block> <0|2|3|4> <домен|CIDR>
+	dev-add)   # dev-add <IP> <vpn|bypass|block> <0|2..7> <домен|CIDR>
 		is_ip4 "$2" || { echo "нужен IPv4 устройства"; exit 1; }
 		case "$3" in vpn|bypass|block) ;; *) echo "направление: vpn|bypass|block"; exit 1 ;; esac
-		is_slot "$4" || { echo "выход: 0|2|3|4"; exit 1; }
+		is_slot "$4" || { echo "выход: 0|2..7"; exit 1; }
 		_dip="$2"; _ddir="$3"; _dsl="$4"; [ "$_ddir" = vpn ] || _dsl=0
 		_val=$(norm_member "$5") || { echo "нужен домен или IP/CIDR"; exit 1; }
 		# ZAPRET-выход правилу устройства не назначается — по той же причине, что и устройству
@@ -768,9 +770,9 @@ case "$1" in
 	*)
 		echo "groups.sh — именованные группы правил «в VPN / мимо VPN»"
 		echo "  list | add <vpn|bypass> <имя> | del <id> | rename <id> <имя>"
-		echo "  dir <id> <vpn|bypass> | slot <id> <0|2|3|4> | toggle <id> <0|1> | set-members <id> < stdin | apply"
+		echo "  dir <id> <vpn|bypass> | slot <id> <0|2..7> | toggle <id> <0|1> | set-members <id> < stdin | apply"
 		echo "  new <vpn|bypass> <slot> <имя> < stdin  (создать группу с составом; печатает «id<TAB>членов»)"
-		echo "  правила устройства: dev-add <IP> <vpn|bypass|block> <0|2|3|4> <домен|CIDR> | dev-del <IP> <значение>"
+		echo "  правила устройства: dev-add <IP> <vpn|bypass|block> <0|2..7> <домен|CIDR> | dev-del <IP> <значение>"
 		echo "                      dev-list [IP] | dev-rules | dev-purge <IP>"
 		exit 1
 		;;

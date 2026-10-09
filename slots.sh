@@ -4,10 +4,11 @@
 # «Выход» (slot) = (транспорт, конфиг): доп-туннель/десинк, через который едут ПРИВЯЗАННЫЕ
 # к нему группы (groups.sh) и гео-категории (geo.sh). Основной транспорт (.transport) — это
 # неявный слот №1, ЕГО этот реестр НЕ описывает (истина по-прежнему .transport/transport.sh).
-# Здесь живут только ДОП-слоты: id 2..4 (лимит 3; марки под маской 0x7 — запас на вырост).
+# Only EXTRA slots live here: ids MIN_ID..MAX_ID = 2..7. mark = id and `pref 9<id>` must stay above the base pref 99,
+# so this numbering stops at 8; MAX_ID is the one ceiling, every other literal of the range is checked against it (C130).
 #
 # Дизайн целиком: заметки разработки «мультитранспорт-дизайн». Ключевое:
-#   * марка слота = его id (0x2..0x4) -> ip rule pref 9<id> -> table 100<id>;
+#   * марка слота = его id (0x2..0x7) -> ip rule pref 9<id> -> table 100<id>;
 #   * слот-сеты grp_vpn_s<id> / geo_vpn_s<id> МЕТИТ mark-core.sh (инвариант проекта: логика
 #     «выше miwifi/NFQUEUE» живёт в ОДНОМ месте — там). Этот скрипт правила НЕ СТАВИТ;
 #   * а вот СНИМАЕТ правила своего слота — он (unwire): del/disable обязаны прибрать за собой,
@@ -33,14 +34,14 @@
 #                                  источник для пула проб панели и byedpi-test.sh
 #   slots.sh route <id|0|zapret> <домен> — «а ЭТОТ домен едет через выход?»: резолв + ipset test
 #                                  по сетам цели. TSV: hit|miss|noresolve|badhost<TAB>ip<TAB>сет
-#   slots.sh add <имя> <транспорт> [конфиг] [fallback]  — создать (id = первый свободный 2..4)
+#   slots.sh add <имя> <транспорт> [конфиг] [fallback]  — создать (id = первый свободный 2..7)
 #   slots.sh set <id> <name|transport|config|fallback> <значение>
 #   slots.sh enable <id> / disable <id>
 #   slots.sh del <id>            — снять правила (unwire) + удалить из реестра
 #   slots.sh unwire <id>         — только снять iptables/ip rule слота (без правки реестра)
 #   slots.sh rename-config <транспорт> <старое> <новое> — конфиг ПЕРЕИМЕНОВАН: поле config выходов этого транспорта
 #                                  со старым именем → новое (печатает, сколько строк переписано)
-#   slots.sh key-holder <конфиг> <main|2|3|4> [live] — занят ли КЛЮЧ этого awg-конфига основным каналом или
+#   slots.sh key-holder <конфиг> <main|2..7> [live] — занят ли КЛЮЧ этого awg-конфига основным каналом или
 #                                  другим выходом (0 = занят, причина словами; 1 = свободен; 2 = не судить);
 #                                  без `live` — «можно ли назначить», с `live` — «поднимать ли сейчас» (см. блок ключей)
 #   slots.sh key-map             — «конфиг⇥держатель» по занятым ключам configs/ (пометки в выборе панели)
@@ -59,7 +60,7 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
 SLOTS_FILE="$ENODIA_STATE/.slots"
 MIN_ID=2
-MAX_ID=4
+MAX_ID=7
 TAB=$(printf '\t')
 
 # Где лежит бинарь (store-lib.sh): накопитель = ОПЦИЯ, но если он включён — альт-бинари живут
@@ -77,7 +78,7 @@ command -v slot_socks_port >/dev/null 2>&1 || slot_socks_port() { echo $((10830 
 b64e() { printf '%s' "$1" | base64 | tr -d '\n'; }
 b64d() { printf '%s' "$1" | base64 -d 2>/dev/null; }
 
-valid_id() { case "$1" in 2|3|4) return 0 ;; *) return 1 ;; esac; }
+valid_id() { case "$1" in [0-9]) [ "$1" -ge "$MIN_ID" ] && [ "$1" -le "$MAX_ID" ] ;; *) return 1 ;; esac; }
 
 # Транспорт слота должен быть известен оркестратору (SELECTABLE transport.sh). Дублировать
 # список не хотим (DRY) — но и сорсить transport.sh нельзя (он исполняемый, не либа), поэтому
@@ -358,32 +359,29 @@ cmd_state() {
     done < "$SLOTS_FILE"
 }
 
-cmd_list_json() {
-    _gtsv="$ENODIA_STATE/groups/groups.tsv"
-    _c2=0; _c3=0; _c4=0
+# Bindings of ONE exit -> _bc (groups), _be (geo «в VPN»), _bk (geo keys as a JSON list body). Asked per exit, not
+# tallied into per-id variables: a tally keeps one branch per id and silently drops every id the branches do not name
+# (exits 5..7 read as «0 groups, 0 geo» while bound — review s.106). Group rows count whatever their state, as before.
+# Geo: 5th column of geo/actions.tsv (key⇥action⇥cnt⇥ts⇥slot); the slot is valid only with action=vpn (geo.sh keeps it).
+# Keys are [a-z0-9._!-] (no JSON escape needed; the CGI sanitises the charset again) — the panel lights preset chips by them.
+slot_bindings() {   # $1 = id
+    _bc=0; _be=0; _bk=''
     if [ -f "$_gtsv" ]; then
         while IFS="$TAB" read -r _gid _gen _gdir _gslot _gname _gsrc; do
-            case "$_gslot" in 2) _c2=$((_c2+1)) ;; 3) _c3=$((_c3+1)) ;; 4) _c4=$((_c4+1)) ;; esac
+            [ "$_gslot" = "$1" ] && _bc=$((_bc+1))
         done < "$_gtsv"
     fi
-    # Гео-привязки (Ф1b): 5-я колонка geo/actions.tsv (key⇥action⇥cnt⇥ts⇥slot); считаем только
-    # действующие строки (в реестре нет off), slot валиден лишь при action=vpn — geo.sh это блюдёт.
-    # Заодно СОБИРАЕМ сами ключи на слот (geo_keys) — панель по ним подсвечивает чипы-пресеты
-    # (v2fly-youtube/… привязан ли к этому выходу). Ключи гео = [a-z0-9._!-] (JSON-эскейп не нужен,
-    # как и для name_b64: кавычек/бэкслешей в наборе нет; CGI дополнительно санирует их charset'ом).
-    _g2=0; _g3=0; _g4=0
-    _gk2=''; _gk3=''; _gk4=''
-    _geor="$ENODIA_STATE/geo/actions.tsv"
     if [ -f "$_geor" ]; then
-        while IFS="$TAB" read -r _gk _ga _gc _gt _gs; do
-            [ "$_ga" = vpn ] || continue
-            case "$_gs" in
-                2) _g2=$((_g2+1)); _gk2="$_gk2${_gk2:+,}\"$_gk\"" ;;
-                3) _g3=$((_g3+1)); _gk3="$_gk3${_gk3:+,}\"$_gk\"" ;;
-                4) _g4=$((_g4+1)); _gk4="$_gk4${_gk4:+,}\"$_gk\"" ;;
-            esac
+        while IFS="$TAB" read -r _bkey _ga _gcnt _gt _gs; do
+            [ "$_ga" = vpn ] && [ "$_gs" = "$1" ] || continue
+            _be=$((_be+1)); _bk="$_bk${_bk:+,}\"$_bkey\""
         done < "$_geor"
     fi
+}
+
+cmd_list_json() {
+    _gtsv="$ENODIA_STATE/groups/groups.tsv"
+    _geor="$ENODIA_STATE/geo/actions.tsv"
     _n=0; _first=1; _krlx=0; _krix=0   # держатели ключей — один раз на ответ, а не на выход (живой ключ = вызовы awg)
     printf '{"slots":['
     if [ -s "$SLOTS_FILE" ]; then
@@ -392,9 +390,7 @@ cmd_list_json() {
             _n=$((_n+1))
             [ "$_first" = 1 ] || printf ','
             _first=0
-            case "$id" in 2) _gc=$_c2 ;; 3) _gc=$_c3 ;; 4) _gc=$_c4 ;; *) _gc=0 ;; esac
-            case "$id" in 2) _ge=$_g2 ;; 3) _ge=$_g3 ;; 4) _ge=$_g4 ;; *) _ge=0 ;; esac
-            case "$id" in 2) _gk=$_gk2 ;; 3) _gk=$_gk3 ;; 4) _gk=$_gk4 ;; *) _gk='' ;; esac
+            slot_bindings "$id"
             # state — честный статус (см. slot_state): панель красит точку и объясняет, почему
             # включённый выход не везёт трафик. Выключенный не щупаем (правил у него нет).
             if [ "$en" = on ]; then _st=$(slot_state "$id" "$t" "$fb"); else _st=off; fi
@@ -410,7 +406,7 @@ cmd_list_json() {
                 _kcl=$(awg_ids "$AWG_CONFIGS/$cfg.conf" | key_match "$_kr" "s$id" | head -n1 | cut -f2)
             fi
             printf '{"id":%s,"name_b64":"%s","transport":"%s","config":"%s","fallback":"%s","enabled":%s,"state":"%s","groups":%s,"geo":%s,"geo_keys":[%s],"key_clash":"%s"}' \
-                "$id" "$nb" "$t" "$cfg" "$fb" "$([ "$en" = on ] && echo true || echo false)" "$_st" "$_gc" "$_ge" "$_gk" "$_kcl"
+                "$id" "$nb" "$t" "$cfg" "$fb" "$([ "$en" = on ] && echo true || echo false)" "$_st" "$_bc" "$_be" "$_bk" "$_kcl"
         done < "$SLOTS_FILE"
     fi
     # Транспорты, готовые нести ДОП-ВЫХОД, — от ОРКЕСТРАТОРА (`transport.sh slot-list`),
@@ -591,7 +587,7 @@ key_busy_msg() {
     echo "$_mwhat. Один ключ AmneziaWG не держит два подключения: сервер оставит одно, и второе будет постоянно отваливаться. Заведите отдельный конфиг (с другим ключом)."
 }
 key_self() { case "$1" in main|none) printf '%s' "$1" ;; *) printf 's%s' "$1" ;; esac; }
-# key-holder <имя конфига> <main|2|3|4> [live] — CLI-вход для switch-vpn.sh (intent) и transport-awg.sh (live).
+# key-holder <имя конфига> <main|2..7> [live] — CLI-вход для switch-vpn.sh (intent) и transport-awg.sh (live).
 # Код: 0 — ЗАНЯТ (в stdout причина словами), 1 — свободен, 2 — судить не по чему (нет файла/ключа).
 cmd_key_holder() {
     _kc="$1"; _ks=$(key_self "$2"); _kmode=intent; [ "$3" = live ] && _kmode=live
@@ -645,7 +641,7 @@ cmd_add() {
         [ -z "$(slot_line "$i")" ] && { id=$i; break; }
         i=$((i+1))
     done
-    [ -n "$id" ] || { slots_lock_drop; echo "[slots] мест нет (лимит $((MAX_ID-MIN_ID+1)) доп-выхода)"; return 1; }
+    [ -n "$id" ] || { slots_lock_drop; echo "[slots] мест нет: заняты все $((MAX_ID-MIN_ID+1)) доп-выходов"; return 1; }
     _slots_write "$id" "$(b64e "$name")" "$t" "$cfg" "$fb" on
     slots_lock_drop
     # Строка пишется сразу en=on ⇒ выход ОБЯЗАН начать работать здесь же, а не через тик
@@ -689,7 +685,7 @@ cmd_rename_config() {
 # как весь персист проекта) — sed по TSV с base64 внутри хрупок, собираем строку заново.
 cmd_set() {
     id="$1"; field="$2"; val="$3"
-    valid_id "$id" || { echo "[slots] id = 2..4"; return 1; }
+    valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
     line=$(slot_line "$id"); [ -n "$line" ] || { echo "[slots] нет слота №$id"; return 1; }
     old_nb=$(echo "$line" | cut -f2); old_t=$(echo "$line" | cut -f3)
     old_cfg=$(echo "$line" | cut -f4); old_fb=$(echo "$line" | cut -f5); old_en=$(echo "$line" | cut -f6)
@@ -806,7 +802,7 @@ slot_activate() {
 
 cmd_toggle() {
     id="$1"; en="$2"
-    valid_id "$id" || { echo "[slots] id = 2..4"; return 1; }
+    valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
     [ -n "$(slot_line "$id")" ] || { echo "[slots] нет слота №$id"; return 1; }
     TRANSPORT_SH="$ENODIA_DIR/transport.sh"
     if [ "$en" = on ]; then
@@ -837,7 +833,7 @@ cmd_toggle() {
 # для установленных соединений (грабля проекта). Дешёвого точечного -D по сету нет — флашим.
 cmd_unwire() {
     id="$1"
-    valid_id "$id" || { echo "[slots] id = 2..4"; return 1; }
+    valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
     for sset in "grp_vpn_s$id" "geo_vpn_s$id"; do
         for chain in PREROUTING OUTPUT; do
             while iptables -t mangle -D "$chain" -m set --match-set "$sset" dst -j ACCEPT 2>/dev/null; do :; done
@@ -853,7 +849,7 @@ cmd_unwire() {
 
 cmd_del() {
     id="$1"
-    valid_id "$id" || { echo "[slots] id = 2..4"; return 1; }
+    valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
     line=$(slot_line "$id"); [ -n "$line" ] || { echo "[slots] нет слота №$id"; return 1; }
     # Включённый слот — сперва опустить несущую/десинк через оркестратор (строка ещё on, диспетч
     # работает), потом снять ядро-следы и удалить из реестра.
@@ -888,5 +884,5 @@ case "$1" in
     rename-config) cmd_rename_config "$2" "$3" "$4" ;;
     key-holder)   cmd_key_holder "$2" "$3" "$4" ;;
     key-map)      cmd_key_map ;;
-    *) echo "usage: $0 list|list-enabled|list-json|state|carriers|show <id>|domains <id|0> [кап]|route <id|0> <домен>|add <имя> <транспорт> [конфиг] [fallback]|set <id> <поле> <знач>|enable <id>|disable <id>|del <id>|unwire <id>|rename-config <транспорт> <старое> <новое>|key-holder <конфиг> <main|2..4> [live]|key-map"; exit 2 ;;
+    *) echo "usage: $0 list|list-enabled|list-json|state|carriers|show <id>|domains <id|0> [кап]|route <id|0> <домен>|add <имя> <транспорт> [конфиг] [fallback]|set <id> <поле> <знач>|enable <id>|disable <id>|del <id>|unwire <id>|rename-config <транспорт> <старое> <новое>|key-holder <конфиг> <main|2..7> [live]|key-map"; exit 2 ;;
 esac

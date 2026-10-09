@@ -36,7 +36,7 @@ BIN_DIR="$ENODIA_BIN"
 if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
 
 # Второе сито: имена НАШИХ демонов, чья командная строка может не содержать наших путей.
-OUR_BINS="amneziawg-go awg xray hysteria hev byedpi ciadpi nfqws panel-tls https-dns-proxy dot-proxy"
+OUR_BINS="amneziawg-go awg xray hysteria hev byedpi ciadpi nfqws panel-tls https-dns-proxy dot-proxy dns-filter"
 
 TOPN=8            # столько чужих процессов показываем поимённо, остальные — одной строкой
 

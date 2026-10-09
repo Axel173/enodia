@@ -645,7 +645,7 @@ sweep_touch() { date +%s > "$SWEEP_LOCK"; }
 sweep_target() {
     case "${1:-}" in
         '')      SW_ARGS="$ARGS_FILE"; SW_BAK="$SWEEP_BAK"; SW_SLOT="" ;;
-        2|3|4)   SW_ARGS="$ENODIA_STATE/.byedpi-args-s$1"; SW_BAK="$ENODIA_STATE/.byedpi-args-s$1.sweepbak"; SW_SLOT="$1" ;;
+        [2-7])   SW_ARGS="$ENODIA_STATE/.byedpi-args-s$1"; SW_BAK="$ENODIA_STATE/.byedpi-args-s$1.sweepbak"; SW_SLOT="$1" ;;
         *)       return 1 ;;
     esac
     return 0
@@ -831,7 +831,7 @@ slot_stop_daemons() {   # $1 = id
 # конфига НЕТ (десинк локальный, config='-') — cfg игнорируем. Идемпотентно (reup: watchdog зовёт slot-up).
 cmd_slot_up() {   # $1 = id ; $2 = cfg (игнор)
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     owner_rule_add          # анти-петля (egress ciadpi мимо маркировки) ДО подъёма; ref-count держит её
     if ! slot_start_daemons "$_id"; then
         log "слот №$_id: несущая byedpi не поднялась -> выход живёт по fallback-политике (mark-core)"
@@ -846,7 +846,7 @@ cmd_slot_up() {   # $1 = id ; $2 = cfg (игнор)
 }
 cmd_slot_down() {   # $1 = id
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     slot_remove_routing "$_id"
     slot_stop_daemons "$_id"
     owner_rule_needed "$_id" || owner_rule_del   # снять анти-петлю, если не нужна ни транспорту, ни др. byedpi-слоту
@@ -862,7 +862,7 @@ cmd_slot_down() {   # $1 = id
 # Слот не поднят → no-op 0: стратегия лежит в файле и применится при slot-up (тот читает её сам).
 cmd_slot_reload() {   # $1 = id
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) log "слот: id = 2..4"; return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     _pid=$(slot_ciadpi_pid "$_id"); _port=$(slot_socks_port "$_id")
     proc_alive "$_pid" || { log "слот №$_id: ciadpi не запущен — новая стратегия применится при включении выхода"; return 0; }
     # ГОНКА (поймана на железе dev43): ciadpi отвечает на SIGTERM не мгновенно, а порт отпускает
@@ -900,7 +900,7 @@ cmd_slot_reload() {   # $1 = id
 # fail и уводил транспорт на awg (та же грабля, что в основном cmd_health).
 cmd_slot_health() {   # $1 = id
     _id="$1"
-    case "$_id" in 2|3|4) ;; *) return 1 ;; esac
+    case "$_id" in [2-7]) ;; *) return 1 ;; esac
     # Свип (панель применяет стратегии вживую) = штатные рестарты ciadpi. Не судим — иначе
     # сторож принял бы подбор стратегии за падение выхода и погасил бы его посреди свипа.
     sweep_fresh && return 0
