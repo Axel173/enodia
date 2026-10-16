@@ -10,7 +10,11 @@
 #
 #  без параметров  -> сервер АКТИВНОГО транспорта: {transport,server,ms,method} (для шапки).
 #  ?all=1          -> ВСЕ конфиги всех транспортов: {configs:[{transport,name,host,port,
-#                     proto,active,ms,method}]} (для окна «Серверы и конфиги»).
+#                     proto,active,ms,method,cdn,blk,tms,tmt,ncmp,via,vup,vms,vmt}]} (для окна «Серверы и конфиги»):
+#                     blk/tms/tmt — напрямую молчит (и при повторе тем же способом — direct_again), через туннель отвечает
+#                     (адрес заблокирован провайдером);
+#                     ncmp — напрямую молчит, а сравнить не с чем: живой несущей, ведущей к другому серверу, нет;
+#                     via/vms/vmt — сервер на дороге (road.sh) и его число через неё (tmt/vmt — чем ответил, как method).
 # Проба идёт НАПРЯМУЮ (endpoint VPS в main-таблице, не через туннель) — честная задержка.
 # 2FA-гейт (totp.sh) — см. разбор в cgi-bin/status.
 # uhttpd НЕ ПЕРЕДАЁТ CGI своё окружение (замер на железе 01.09.2026 пробным CGI: все ENODIA_*
@@ -43,6 +47,7 @@ echo ""
 D=${ENODIA_DIR:-/data/usr/app/enodia}
 DS=${ENODIA_STATE:-/data/usr/app/enodia-state}
 DB=${ENODIA_BIN:-/data/usr/app/enodia-bin}
+TAB=$(printf '\t')
 
 # WAN-интерфейс: пробу гоним НАПРЯМУЮ через него. КРИТИЧНО: IP серверов подписки часто ∈
 # iplist_set → curl из роутера к ним МАРКИРУЕТСЯ 0x1 → уходит в АКТИВНЫЙ туннель (xtun/awg0),
@@ -57,6 +62,12 @@ DB=${ENODIA_BIN:-/data/usr/app/enodia-bin}
 if [ -f "$D/ip-lib.sh" ]; then . "$D/ip-lib.sh"; fi
 command -v wan_iface >/dev/null 2>&1 || wan_iface() { ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'; }
 WAN=$(wan_iface)
+# Возраст отметки времени с защитой от скачка часов (рукопожатия несущих — tunnels). Шим = прежнее поведение.
+if [ -f "$D/clock-lib.sh" ]; then . "$D/clock-lib.sh"; fi
+command -v age_since >/dev/null 2>&1 || age_since() {
+	case "$1" in ''|*[!0-9]*) echo 999999; return ;; esac
+	[ "$1" -gt 0 ] && echo $(( $(date +%s) - $1 )) || echo 999999
+}
 
 # CDN-детект (Cloudflare). ЗАЧЕМ: сервер подписки за Cloudflare (напр. sweden.cloudpath.live
 # -> 172.65.160.81) отвечает на TCP-443 БЛИЖАЙШИМ edge-узлом CDN, а не origin-сервером →
@@ -78,16 +89,17 @@ is_cdn() {
 		exit 1 }'
 }
 
-# tcp_ms <host> <port> [connect-timeout] -> печатает "МС|IP": МС = TCP-рукопожатие (мс, пусто
-# если не соединились), IP = %{remote_ip} (к кому реально подключились — для CDN-детекта).
+# tcp_ms <host> <port> [connect-timeout] [iface] -> печатает "МС|IP": МС = TCP-рукопожатие (мс, пусто
+# если не соединились), IP = %{remote_ip} (к кому реально подключились — для CDN-детекта). iface — к чему
+# привязать пробу (деф. WAN — прежний путь байт в байт; туннель — у probe_if ниже).
 # ВАЖНО: возвращаем IP В STDOUT, а НЕ через глобал — вызов идёт в $(...) (субшелл), и присвоение
 # глобалу там потерялось бы (ловушка: cdn всегда был false, хотя awk-матч верный). Callers берут
 # МС как ${r%%|*}, IP как ${r#*|}.
 tcp_ms() {
-	th="$1"; tp="$2"; ct="${3:-2}"
+	th="$1"; tp="$2"; ct="${3:-2}"; ti="${4:-$WAN}"
 	{ [ -n "$th" ] && [ -n "$tp" ]; } || { printf '|'; return 0; }
 	ch="$th"; case "$th" in *:*) ch="[$th]" ;; esac   # IPv6 в скобки для curl
-	tc=$(curl -s -o /dev/null ${WAN:+--interface $WAN} --connect-timeout "$ct" --max-time $((ct+2)) -w '%{time_connect} %{remote_ip}' "http://$ch:$tp" 2>/dev/null)
+	tc=$(curl -s -o /dev/null ${ti:+--interface $ti} --connect-timeout "$ct" --max-time $((ct+2)) -w '%{time_connect} %{remote_ip}' "http://$ch:$tp" 2>/dev/null)
 	tms=$(awk -v t="${tc%% *}" 'BEGIN{ if(t+0>0) printf "%.0f", t*1000 }')
 	printf '%s|%s' "$tms" "${tc##* }"
 }
@@ -120,7 +132,179 @@ probe() {
 }
 cdn_json() { [ "$CDN" = 1 ] && printf true || printf false; }
 
+# ПРОБА ЧЕРЕЗ ТУННЕЛЬ — те же пробы, только привязанные не к WAN, а к живой несущей. Отвечает на два вопроса:
+#  * «напрямую молчит, а через туннель отвечает» = провайдер режет АДРЕС, сервер жив (BE7000 09.10.2026: у VPS через eth0
+#    молчали все порты, через awg0 22/443 открыты за 58 мс) — панель пишет «адрес заблокирован провайдером», а не «не отвечает»;
+#  * сервер на ДОРОГЕ (road.sh) — его число меряется через дорогу.
+# Только открытые порты и ICMP: «быстрый отказ» как признак жизни не годится — через несущую без маршрута соединение рвётся
+# так же мгновенно, и это было бы ложное «заблокирован». Нет открытого порта — вердикта нет («не отвечает», как раньше).
+# VMT — чем ответил (tcp | net:<порт> | icmp), как METHOD у прямой пробы: панель подписывает число тем же «(:443)».
+probe_if() {   # $1 = iface, $2 = host, $3 = port, $4 = proto -> VMS (мс или пусто), VMT
+	VMS=""; VMT=""
+	{ [ -n "$1" ] && [ -n "$2" ]; } || return 0
+	if [ "$4" = tcp ] && [ -n "$3" ]; then r=$(tcp_ms "$2" "$3" 2 "$1"); VMS=${r%%|*}; [ -n "$VMS" ] && { VMT=tcp; return 0; }; fi
+	for cp in 443 80 22; do
+		{ [ "$4" = tcp ] && [ "$cp" = "$3" ]; } && continue
+		r=$(tcp_ms "$2" "$cp" 1 "$1"); VMS=${r%%|*}; [ -n "$VMS" ] && { VMT="net:$cp"; return 0; }
+	done
+	im=$(ping -c1 -W1 -I "$1" "$2" 2>/dev/null | sed -n 's/.*time=\([0-9.][0-9.]*\).*/\1/p' | head -1)
+	VMS=$(awk -v t="$im" 'BEGIN{ if(t+0>0) printf "%.0f", t }'); [ -n "$VMS" ] && VMT=icmp
+	return 0
+}
+# «BLOCKED» IS SAID ONLY OF A SERVER THAT KEPT SILENT DIRECTLY TWICE (BE7000, the walk of 12.10.2026). The direct pass gives each
+# port ONE second — one SYN: lost on the way, it reads «silent», the tunnel then answers, and the screen said «адрес заблокирован
+# провайдером» about a server that answered directly a minute before and a minute after (TCP :22 in 31–64 ms; the person: «вроде
+# же не заблокирован?»). One failed pass is not a cause. So once the tunnel HAS answered, the direct path is asked again — by the
+# very way the tunnel answered (that port, or ICMP: it is known to be open) and with room for a retransmit: BLK_AGAIN_T seconds.
+# It answers — the server is reachable directly: its number, no verdict. Costs nothing unless the verdict is about to be said.
+BLK_AGAIN_T=3
+direct_again() {   # $1 = host, $2 = its own port, $3 = how the tunnel answered (VMT) -> MS, METHOD (+CDN) when it answers directly after all
+	case "$3" in
+		tcp)   r=$(tcp_ms "$1" "$2" "$BLK_AGAIN_T") ;;
+		net:*) r=$(tcp_ms "$1" "${3#net:}" "$BLK_AGAIN_T") ;;
+		icmp)  im=$(ping -c2 -W"$BLK_AGAIN_T" ${WAN:+-I $WAN} "$1" 2>/dev/null | sed -n 's/.*time=\([0-9.][0-9.]*\).*/\1/p' | head -1)
+		       MS=$(awk -v t="$im" 'BEGIN{ if(t+0>0) printf "%.0f", t }'); [ -n "$MS" ] && METHOD=icmp
+		       return 0 ;;
+		*)     return 0 ;;
+	esac
+	MS=${r%%|*}
+	[ -n "$MS" ] && { METHOD=$3; TCP_IP=${r#*|}; is_cdn "$TCP_IP" && CDN=1; }
+	return 0
+}
+# LIVE CARRIERS TO COMPARE THROUGH — «iface address» per line: the main one (default in table 1000 —
+# ip-lib.sh::carrier_iface) and every exit that is up (default in its table 100N). None — nothing to compare with: there is no
+# «blocked» verdict, and the answer says so (`ncmp`) — the panel then offers the road instead of a bare «не отвечает».
+# ТОЛЬКО WireGuard (awg*): tun2socks (xtun — Xray, Hysteria2, ByeDPI) отвечает на SYN САМ (lwIP) и лишь потом идёт к серверу по
+# socks — «соединились за 0 мс» через него будет и у выключенного сервера, то есть ложное «адрес заблокирован» (ревью с.118).
+# The address is where the carrier's daemon goes NOW (`awg show … endpoints`): tunnel_for() needs it.
+# THE ORDER: carriers with a FRESH handshake first. tunnel_for() takes the first that fits, and one answer is all it asks: a
+# carrier that has its route but is silent itself (its server fell, the watchdog has not come yet) stood first and gave «no
+# answer through the tunnel» while a live one stood right behind it. A stale handshake is not «dead» (an idle exit without a
+# keepalive renews it on the first packet) — such carriers stay in the list, after the fresh ones. TUN_MAIN_LIVE — the main
+# carrier is among the fresh: its own server answers it (main_carries).
+HS_FRESH=180
+TUNS=""; TUNS_SET=0; TUN_MAIN=""; TUN_MAIN_LIVE=0
+tunnels() {
+	[ "$TUNS_SET" = 0 ] || return 0
+	TUNS_SET=1
+	command -v carrier_iface >/dev/null 2>&1 && TUN_MAIN=$(carrier_iface)
+	case "$TUN_MAIN" in awg*) ;; *) TUN_MAIN="" ;; esac
+	_tl=$TUN_MAIN
+	for _tn in 2 3 4 5 6 7; do
+		_td=$(ip route show table "100$_tn" 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')   # not-wan: несущие ВЫХОДОВ
+		case "$_td" in awg*) _tl="$_tl $_td" ;; esac
+	done
+	_tfr=""; _tst=""
+	for _td in $_tl; do
+		_te=$("$DB/awg" show "$_td" endpoints 2>/dev/null | awk 'NR==1{print $2}'); _te=${_te%:*}
+		_th=$("$DB/awg" show "$_td" latest-handshakes 2>/dev/null | awk 'NR==1{print $2}')
+		if [ "$(age_since "$_th")" -lt "$HS_FRESH" ]; then
+			[ "$_td" = "$TUN_MAIN" ] && TUN_MAIN_LIVE=1
+			_tfr="$_tfr$_td $(printf '%s' "$_te" | tr -d '[]')
+"
+		else
+			_tst="$_tst$_td $(printf '%s' "$_te" | tr -d '[]')
+"
+		fi
+	done
+	TUNS="$_tfr$_tst"
+}
+# The ACTIVE AmneziaWG config whose own tunnel CARRIES NOW (the main carrier is AmneziaWG and its handshake is fresh). Such a
+# server is reachable — it answers its tunnel — whatever a bare connect from outside says: silence to TCP/ICMP is the norm for a
+# VPS that opens only its UDP port. It is not compared with anything: «blocked» there offered a road to a working server, and
+# «nothing to compare with» had nothing to say either (review s.121). tunnels() first.
+main_carries() { [ -n "$TUN_MAIN" ] && [ "$TUN_MAIN_LIVE" = 1 ]; }
+# tunnel_for <host> <own:1|0> -> the first live carrier that is a SECOND PATH to the host. Two kinds are not: the main carrier for
+# the ACTIVE AmneziaWG config (`own` — that server's own tunnel; a silent active one IS the dead tunnel, the header says so) and
+# any carrier whose daemon goes to this very address (a second config of the same VPS, an exit on this config). Through its own
+# tunnel a server is asked from the inside: a VPS closed from the outside by its firewall answers itself there, and that would
+# read «blocked by the ISP» on a working server.
+# tunnels() is called FIRST and outside `$(…)`: a subshell would lose the list it builds.
+tunnel_for() {
+	printf '%s' "$TUNS" | while read -r _fi _fe; do
+		[ -n "$_fi" ] || continue
+		[ "$2" = 1 ] && [ "$_fi" = "$TUN_MAIN" ] && continue
+		[ -n "$_fe" ] && [ "$_fe" = "$1" ] && continue
+		printf '%s' "$_fi"; break
+	done
+}
+# Дороги конфигов (road.sh list: `awg/<файл>⇥<id>`) — один запуск на весь ответ.
+ROADS=""; [ -f "$D/road.sh" ] && [ -s "$DS/.cfg-via" ] && ROADS=$(sh "$D/road.sh" list 2>/dev/null)
+road_of() { [ -n "$ROADS" ] && printf '%s\n' "$ROADS" | awk -F'\t' -v k="$1" '$1==k { print $2; exit }'; }
+
 clean() { printf '%s' "$1" | tr -d '"\\ '; }
+
+# AN AMNEZIA PREMIUM AmneziaWG SERVER (premium.sh): its Endpoint is Amnezia's relay, and the relay answers neither ICMP nor any TCP
+# port — «нет ответа» on a server that carried an exit the same minute (walk 14.10.2026). Its number is THE TUNNEL'S OWN (the
+# user's request 14.10.2026): a TCP connect to 1.1.1.1:443 through it. A server in use is measured through its LIVE interface —
+# awg0 (the active config) or awgN (an exit's): a second interface on the same key would make Amnezia's server swing between two
+# addresses and cut the live tunnel. A server not in use — through a throwaway interface on its key (transport-awg.sh try: the
+# handshake first, then the measure). An exit that holds it and is down — no number: nothing carries it now, and a probe on its key
+# could meet the exit's own raise. METHOD=tun.
+# THE THROWAWAY PROBE IS NOT RUN (review s.136 r2, L2): for the ACTIVE config without awg0 (awg0 is absent for seconds inside every
+# switch — a second endpoint on the key it is about to raise, at the very handshake the switch judges); while a switch or a watchdog
+# tick drives a carrier (the same window, by the owner's answer — daemon-lib.sh::carrier_busy); on a key a live interface holds under
+# another name (slots.sh key-holder … live — the project's one answer). It goes by the config's road (TRY_ROAD; review s.136 r2, M3).
+# BUSY IS NOT A VERDICT (review s.136 r2, L1): the probe interface held by another probe longer than the wait (the panel's sweep asks
+# four at a time, and Premium servers stand side by side), or a switch running — METHOD=busy with no number; the panel keeps no
+# verdict of it.
+# prem_srv <name> — 0: the config's OWNER (the longest tag, as everywhere) is an Amnezia Premium subscription (its link is a key).
+prem_srv() {
+	case "$1" in sub-*-awg) ;; *) return 1 ;; esac
+	[ -s "$DS/.subs" ] || return 1
+	awk -F'\t' -v n="$1" '{ p = "sub-" $1 "-"; if (substr(n, 1, length(p)) == p && length($1) > bl) { bl = length($1); pr = ($2 ~ /^vpn:\/\//) } } END { exit pr ? 0 : 1 }' "$DS/.subs"
+}
+PM_TUN_HOST=1.1.1.1
+# $3 = live — only through a live interface, never a throwaway one: the header asks every 10 s, and an interface up and down each time
+# is not a measure but a load.
+# NOT MEASURED IS NOT DEAD (review s.136 r3, router L1 / panel 2): every branch that chooses not to measure answers a method the panel
+# keeps no verdict of — `busy` (a switch or a tick drives a carrier now, the probe interface held by others) or `idle` (the key is live
+# elsewhere under another name, or held by an exit that is down: nothing carries it now). An empty method with no number used to reach
+# the panel as ✗, cached for every device.
+# MEASURED SILENCE IS STILL `tun` (walk 15.10.2026, dev.20): a probe that ran — through a live interface or a throwaway one — and got
+# no answer says so with METHOD=tun and no number. The key does not carry; the panel says that instead of an endpoint's silence or
+# a second opinion about the relay (one address for every country — the same relay carried FI that minute).
+prem_ms() {   # $1 = config name, $2 = active (true|false) [$3 = live] -> MS, METHOD (tun | busy | idle: no verdict) — or nothing
+	MS=""; METHOD=""; CDN=0; TCP_IP=""; _pi=""
+	[ -n "$PM_LIB" ] || { PM_LIB=1; if [ -f "$D/daemon-lib.sh" ]; then . "$D/daemon-lib.sh"; fi; }
+	command -v carrier_busy >/dev/null 2>&1 || carrier_busy() { return 1; }
+	if [ "$2" = true ]; then
+		if [ -d /sys/class/net/awg0 ]; then _pi=awg0
+		else
+			# The ACTIVE config without awg0. Inside a switch (or a tick) — no verdict: a throwaway interface would meet the key the
+			# switch is raising. AmneziaWG should carry and awg0 is gone — no verdict either (the watchdog judges that). The VPN switched
+			# off by hand, or another transport carrying with no warm reserve — its key is not live: measured as a free server below.
+			if [ -e /tmp/enodia-switching.lock ] || carrier_busy; then METHOD=busy; return 0; fi
+			case "$(cat "$DS/.transport" 2>/dev/null | tr -d ' \r\n')" in
+				''|awg) [ -f "$DS/.vpn-off" ] || { METHOD=busy; return 0; } ;;
+			esac
+		fi
+	else
+		_ph=$([ -f "$D/slots.sh" ] && sh "$D/slots.sh" holders awg "$1" 2>/dev/null </dev/null | grep -E '^[2-7](,[2-7])*$' | head -n 1)
+		if [ -n "$_ph" ]; then
+			_ph=${_ph%%,*}; [ -d "/sys/class/net/awg$_ph" ] || { METHOD=idle; return 0; }
+			_pi="awg$_ph"
+		fi
+	fi
+	if [ -n "$_pi" ]; then
+		r=$(tcp_ms "$PM_TUN_HOST" 443 3 "$_pi"); MS=${r%%|*}; METHOD=tun
+		return 0
+	fi
+	[ "${3:-}" != live ] || return 0
+	[ -f "$D/transport-awg.sh" ] && [ -f "$DS/configs/$1.conf" ] || return 0
+	if [ -e /tmp/enodia-switching.lock ] || carrier_busy; then METHOD=busy; return 0; fi
+	if [ -f "$D/slots.sh" ] && sh "$D/slots.sh" key-holder "$1" none live >/dev/null 2>&1 </dev/null; then METHOD=idle; return 0; fi
+	_pn=0; _po=""; _pr=1
+	while [ "$_pn" -lt 8 ]; do
+		_po=$(TRY_MS=1 TRY_ROAD=$1 sh "$D/transport-awg.sh" try "$DS/configs/$1.conf" "https://$PM_TUN_HOST/cdn-cgi/trace" 6 2>/dev/null </dev/null); _pr=$?
+		[ "$_pr" = 5 ] || break      # another probe holds the throwaway interface — its turn first
+		sleep 2; _pn=$((_pn + 1))
+	done
+	[ "$_pr" != 5 ] || { METHOD=busy; return 0; }
+	MS=$(printf '%s\n' "$_po" | sed -n 's/^try_ms=\([0-9][0-9]*\)$/\1/p' | head -n 1)
+	METHOD=tun
+	return 0
+}
 
 # Разбор host:port (учитывая [v6]:port). $1 = строка "host:port" -> EH, EP.
 split_hp() {
@@ -149,10 +333,58 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 	first=1
 	emit() { # transport name host port proto active
 		[ "$first" = 1 ] || printf ','; first=0
-		probe "$3" "$4" "$5"
+		_pmx=0
+		if [ "$1" = awg ] && prem_srv "$(clean "$2")"; then prem_ms "$(clean "$2")" "$6"; _pmx=1; else probe "$3" "$4" "$5"; fi
 		msj=$MS; [ -n "$msj" ] || msj=null
-		printf '{"transport":"%s","name":"%s","host":"%s","port":"%s","proto":"%s","active":%s,"ms":%s,"method":"%s","cdn":%s}' \
-			"$1" "$(clean "$2")" "$(clean "$3")" "${4:-}" "$5" "$6" "$msj" "${METHOD:-}" "$(cdn_json)"
+		# Дорога (road.sh, только AmneziaWG): число — ЧЕРЕЗ НЕЁ, интерфейс дороги — awg<id>.
+		# vup — выход-дорога поднят: тогда число судят через неё; лежит — пакеты к серверу идут напрямую (fail-open), и честное число —
+		# прямое (ревью с.118: при лежащей дороге работающий напрямую сервер рисовался ✗).
+		rv=""; vmj=null; vmt=""; vup=false
+		if [ "$1" = awg ]; then
+			rv=$(road_of "awg/$(clean "$2")")
+			if [ -n "$rv" ] && [ -d "/sys/class/net/awg$rv" ]; then
+				vup=true
+				# An Amnezia Premium server: prem_ms has already measured it by this road (TRY_ROAD, or a live carrier following the
+				# kernel's road rule) — and its relay answers no probe through the road either: the probe painted a working server ✗ and
+				# threw the right number away (review s.136 r3, M2).
+				if [ "$_pmx" = 1 ]; then [ -n "$MS" ] && { vmj=$MS; vmt=$METHOD; }
+				else probe_if "awg$rv" "$3" "$4" "$5"; [ -n "$VMS" ] && { vmj=$VMS; vmt=$VMT; }; fi
+			fi
+		fi
+		# Silent directly — asked again through a live carrier that is a second path to it (tunnel_for): an answer there ⇒ «address
+		# blocked by the ISP». No such carrier — nobody was asked, and that is said too (`ncmp`): «не отвечает» with nothing to
+		# compare with is not «the server is dead» (the only server, blocked — its own tunnel is the one that fell).
+		blk=false; tmj=null; tmt=""; ncmp=false
+		# An Amnezia Premium relay answers nobody from outside — «blocked by the ISP» or «nothing to compare with» would be about the
+		# relay's silence, not the server; its own tunnel is its number (prem_ms).
+		if [ -z "$MS" ] && [ -n "$3" ] && [ "$_pmx" = 0 ]; then
+			_own=0; [ "$1" = awg ] && [ "$6" = true ] && _own=1
+			tunnels
+			if [ "$_own" = 1 ] && main_carries; then :   # reachable through its own tunnel — nothing is compared, nothing is claimed
+			else
+				_ti=$(tunnel_for "$(clean "$3")" "$_own")
+				if [ -n "$_ti" ]; then
+					probe_if "$_ti" "$3" "$4" "$5"
+					# the tunnel answered — the direct path is asked once more before the verdict (direct_again)
+					[ -n "$VMS" ] && direct_again "$3" "$4" "$VMT"
+					if [ -n "$MS" ]; then msj=$MS
+					else [ -n "$VMS" ] && { blk=true; tmj=$VMS; tmt=$VMT; }
+					fi
+				else ncmp=true; fi
+			fi
+		fi
+		# ВТОРОЕ МНЕНИЕ (cheburcheck.sh) — только при включённом (по умолчанию выкл: без файла ни одного лишнего запуска). Ответ
+		# сервиса — как есть, судит панель по его полям; молчащий сервер, которому сравнить не с чем, спрашиваем сами, если
+		# включено «спрашивать самому» (троттл и проверка адреса — у владельца).
+		chb=""
+		if [ -f "$DS/.chebur" ] && [ -f "$D/cheburcheck.sh" ]; then
+			_ch=$(clean "$3")
+			[ -z "$MS" ] && [ "$blk" = false ] && [ "$6" != true ] && sh "$D/cheburcheck.sh" want "$_ch" >/dev/null 2>&1
+			chb=$(sh "$D/cheburcheck.sh" get "$_ch" 2>/dev/null | head -n 1)
+			case "$chb" in '{'*'}') ;; *) chb="" ;; esac
+		fi
+		printf '{"transport":"%s","name":"%s","host":"%s","port":"%s","proto":"%s","active":%s,"ms":%s,"method":"%s","cdn":%s,"blk":%s,"tms":%s,"tmt":"%s","ncmp":%s,"via":"%s","vup":%s,"vms":%s,"vmt":"%s"%s}' \
+			"$1" "$(clean "$2")" "$(clean "$3")" "${4:-}" "$5" "$6" "$msj" "${METHOD:-}" "$(cdn_json)" "$blk" "$tmj" "$tmt" "$ncmp" "$rv" "$vup" "$vmj" "$vmt" "${chb:+,\"chb\":$chb}"
 	}
 	# tag= (подписка) — только xray. one= — транспорт по tpt= (без tpt: xray, обратная совместимость).
 	if { [ -z "$gtag" ] && [ -z "$gone" ]; } || { [ -n "$gone" ] && [ "$gtpt" = awg ]; }; then
@@ -175,6 +407,13 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 		host=$(grep -oE '"address"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
 		# порт вненга (vnext), НЕ inbound socks 10808 — берём первый порт != 10808
 		port=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$cf" 2>/dev/null | grep -oE '[0-9]+' | grep -v '^10808$' | head -1)
+		# A CHAIN (`dialerProxy`, Amnezia Premium: relay → exit): the first address is the exit, reached THROUGH the relay — the server
+		# to ask from home is the relay. The plugin's parser answers (xray-transport.sh endpoint); asked only for a chain — a fork
+		# per config would cost a list of 40 servers seconds.
+		if grep -q '"dialerProxy"' "$cf" 2>/dev/null && [ -f "$D/xray-transport.sh" ]; then
+			xep=$(sh "$D/xray-transport.sh" endpoint "$cf" 2>/dev/null </dev/null | head -n 1)
+			case "$xep" in ?*"$TAB"?*) host=${xep%%"$TAB"*}; port=${xep#*"$TAB"} ;; esac
+		fi
 		net=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
 		case "$net" in quic|kcp) pr=udp ;; *) pr=tcp ;; esac
 		a=$([ "$name" = "$xr_active" ] && echo true || echo false)
@@ -205,7 +444,12 @@ case "$t" in
 	xray) host=$(grep -oE '"address"[[:space:]]*:[[:space:]]*"[^"]*"' "$DS/xray.json" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
 	      port=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$DS/xray.json" 2>/dev/null | grep -oE '[0-9]+' | grep -v '^10808$' | head -1)
 	      net=$(grep -oE '"network"[[:space:]]*:[[:space:]]*"[^"]*"' "$DS/xray.json" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-	      case "$net" in quic|kcp) pr=udp ;; *) pr=tcp ;; esac ;;
+	      case "$net" in quic|kcp) pr=udp ;; *) pr=tcp ;; esac
+	      # A chain — the relay the router dials (see the list's branch above).
+	      if grep -q '"dialerProxy"' "$DS/xray.json" 2>/dev/null && [ -f "$D/xray-transport.sh" ]; then
+	          xep=$(sh "$D/xray-transport.sh" endpoint "$DS/xray.json" 2>/dev/null </dev/null | head -n 1)
+	          case "$xep" in ?*"$TAB"?*) host=${xep%%"$TAB"*}; port=${xep#*"$TAB"} ;; esac
+	      fi ;;
 esac
 host=$(clean "$host")
 
@@ -221,23 +465,37 @@ DEADF=/tmp/enodia-ping-active-dead
 DEAD_TTL=25
 pfresh=0; case "$QUERY_STRING" in *fresh=1*) pfresh=1 ;; esac
 if [ "$pfresh" != 1 ] && [ -n "$host" ] && [ -f "$DEADF" ]; then
-	read -r dt dh dts _drest < "$DEADF" 2>/dev/null
+	read -r dt dh dts dm _drest < "$DEADF" 2>/dev/null
+	dm=$(printf '%s' "$dm" | tr -cd 'a-z0-9:')
 	case "$dts" in ''|*[!0-9]*) dts=0 ;; esac
 	now=$(date +%s 2>/dev/null); case "$now" in ''|*[!0-9]*) now=0 ;; esac
 	# clock-raw: «протухло» здесь означает БЕЗДЕЙСТВИЕ (лишний честный проб), а не действие, поэтому
 	# кламп age_since («скачок ⇒ 0 = свежее») тут вреден — он УДЕРЖАЛ бы отрицательный кэш. Разбор — выше.
 	age=$((now - dts))
 	if [ "$dt" = "$t" ] && [ "$dh" = "$host" ] && [ "$age" -ge 0 ] && [ "$age" -lt "$DEAD_TTL" ]; then
-		printf '{"transport":"%s","server":"%s","ms":null,"method":"","cdn":false,"cached":true}\n' "$t" "${host:-?}"
+		printf '{"transport":"%s","server":"%s","ms":null,"method":"%s","cdn":false,"cached":true}\n' "$t" "${host:-?}" "$dm"
 		exit 0
 	fi
 fi
 
-probe "$host" "$port" "$pr"
+# Активный AmneziaWG едет по ДОРОГЕ (road.sh) — его пакеты к серверу идут через выход, и число шапки — ТОЛЬКО через неё: прямая проба
+# к заблокированному адресу молчала бы ~4 с каждые 10 с, а отрицательный кэш ниже записал бы живой сервер мёртвым (ревью с.118).
+_hrv=""
+if [ "$t" = awg ] && [ -n "$host" ]; then
+	_hrv=$(road_of "awg/$(cat "$DS/.active" 2>/dev/null | tr -d ' \r\n"\\')")
+	[ -n "$_hrv" ] && [ -d "/sys/class/net/awg$_hrv" ] || _hrv=""
+fi
+_hpm=""; [ "$t" = awg ] && _hpm=$(cat "$DS/.active" 2>/dev/null | tr -d ' \r\n"\\')
+# An Amnezia Premium server — FIRST, before its road: its own tunnel is the number (prem_ms; awg0's packets ride the road by the kernel's
+# rule anyway), and the relay answers no probe through the road (review s.136 r3, M2). No number — still METHOD=tun: the header must not
+# say «no answer to a TCP probe and ping» about a server nobody probed that way (review s.136 r2, panel 10).
+if [ -n "$_hpm" ] && prem_srv "$_hpm"; then prem_ms "$_hpm" true live; METHOD=tun
+elif [ -n "$_hrv" ]; then probe_if "awg$_hrv" "$host" "$port" "$pr"; MS=$VMS; METHOD=$VMT; CDN=0
+else probe "$host" "$port" "$pr"; fi
 # Обновляем негативный кэш по факту пробы: мёртв → пишем метку, жив → сносим (мгновенное восстановление).
 if [ -n "$host" ]; then
 	if [ -z "$MS" ]; then now=$(date +%s 2>/dev/null); case "$now" in ''|*[!0-9]*) now=0 ;; esac
-		printf '%s %s %s\n' "$t" "$host" "$now" > "$DEADF" 2>/dev/null
+		printf '%s %s %s %s\n' "$t" "$host" "$now" "${METHOD:-}" > "$DEADF" 2>/dev/null   # the method too: a cached «no answer» of a Premium server is still `tun`
 	else rm -f "$DEADF" 2>/dev/null; fi
 fi
 msj=$MS; [ -n "$msj" ] || msj=null

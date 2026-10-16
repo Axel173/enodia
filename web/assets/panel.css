@@ -444,6 +444,8 @@
   .lrow.dis>.grow{opacity:.6}
   /* Пробел С ОБЕИХ сторон: замер клеится к тексту без своего пробела («salamander· 61 мс» — ревью пачки 2, круг 2). */
   .lrow .ds .srv-ping:not(:first-child):not(:empty)::before{content:' · '}
+  /* Хвост строки сервера (дорога к серверу, «дорога для»): разделитель — только если перед ним есть непустой сосед (пинг пуст до проверки). */
+  .lrow .ds > :not(:empty) ~ .srv-tail::before{content:' · '}
   /* Метка-кнопка («выбрать →»): вид чипа, поведение кнопки — ею строку активируют с клавиатуры. */
   button.chip{border:0;font:inherit;font-size:12.5px;cursor:pointer}
   @media (hover:hover){ button.chip:hover{color:var(--ink);background:var(--soft2)} }
@@ -474,7 +476,10 @@
   .popmenu{position:fixed;z-index:60;background:var(--bg-primary);border:.5px solid var(--border-s);border-radius:var(--r-md);
            box-shadow:0 6px 24px rgba(0,0,0,.35);padding:4px;min-width:184px;max-width:280px}
   .popmenu-item{display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text-primary);
-                font:inherit;font-size:13px;padding:9px 11px;border-radius:var(--r-sm);cursor:pointer;white-space:nowrap}
+                font:inherit;font-size:13px;padding:9px 11px;border-radius:var(--r-sm);cursor:pointer;
+                /* A long server name (the person's own) plus our note «— занят: выход №N →» is wider than the menu's ceiling: the item
+                   wraps instead of running past the menu's edge. Short items are as wide as before — the menu shrinks to its content. */
+                white-space:normal;overflow-wrap:anywhere}
   .popmenu-item:focus-visible{background:var(--bg-secondary)} @media (hover:hover){ .popmenu-item:hover{background:var(--bg-secondary)} }
   .popmenu-item:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
   .popmenu-item.danger{color:var(--text-warning)}
@@ -1013,7 +1018,9 @@
   .arc .sub2{font-size:11px;color:var(--ink2);text-align:center;overflow-wrap:anywhere}
   .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:2px;margin-top:12px}
   .stats .s{padding:8px 10px;min-width:0}
-  .stats .l{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);font-weight:600}
+  /* overflow-wrap: the label of «Пинг через <имя выхода>» carries the person's text — an unbroken name of 17+ letters ran past
+     the 129-px cell at 320 px (measured, review s.123). */
+  .stats .l{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);font-weight:600;overflow-wrap:anywhere}
   .stats .v{font-size:15px;font-weight:500;margin-top:2px;color:var(--ink);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
   .stats .v.wr{color:var(--warn)}
   .rr-acts{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
@@ -1332,8 +1339,14 @@
   .vs-qr{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 16px;margin-top:12px;min-width:0}
   .vs-qr>.grow{flex:1 1 200px;min-width:0}
   .vs-qr .acts{margin-top:0}
+  /* A note beside the code (the series, «не влез») stands ABOVE the buttons — 10 px between, the column's rhythm in the mockup;
+     without it the note lay right on the buttons (s.138, seen on BE7000). */
+  .vs-qr>.grow>.note2{margin-bottom:10px}
   .qrbox{background:#fff;padding:10px;border-radius:10px;line-height:0;max-width:100%;box-sizing:border-box}
   .qrbox svg{max-width:100%;height:auto}
+  /* A series of frames for AmneziaVPN (qrSeriesHtml): one frame shown at a time, its number under the code. */
+  .qrs{display:flex;flex-direction:column;align-items:center;gap:6px;max-width:100%}
+  .qrs-n{font-size:12px;color:var(--ink3)}
   /* Коды восстановления второго фактора (шаг 7a) — сеткой, по коду в ячейке: их переписывают на бумагу и сверяют глазами,
      и строка через запятую в колонку не ложится. Ширина ячейки — под код вида `xxxxx-xxxxx` моноширинным. */
   .codes{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:7px;margin-top:11px;min-width:0}
@@ -1345,6 +1358,11 @@
   /* Командная строка консоли — поле до потолка 560, «Выполнить» у правого края; на узкой карточке кнопка встаёт под поле (макет). */
   .lnkrow.con{justify-content:space-between;flex-wrap:wrap}
   .lnkrow.con>input{flex:1 1 280px}
+  /* Экран сервера, карточка «Имя» (`.lnkrow.nm`): в узкой карточке поле имени рядом с «Переименовать» сжималось до 116 px и
+     резало имя из 12 знаков (320 px, замер 12.10.2026: карточка 294, кнопка 136). Кнопка уходит под поле, к правому краю.
+     Порог — по ширине КАРТОЧКИ (как у .zp-tr): до 340 px окна строка в два этажа, с 360 — прежняя (поле 156 px и шире).
+     Остальных `.lnkrow` правило не касается. */
+  @container card (max-width:280px){ .lnkrow.nm{flex-wrap:wrap} .lnkrow.nm>input{flex-basis:100%} .lnkrow.nm>.btn{margin-left:auto} }
   .codes>span{background:var(--soft);border-radius:var(--r-sm);padding:7px 10px;text-align:center;font-size:14px;letter-spacing:.5px}
   .vs-txt{margin-top:10px;min-width:0}
   .vs-txt summary{font-size:12.5px;color:var(--ink3);cursor:pointer}
@@ -2017,6 +2035,10 @@
          text-decoration:underline;text-underline-offset:2px;cursor:pointer}
   @media (hover:hover){ .ilink:hover{background:none;text-decoration-thickness:2px} }
   .ilink:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:3px}
+  /* AN INLINE LINK AND THE MARK AFTER IT STAY ON ONE LINE. A <button> is an atomic inline: the browser may break the line between
+     it and the full stop that follows, and the stop went to the next line alone. A word joiner (U+2060) does not hold them
+     (measured in Chromium, 12.10.2026) — a nowrap wrapper around the button and its mark does. */
+  .nbr{white-space:nowrap}
   .note2.bad{background:var(--bad-soft);color:var(--bad)}
   .note2 b{font-weight:600}
   /* Сегмент переключателя достижим с клавиатуры (role и tabindex ему выдаёт `wireSeg`) — значит

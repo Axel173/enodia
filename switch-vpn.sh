@@ -41,6 +41,9 @@
 #   switch-vpn.sh rollback       — вручную откатиться на .last.bak
 #   switch-vpn.sh failover       — перебрать резервы и встать на первый рабочий
 #                                  (зовётся watchdog'ом при смерти активного VPS)
+#   switch-vpn.sh stage <имя>    — разложить конфиг, не трогая несущую
+#   switch-vpn.sh refresh <имя>  — the ACTIVE config's text changed on disk (a subscription): lay it out again and, when
+#                                  AmneziaWG carries, re-raise with the usual return to the previous copy; «home» is not moved
 
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
 ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
@@ -54,6 +57,8 @@ if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 # Ожидание xtables-лока: ipt-lib.sh подменяет команду `iptables` и добавляет `-w`. Лок занят
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
+# No ipt-lib.sh with `mss_clamp` (a partial update) ⇒ the old path: no clamp.
+command -v mss_clamp >/dev/null 2>&1 || { mss_clamp() { :; }; mss_unclamp() { :; }; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
 CONFIGS_DIR="$ENODIA_STATE/configs"
 ACTIVE_CONF="$ENODIA_STATE/awg.conf"
@@ -94,6 +99,11 @@ NF_LANG=$(nf_lang)
 # DNS до следующего repair. Шим — на случай установки без lib.
 if [ -f "$ENODIA_DIR/doh-lib.sh" ]; then . "$ENODIA_DIR/doh-lib.sh"; fi
 command -v doh_apply_dns >/dev/null 2>&1 || doh_apply_dns() { return 1; }
+# The resolver a config names — dns-lib.sh::conf_dns, the SAME reader the carrier plugin asks: safety_off removes the route the
+# plugin laid to that resolver, and two readers naming different values of one `DNS =` line would leave it behind. No library
+# or an older one — the old line.
+if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
+command -v conf_dns >/dev/null 2>&1 || conf_dns() { grep -E '^DNS[[:space:]]*=' "$1" 2>/dev/null | head -1 | awk -F'= *' '{print $2}' | awk -F',' '{print $1}' | tr -d ' '; }
 # «VPN выключен вручную — несущую не берёт никто» (daemon-lib.sh::carrier_barred, разбор там): смена и перебор серверов идут минутами,
 # и выключение, нажатое посреди них, обязано их остановить (ревью ветки, круг 2). Нет библиотеки — прежний путь.
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
@@ -531,10 +541,18 @@ bring_up() {
 
     # Ждём появления интерфейса
     for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-        ip link show awg0 >/dev/null 2>&1 && return 0
+        ip link show awg0 >/dev/null 2>&1 && { road_rewire; return 0; }
         sleep 1
     done
     return 1
+}
+# ДОРОГА К СЕРВЕРУ (road.sh) — ДО ожидания рукопожатия. Правило «пакеты к серверу — через выход» `wire` строит по `.active` (его уже
+# записал install_config) и адресу из конфига или awg0.conf (его только что сгенерировал awg_setup); прежде оно вставало лишь в
+# apply_routing — ПОСЛЕ ожидания, и рукопожатие сервера на дороге 25 с шло напрямую к заблокированному адресу: смена, перебор и
+# возврат на такой сервер откатывались «не подключается» (ревью с.118, круг 2). Нет дорог — ни одного лишнего запуска.
+road_rewire() {
+    [ -f "$ENODIA_DIR/road.sh" ] && [ -s "$ENODIA_STATE/.cfg-via" ] && sh "$ENODIA_DIR/road.sh" wire >/dev/null 2>&1
+    return 0
 }
 
 bring_down() {
@@ -622,6 +640,7 @@ safety_off() {
     # geo_vpn. Без ip rule и без default марка ни на что не влияет, а вернёт её (и правильно)
     # первый же mark-core. Снимаем лишь NAT нашей несущей.
     iptables -t nat -D POSTROUTING -o awg0 -j MASQUERADE 2>/dev/null
+    mss_unclamp awg0
 
     # 2. DNS — выключаем upstream через дохлый туннель, ставим публичный.
     #    Это файл в overlay (/etc), он сбросится при ребуте — нам и надо.
@@ -648,7 +667,7 @@ DNS_FALLBACK
         _dnsmsg="DNS не трогали (нет 00-upstream.conf)"
     fi
     # Снимаем маршрут к VPN-DNS через дохлый awg0 (если был)
-    VPN_DNS=$(grep -E '^DNS[[:space:]]*=' "$ACTIVE_CONF" 2>/dev/null | head -1 | awk -F'= *' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+    VPN_DNS=$(conf_dns "$ACTIVE_CONF")
     [ -n "$VPN_DNS" ] && ip route del "$VPN_DNS/32" dev awg0 2>/dev/null
 
     # Перезапускаем dnsmasq, чтобы подхватил новый upstream
@@ -858,7 +877,9 @@ Check the log and free space: cat /tmp/enodia-switch-vpn-setup.log; df -h"
         show_status
         # Осознанный (ручной) выбор страны = новый «основной» (home) для режима
         # failover home: именно сюда watchdog будет возвращаться, когда home оживёт.
-        echo "$target" > "$ENODIA_STATE/.failover-home"
+        # `refresh` is NOT a choice (a subscription rewrote the config of the server that is already active): written there too,
+        # «home» would move to an emergency reserve the watchdog had stepped onto.
+        [ "${SW_KEEP_HOME:-0}" = 1 ] || echo "$target" > "$ENODIA_STATE/.failover-home"
         return 0
     else
         printf " ${RED}нет ответа${NC}\n"
@@ -1293,6 +1314,31 @@ case "$1" in
         if key_busy "$2"; then printf "${RED}[FAIL]${NC} %s\n" "$KEY_BUSY"; exit 1; fi
         install_config "$_st_src" "$2" || exit 1
         printf "${GREEN}[OK]${NC} конфиг %s разложен (awg.conf + amnezia_for_awg.conf). Несущая НЕ тронута.\n" "$2"
+        ;;
+    refresh)
+        # THE TEXT OF THE ACTIVE CONFIG CHANGED ON DISK (a subscription rewrote configs/<name>.conf): bring the working copies
+        # in line with it. Not a switch — the server is the one already chosen — so three things differ from `<name>`:
+        #   * a name that is NOT the active one is refused (code 3): between the caller's look and this call the watchdog may
+        #     have stepped onto a reserve, and «refreshing» the old name would undo its choice;
+        #   * AmneziaWG does not carry right now (another transport, no transport, the VPN switched off by hand) — the config is
+        #     only laid out, as `stage` does: the full path would first let go of the carrier that works;
+        #   * «home» of the reserve is not moved (SW_KEEP_HOME).
+        # AmneziaWG carries — the full path with its own return: the new text does not shake hands ⇒ the previous copy is back.
+        [ -n "$2" ] || { printf "${RED}[FAIL]${NC} укажите имя конфига\n"; exit 1; }
+        _rf_src="$CONFIGS_DIR/${2}.conf"
+        [ -f "$_rf_src" ] || { printf "${RED}[FAIL]${NC} Не найден файл %s\n" "$_rf_src"; exit 1; }
+        if [ "$(head -n 1 "$ACTIVE_NAME" 2>/dev/null | tr -d ' \r\n')" != "$2" ]; then
+            printf "${YELLOW}[refresh]${NC} %s — не активный конфиг, ничего не трогаю.\n" "$2"
+            exit 3
+        fi
+        if [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')" = awg ] && ! carrier_barred; then
+            SW_KEEP_HOME=1
+            switch_to "$2"
+        else
+            if key_busy "$2"; then printf "${RED}[FAIL]${NC} %s\n" "$KEY_BUSY"; exit 1; fi
+            install_config "$_rf_src" "$2" || exit 1
+            printf "${GREEN}[OK]${NC} конфиг %s разложен заново (awg.conf + amnezia_for_awg.conf). Несущая НЕ тронута.\n" "$2"
+        fi
         ;;
     *)
         switch_to "$1"

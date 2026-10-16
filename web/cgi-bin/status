@@ -277,16 +277,19 @@ elif ip rule show 2>/dev/null | grep -q 'fwmark 0x1' && [ -n "$(carrier_iface)" 
 	live=1
 fi
 
-# Xray-подписка: из какой ПОДПИСКИ активный сервер (по префиксу sub-<tag>-, tag из .subs) —
+# Сервер ПОДПИСКИ: из какой подписки активный сервер (по префиксу sub-<tag>-, tag из .subs) —
 # показываем в шапке «↳ подписка: …». cfg тут ещё СЫРОЕ имя файла (до подстановки имени ниже).
+# ALL THREE config families: the fork stood on `xray` alone, and the header of an active Hysteria2 (later AmneziaWG) server of
+# a subscription showed its file name «sub-…» and no subscription — the «fork forgot the alt» class.
 sub_label=""
-if [ "$t" = xray ] && [ -n "$cfg" ] && [ -f "$DS/.subs" ]; then
+sub_fam=0; case "$t" in xray|hy2|awg) sub_fam=1 ;; esac
+if [ "$sub_fam" = 1 ] && [ -n "$cfg" ] && [ -f "$DS/.subs" ]; then
 	TAB=$(printf '\t')
 	# Владелец = ДЛИНЕЙШИЙ подходящий тег, НЕ первый по порядку в файле: теги подписок
 	# бывают префиксами друг друга («liberty» ⊂ «liberty-белые»), а «-» встречается и
 	# ВНУТРИ тега ⇒ break на первом совпадении показывал бы метку чужой подписки (симптом:
 	# конфиг верный, а «↳ подписка: …» врёт). Зеркало ownerTag() в panel.js и
-	# del_sub_configs в cgi-bin/action.
+	# subs-update.sh (prune_stale, cmd_drop).
 	blen=-1
 	while IFS="$TAB" read -r tg u lab; do
 		[ -n "$tg" ] || continue
@@ -305,7 +308,7 @@ sub_label=$(echo "$sub_label" | tr -d '\000-\037"\\')
 cfg_file=$(echo "$cfg" | tr -d '\000-\037"\\')
 # Xray-подписка: показать НАСТОЯЩЕЕ имя сервера (из .sub-names, с эмодзи/флагом) вместо
 # sub-<tag>-… — иначе шапка врала «sub-svpq96g-14» вместо выбранного «🇵🇱 Польша».
-if [ "$t" = xray ] && [ -n "$cfg" ] && [ -f "$DS/.sub-names" ]; then
+if [ "$sub_fam" = 1 ] && [ -n "$cfg" ] && [ -f "$DS/.sub-names" ]; then
 	fr=$(grep "^$cfg$(printf '\t')" "$DS/.sub-names" 2>/dev/null | head -1 | cut -f2-)
 	[ -n "$fr" ] && cfg="$fr"
 fi
@@ -430,9 +433,10 @@ $(sh "$D/watchdog.sh" standing 2>/dev/null)
 EOF
 fi
 
-ex_on=0; ex_bad=0
+ex_on=0; ex_bad=0; ex_states=""
 if [ -f "$D/slots.sh" ] && [ -s "$DS/.slots" ]; then
-	for st in $(sh "$D/slots.sh" state 2>/dev/null | cut -f2); do
+	ex_states=$(sh "$D/slots.sh" state 2>/dev/null)   # id⇥state — kept: the road's mark below asks «does ITS exit carry» of the same answer
+	for st in $(printf '%s\n' "$ex_states" | cut -f2); do
 		case "$st" in
 			off) ;;
 			up|idle) ex_on=$((ex_on+1)) ;;
@@ -455,5 +459,24 @@ for _tkf in "$DS/tasks"/t*.task; do
 	tk_n=$((tk_n+1)); _tki=${_tkf##*/}; _tki=${_tki%.task}
 	case "$(tail -n 1 "/tmp/enodia-tasks/$_tki.hist" 2>/dev/null | cut -f6)" in err|killed|cut|nodir) tk_bad=$((tk_bad+1)) ;; esac
 done
-printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"tasks_n":%s,"tasks_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s}\n' \
-	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$tk_n" "$tk_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now"
+# THE ROAD OF THE MAIN SERVER (road.sh): its packets to the server ride another exit — the header says so («через WARP») and the facts
+# ribbon gets a chip (the user's request, BE7000 10.10.2026: nothing on the overview told the server rides a road but MTU 1188). The
+# answer is road.sh's (`carrier main`: the registry, an EFFECTIVE road only, empty under `.vpn-off`); the exit's name goes as stored
+# (base64, the panel decodes it like every exit's name), «is it WARP» — warp.sh's list by the exit's config. No store ⇒ no fork: most
+# routers have no road at all, and this file is polled every 10 s.
+# `road_up` — the road's exit CARRIES (up|idle of `slots.sh state`, the same kernel facts as the «выход не работает» pill). A road
+# that is set but down leaves the server's packets going directly (fail-open): «через WARP» was then said of packets that did not
+# ride it (review s.122). No state line for the exit — nothing is claimed (true).
+road_id=""; road_nb=""; road_w=false; road_up=true
+if [ "$t" = awg ] && [ -s "$DS/.cfg-via" ] && [ -f "$D/road.sh" ]; then
+	road_id=$(sh "$D/road.sh" carrier main 2>/dev/null | tr -cd '2-7' | cut -c1)
+	if [ -n "$road_id" ] && [ -f "$D/slots.sh" ]; then
+		case "$(printf '%s\n' "$ex_states" | awk -F'\t' -v i="$road_id" '$1 == i { print $2; exit }')" in ''|up|idle) ;; *) road_up=false ;; esac
+		_rdl=$(sh "$D/slots.sh" show "$road_id" 2>/dev/null)
+		road_nb=$(printf '%s' "$_rdl" | cut -f2 | tr -cd 'A-Za-z0-9+/=')
+		_rdc=$(printf '%s' "$_rdl" | cut -f4)
+		if [ -n "$_rdc" ] && [ -f "$D/warp.sh" ] && sh "$D/warp.sh" list 2>/dev/null | cut -f1 | grep -qxF "$_rdc"; then road_w=true; fi
+	fi
+fi
+printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"road":"%s","road_name_b64":"%s","road_warp":%s,"road_up":%s,"tasks_n":%s,"tasks_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s}\n' \
+	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$road_id" "$road_nb" "$road_w" "$road_up" "$tk_n" "$tk_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now"

@@ -104,6 +104,9 @@ apply_mtu() {
 	m=$(mtu_flag)
 	[ -n "$m" ] || return 0
 	ip link show awg0 >/dev/null 2>&1 && ip link set awg0 mtu "$m" 2>/dev/null
+	# A server riding a road (road.sh) lives inside the road's tunnel: the manual MTU must not climb above the road's ceiling.
+	[ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" mtu-fix >/dev/null 2>&1
+	return 0
 }
 
 apply_ipv6() {

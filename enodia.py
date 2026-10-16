@@ -42,7 +42,7 @@ from collections import namedtuple
 
 # Версия PC-стороны проекта. Держится В СИНХРОНЕ с `version` в pyproject.toml и requirements.txt
 # (копии сознательные — uv-путь и pip-путь; разъезд ловит C35). См. CHANGELOG.md.
-PROJECT_VERSION = "1.1.0"
+PROJECT_VERSION = "1.2.0"
 
 # --- Зависимость paramiko (in-process SSH) — с авто-доустановкой ---
 # paramiko ОБЯЗАТЕЛЕН (in-process SSH). Если его нет — НЕ падаем молча с кодом 1: на
@@ -2069,6 +2069,36 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
         p = self.router_paths()
         return p["dir"], p["state"], p["bin"]
 
+    def stock_backup(self, verb):
+        """THE STOCK SETTINGS BACKUP (Xiaomi keeps a copy of its settings container: 3.8 MB of BE6500's flash). The answer is the
+        ROUTER's, by its one owner stock-backup.sh — taken FROM THE PACKAGE and run before anything is installed (the script carries
+        shims of its libraries), into the dirs the install will use. No copy of what it knows lives here (C1). `verb`: status | off.
+        Returns the owner's one-line JSON as a dict, or None — no package, no answer, not JSON."""
+        data = payload_file("stock-backup.sh")
+        if data is None or verb not in ("status", "off"):
+            return None
+        mode = self.router_paths().get("mode", "")
+        # The system lives on a drive that is missing (`none`): the install dirs fall back to the flash literals, and «off» would
+        # write the person's choice into an empty twin there — heal, uninstall and the panel never read it (review s.139). Refused
+        # here, in the owner's own code and words.
+        if verb == "off" and mode == "none":
+            return {"ok": False, "why": "nostate"}
+        _dD, _dS, _dB = self.install_dirs()
+        # Only a router with no system yet may have its state dir MADE by the owner (stock-backup.sh: ENODIA_SB_MKSTATE).
+        mk = "1" if mode == "" else "0"
+        head = (f"ENODIA_DIR={_shq(_dD)}; ENODIA_STATE={_shq(_dS)}; ENODIA_SB_MKSTATE={mk}; "
+                f"export ENODIA_DIR ENODIA_STATE ENODIA_SB_MKSTATE\nset -- {verb}\n")
+        out = self.router.run_script(head + data.decode("utf-8", "replace"), silent=True).out or ""
+        for line in reversed(out.splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    j = json.loads(line)
+                except ValueError:
+                    return None
+                return j if isinstance(j, dict) else None
+        return None
+
     def space_mp(self):
         """Том, на котором считаем место под установку: тот, где живёт КОД (туда её и кладём). Не спросили — наш том флеша."""
         return getattr(self, "disk_dest_mp", None) or getattr(self, "disk_our_mp", "/data")
@@ -2151,6 +2181,15 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
             info(L(f"Свободное место на {mp} узнать не удалось — ставлю без проверки",
                    f"Could not read free space on {mp} — installing without that check"))
             return True
+        # The stock settings backup is said where space is short (the wizard shows its own block with the price and the button).
+        if verdict in ("none", "tight", "near"):
+            sb = self.stock_backup("status") or {}
+            # …only when the short volume IS the copy's: with the code on a USB drive the flash copy frees nothing there (review s.139).
+            if sb.get("offer") is True and sb.get("copy") is True and sb.get("mp") == mp:
+                info(L(f"  Прошивка держит копию своих настроек — около {int(sb.get('est_b') or 0) // 1024} КБ; выключить её можно в мастере "
+                       f"(проверка перед установкой) или в панели: «Роутер → Место и накопитель».",
+                       f"  The firmware keeps a copy of its settings — about {int(sb.get('est_b') or 0) // 1024} KB; it can be turned off in "
+                       f"the wizard (checks before installing) or in the panel: “Router → Space and drive”."))
         if verdict == "none":
             err(L(f"На {mp} свободно {free} КБ, а самый крупный файл payload — {biggest} КБ.",
                   f"{mp} has {free} KB free, and the largest payload file is {biggest} KB."))
@@ -4058,10 +4097,67 @@ def wizard_facts(app, state):
         "payload_version": payload_version()[0],
         # Пакет кода рядом (см. local_package): нет или битый — ставить нечем, и экран называет причину.
         "pkg_ok": not pk.get("error"), "pkg_why": pk.get("error", ""),
+        # The stock settings backup — the router's answer (stock-backup.sh from the package): `offer` — the screen shows the block
+        # with the price; `mine` — turned off through us. No package — no answer, no block.
+        "stockbak": (app.stock_backup("status") or {}) if not pk.get("error") else {},
     }
     ok(L("Проверка закончена", "Checks finished"))
     return {"ok": verdict != "none" and writable and not legacy and not store_blocked and not busy and not pk.get("error"),
             "facts": facts}
+
+
+# The stock settings backup: the router's refusal codes (stock-backup.sh) in the wizard's two languages.
+STOCK_BACKUP_WHY = {
+    "absent": ("у этой прошивки нет копии настроек", "this firmware has no settings backup"),
+    "nolive": ("хранилище настроек роутера не открылось при загрузке — копию не трогаю: она может быть единственной целой",
+               "the router's settings store did not open at boot — the copy is left alone: it may be the only intact one"),
+    "busy": ("прошивка как раз делает копию — повторите через минуту", "the firmware is making the copy right now — try again in a minute"),
+    "nothing": ("копия настроек прошивки уже выключена", "the firmware settings backup is already off"),
+    "uci": ("прошивка не приняла смену настройки", "the firmware did not accept the setting change"),
+    "rm": ("копию выключил, но удалить её не вышло — место не освободилось",
+           "the backup is off, but the copy could not be removed — no space was freed"),
+    # Not only a missing drive (refused here before the owner runs): a drive gone read-only, a state dir that cannot be made — the
+    # owner's one code for «the choice has nowhere to go» (review s.139 r3).
+    "nostate": ("каталог настроек системы недоступен для записи (накопитель с системой не найден или только для чтения) — выключать "
+                "копию не стану: выбор негде запомнить",
+                "the system's settings dir takes no writes (the system's drive is missing or read-only) — the backup is left on: there "
+                "is nowhere to remember the choice"),
+}
+
+
+def wizard_stock_backup(app):
+    """«Освободить» на экране проверки: выключить копию настроек прошивки. Цену человек прочёл на экране и отметил галочкой;
+    решает и делает роутер (stock-backup.sh off из пакета), здесь — только слова и итог."""
+    section(L("Копия настроек прошивки", "The firmware settings backup"))
+    r = app.stock_backup("off")
+    if not isinstance(r, dict):
+        # No answer, or not one we could read (a session dropped mid-«off») — what happened to the copy is NOT known (review s.139).
+        words = L("Ответа роутера нет — что с копией, неизвестно: проверьте снова", "No answer from the router — the backup's state is unknown: check again")
+        err(words)
+        return {"ok": False, "error": words}
+    if r.get("ok") is True:
+        fb = int(r.get("freed_b") or 0)
+        if r.get("had") is False:
+            ok(L("Копия выключена: копии ещё не было — прошивка её не сделает", "The backup is off: there was no copy yet — the firmware will not make one"))
+        elif fb > 0:
+            ok(L(f"Копия выключена и удалена: освобождено {fb // 1024} КБ", f"The backup is off and removed: {fb // 1024} KB freed"))
+        else:
+            ok(L("Копия выключена и удалена; место флеш отдаст чуть позже", "The backup is off and removed; the flash will give the space back a little later"))
+        res = {"ok": True, "freed_b": fb, "had": r.get("had") is not False}   # the screen says «место позже» only when a copy was there
+        # The choice did not land (the marker): said on the screen, not only in the log — a firmware update may bring the copy back.
+        if r.get("marked") is False:
+            res["warn"] = L("Копия выключена, но выбор не запомнился — после обновления прошивки копия может вернуться, и сама она "
+                            "выключена снова не будет; включить её обратно можно только вручную: "
+                            "uci set misc.features.sec_cfg_bak=1; uci commit misc.",
+                            "The backup is off, but the choice was not remembered — after a firmware update the backup may come back, "
+                            "and it will not be turned off again by itself; it can be turned back on only by hand: "
+                            "uci set misc.features.sec_cfg_bak=1; uci commit misc.")
+            warn(res["warn"])
+        return res
+    why = str(r.get("why") or "")
+    words = STOCK_BACKUP_WHY.get(why, (f"отказ роутера: {why}", f"the router refused: {why}"))
+    err(L(words[0], words[1]))
+    return {"ok": False, "why": why, "error": L(words[0], words[1])}
 
 
 def wizard_install(app, tight_ok):
@@ -5022,6 +5118,7 @@ def _wizard_handler(app_state):
                                                        str(body.get("password") or "")),
                 "/api/facts": lambda: wizard_facts(app, app_state),
                 "/api/install": lambda: wizard_install(app, body.get("tight_ok")),
+                "/api/stockbak": lambda: wizard_stock_backup(app),
                 "/api/rootpw": lambda: wizard_root_password(app, str(body.get("password") or "")),
                 "/api/panelpw": lambda: wizard_panel_password(app, str(body.get("password") or "")),
                 "/api/store": lambda: wizard_store(app),

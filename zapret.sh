@@ -192,7 +192,7 @@ zt_any_slot_enabled() {
         [ "$_st" = zapret ] || continue
         [ "$_sid" = "$1" ] && continue
         echo x; break
-    done | grep -q x
+    done | grep x >/dev/null   # not `-q`: the reader takes the whole input (C134)
 }
 # ТРЕТИЙ потребитель nfqws — УСТРОЙСТВА «целиком в десинк» (правила по ИСТОЧНИКУ, см. блок
 # «десинк по источнику» ниже). Судим по ФАКТУ в mangle, а не по чужому хранилищу: владелец списка

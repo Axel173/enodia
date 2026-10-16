@@ -470,7 +470,9 @@ elif [ "$active_t" = awg ] && { [ -f ./transport.sh ] || [ -f ./transport-awg.sh
     echo "DNS: upstream ставит плагин awg при подъёме несущей (5.6) — на буте не трогаю"
 elif [ "$active_t" = awg ]; then
     # Фолбэк для установки без transport.sh (старый layout): владельца DNS нет, пишем сами, как было.
+    # dns-raw: the branch of an install WITHOUT the carrier plugin (no library to ask either); a first value that is not an address (wg-quick takes search domains there) is dropped — dnsmasq would refuse `server=<word>`
     VPN_DNS=$(grep -E '^DNS\s*=' "$ENODIA_STATE/awg.conf" 2>/dev/null | head -1 | awk -F'= *' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+    case "$VPN_DNS" in *[!0-9.]*) VPN_DNS="" ;; esac
     [ -z "$VPN_DNS" ] && VPN_DNS=172.29.172.254
     echo "VPN_DNS: $VPN_DNS (нет плагина awg — ставлю сам)"
     # upstream-own: бут старого layout — dnsmasq перезапускает следующая секция heal, свой рестарт здесь лишний (dns_upstream_put).
@@ -874,6 +876,15 @@ if [ -f "$ENODIA_DIR/tasks.sh" ] && [ -d "$ENODIA_STATE/tasks" ]; then
     echo "--- задачи: расписание из настроек ---"
     sh "$ENODIA_DIR/tasks.sh" apply 2>&1 3>&- || true
     [ "$REPLAY" = 0 ] && sh "$ENODIA_DIR/tasks.sh" boot 2>&1 3>&- || true
+fi
+
+# 5.19. THE STOCK SETTINGS BACKUP (stock-backup.sh). The person turned the stock's copy off to free the flash; a firmware update
+# may bring the flag back, and the copy would quietly take megabytes Xray has filled meanwhile — so the person's choice is applied
+# again (user's decision 15.10.2026), with an event. Without their marker the verb does nothing. Last: a copier at work (BE6500's
+# boot hook) is waited for up to a minute, and nothing above should wait behind it. Not VPN — runs under «VPN off» too.
+if [ -f "$ENODIA_DIR/stock-backup.sh" ] && [ -f "$ENODIA_STATE/.stock-backup-off" ]; then
+    echo "--- копия настроек прошивки: выключена вами — проверяю, не вернула ли её прошивка ---"
+    sh "$ENODIA_DIR/stock-backup.sh" heal 2>&1 3>&- || true
 fi
 
 # КОНЕЦ REPLAY. Дальше — только бутовое: диагностический срез в лог и письмо «загрузка OK».

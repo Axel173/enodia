@@ -27,6 +27,8 @@
 # Мутации реестра (add/del/toggle) мгновенные. Всё на /data — переживает ребут.
 
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 # Сброс УЖЕ УСТАНОВЛЕННЫХ соединений — только через ct-lib.sh: на ядре 4.4 (AX3600/BE3600)
 # утилиты conntrack в прошивке НЕТ ВООБЩЕ, и прежний `conntrack -F || true` был тихим no-op —
@@ -202,6 +204,17 @@ ustate() { _usd=$(ram_dir "$CAT"); echo "$1" > "$_usd/.update.state.new" && mv -
 gstate() { echo "$2" > "$1/.guard.state.new" && mv -f "$1/.guard.state.new" "$1/.guard.state"; }
 ulog()   { echo "$*" >> "$(ram_dir "$CAT")/.update.log"; }
 
+# THE LAN GUARD MUST NOT FAIL OPEN. lbl_commit_out leaves the file AS IT WAS when the filtered text could not be written (the
+# RAM disk is full) — and «as it was» here is the UNFILTERED list: the pass would load 192.168/16 and 10/8 into a DROP / «past
+# the VPN» / «into the tunnel» set and put them on flash. Before lbl_commit_out the same failure left a cut-short but FILTERED
+# stump (review s.127). A filter that did not land cancels the pass: the target keeps what it had.
+bogon_inplace() {   # <file> [min mask — see strip_bogon] → 0 — filtered in place ; 1 — said why, the file is removed
+	lbl_commit_out "$1" strip_bogon "${2:-}" < "$1" && return 0
+	echo "bogon-фильтр ($CAT) не записался — нет места в ОЗУ? Проход отменён, цель осталась прежней"
+	rm -f "$1"
+	return 1
+}
+
 # _update_pass: ОДИН проход — собрать источники реестра → нормализовать → применить в цель.
 # Пишет в рабочие файлы ОЗУ $W (задан вызывающим do_update). Всегда под локом do_update; если
 # реестр менялся во время прохода — do_update переиграет его ещё раз (dirty-повтор).
@@ -271,7 +284,13 @@ _update_pass() {
 	fi
 
 	# Дедуп общего результата.
-	all=$W/.all; sort -u "$work" > "$all" 2>/dev/null; rm -f "$work"
+	# Whole or not at all (busybox sort exits 0 on a failed write): a list cut short by a full RAM disk would be loaded as the
+	# pool and put on flash over the good snapshot.
+	all=$W/.all; rm -f "$all"
+	if ! lbl_commit_out "$all" sort -u "$work" 2>/dev/null; then
+		rm -f "$work"; echo "общий список ($CAT) не записался — нет места в ОЗУ? Проход отменён, цель осталась прежней"; return 1
+	fi
+	rm -f "$work"
 	total=$(grep -c '' "$all" 2>/dev/null); case "$total" in ''|*[!0-9]*) total=0 ;; esac
 	echo "источников: $nsrc, суммарно уникальных: $total"
 
@@ -292,7 +311,7 @@ _update_pass() {
 			# Свою приватку «в VPN» человек задаёт правилом адреса или группой (enodia_ip_vpn/grp_vpn) —
 			# эти пути идут мимо фильтра, так что сценарий «корпоративная сеть 10.x через VPN» цел.
 			_b=$(grep -c '' "$all" 2>/dev/null); case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
-			strip_bogon 4 < "$all" > "$all.safe" && mv "$all.safe" "$all"   # порог 4, а не 8 — см. strip_bogon
+			bogon_inplace "$all" 4 || return 1   # порог 4, а не 8 — см. strip_bogon
 			_a=$(grep -c '' "$all" 2>/dev/null); case "$_a" in ''|*[!0-9]*) _a=0 ;; esac
 			echo "tunnel-cidr bogon-фильтр: $_b → $_a CIDR (приватка/CGNAT вырезаны — защита LAN)"
 			if n=$(apply_ipset iplist_set "$all"); then
@@ -316,7 +335,7 @@ _update_pass() {
 			# ЗАЩИТА LAN: вырезать приватку/богоны/широкие маски ДО заливки в set и снимка — иначе
 			# DROP по blocklist_set (INPUT/FORWARD) убьёт локалку (см. strip_bogon в lists-lib.sh).
 			_b=$(grep -c '' "$all" 2>/dev/null); case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
-			strip_bogon < "$all" > "$all.safe" && mv "$all.safe" "$all"
+			bogon_inplace "$all" || return 1
 			_a=$(grep -c '' "$all" 2>/dev/null); case "$_a" in ''|*[!0-9]*) _a=0 ;; esac
 			echo "ipblock bogon-фильтр: $_b → $_a CIDR (приватка/широкие вырезаны — защита LAN)"
 			ensure_block_rules
@@ -330,7 +349,7 @@ _update_pass() {
 			# или широкая маска в пуле вывела бы весь LAN-трафик мимо VPN (тихая утечка, а не
 			# обрыв — заметить труднее, чем FireHOL-инцидент). strip_bogon режет то же самое.
 			_b=$(grep -c '' "$all" 2>/dev/null); case "$_b" in ''|*[!0-9]*) _b=0 ;; esac
-			strip_bogon < "$all" > "$all.safe" && mv "$all.safe" "$all"
+			bogon_inplace "$all" || return 1
 			_a=$(grep -c '' "$all" 2>/dev/null); case "$_a" in ''|*[!0-9]*) _a=0 ;; esac
 			echo "zapret-cidr bogon-фильтр: $_b → $_a CIDR (приватка/широкие вырезаны — защита LAN)"
 			if n=$(apply_ipset "$ZAPRET_CIDR_SET" "$all"); then
@@ -396,16 +415,20 @@ do_update() {
 
 	: > "$W/.update.log"; ustate RUNNING
 	exec >>"$W/.update.log" 2>&1
+	_urc=0
 	while :; do
 		rm -f "$W/.update.dirty"   # сброс ДО чтения реестра: пойманный dirty ⇒ реестр прочитан ПОСЛЕ мутации
-		_update_pass
+		_update_pass; _urc=$?
 		[ -f "$W/.update.dirty" ] || break
 		echo "--- реестр менялся во время обновления → переигрываю проход ---"
 	done
-	ustate DONE
+	# A PASS THAT CANCELLED ITSELF (the list could not be written whole — bogon_inplace, the merged list) is not «done»: the
+	# target keeps what it had, the panel says «обновление прервалось» and offers the button again, and the caller gets the
+	# code — guarded_enable must not test the connection of a set that was never loaded (review s.127, round 2).
+	if [ "$_urc" = 0 ]; then ustate DONE; else ustate ABORTED; fi
 	trap - EXIT INT TERM HUP PIPE
 	ls_lock_drop "$lock"
-	return 0
+	return "$_urc"
 }
 
 # reapply: БЫСТРОЕ восстановление цели из снимка БЕЗ скачивания (для boot-хука heal.sh:
@@ -574,6 +597,12 @@ guarded_enable() {
 	while [ -d "$_g/.update.lock" ] && ! _lock_stale "$_g/.update.lock" && [ "$_gw_n" -lt "$_gw_max" ] && ! guard_cancelled "$_c"; do sleep 1; _gw_n=$((_gw_n + 1)); done
 	guard_cancelled "$_c" && return 0   # ждали чужой проход
 	if [ -d "$_g/.update.lock" ] && ! _lock_stale "$_g/.update.lock"; then gstate "$_g" ABORTED; return 1; fi
+	# THE PASS CANCELLED ITSELF (the list could not be written whole) — ours or the foreign one we waited for: nothing was
+	# applied, there is nothing to test. The witness is the state do_update wrote — one for both: «прервалась, блокировка не
+	# применена», not a connection test of a set nobody loaded.
+	if [ "$(cat "$_g/.update.state" 2>/dev/null | tr -d ' \r\n')" = ABORTED ]; then
+		gstate "$_g" ABORTED; return 1
+	fi
 	[ "$_c" = ipblock ] || { gstate "$_g" OK; return 0; }
 	sleep 3
 	_ok=1; _why=''
@@ -860,7 +889,7 @@ allow_set() {  # allow_set <cat> <файл>
 		else grep -vxF -f "$_ai.new" "$_af" 2>/dev/null | grep -q . && _gone=1; fi
 		rm -f "$_ai.new"
 	fi
-	sort -u "$_ai.ok" > "$_af.new" && mv "$_af.new" "$_af"
+	lbl_commit_out "$_af" sort -u "$_ai.ok"
 	_kept=$(grep -c '' "$_af" 2>/dev/null); case "$_kept" in ''|*[!0-9]*) _kept=0 ;; esac
 	rm -f "$_ai" "$_ai.ok"
 	_app=off

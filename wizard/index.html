@@ -1082,7 +1082,7 @@ scr('rootpw', {step: 1, t: Lbl('Смените пароль root', 'Change the r
 
 /* ═══ 6. ПРОВЕРКА ПЕРЕД УСТАНОВКОЙ — с ЧИСЛАМИ. Тестер 23.08.2026 получил «успех» на
    забитом /data и пошёл искать причину в панели: цифру места ему никто не показал. ══ */
-scr('check', {step: 2, picks: ['tight'], t: Lbl('Проверка перед установкой', 'Checks before installing'),
+scr('check', {step: 2, picks: ['tight', 'sbkok'], t: Lbl('Проверка перед установкой', 'Checks before installing'),
  sub: Lbl('Смотрю, что за роутер и влезет ли то, что я повезу.',
           'Looking at what this router is and whether what I bring will fit.'),
  body: function(){
@@ -1099,6 +1099,10 @@ scr('check', {step: 2, picks: ['tight'], t: Lbl('Проверка перед у�
    if (REPAINT && ST.facts) return showFacts(ST.facts);
    if (REPAINT && ST.factsErr) return checkStuck(ST.factsErr);
    ST.facts = null; ST.factsErr = null;
+   /* Исход «Освободить» — в СЕАНСЕ, не только в DOM: смена языка перерисовывает экран из ST.facts, и предупреждение «выбор не
+      запомнился» (единственный путь назад) пропадало, а устаревший блок снова предлагал «Освободить» (ревью с.139, круг 3).
+      `sbkNext` — слова для проверки, что идёт ЗА «Освободить» (место UBIFS отдаст позже), `sbkShow` — что показано сейчас. */
+   ST.sbkShow = ST.sbkNext || null; ST.sbkNext = null;
    runJob('/api/facts', {}).then(function(r){
      if (r.gone) return;
      if (!r.facts){ checkStuck(ST.factsErr = {error: r.error || ''}); return; }
@@ -1211,6 +1215,84 @@ function showFacts(f){
                 v: T('нельзя ставить', 'cannot install')} : null
   ]);
   var blocked = (f.space === 'none') || !f.writable || !!f.legacy || !!f.store || !!f.busy || !f.pkg_ok;
+  /* КОПИЯ НАСТРОЕК ПРОШИВКИ (stock-backup.sh; решение 15.10.2026). Предлагает РОУТЕР (`stockbak.offer`) — на любом роутере, где
+     прошивка держит копию своего хранилища настроек (на BE6500 — 3,8 МБ из 19,5, и Xray не влезал). Цена — ДО кнопки, галочка
+     снята по умолчанию; «Освободить» — задание /api/stockbak, потом проверка заново (место пересчитано). Тесно — жёлтая рамка.
+     Выключена через нас — строка без кнопки: включают обратно в панели. ЧТО показать и ПОЧЕМУ — поля роутера (`offer`/`off_why`,
+     `off_mine`), а не догадка экрана (ревью с.139). Система живёт на накопителе, а его нет (`store_mode` none) — кнопки нет: выбор
+     человека некуда записать, и роутер его потерял бы. */
+  var sb = f.stockbak || {}, sbHtml = '';
+  var sbPrice = T('<b>Цена:</b> если основное хранилище повредится (например, свет погаснет во время записи), роутер при загрузке ' +
+        'сбросит все настройки — Wi-Fi, пароли и автозапуск панели, — восстанавливать будет не из чего. Включить копию обратно можно ' +
+        'в панели: «Роутер → Место и накопитель».',
+        '<b>The price:</b> if the main store breaks (say, the power goes off during a write), the router resets all its settings at ' +
+        'boot — Wi-Fi, passwords and the panel’s autostart — and there is nothing to restore them from. The backup can be turned back ' +
+        'on in the panel: “Router → Space and drive”.');
+  /* Исход «Освободить» из сеанса (ST.sbkShow: предупреждение, отказ, «место позже») — рисуется тут же, при каждой перерисовке. */
+  var sbSaid = ST.sbkShow ? '<div class="wzgap">' + Note(esc(ST.sbkShow.t), ST.sbkShow.k) + '</div>' : '';
+  if (sb.offer === true){
+    /* Роутер занят (обновление, снятие, смена раскладки — `f.busy`): каталог настроек может уйти посреди «Освободить», и метка
+       выбора легла бы туда, где её не найдут (ревью с.139, круг 2) — кнопки нет, причина та же, что держит «Установить». */
+    var sbe = Number(sb.est_b) || 0, sbNoDrive = (f.store_mode === 'none'), sbBusy = !!f.busy;
+    sbHtml = '<div class="wzgap">' + Note(
+      (sb.copy !== true
+        ? T('<b>Копия настроек прошивки.</b> Прошивка сделает вторую копию своего хранилища настроек при следующем проходе (раз в 6 ' +
+            'часов). Если выключить её сейчас, копия не займёт места на флеше. ',
+            '<b>The firmware settings backup.</b> The firmware makes a second copy of its settings store on its next pass (every 6 ' +
+            'hours). Turned off now, the copy takes no room on the flash. ')
+        : sb.flag === '1'
+        ? T('<b>Копия настроек прошивки — около ' + hb(sbe) + '.</b> Прошивка держит вторую копию своего хранилища настроек и ' +
+            'обновляет её раз в 6 часов. Её можно выключить и удалить — освободится место под протоколы. ',
+            '<b>The firmware settings backup — about ' + hb(sbe) + '.</b> The firmware keeps a second copy of its settings store and ' +
+            'refreshes it every 6 hours. It can be turned off and removed — that frees room for the protocols. ')
+        : T('<b>Копия настроек прошивки — около ' + hb(sbe) + '.</b> Прошивка оставила вторую копию своего хранилища настроек и ' +
+            'больше её не обновляет, а место копия занимает. Её можно удалить — освободится место под протоколы. ',
+            '<b>The firmware settings backup — about ' + hb(sbe) + '.</b> The firmware left a second copy of its settings store and no ' +
+            'longer refreshes it, but the copy takes room. It can be removed — that frees room for the protocols. ')) + sbPrice,
+      (f.space === 'tight' || f.space === 'none') ? 'warn' : 'info') +
+      (sbNoDrive
+        ? Note(T('Система стоит на внешнем накопителе, а его сейчас нет — выключать копию не стану: выбор негде запомнить. ' +
+                 'Вставьте накопитель и проверьте снова.',
+                 'The system lives on an external drive, and the drive is missing — the backup is left on: there is nowhere to ' +
+                 'remember the choice. Plug the drive in and check again.'), 'info')
+        : sbBusy
+        ? Note(T('Роутер сейчас занят (обновление, снятие или смена раскладки) — выключать копию сейчас не стану. Проверьте снова, ' +
+                 'когда он закончит.',
+                 'The router is busy right now (an update, a removal or a layout change) — the backup is left alone for now. Check ' +
+                 'again when it is done.'), 'info')
+        : Chk('sbkok', T('Понимаю цену — выключить копию настроек прошивки', 'I understand the price — turn the firmware settings backup off')) +
+          '<div id="sbkmsg">' + sbSaid + '</div><div class="wzgap"><button class="btn" data-act="sbkoff" data-need="sbkok">' +
+          (sb.copy === true ? T('Освободить около ', 'Free about ') + hb(sbe) : T('Выключить копию', 'Turn the backup off')) + '</button></div>') +
+      '</div>';
+  } else if (sb.off_mine === true){
+    var sbf = Number(sb.freed_b) || 0;
+    sbHtml = '<div class="wzgap">' + Note(
+      T('Копия настроек прошивки выключена' + (sbf ? ' — освобождено ' + hb(sbf) : '') + '. Включить её обратно можно в панели: «Роутер → Место и накопитель».',
+        'The firmware settings backup is off' + (sbf ? ' — ' + hb(sbf) + ' freed' : '') + '. It can be turned back on in the panel: “Router → Space and drive”.'),
+      'ok') + '</div>';
+  } else if (sb.mine === true && sb.off_why === 'nolive'){
+    /* Лежит ли копия — от роутера (`copy`): без копии «может быть единственной целой» было бы неправдой (ревью с.139, круг 2). */
+    /* «Прошивка включила снова» — только при флаге 1 (ревью с.139, круг 3): флаг 0 с копией — выключение, которое не дошло. */
+    var sbLead = sb.flag === '1'
+      ? T('Копию настроек прошивки вы выключали, а прошивка включила её снова. ', 'You turned the firmware settings backup off, and the firmware turned it back on. ')
+      : T('Копию настроек прошивки вы выключали, но копия осталась на флеше. ', 'You turned the firmware settings backup off, but the copy is still on the flash. ');
+    sbHtml = '<div class="wzgap">' + Note(sbLead + (sb.copy === true
+      ? T('Выключить снова сейчас нельзя: хранилище настроек роутера не открылось при загрузке — копия может быть единственной целой.',
+          'It cannot be turned off again now: the router’s settings store did not open at boot — the copy may be the only intact one.')
+      : T('Выключить снова сейчас нельзя: хранилище настроек роутера не открылось при загрузке.',
+          'It cannot be turned off again now: the router’s settings store did not open at boot.')), 'warn') + '</div>';
+  } else if (sb.mine === true && sb.off_why === 'absent'){
+    sbHtml = '<div class="wzgap">' + Note(sb.copy === true
+      ? T('Копию настроек прошивки вы выключали; копия лежит, но у этой прошивки больше нет механизма копии — трогать её не стану.',
+          'You turned the firmware settings backup off; a copy is there, but this firmware no longer has the backup mechanism — it is left alone.')
+      : T('Копию настроек прошивки вы выключали; у этой прошивки больше нет механизма копии — выключать нечего.',
+          'You turned the firmware settings backup off; this firmware no longer has the backup mechanism — there is nothing to turn off.'), 'info') + '</div>';
+  }
+  /* Блока нет (выключена, а метка не легла — роутер о ней больше не знает), а сказать есть что — свой узел; «Проверить снова» —
+     у предупреждения о незапомненном выборе. */
+  if (ST.sbkShow && sb.offer !== true)
+    sbHtml += '<div class="wzgap"><div id="sbkmsg">' + sbSaid + '</div>' + (ST.sbkShow.recheck
+      ? '<div class="wzgap"><button class="btn" data-act="recheck">' + T('Проверить снова', 'Check again') + '</button></div>' : '') + '</div>';
   extra.innerHTML =
     Note(T('<b>Что поставлю:</b> веб-панель :8088, скрипты, автозапуск и сторож в cron, плюс два маленьких ' +
            'компонента обхода блокировок без сервера (ByeDPI и Zapret) — они же аварийный канал до GitHub.',
@@ -1233,6 +1315,7 @@ function showFacts(f){
               '<b>The installation will not start.</b> The wizard will not clean out someone else’s router on ' +
               'its own. Free up space (over SSH: <code>du -xsk ' + spmp + '/* | sort -n | tail -15</code>) and check ' +
               'again.'), 'bad') + '</div>' : '') +
+    sbHtml +
     /* Кнопка выключена — и человек обязан прочитать ПОЧЕМУ. Без этой строки он ставит галочку
        «всё равно пробую», видит мёртвую кнопку и решает, что сломан мастер. */
     (f.legacy ? '<div class="wzgap">' +
@@ -1731,6 +1814,7 @@ var RESUME = {
   panelpw:   {t: function(){ return pwOnlyJob() ? T('Меняю пароль панели', 'Changing the panel password') : T('Задаю пароль панели', 'Setting the panel password'); },
               ok: function(r){ return pwOnlyJob() ? 'exists' : pwNext(r); }, bad: function(){ return pwOnlyJob() ? 'panelpw-only' : 'panelpw'; }, step: 2},
   rootpw:    {t: Lbl('Меняю пароль root', 'Changing the root password'), ok: 'check', bad: 'rootpw', step: 1},
+  stockbak:  {t: Lbl('Выключаю копию настроек прошивки', 'Turning the firmware settings backup off'), ok: 'check', bad: 'check', step: 2},
   storemode: {t: Lbl('Переношу', 'Moving the system'), ok: function(r){ ST.storeDone = r.mode || ''; return 'done'; }, bad: 'done', step: 2},
   remove:    {t: Lbl('Снимаю с роутера', 'Removing from the router'), ok: 'scan', bad: 'remove', step: 2}};
 function resumeOf(){ return RESUME[ST.jobName] || null; }
@@ -2132,6 +2216,9 @@ window.addEventListener('hashchange', function(){
    нечем. Один обработчик на все экраны, второй копии не заводить. */
 function syncNeed(){
   document.querySelectorAll('[data-need]').forEach(function(b){
+    /* Занятая (своё задание идёт: `data-old`) или запертая чужим заданием (`data-lock`) кнопку галочка НЕ отпирает: «Освободить»
+       идёт на месте, экран с галочками живой, и любая отметка во время задания отпирала и её, и «Установить» (ревью с.139). */
+    if (b.dataset.old || b.hasAttribute('data-lock')) return;
     var c = document.getElementById(b.getAttribute('data-need'));
     /* `data-blocked` СИЛЬНЕЕ галочки: кнопку могли запретить по другой причине (каталог не
        пишется), и тогда отметка «всё равно пробую» не имеет права её включить. */
@@ -2144,7 +2231,7 @@ document.addEventListener('change', function(e){
      перерисовали, возвращает их, а не обнуляет. */
   if (e.target && (e.target.id === 'bak' || e.target.id === 'lang') && CUR === 'access') ST.acc[e.target.id] = e.target.checked;
   /* Галочки согласия — в сеанс (переживают смену языка); вход на экран их сбрасывает (`picks` экрана, см. render). */
-  if (e.target && /^(removable|sure|agree|tight)$/.test(e.target.id)) ST.pick[e.target.id] = e.target.checked;
+  if (e.target && /^(removable|sure|agree|tight|sbkok)$/.test(e.target.id)) ST.pick[e.target.id] = e.target.checked;
   /* Накопитель выбирают из списка, и от выбора зависит не только «куда переносить», но и что
      мы обещаем про ключи: права доступа — свойство РАЗМЕТКИ, а размечены накопители по-разному.
      Поэтому смена выбора перерисовывает блок целиком (showStore сам вернёт выбранное значение),
@@ -2271,8 +2358,10 @@ function busy(node, text){
   node.disabled = true;
   node.dataset.old = node.textContent;
   node.textContent = text || T('Минуту…', 'One moment…');
+  /* Запираем и кнопку с галочкой (`data-need`), уже запертую: задание на месте («Освободить») оставляет экран с галочками живым, и
+     отметка во время задания отпирала незапертую им «Установить» (ревью с.139). `unbusy` пересчитает её по галочке (`syncNeed`). */
   document.querySelectorAll('#acts button').forEach(function(b){
-    if (b !== node && !b.disabled){ b.disabled = true; b.setAttribute('data-lock', '1'); }
+    if (b !== node && (!b.disabled || b.hasAttribute('data-need'))){ b.disabled = true; b.setAttribute('data-lock', '1'); }
   });
 }
 function unbusy(node){
@@ -2531,6 +2620,33 @@ function act(name, node){
     }).catch(function(e){ unbusy(node); say('fail', {e: e}); });
   }
   if (name === 'recheck') return go('check');
+  /* Копия настроек прошивки: цену прочли и отметили (кнопку держит `data-need`), делает роутер; успех — проверка заново (место
+     пересчитано), отказ — его слова на месте, блок остаётся. */
+  if (name === 'sbkoff'){
+    var sk = document.getElementById('sbkok');
+    if (!(sk && sk.checked)) return;
+    /* Задание уже идёт (кнопку отперли мимо `disabled`) — второй щелчок не зовёт runJob: тот откажет «уже идёт», а его исход
+       (`unbusy`) отпер бы кнопку посреди первого задания (ревью с.139). */
+    if (JOB_RUN || node.dataset.old) return;
+    busy(node, T('Выключаю…', 'Turning off…'));
+    return runJob('/api/stockbak', {}).then(function(r){
+      unbusy(node);
+      if (r.gone) return;
+      /* Место UBIFS отдаёт не сразу: проверка заново покажет прежнее — слова «позже» едут в неё (ST.sbkNext). */
+      if (r.ok && !r.warn){
+        if (r.had === true && !r.freed_b) ST.sbkNext = {k: 'info', t: T('Копия выключена; место флеш отдаст чуть позже — проверьте снова через минуту.',
+                                                                 'The backup is off; the flash gives the space back a little later — check again in a minute.')};
+        return go('check');
+      }
+      /* Выключена, но выбор не запомнился — сказать НА ЭКРАНЕ и в сеансе (после проверки заново блока уже не было бы; смена языка
+         рисует из сеанса): блока больше нет — копия выключена, кнопка — «Проверить снова». Отказ — тоже в сеанс, блок остаётся. */
+      if (r.ok){
+        ST.sbkShow = {k: 'warn', t: r.warn, recheck: true};
+        if (ST.facts) ST.facts.stockbak = {};
+      } else ST.sbkShow = {k: 'bad', t: r.error || T('Роутер отказал', 'The router refused')};
+      if (ST.facts) showFacts(ST.facts);
+    }).catch(function(e){ unbusy(node); say('fail', {e: e}); });
+  }
   if (name === 'install'){
     var t = document.getElementById('tight');
     ST.tight = !!(t && t.checked);

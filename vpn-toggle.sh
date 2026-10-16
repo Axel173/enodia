@@ -47,6 +47,8 @@ if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # Нет ipt-lib.sh с `ipt_top` (частичное обновление) ⇒ прежнее «первым в цепочку», байт-в-байт.
 command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$_itc" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"; }
+# No ipt-lib.sh with `mss_clamp` (a partial update) ⇒ the old path: no clamp.
+command -v mss_clamp >/dev/null 2>&1 || { mss_clamp() { :; }; mss_unclamp() { :; }; }
 if ! command -v ct_flush >/dev/null 2>&1; then
     ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
     ct_flush_src_n(){ [ -n "$1" ] && conntrack -D --src "$1" 2>/dev/null | wc -l; return 0; }
@@ -170,6 +172,9 @@ cmd_off() {
         ip rule del fwmark "0x$_s" table "100$_s" 2>/dev/null
         ip rule del fwmark "0x$_s" table $TABLE 2>/dev/null
     done
+    # Roads to servers (road.sh, pref 82..87) — ours too: «off» leaves the router as it is after a reboot with the flag. `on`
+    # brings them back by the carriers' raise (endpoint-set → wire), the same path as a boot.
+    [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" unwire >/dev/null 2>&1
     # ЛОК СМЕНЫ НЕСУЩЕЙ — И НА СНЯТИИ ТОЖЕ (зеркало cmd_on). Флаг `.vpn-off` записан выше, и тик
     # сторожа, который начнётся ПОСЛЕ него, из тика выйдет. Но тик, уже прошедший проверку флага,
     # может прямо сейчас вести failover — и поднять несущую ровно между нашим `down` и `cold`.
@@ -447,6 +452,7 @@ cmd_repair() {
         ip route replace default dev awg0 table $TABLE 2>/dev/null
         iptables -t nat -C POSTROUTING -o awg0 -j MASQUERADE 2>/dev/null || \
             iptables -t nat -A POSTROUTING -o awg0 -j MASQUERADE
+        mss_clamp awg0
         ipt_top FORWARD -o awg0 -j ACCEPT
         ipt_top FORWARD -i awg0 -j ACCEPT
     elif [ -f "$ENODIA_DIR/transport.sh" ]; then

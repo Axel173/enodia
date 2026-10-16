@@ -788,7 +788,7 @@ bd_any_byedpi_slot() {   # $1 = exclude id (опц.)
         [ "$_st" = byedpi ] || continue
         { [ -n "$1" ] && [ "$_sid" = "$1" ]; } && continue
         echo hit
-    done | grep -q hit
+    done | grep hit >/dev/null   # not `-q`: the reader takes the whole input, or the loop's next echo says «Broken pipe» (C134)
 }
 owner_rule_needed() {   # $1 = exclude slot id (опц.); код 0 = ещё нужна (НЕ снимать)
     bd_transport_active && return 0

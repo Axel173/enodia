@@ -58,6 +58,8 @@ CONF_LIVE="${CONF_LIVE:-/tmp/dnsmasq.d/$CONF_NAME}"
 CONF_ETC="/etc/dnsmasq.d/$CONF_NAME"      # НЕ пишем — только сносим: см. разбор в шапке
 TAB=$(printf '\t')
 
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/lease-lib.sh" ]; then . "$ENODIA_DIR/lease-lib.sh"; fi
 if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
 
@@ -266,12 +268,10 @@ cmd_add() {   # $1 = IP, $2 = MAC (необязателен: возьмём ны
     fi
     _dh=""
     command -v lease_host_of >/dev/null 2>&1 && _dh=$(lease_host_of "$_di")
-    _dtmp="$STORE.tmp.$$"
     # Тот же MAC на другом адресе — это ПЕРЕЕЗД: старую строку снимаем, иначе dnsmasq получит два
     # `dhcp-host` на один MAC и выдаст устройству не тот адрес, который человек только что выбрал.
-    { [ -f "$STORE" ] && awk -F'\t' -v m="$_dm" '$1!=m' "$STORE" 2>/dev/null
-      printf '%s\t%s\t%s\n' "$_dm" "$_di" "$_dh"
-    } > "$_dtmp" 2>/dev/null && mv "$_dtmp" "$STORE" 2>/dev/null || { rm -f "$_dtmp" 2>/dev/null; echo "[dhcp-static] не записать $STORE" >&2; return 1; }
+    # Целиком либо никак — label-lib.sh::lbl_commit_out (awk при неудачной записи выходит с кодом 0).
+    lbl_commit_out "$STORE" store_text_with "$_dm" "$_di" "$_dh" 2>/dev/null || { echo "[dhcp-static] не записать $STORE" >&2; return 1; }
     if cmd_apply; then
         if command -v mac_is_random >/dev/null 2>&1 && mac_is_random "$_dm"; then
             echo "закреплён $_di за $_dm; ВНИМАНИЕ: это случайный (приватный) MAC — устройство меняет его само, и тогда закрепление перестанет действовать"
@@ -285,12 +285,15 @@ cmd_add() {   # $1 = IP, $2 = MAC (необязателен: возьмём ны
     return 1
 }
 
+store_text_with() {   # the store's new text: the other MACs' lines, then this one's (mac, ip, host)
+    if [ -f "$STORE" ]; then awk -F'\t' -v m="$1" '$1!=m' "$STORE" || return 1; fi
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3"
+}
+
 cmd_del() {   # $1 = IP либо MAC
     _dk="$1"; _dkm=$(norm_mac "$1")
     [ -f "$STORE" ] || { echo "нечего снимать"; return 0; }
-    _dtmp="$STORE.tmp.$$"
-    awk -F'\t' -v k="$_dk" -v m="$_dkm" '$1!=m && $2!=k' "$STORE" 2>/dev/null > "$_dtmp" || { rm -f "$_dtmp" 2>/dev/null; return 1; }
-    mv "$_dtmp" "$STORE" 2>/dev/null || { rm -f "$_dtmp" 2>/dev/null; return 1; }
+    lbl_commit_out "$STORE" awk -F'\t' -v k="$_dk" -v m="$_dkm" '$1!=m && $2!=k' "$STORE" 2>/dev/null || return 1
     cmd_apply || return 1
     echo "закрепление снято: $1"
     return 0

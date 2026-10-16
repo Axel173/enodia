@@ -101,26 +101,8 @@ cmd_import() {
            for _if in "$2"/hy2-configs/*.yaml; do [ -f "$_if" ] && { _ib=${_if##*/}; echo "hy2/${_ib%.yaml}"; }; done )
     lbl_lock_take "$LOCK" 'cfg-names' || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
     # Архивные имена — ТОЛЬКО у конфигов, которые архив привёз: застрявшая в архиве строка (сбой снятия) иначе легла бы на ЧУЖОЙ
-    # локальный конфиг с тем же файлом — класс находки 1 ревью с.95 (ревью с.96, круг 3).
-    _ia=""
-    if [ -f "$1" ]; then
-        while IFS= read -r _ir || [ -n "$_ir" ]; do
-            [ -n "$_ir" ] || continue
-            case "$LBL_NL$_ik$LBL_NL" in *"$LBL_NL${_ir%%"$LBL_TAB"*}$LBL_NL"*) _ia="${_ia:+$_ia$LBL_NL}$_ir" ;; esac
-        done <<EOF
-$(lbl_list "$1" "$KEY_RE")
-EOF
-    fi
-    _ikeep=""
-    while IFS= read -r _ir || [ -n "$_ir" ]; do
-        [ -n "$_ir" ] || continue
-        case "$LBL_NL$_ik$LBL_NL" in *"$LBL_NL${_ir%%"$LBL_TAB"*}$LBL_NL"*) continue ;; esac
-        _ikeep="${_ikeep:+$_ikeep$LBL_NL}$_ir"
-    done <<EOF
-$(lbl_list "$STORE" "$KEY_RE")
-EOF
-    _iw=$(printf '%s\n%s\n' "$_ia" "$_ikeep" | awk -F"$LBL_TAB" 'NF >= 2 && !($1 in s) { s[$1] = 1; print }')
-    lbl_commit "$STORE" "$_iw"; _imr=$?
+    # локальный конфиг с тем же файлом — класс находки 1 ревью с.95 (ревью с.96, круг 3). Алгоритм — у label-lib (тот же у road.sh).
+    lbl_import "$STORE" "$1" "$_ik" "$KEY_RE"; _imr=$?
     lbl_lock_drop "$LOCK"
     [ "$_imr" = 0 ] || { echo "[cfg-names] не удалось записать имена (место на разделе?)"; return 1; }
     return 0

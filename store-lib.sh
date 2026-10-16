@@ -100,8 +100,11 @@ DATA_RESERVE_B=2621440                  # 2.5 МБ
 # было брать «по документации».
 harden_tree() {     # $1 = корень, $2 = режим каталогов, $3 = режим файлов («-» = не трогать)
     [ -d "$1" ] || return 0
-    find "$1" -type d -exec chmod "$2" {} ';' 2>/dev/null
-    [ "$3" = "-" ] || find "$1" -type f -exec chmod "$3" {} ';' 2>/dev/null
+    # `|| :` on each find: the callers run under `set -e` (install.sh), and busybox `find` returns 1 when an entry vanishes mid-walk —
+    # the state directory is written every minute (cron's ticks: a temp file, then mv) — and the installer died there without a word
+    # (the test release of 15.10.2026). A mode not set on a file that is gone is nothing to stop for.
+    find "$1" -type d -exec chmod "$2" {} ';' 2>/dev/null || :
+    [ "$3" = "-" ] || find "$1" -type f -exec chmod "$3" {} ';' 2>/dev/null || :
     return 0
 }
 
@@ -118,6 +121,10 @@ harden_perms() {    # $1 = каталог кода, $2 = каталог сост
     # результат, полученный из семантики `cp` и umask, — не правило, а совпадение; для
     # файла, который root запускает как демона, «не world-writable» надо ЗАЯВЛЯТЬ.
     harden_tree "$3" 755 755
+    # …except the EXITS' generated configs (`awg<N>.conf`, transport-awg.sh::slot_ifconf): they live here, next to the binaries,
+    # and carry a private key — «everything here is a binary» made them 755 on every install and every move (measured on BE7000
+    # 11.10.2026). The same closed mode the state directory has.
+    find "$3" -type f -name 'awg[0-9]*.conf' -exec chmod 600 {} ';' 2>/dev/null || :
     return 0
 }
 

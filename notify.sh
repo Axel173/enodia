@@ -166,7 +166,11 @@ RESP=$(
     sleep 1
     echo "QUIT"
     sleep 1
-} | $TMO openssl s_client -connect "$CONNECT" -servername "$SMTP_HOST" $STARTTLS_ARG -crlf -quiet 2>&1
+} 2>/dev/null | $TMO openssl s_client -connect "$CONNECT" -servername "$SMTP_HOST" $STARTTLS_ARG -crlf -quiet 2>&1
+# `2>/dev/null` у ПИСАТЕЛЯ диалога: сервер, который не принял соединение (или оборвал его), оставляет трубу без читателя, и
+# каждый следующий echo говорил «sh: write error: Broken pipe» — двадцать строк в /tmp/enodia-notify-event.log на каждое
+# неушедшее письмо (замер BE7000 12.10.2026: SMTP провайдера отказывал в соединении, лог в ОЗУ не ротирует никто). Сказать
+# писателю больше нечего: в группе только echo, printf и sleep, а ответ сервера и ошибки openssl идут своим `2>&1`.
 )
 
 echo "$(date) notify: subj='$SUBJECT'" >>"$LOG"

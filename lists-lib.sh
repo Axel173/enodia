@@ -34,6 +34,8 @@ TAB=$(printf '\t')
 # (ГРАБЛЯ №2 в шапке dns-lib.sh). Гард `if [ -f ]` обязателен: провалившийся `.` в busybox ash —
 # фатальная ошибка спецбилтина, шелл выходит НА МЕСТЕ, и шим ниже не выполнился бы никогда.
 # Шим-фолбэк (нет библиотеки = поломанная установка) = прежнее поведение: DoH без bind'а.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
 # Возраст лока — через age_since (clock-lib.sh): часы без RTC прыгают вперёд через ~13 мин после
 # загрузки, и голая разность объявляет ЖИВОЙ лок протухшим ⇒ его сносят из-под работающего
@@ -196,12 +198,9 @@ _reg_rewrite() {
 	_rc="$1"; shift
 	_rf=$(reg_path "$_rc"); [ -f "$_rf" ] || return 1
 	reg_lock_take "$_rc"; _rlk=$?
-	_rt="$_rf.new.$$"
-	if awk -F"$TAB" -v OFS="$TAB" "$@" "$_rf" > "$_rt" 2>/dev/null; then
-		mv "$_rt" "$_rf"; _rr=0
-	else
-		rm -f "$_rt" 2>/dev/null; _rr=1   # awk упал (нет места/битый файл) — реестр НЕ трогаем
-	fi
+	# Через label-lib.sh::lbl_commit_out: «нет места» awk кодом возврата НЕ сообщает (busybox, замер BE7000 12.10.2026 —
+	# код 0 и обрубок), о записи говорит приёмник. awk упал или запись не легла — реестр НЕ трогаем.
+	if lbl_commit_out "$_rf" awk -F"$TAB" -v OFS="$TAB" "$@" "$_rf" 2>/dev/null; then _rr=0; else _rr=1; fi
 	[ "$_rlk" = 0 ] && reg_lock_drop "$_rc"
 	return $_rr
 }
@@ -642,8 +641,8 @@ apply_dnsmasq_block() {  # apply_dnsmasq_block <conf> <domainsfile> <allowfile|'
 				sed -n 's#^address=/\([^/]*\)/.*#\1#p' "$_dof" 2>/dev/null
 			done > "$_dom.oth.$$"
 			if [ -s "$_dom.oth.$$" ]; then
-				awk 'FNR==NR { o[$0]=1; next } { x=$0; k=1; while (sub(/^[^.]*\./, "", x)) if (x in o) { k=0; break }; if (k) print }' \
-					"$_dom.oth.$$" "$_dpar" > "$_dpar.k" && mv "$_dpar.k" "$_dpar"
+				lbl_commit_out "$_dpar" awk 'FNR==NR { o[$0]=1; next } { x=$0; k=1; while (sub(/^[^.]*\./, "", x)) if (x in o) { k=0; break }; if (k) print }' \
+					"$_dom.oth.$$" "$_dpar"
 			fi
 			rm -f "$_dom.oth.$$"
 		fi

@@ -51,6 +51,8 @@ ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 # утилиты conntrack в прошивке НЕТ ВООБЩЕ, и прежний `conntrack -F || true` был тихим no-op —
 # правило стояло, а поток шёл по-старому через NSS/ECM. Шим = прежнее поведение (частичный
 # apply-scripts не должен падать), полноценный сброс живёт в самой библиотеке.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 # Ожидание xtables-лока: ipt-lib.sh подменяет команду `iptables` и добавляет `-w`. Лок занят
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
@@ -301,6 +303,7 @@ step_rules() {
     _t=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
     [ -n "$_t" ] && run transport.sh down "$_t"           # несущая: default/FORWARD/MASQ/DNS
     run mark-core.sh unwire                               # маркировка, гарды, ip rule
+    run road.sh unwire                                    # дороги к серверам (pref 82..87; доборка ниже ловит их и по таблице)
     for _c in $CHAINS_MANGLE; do
         while iptables -t mangle -D PREROUTING -j "$_c" 2>/dev/null; do :; done
         while iptables -t mangle -D OUTPUT -j "$_c" 2>/dev/null; do :; done
@@ -431,10 +434,10 @@ step_sweep() {       # $1 = keep → цепочки панели оставля�
 #      прибивает домен к нашему СТАРОМУ адресу для всего роутера — и снять её, кроме нас, некому.
 step_hosts() {
     grep -qF "$HOSTS_TAG" /etc/hosts 2>/dev/null || return 0
-    grep -vF "$HOSTS_TAG" /etc/hosts > /etc/hosts.enodiatmp 2>/dev/null
-    [ -f /etc/hosts.enodiatmp ] && mv -f /etc/hosts.enodiatmp /etc/hosts
-    rm -f /etc/hosts.enodiatmp 2>/dev/null
-    log "/etc/hosts: строки сида server-host сняты."
+    # Whole or not at all (label-lib.sh): grep exits 0 when its write fails, and a stump would replace the router's hosts.
+    if lbl_commit_out_as /etc/hosts.enodiatmp /etc/hosts lbl_grep -vF "$HOSTS_TAG" /etc/hosts 2>/dev/null; then
+        log "/etc/hosts: строки сида server-host сняты."
+    else log "/etc/hosts: строки сида server-host снять не удалось (файл не переписался)."; fi
 }
 
 # 4b. RAM-СЛЕД. `/tmp` гибнет на ребуте, но «снёс и работаю дальше» — законный сценарий, а
@@ -537,6 +540,7 @@ step_daemons() {      # $1 = дополнительные демоны (толь
 # 3. Cron. Наши строки узнаются по ПУТИ (`cron_ours`: бутстрап или каталог кода) — перечислять скрипты
 #    поимённо нельзя (список менялся при каждой новой фиче: heal, watchdog, traffic-acct, web-ui,
 #    iplist-update, subs-update…, и старый uninstall уже отставал на три штуки).
+cron_saved_text() { cron_ours "$1" 2>/dev/null | grep -vF "$CRON_PANEL"; }   # our lines but the panel's — what `keep` remembers
 step_cron() {        # $1 = keep → строку панели оставляем, снятое помним (deactivate)
     _ct=/etc/crontabs/root
     _kept=""
@@ -548,7 +552,11 @@ step_cron() {        # $1 = keep → строку панели оставляе�
     # цел, отчёт рапортовал «снято строк N», и через минуту heal.sh переигрывал ВСЁ, что мы
     # только что сняли, — то есть деактивация не работала совсем. Судим по ФАКТУ: черновик
     # создан ⇒ выкладываем (пустой файл — законный результат).
-    cron_ours -v "$_ct" > "$_ct.new" 2>/dev/null
+    # ЧЕРНОВИК ПИШЕТ `cat`: grep и awk при неудачной записи (раздел полон — /etc на AX3600 это флеш) выходят с кодом 0, и
+    # обрубок лёг бы поверх crontab — вместе с нашими строками ушли бы чужие (замер BE7000 12.10.2026, dev/blind-write-scan.py).
+    # Код трубы — код `cat`: он о неудаче говорит. Не записалось — crontab не трогаем вовсе (_cdr).
+    _cdr=1
+    cron_ours -v "$_ct" 2>/dev/null | cat > "$_ct.new" 2>/dev/null || _cdr=0
     if [ "$1" = keep ]; then
         # Сперва ПОМНИМ, потом снимаем: `$_ct` ещё цел, и снятое можно будет вернуть.
         # Сколько снимаем — считаем по ЖИВОМУ крону, а не по снимку: снимок может и не записаться
@@ -557,15 +565,20 @@ step_cron() {        # $1 = keep → строку панели оставляе�
         case "$_was" in ''|*[!0-9]*) _was=0 ;; esac
         # Пустым снимком прежний НЕ затираем — повторная деактивация (в кроне осталась одна
         # строка панели) иначе стёрла бы память о расписании, и возвращать было бы нечего.
-        cron_ours "$_ct" 2>/dev/null | grep -vF "$CRON_PANEL" > "$CRON_SAVE.new" 2>/dev/null
-        if [ -s "$CRON_SAVE.new" ]; then mv "$CRON_SAVE.new" "$CRON_SAVE"; else rm -f "$CRON_SAVE.new"; fi
+        # (grep, не выбрав ни строки, выходит с кодом 1 — владелец тогда ничего не пишет: это и есть «пустым не затираем».)
+        lbl_commit_out "$CRON_SAVE" cron_saved_text "$_ct"
         # Запомнить не вышло (нет места на 20-МБ /data, ФС в ro) — молчать нельзя: «включить»
         # вернёт правила и настройки подсистем, а расписание придётся возвращать переустановкой.
         if [ "$_was" != 0 ] && [ ! -s "$CRON_SAVE" ]; then
             log "ВНИМАНИЕ: расписание снято, но запомнить его не вышло ($CRON_SAVE) — после «включить» проверьте cron."
         fi
-        cron_ours "$_ct" 2>/dev/null | grep -F "$CRON_PANEL" >> "$_ct.new" 2>/dev/null
+        cron_ours "$_ct" 2>/dev/null | grep -F "$CRON_PANEL" | cat >> "$_ct.new" 2>/dev/null || _cdr=0
         _kept=" (строка панели оставлена — ею панель поднимается после ребута)"
+    fi
+    if [ "$_cdr" != 1 ]; then
+        rm -f "$_ct.new" 2>/dev/null
+        log "ВНИМАНИЕ: новый crontab записать не удалось (нет места?) — расписание НЕ снято, файл оставлен как был."
+        return 0
     fi
     # Adopted lines. A task line is ours, the line it replaced was not — the firmware's SSH-access patch among them: removed with
     # ours, SSH closed after the next reboot (review s.106). The crontab without our lines goes to `tasks.sh apply`, and it writes
@@ -736,7 +749,8 @@ EOF
         # стоковом конфиге остаётся подпись установщика — замерено на AX3600.
         _dnstmp="${DNSMASQ_CONF%/*}/.dnsmasq.conf.uninst.$$"
         _dn0=$(wc -l < "$DNSMASQ_CONF" 2>/dev/null)
-        grep -vxF "$DNSMASQ_LINE" "$DNSMASQ_CONF" | grep -vF -e "$DNSMASQ_MARK" -e "$DNSMASQ_MARK_OLD" > "$_dnstmp" 2>/dev/null
+        # Through `cat`: grep exits 0 when its write fails, and a stump has fewer lines too — the count below would let it through.
+        grep -vxF "$DNSMASQ_LINE" "$DNSMASQ_CONF" | grep -vF -e "$DNSMASQ_MARK" -e "$DNSMASQ_MARK_OLD" | cat > "$_dnstmp" 2>/dev/null || rm -f "$_dnstmp" 2>/dev/null
         _dn1=$(wc -l < "$_dnstmp" 2>/dev/null)
         case "$_dn0" in ''|*[!0-9]*) _dn0=0 ;; esac
         case "$_dn1" in ''|*[!0-9]*) _dn1=0 ;; esac
@@ -764,6 +778,29 @@ EOF
 #     то есть печатал бы «снято» и тогда, когда шаг снятия правил на самом деле провалился. Так
 #     мы теряем ровно ту диагностику, ради которой step_verify и написан. Поэтому здесь только
 #     uci (её вердикт как раз проверяет), а перезагрузка — `fwzone_reload` ПОСЛЕ вердикта.
+# 4c. The stock settings backup (stock-backup.sh): turned off through us — the flag goes back to what it was before us (user's
+# decision 15.10.2026: the router returns to stock; the stock makes its copy again on its next pass). purge only.
+step_stockbak() {
+    [ -f "$ENODIA_STATE/.stock-backup-off" ] || return 0
+    # The log says what the OWNER did (its one word), not what we hoped: a flag that was off before us stays off (review s.139).
+    _sbu=""
+    [ -f "$ENODIA_DIR/stock-backup.sh" ] && _sbu=$(sh "$ENODIA_DIR/stock-backup.sh" uninstall 2>> "$REPORT")
+    case "$_sbu" in
+        restored)    log "Копия настроек прошивки: флаг возвращён (1) — прошивка сделает копию сама в ближайшие 6 часов." ;;
+        kept)        log "Копия настроек прошивки: до нас она была выключена — так и оставлена." ;;
+        kept-absent) log "Копия настроек прошивки: у этой прошивки её больше нет — флаг не трогал." ;;
+        "fail-flag 1") log "Копия настроек прошивки: вернуть флаг не вышло (uci set misc.features.sec_cfg_bak=1; uci commit misc)." ;;
+        fail-mark*)  # the flag is as it should be (restored or kept); only the marker stayed — said so, no advice to change the flag
+                     log "Копия настроек прошивки: флаг на месте (${_sbu#fail-mark }), но запись выбора снять не вышло — её снимет снос каталога настроек." ;;
+        *)           # no owner here (the wizard turned it off with the PACKAGE's owner, the install never landed): the choice as it was
+                     # recorded goes into the report, so nothing is advised blind (review s.139 r2 — a fixed «=1» could turn ON a copy
+                     # the stock had off).
+                     log "Копия настроек прошивки: владельца нет — флаг не тронут; запись выбора (was= — значение до нас) ниже."
+                     cat "$ENODIA_STATE/.stock-backup-off" >> "$REPORT" 2>/dev/null ;;
+    esac
+    return 0
+}
+
 step_fwzone() {
     FW_RELOAD=0
     command -v uci >/dev/null 2>&1 || { log "firewall: uci не найден — зону не трогаю."; return 0; }
@@ -965,6 +1002,10 @@ step_verify() {      # $1 = дополнительные демоны (как у
     else _cn=$(cron_ours -c /etc/crontabs/root 2>/dev/null); fi
     case "$_cn" in ''|*[!0-9]*) _cn=0 ;; esac
     [ "$_cn" = 0 ] || _left="$_left cron($_cn)"
+    # The stock settings backup the person turned off through us: purge puts the flag back (step_stockbak) and the owner drops its
+    # marker only after that — a marker still here = the router left with a stock setting we changed. Not on deactivate (keep):
+    # files and settings stay, the person's choice with them.
+    [ "$2" = keep ] || { [ -f "$ENODIA_STATE/.stock-backup-off" ] && _left="$_left копия-настроек-прошивки"; }
     # Сниппеты dnsmasq — самое дорогое из уцелевшего: наш 00-upstream.conf ЗАПИРАЕТ upstream в
     # туннель, которого больше нет, то есть «деактивация» оставила бы сеть вообще без DNS.
     _dso=$(dnsmasq_ours)
@@ -1120,6 +1161,7 @@ cmd_purge() {
     step_cron
     step_dnsmasq
     step_fwzone         # ДО вердикта: он про uci-след спрашивает (и только purge — см. шаг 4b)
+    step_stockbak       # ДО вердикта и ДО сноса каталога настроек: метка «выключена вами» лежит там
     step_hosts          # ДО вердикта: RAM-след ниже идёт последним, а вердикт про hosts спрашивает
     # Проверяем ДО стирания каталога: `set_state` пишет ВНУТРЬ $ENODIA_DIR, после rm писать будет
     # некуда, а отметка «снялось не всё» нужна ровно тому, кто потом придёт разбираться.

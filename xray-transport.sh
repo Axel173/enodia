@@ -51,6 +51,10 @@ command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$ENODIA_BIN/$1"
 # Нет файла (частичный apply-scripts) — шим повторяет ПРЕЖНИЙ путь: фиксированный срок и никакого
 # различения «умер»/«жив, но не готов».
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
+# lbl_commit_out — a config is replaced whole or not at all (access_off; C135): `cat tmp > config` truncated the config FIRST, and
+# a full partition left the server's config empty (review s.136, L9).
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi
+command -v lbl_commit_out >/dev/null 2>&1 || lbl_commit_out() { _lcf=$1; shift; "$@" > "$_lcf.$$.new" && mv -f "$_lcf.$$.new" "$_lcf" && return 0; rm -f "$_lcf.$$.new"; return 1; }   # write-blind: the shim of a missing library is the old line
 # «VPN выключен вручную — несущую не берёт никто» (carrier_barred/carrier_run, разбор в daemon-lib.sh). Нет — прежний путь.
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
 command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
@@ -145,11 +149,55 @@ command -v carrier_up_mark >/dev/null 2>&1 || carrier_up_mark() { return 0; }
 # xray-s<id>.json, а парс сервера обязан быть ОДНОЙ реализацией (иначе копия разойдётся —
 # ровно тот случай, из-за которого resolve_ipv4 вынесен в dns-lib.sh).
 xray_server_host() {
+    # A CHAIN (`dialerProxy`, Amnezia Premium's VLESS: relay → exit) — the router dials the chain's LAST hop, the relay; the first
+    # address in the file is the EXIT, reached through the relay. The anti-loop and the seed taken by it guarded the wrong address.
+    if xray_chain_at "${1:-$XRAY_JSON}"; then
+        _xsh=$(xray_ob_val "${1:-$XRAY_JSON}" "$XRAY_HOP" address)
+        [ -z "$_xsh" ] || { printf '%s\n' "$_xsh"; return 0; }
+    fi
     { tr -d '\r\n' < "${1:-$XRAY_JSON}" 2>/dev/null; } \
         | sed 's/.*"outbounds"/"outbounds"/' \
         | grep -o '"address"[[:space:]]*:[[:space:]]*"[^"]*"' \
         | head -1 \
         | sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/'
+}
+# xray_chain_at <config> — the default outbound (the first) dials through `dialerProxy`: follow the tags to the outbound that dials
+# by itself → its index in XRAY_HOP. Code 1 — no chain (the old parse answers), no jsonfilter, a tag that names nothing, deeper
+# than four hops (a loop). Indices, not `outbounds[*].tag`: an outbound without a tag would shift the lines.
+xray_chain_at() {
+    command -v jsonfilter >/dev/null 2>&1 || return 1
+    _xcd=$(jsonfilter -i "$1" -e '@.outbounds[0].streamSettings.sockopt.dialerProxy' 2>/dev/null)
+    [ -n "$_xcd" ] || return 1
+    _xcn=$(jsonfilter -i "$1" -e '@.outbounds[*].protocol' 2>/dev/null | wc -l)
+    _xch=0
+    while [ -n "$_xcd" ]; do
+        _xch=$((_xch+1)); [ "$_xch" -le 4 ] || return 1
+        XRAY_HOP=""; _xcj=0
+        while [ "$_xcj" -lt "$_xcn" ]; do
+            [ "$(jsonfilter -i "$1" -e "@.outbounds[$_xcj].tag" 2>/dev/null)" = "$_xcd" ] && { XRAY_HOP=$_xcj; break; }
+            _xcj=$((_xcj+1))
+        done
+        [ -n "$XRAY_HOP" ] || return 1
+        _xcd=$(jsonfilter -i "$1" -e "@.outbounds[$XRAY_HOP].streamSettings.sockopt.dialerProxy" 2>/dev/null)
+    done
+    return 0
+}
+# xray_ob_val <config> <index> <address|port> — the server field of outbound <index>: vnext (vless/vmess), servers (trojan/ss), or
+# the flat form of newer configs (`settings.address`).
+xray_ob_val() {
+    for _xop in "settings.vnext[0].$3" "settings.servers[0].$3" "settings.$3"; do
+        _xov=$(jsonfilter -i "$1" -e "@.outbounds[$2].$_xop" 2>/dev/null | head -n 1)
+        [ -z "$_xov" ] || { printf '%s' "$_xov"; return 0; }
+    done
+    return 1
+}
+# The server the router DIALS, for readers outside the plugin (cgi-bin/ping asks only for a chain): «host⇥port».
+cmd_endpoint() {
+    [ -f "$1" ] || return 1
+    _xeh=$(xray_server_host "$1"); [ -n "$_xeh" ] || return 1
+    _xep=""
+    if xray_chain_at "$1"; then _xep=$(xray_ob_val "$1" "$XRAY_HOP" port | tr -cd '0-9'); fi
+    printf '%s\t%s\n' "$_xeh" "$_xep"
 }
 # Кладёт ответ для server-host в ЛОКАЛЬНЫЙ dnsmasq (address=/host/IP) — демон резолвит
 # имя сам, мгновенно локально, не уходя в ещё-не-поднятый туннель. Конфиг НЕ трогаем
@@ -225,12 +273,29 @@ access_off() {   # $1 = json-конфиг xray; $2 = "keep" — накоплен
     ACCESS_FIXED=0
     [ -f "$1" ] || return 0
     _aold=$(sed -n 's#.*"access"[[:space:]]*:[[:space:]]*"\(/tmp/[^"]*\)".*#\1#p' "$1" 2>/dev/null | head -n1)
-    [ -n "$_aold" ] || return 0
+    if [ -z "$_aold" ]; then
+        # NO `access` KEY AT ALL — xray then writes the access log to STDOUT, and spawn_xray captures stdout into its log in RAM:
+        # the same ~15 MB a day (Amnezia Premium's VLESS configs come so; an uploaded JSON may). The key goes into `log` (made if
+        # absent) on the config's one-line text; written only when jsonfilter reads the result back as `none` — a shape this sed
+        # does not foresee is left alone, not broken. A path elsewhere or "none" is not ours to change.
+        grep -q '"access"' "$1" 2>/dev/null && return 0
+        command -v jsonfilter >/dev/null 2>&1 || return 0
+        ( umask 077; tr -d '\r\n' < "$1" | sed '
+            /"log"[[:space:]]*:[[:space:]]*{[[:space:]]*}/ { s/"log"[[:space:]]*:[[:space:]]*{[[:space:]]*}/"log":{"access":"none"}/; b; }
+            /"log"[[:space:]]*:[[:space:]]*{/ { s/"log"[[:space:]]*:[[:space:]]*{/"log":{"access":"none",/; b; }
+            s/^[[:space:]]*{/{"log":{"access":"none"},/' > "$1.acc" ) 2>/dev/null
+        if [ "$(jsonfilter -i "$1.acc" -e '@.log.access' 2>/dev/null)" = none ] && ( umask 077; lbl_commit_out "$1" cat "$1.acc" ) 2>/dev/null; then
+            ACCESS_FIXED=1
+            log "в конфиге $(basename "$1") погашен access-лог xray (ключа не было — лог шёл в stdout, в ОЗУ)"
+        fi
+        rm -f "$1.acc" 2>/dev/null
+        return 0
+    fi
     # umask в ПОДОБОЛОЧКЕ: у конфига права 600, потому что в нём креды сервера, и временная
     # копия обязана быть такой же. Перенаправление создаёт файл ДО того, как успел бы сработать
     # chmod, — значит право отбирать надо ЗАРАНЕЕ, а не после.
     ( umask 077; sed 's#\("access"[[:space:]]*:[[:space:]]*\)"/tmp/[^"]*"#\1"none"#' "$1" > "$1.acc" ) 2>/dev/null
-    if [ -s "$1.acc" ] && cat "$1.acc" > "$1" 2>/dev/null; then
+    if [ -s "$1.acc" ] && ( umask 077; lbl_commit_out "$1" cat "$1.acc" ) 2>/dev/null; then
         ACCESS_FIXED=1
         log "в конфиге $(basename "$1") погашен access-лог xray ($_aold рос в ОЗУ)"
         # Накопленное освобождаем ЗДЕСЬ ЖЕ, но ТОЛЬКО ПОСЛЕ удачной правки: демон в этот момент
@@ -759,6 +824,7 @@ case "$1" in
     # DNS активной несущей (DoH toggle/смена резолвера) — через doh_apply_dns. При выключенном VPN — прямой, как после `down`.
     dns)      if carrier_barred; then set_direct_dns; else set_xray_dns; fi ;;
     access-purge) cmd_access_purge ;;  # разовая чистка ХРАНИЛИЩА конфигов от пути access-лога (зовут install.sh и gh-update.sh)
+    endpoint) cmd_endpoint "$2" ;;    # «host⇥port» the router dials for config $2 (a chain's relay) — cgi-bin/ping
     # Слот-вербы ОПЦИОНАЛЬНЫ по контракту: нет слот-слоя → код 2 «не умею» (оркестратор оставит
     # выход на fallback), а не тихая смерть шелла на провалившемся `.`.
     slot-up)     slot_lib_ok || exit 2; carrier_run cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф3): 2-й xray + hev + xtunN в table 100N

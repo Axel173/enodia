@@ -129,6 +129,18 @@ http_date_iso() {
 	_hdi_e=$(http_date_epoch "$1") || return 1
 	date -u -d "@$_hdi_e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
 }
+# iso_date_epoch <ISO 8601> — the epoch of an API's date in UTC: «2026-10-16T23:23:54Z», «2026-10-10 01:31:12.575922+00:00» (Amnezia
+# writes both). Seconds and anything after them (fraction, zone) are cut: only UTC is spoken here, another zone is a refusal.
+iso_date_epoch() {
+	_ide_s=$(printf '%s' "$1" | tr -d '\r' | cut -c1-19 | tr 'T' ' ')
+	case "$_ide_s" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ;; *) return 1 ;; esac
+	_ide_z=$(printf '%s' "$1" | tr -d '\r' | cut -c20- | sed 's/^\.[0-9]*//')
+	case "$_ide_z" in ''|Z|+00:00|+0000) ;; *) return 1 ;; esac
+	# `-d 'YYYY-MM-DD hh:mm:ss'` — a form busybox's date reads by itself (no `-D` format needed) and GNU date reads too.
+	_ide_e=$(date -u -d "$_ide_s" +%s 2>/dev/null)
+	case "$_ide_e" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "$_ide_e"
+}
 
 # ОТМЕТКА «НЕСУЩУЮ ТОЛЬКО ЧТО ПОДНЯЛИ» ------------------------------------------------------
 # ЗАЧЕМ (поймано на железе 14.08.2026). Сторож гардит смену транспорта локом enodia-switching.lock,

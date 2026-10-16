@@ -55,6 +55,8 @@ ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 # утилиты conntrack в прошивке НЕТ ВООБЩЕ, и прежний `conntrack -F || true` был тихим no-op —
 # правило стояло, а поток шёл по-старому через NSS/ECM. Шим = прежнее поведение (частичный
 # apply-scripts не должен падать), полноценный сброс живёт в самой библиотеке.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 # Ожидание xtables-лока: ipt-lib.sh подменяет команду `iptables` и добавляет `-w`. Лок занят
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
@@ -160,9 +162,7 @@ provider_get() {   # provider_get <type> → выбранный pid (валид�
 }
 provider_set() {   # provider_set <type> <pid> → валидация + персист
 	provider_lines | grep -q "^$1|$2|" || { echo "неизвестный провайдер: $1/$2"; return 1; }
-	grep -v "^$1$TAB" "$PROV" 2>/dev/null > "$PROV.new"
-	printf '%s\t%s\n' "$1" "$2" >> "$PROV.new"
-	mv "$PROV.new" "$PROV"
+	lbl_commit_out "$PROV" lbl_without "$PROV" "^$1$TAB" "$1$TAB$2"
 }
 prov_fresh_url() { provider_lines | awk -F'|' -v t="$1" -v p="$2" '$1==t&&$2==p{print $4; exit}'; }
 
@@ -312,6 +312,13 @@ jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 # --- реестр действий (TSV на /data): key<TAB>action<TAB>cnt<TAB>ts ------------------
 reg_get()    { grep "^$1$TAB" "$REG" 2>/dev/null | head -1; }
 reg_action() { reg_get "$1" | cut -f2; }
+# A FILE REPLACED WHOLE OR NOT AT ALL — label-lib.sh::lbl_commit_out: awk, grep and sort exit 0 when their write fails (BusyBox,
+# measured on BE7000 12.10.2026), so `filter > tmp && mv tmp file` put a stump over the registry or the aggregate on a partition
+# with no free block. The pipes this file needs as ONE command:
+sort_inplace() { lbl_commit_out "$1" sort -u "$1" 2>/dev/null; }                 # dedup a list in place
+bogon_sorted() { strip_bogon < "$1" 2>/dev/null | sort -u; }                     # a CIDR list without bogons
+cidr_sorted()  { norm_cidr < "$1" | sort -u; }
+cidr6_sorted() { norm_cidr6 < "$1" | strip_bogon6 | sort -u; }
 reg_write()  { cat > "$REG.new" && mv "$REG.new" "$REG"; }   # атомарно (обрыв не бьёт файл)
 # reg_set <key> <action>: upsert строки. off — строку УБИРАЕМ (нет строки = нет действия).
 reg_set() {
@@ -325,20 +332,18 @@ reg_set() {
 	_s=$(printf '%s' "$_old" | cut -f5)
 	case "$_s" in [2-7]) ;; *) _s=0 ;; esac
 	[ "$_a" = vpn ] || _s=0
-	grep -v "^$_k$TAB" "$REG" 2>/dev/null > "$REG.tmp"
-	[ "$_a" = off ] || printf '%s\t%s\t%s\t%s\t%s\n' "$_k" "$_a" "$_c" "$_t" "$_s" >> "$REG.tmp"
-	mv "$REG.tmp" "$REG"
+	_rgl=""; [ "$_a" = off ] || _rgl="$_k$TAB$_a$TAB$_c$TAB$_t$TAB$_s"
+	lbl_commit_out "$REG" lbl_without "$REG" "^$_k$TAB" "$_rgl"   # no line (off) — the key is gone
 }
 reg_set_meta() {  # reg_set_meta <key> <cnt> <ts>
-	awk -F"$TAB" -v OFS="$TAB" -v k="$1" -v c="$2" -v t="$3" '$1==k{$3=c;$4=t} {print}' "$REG" > "$REG.new" 2>/dev/null && mv "$REG.new" "$REG"
+	lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" -v k="$1" -v c="$2" -v t="$3" '$1==k{$3=c;$4=t} {print}' "$REG" 2>/dev/null
 }
 # Миграция реестра 4-col → 5-col (slot добавлен ПОСЛЕДНИМ полем — прежние позиции не задеты).
 # Идемпотентна (5-col строки проходят как есть), атомарна (tmp+mv); зеркало migrate_reg groups.sh.
 migrate_reg() {
 	[ -s "$REG" ] || return 0
 	awk -F"$TAB" 'NF>0 && NF!=5{c=1} END{exit c?0:1}' "$REG" || return 0
-	awk -F"$TAB" -v OFS="$TAB" 'NF==4{print $1,$2,$3,$4,"0"; next} NF>0{print}' "$REG" > "$REG.mig" \
-		&& mv "$REG.mig" "$REG"
+	lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" 'NF==4{print $1,$2,$3,$4,"0"; next} NF>0{print}' "$REG"
 }
 migrate_reg
 
@@ -569,13 +574,14 @@ fetch_v2fly() {  # fetch_v2fly <имя> <outfile>
 # на флеш (V2CAT_SNAP). Формат: "name": "/data/<имя>" (прямые файлы категорий — без вложенных слэшей).
 # Провал сети НЕ трогает снимок (панель остаётся на прежнем/baked). Имена чистим до [a-z0-9._!-].
 # Зовёт `update` (перекачка источников); отдельно НЕ трогаем на каждый list — каталог статичен.
+v2fly_names() {   # the catalogue's category names from the fetched listing $1; code 1 — none
+	grep -oE '"/data/[^"/]+"' "$1" 2>/dev/null | sed 's|"/data/||; s|"$||' | grep -E '^[a-z0-9._!-]+$' | sort -u | grep .
+}
 v2fly_enumerate() {
 	_tmp="$RAM/.v2list.$$"
 	fetch_url "$V2CAT_URL" "$_tmp" || { rm -f "$_tmp" 2>/dev/null; return 0; }
-	grep -oE '"/data/[^"/]+"' "$_tmp" 2>/dev/null | sed 's|"/data/||; s|"$||' \
-		| grep -E '^[a-z0-9._!-]+$' | sort -u > "$_tmp.n"
-	[ -s "$_tmp.n" ] && mv "$_tmp.n" "$V2CAT_SNAP"
-	rm -f "$_tmp" "$_tmp.n" 2>/dev/null
+	lbl_commit_out "$V2CAT_SNAP" v2fly_names "$_tmp"   # no name at all (code 1) — the snapshot stays; the temp file is next to it, on the flash
+	rm -f "$_tmp" 2>/dev/null
 }
 # (runetfreedom-каталог не перечисляем в рантайме — baked-only, см. коммент у RFIP_SNAP выше: data-API 403
 #  на >50-МБ репо, а набор категорий статичен.)
@@ -595,16 +601,15 @@ ensure_cache() {
 			esac
 			# rename, never rewrite in place: `>` truncates first, and the schedules' filter reloading in that window would
 			# load half a category — or none (review s.112)
-			[ -s "$_raw" ] && sort -u "$_raw" > "$_cf.$$" && mv -f "$_cf.$$" "$_cf"
-			rm -f "$_raw" "$_cf.$$" 2>/dev/null
+			[ -s "$_raw" ] && lbl_commit_out "$_cf" sort -u "$_raw"
+			rm -f "$_raw" 2>/dev/null
 		else
 			_raw="$RAM/.raw.$_k"
 			if fetch_url "$_u" "$_raw"; then
-				norm_cidr < "$_raw" | sort -u > "$_cf.$$" && mv -f "$_cf.$$" "$_cf"
+				lbl_commit_out "$_cf" cidr_sorted "$_raw"
 				# the IPv6 lines beside it, bogons cut (`<key>@6`): norm_cidr keeps IPv4 only, and a consumer closes a messenger by its
 				# network in both families. Written even empty — «fetched, the source has no v6» (CONSUMERS below)
-				norm_cidr6 < "$_raw" | strip_bogon6 | sort -u > "$_cf@6.$$" && mv -f "$_cf@6.$$" "$_cf@6"
-				rm -f "$_cf.$$" "$_cf@6.$$" 2>/dev/null
+				lbl_commit_out "$_cf@6" cidr6_sorted "$_raw"
 			fi
 			rm -f "$_raw" 2>/dev/null
 		fi
@@ -757,8 +762,7 @@ _wanted_pass() {
 			# `@4` only from a cache that is here: after a reboot `ready` put the forms back from the snapshots while the cache is
 			# gone, and an offline pass must not empty them
 			if [ -f "$_wc" ]; then
-				strip_bogon < "$_wc" 2>/dev/null | sort -u > "$_wc@4.$$" && mv -f "$_wc@4.$$" "$_wc@4"
-				rm -f "$_wc@4.$$" 2>/dev/null
+				lbl_commit_out "$_wc@4" bogon_sorted "$_wc"
 			fi
 			[ -f "$_wc@4" ] || continue
 			[ -f "$_wc@6" ] || : > "$_wc@6"
@@ -845,12 +849,16 @@ _build_pass() {
 	fi
 	# CIDR: busybox sort БЕЗ -o (дампит в stdout) → сорт+дедуп через tmp+mv. Блок-агрегат СТРОГО
 	# strip_bogon (защита LAN от «глухого» DROP; зеркало ipblock).
-	sort -u "$_vpn" > "$_vpn.s" 2>/dev/null && mv "$_vpn.s" "$_vpn"
-	sort -u "$_out" > "$_out.s" 2>/dev/null && mv "$_out.s" "$_out"
-	strip_bogon < "$_blk" 2>/dev/null | sort -u > "$_blk.s" 2>/dev/null; mv "$_blk.s" "$_blk"
+	sort_inplace "$_vpn"
+	sort_inplace "$_out"
+	# THE GUARD MUST NOT FAIL OPEN: a filter that could not be written (the RAM disk is full) leaves the aggregate UNFILTERED —
+	# lbl_commit_out keeps the file as it was. Such an aggregate is neither loaded nor put on flash: its set keeps what it had and
+	# is named among the failed ones (review s.127; before lbl_commit_out the same failure left a cut-short but filtered stump).
+	_gbad=""
+	lbl_commit_out "$_blk" bogon_sorted "$_blk" || _gbad="$_gbad blk"
 	# Десинк-пул тоже СТРОГО strip_bogon: zapret вешает на него NFQUEUE (а слот — ещё и ACCEPT выше
 	# маркировки) ⇒ приватка в пуле = LAN мимо VPN. Зеркало zapret_cidr.
-	strip_bogon < "$_dsy" 2>/dev/null | sort -u > "$_dsy.s" 2>/dev/null; mv "$_dsy.s" "$_dsy"
+	lbl_commit_out "$_dsy" bogon_sorted "$_dsy" || _gbad="$_gbad dsy"
 	# geo_block домены НЕ наполняют (они уходят в dnsmasq через address=, а не ipset=) ⇒ ему
 	# файл доменов не передаём: динамики у набора не бывает, но снимок даёт «не изменилось —
 	# не трогаем» и на нём (агрегат страны пересобирать вхолостую дорого).
@@ -858,33 +866,35 @@ _build_pass() {
 	_gfail=""
 	set_sync "$SET_VPN" "$_vpn" "$_dv" || _gfail="$_gfail $SET_VPN"
 	set_sync "$SET_OUT" "$_out" "$_do" || _gfail="$_gfail $SET_OUT"
-	set_sync "$SET_BLK" "$_blk"        || _gfail="$_gfail $SET_BLK"
-	set_sync "$SET_DSY" "$_dsy" "$_dd" || _gfail="$_gfail $SET_DSY"
-	snap_q "$SNAP_VPN" "$_vpn"; snap_q "$SNAP_OUT" "$_out"; snap_q "$SNAP_BLK" "$_blk"
-	snap_q "$SNAP_DSY" "$_dsy"
+	case "$_gbad" in *blk*) _gfail="$_gfail $SET_BLK" ;; *) set_sync "$SET_BLK" "$_blk" || _gfail="$_gfail $SET_BLK" ;; esac
+	# …the desync set still has to EXIST: build_dns below writes `ipset=/…/<set>` lines for its domains, and dnsmasq wants the
+	# set there before it restarts (set_sync creates it; a refused aggregate skips set_sync).
+	case "$_gbad" in *dsy*) _gfail="$_gfail $SET_DSY"; set_ensure "$SET_DSY" ;; *) set_sync "$SET_DSY" "$_dsy" "$_dd" || _gfail="$_gfail $SET_DSY" ;; esac
+	snap_q "$SNAP_VPN" "$_vpn"; snap_q "$SNAP_OUT" "$_out"
+	case "$_gbad" in *blk*) ;; *) snap_q "$SNAP_BLK" "$_blk" ;; esac
+	case "$_gbad" in *dsy*) ;; *) snap_q "$SNAP_DSY" "$_dsy" ;; esac
 	# Слот-агрегаты: сорт+дедуп, сет наполняем если есть члены (CIDR или домены — dnsmasq требует
 	# СУЩЕСТВУЮЩИЙ сет до рестарта, set_sync его создаёт и пустым) ИЛИ сет уже жив (иначе IP отвязанной
 	# категории залипли бы в старом сете — зеркало groups.sh). Снимок на флеш — офлайн-ребут переживает.
 	for _sn in 2 3 4 5 6 7; do
 		_sf="$RAM/.agg-vpn-s$_sn"; _df="$RAM/.dom-vpn-s$_sn"
-		sort -u "$_sf" > "$_sf.s" 2>/dev/null && mv "$_sf.s" "$_sf"
-		sort -u "$_df" > "$_df.s" 2>/dev/null && mv "$_df.s" "$_df"
+		sort_inplace "$_sf"
+		sort_inplace "$_df"
 		if [ -s "$_sf" ] || [ -s "$_df" ] || ipset list -n 2>/dev/null | grep -qx "geo_vpn_s$_sn"; then
 			set_sync "geo_vpn_s$_sn" "$_sf" "$_df" || _gfail="$_gfail geo_vpn_s$_sn"
 		fi
 		snap_q "$GEO/.snap-vpn-s$_sn" "$_sf"
 	done
 	# ДОМЕНЫ: дедуп + dnsmasq-conf (сеты geo_vpn/geo_out уже созданы set_sync выше — dnsmasq требует их).
-	sort -u "$_dv" > "$_dv.s" 2>/dev/null && mv "$_dv.s" "$_dv"
-	sort -u "$_do" > "$_do.s" 2>/dev/null && mv "$_do.s" "$_do"
-	sort -u "$_db" > "$_db.s" 2>/dev/null && mv "$_db.s" "$_db"
-	sort -u "$_dd" > "$_dd.s" 2>/dev/null && mv "$_dd.s" "$_dd"
+	sort_inplace "$_dv"
+	sort_inplace "$_do"
+	sort_inplace "$_db"
+	sort_inplace "$_dd"
 	build_dns "$_dv" "$_do" "$_db" "$_dd"
 	adblock_resync
 	# ПЕРЕСЕЧЕНИЕ «в VPN» × «мимо» — считаем ЗДЕСЬ, пока агрегаты ещё не удалены, и кладём
 	# вердикт на флеш: панель обязана показывать факт с роутера, а не свою арифметику.
-	overlap_scan "$_vpn" "$SET_OUT" "$_dv" "$_do" > "$GEO/.overlap.new" 2>/dev/null \
-		&& mv "$GEO/.overlap.new" "$GEO/.overlap" || rm -f "$GEO/.overlap.new" 2>/dev/null
+	lbl_commit_out "$GEO/.overlap" overlap_scan "$_vpn" "$SET_OUT" "$_dv" "$_do" 2>/dev/null
 	wire_rules
 	# Пул десинка изменился → досборка правил nfqws (zapret сам о нашем сете не узнает). Верб rewire
 	# идемпотентен и НЕ поднимает демон, когда десинк выключен, — звать безопасно всегда.
@@ -981,8 +991,7 @@ geo_enabled() { [ -s "$REG" ]; }   # есть хоть один выбранны
 # Один вызов на репозиторий-источник: из ответа коммита берём И sha (для пиновки фетча — jsd_ref), И дату
 # (для метки «апстрим N назад» в панели). $SHAS = repo_id<TAB>sha<TAB>iso. Провал по репо → сохраняем
 # прежнюю строку (последнее известное). Зовут: update (перед сборкой) и панель (async при пустом кэше дат).
-resolve_upstream() {
-	: > "$SHAS.new"
+shas_text() {
 	for _row in \
 		"v2fly|https://api.github.com/repos/v2fly/domain-list-community/commits/master" \
 		"rfip|https://api.github.com/repos/runetfreedom/russia-blocked-geoip/commits/release" \
@@ -997,8 +1006,8 @@ resolve_upstream() {
 		fi
 		rm -f "$_tmp" 2>/dev/null
 		case "$_sha" in
-			[0-9a-f][0-9a-f]*) printf '%s\t%s\t%s\n' "$_rid" "$_sha" "$_iso" >> "$SHAS.new" ;;
-			*) grep "^$_rid$TAB" "$SHAS" 2>/dev/null >> "$SHAS.new" ;;   # провал API — держим прежний sha/дату
+			[0-9a-f][0-9a-f]*) printf '%s\t%s\t%s\n' "$_rid" "$_sha" "$_iso" ;;
+			*) grep "^$_rid$TAB" "$SHAS" 2>/dev/null ;;   # провал API — держим прежний sha/дату
 		esac
 	done
 	# ipdeny — НЕ git, коммитов у него нет, но свежесть измерима: `Last-Modified` отдаётся на КАЖДОЙ
@@ -1007,10 +1016,13 @@ resolve_upstream() {
 	# актуальности, то есть человек не мог отличить живой источник от заброшенного.
 	# SHA-поле держим прочерком: пиновать нечего, а формат строки $SHAS общий.
 	_ipd=$(ipdeny_iso 2>/dev/null)
-	if [ -n "$_ipd" ]; then printf 'ipdeny\t-\t%s\n' "$_ipd" >> "$SHAS.new"
-	else grep "^ipdeny$TAB" "$SHAS" 2>/dev/null >> "$SHAS.new"; fi
-	[ -s "$SHAS.new" ] && mv "$SHAS.new" "$SHAS" || rm -f "$SHAS.new" 2>/dev/null
+	if [ -n "$_ipd" ]; then printf 'ipdeny\t-\t%s\n' "$_ipd"
+	else grep "^ipdeny$TAB" "$SHAS" 2>/dev/null; fi
+	return 0
 }
+# Whole or not at all (label-lib.sh); `grep .` gives code 1 when the text is empty — then the old file stays.
+shas_filled() { shas_text | grep .; }
+resolve_upstream() { lbl_commit_out "$SHAS" shas_filled; }
 # Last-Modified зоны ipdeny → ISO. Приводим ЗДЕСЬ, а не в панели: `geoFreshLabel` режет дату как
 # `iso.slice(0,10)`, и RFC-1123 («Thu, 13 Aug 2026 …») превратился бы в «Thu, 13 A». Одна ветка
 # формата на весь проект — во фронте второй не заводим. САМ РАЗБОР RFC-1123 — у владельца
@@ -1213,7 +1225,7 @@ case "$1" in
 	set)   # set <key> <vpn|bypass|block|desync|off> — записать выбор действия (мгновенно), сборку зовёт update/apply
 		[ -n "$(cat_url "$2")" ] || { echo "неизвестный ключ гео"; exit 1; }
 		case "$3" in vpn|bypass|block|desync|off) ;; *) echo "действие: vpn|bypass|block|desync|off"; exit 1 ;; esac
-		reg_set "$2" "$3"
+		reg_set "$2" "$3" || { echo "гео «$2»: выбор не записался (нет места на разделе настроек?)"; exit 1; }
 		echo "гео «$2»: $(case "$3" in vpn) echo 'в VPN' ;; bypass) echo 'мимо VPN' ;; block) echo 'заблокировано' ;; desync) echo 'в десинк' ;; *) echo 'выкл' ;; esac)"
 		;;
 	desync-list)   # что выбрано «в десинк» — key|label|доменов/адресов. Читает карточка Zapret:
@@ -1236,7 +1248,7 @@ case "$1" in
 		if [ "$3" != 0 ] && [ "$(printf '%s' "$_ln" | cut -f2)" != vpn ]; then
 			echo "доп-выход только для действия «в VPN»"; exit 1
 		fi
-		awk -F"$TAB" -v OFS="$TAB" -v k="$2" -v s="$3" '$1==k{$5=s} {print}' "$REG" > "$REG.new" && mv "$REG.new" "$REG"
+		lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" -v k="$2" -v s="$3" '$1==k{$5=s} {print}' "$REG"
 		echo "выход: $([ "$3" = 0 ] && echo 'Основной' || echo "слот №$3")"
 		;;
 	# want <consumer> [<key>…] — the consumer's whole set of keys (none = it wants nothing); domain and cidr keys alike — each
@@ -1254,7 +1266,7 @@ case "$1" in
 		[ -z "$_wbad" ] || echo "неизвестный ключ гео:$_wbad — пропущен"
 		mkdir -p "$WANT_DIR" 2>/dev/null
 		if [ -z "$_wok" ]; then rm -f "$WANT_DIR/$_wc"; exit 0; fi
-		printf '%s\n' $_wok | sort -u > "$WANT_DIR/.$_wc.$$" && mv -f "$WANT_DIR/.$_wc.$$" "$WANT_DIR/$_wc" ;;
+		printf '%s\n' $_wok | lbl_commit_out_as "$WANT_DIR/.$_wc.$$" "$WANT_DIR/$_wc" sort -u ;;
 	# ready <key>… — «<key><TAB><kind><TAB><path>» for every READY form of the keys (want_forms): the RAM cache, or the flash
 	# snapshot put back into it. A key with neither is left out (the consumer goes without it until `wanted` brings it) — never a
 	# fetch here. A cidr key is ready by its `@4` (a `cidr` line); its `cidr6` line follows only then, and only when `@6` is not

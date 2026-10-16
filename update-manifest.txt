@@ -119,6 +119,19 @@ dhcp-static.sh
 dev-names.sh
 label-lib.sh
 cfg-names.sh
+# «Дорога к серверу»: пакеты несущей к её серверу — через другой выход (адрес VPS заблокирован провайдером). Правила pref 82..87
+# выводит из хранилищ эндпоинтов; зовут apply-bypass, net-tune, slots, vpn-toggle, uninstall — все с гардом `-f`: нет файла —
+# дорог нет, поведение прежнее.
+road.sh
+# «Второе мнение о блокировке» (cheburcheck.sh, opt-in, по умолчанию выкл) и «Получить WARP» (warp.sh): зовут CGI action/ping
+# с гардом `-f`; нет файла — панель честно отказывает, остальное как раньше.
+cheburcheck.sh
+warp.sh
+# Amnezia Premium (premium.sh): a subscription by the service's key — the router asks Amnezia's API itself. amnezia-gw.pem is
+# Amnezia's PUBLIC key, byte for byte (the gateway lists' AES key is SHA-512 of its exact bytes; C138 pins the sum). Callers
+# (subs-update.sh, cgi-bin/action, watchdog.sh) guard by `-f`: no file — no Premium, the rest as before.
+premium.sh
+amnezia-gw.pem
 lists-update.sh
 groups.sh
 geo.sh
@@ -130,6 +143,9 @@ dump.sh
 # Чистка флеша + разбивка занятого. Это ЕДИНСТВЕННЫЙ владелец списка «что считается мусором»:
 # карточка «Компоненты» зовёт его вербами json/clean, второй копии списка в CGI нет намеренно.
 clean.sh
+# The stock settings backup (Xiaomi's copy of its settings container): offer, off, back on, boot heal, uninstall. The wizard
+# runs this file from the package before the install, so it carries shims of its libraries.
+stock-backup.sh
 # «Кто ест ОЗУ» — тот же по форме ответ, но про живые процессы; зовёт карточка «О роутере»
 # (data?section=ram) ЛЕНИВО, по клику. Ничего не меняет и ничего не запускает.
 ram-usage.sh

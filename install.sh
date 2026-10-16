@@ -72,10 +72,16 @@ NC='\033[0m' # No Color
 # Из пакета обновления (pkg-install.sh) наш вывод уходит в журнал экрана «Обновление» — escape-коды там мусор.
 if [ -n "$INSTALL_FROM_PKG" ]; then RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''; fi
 
-log()  { printf "${BLUE}[INFO]${NC}  %s\n" "$1"; }
-ok()   { printf "${GREEN}[ OK ]${NC}  %s\n" "$1"; }
-warn() { printf "${YELLOW}[WARN]${NC}  %s\n" "$1"; }
-err()  { printf "${RED}[FAIL]${NC}  %s\n" "$1" >&2; }
+log()  { _ILAST=$1; printf "${BLUE}[INFO]${NC}  %s\n" "$1"; }
+ok()   { _ILAST=$1; printf "${GREEN}[ OK ]${NC}  %s\n" "$1"; }
+warn() { _ILAST=$1; printf "${YELLOW}[WARN]${NC}  %s\n" "$1"; }
+err()  { _IERR=1; printf "${RED}[FAIL]${NC}  %s\n" "$1" >&2; }
+# A STOP UNDER `set -e` IS NEVER SILENT: a command that fails without a word (busybox `find` over a directory an entry vanished from
+# mid-walk, a guard idiom as the last command) ended the installer with nothing in its log but the line before — the update said
+# «установщик кончился ошибкой» and nobody could tell where (BE7000, the test release of 15.10.2026: the log held «Проверяю
+# окружение…» alone). The exit trap names the last thing it said; an `err` already said why.
+_ILAST=""; _IERR=0
+trap '_irc=$?; if [ "$_irc" != 0 ] && [ "$_IERR" = 0 ]; then printf "%s\n" "[FAIL]  установщик оборвался молча (код $_irc) после шага «${_ILAST:-начало}» — повторите установку; если повторится, пришлите диагностику" >&2; fi' EXIT
 
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
 ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
@@ -870,7 +876,9 @@ elif [ "$ACTIVE_PROTO" = xray ] || [ "$ACTIVE_PROTO" = hy2 ] || [ "$ACTIVE_PROTO
     ok "dnsmasq перезапущен на публичный upstream (резолв для закачки списков до подъёма транспорта)"
 else
     # AmneziaWG: upstream ВНУТРИ туннеля (адрес из awg.conf поля DNS=, fallback 172.29.172.254).
+    # dns-raw: the legacy full install (not the panel-only one the PC uses); a first value that is not an address is dropped (dnsmasq would refuse `server=<word>`)
     VPN_DNS=$(grep -E '^DNS\s*=' "$AWG_CONF" 2>/dev/null | head -1 | awk -F'= *' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+    case "$VPN_DNS" in *[!0-9.]*) VPN_DNS="" ;; esac
     [ -z "$VPN_DNS" ] && VPN_DNS="172.29.172.254"
     # upstream-own: легаси-путь полной установки (не PANEL_ONLY), файл с шапкой-комментарием для человека.
     cat > "$DNS_OVERRIDE" <<EOF

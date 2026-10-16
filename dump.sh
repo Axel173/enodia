@@ -394,6 +394,13 @@ if [ -f "$ENODIA_DIR/slots.sh" ]; then
     sh "$ENODIA_DIR/slots.sh" carriers 2>/dev/null || echo "(нет)"
     sub "слот-марки и таблицы (ip rule)"
     ip rule 2>/dev/null | grep -E 'fwmark 0x[2-7]' || echo "(слот-правил в ip rule нет)"
+    # Roads (road.sh): «server X rides exit N» — the store (intent) and the rules standing now (fact) side by side, because the
+    # question people bring is exactly «I set the road, why does the server still go direct».
+    if [ -f "$ENODIA_DIR/road.sh" ]; then
+        sub "дороги к серверам (road.sh: конфиг → выход; правила pref 82..87)"
+        sh "$ENODIA_DIR/road.sh" list 2>/dev/null | awk -F'\t' '{ print $1 " → выход №" $2 }'
+        ip rule 2>/dev/null | grep -E '^8[2-7]:' || echo "(правил дорог в ip rule нет)"
+    fi
     # УЧЁТ ПО ВЫХОДАМ — сюда же, а не в «ресурсы»: разбирают его вместе с самими выходами
     # («карточка показывает не то»), и ответ на это ровно два файла: СЫРОЙ последний замер
     # (первая строка — несущая и WAN, ниже по строке на выход: "s<id> <iface> <rx> <tx>") и
@@ -896,7 +903,18 @@ showmeta "$ENODIA_STATE/notify.conf"
 showmeta "$ENODIA_STATE/.subs"
 showmeta "$ENODIA_STATE/.sub-names"
 showmeta "$ENODIA_STATE/.cfg-names"   # свои имена конфигов (cfg-names.sh): в бэкапе — с конфигами; содержимое — имена человека
+showmeta "$ENODIA_STATE/.cfg-via"     # дороги к серверам (road.sh): конфиг → номер выхода-дороги
 showmeta "$ENODIA_STATE/.sub-picks"
+showmeta "$ENODIA_STATE/premium"      # Amnezia Premium (premium.sh): the router's installation id and the last answers — not read
+# …and what the last Premium work said (no key in it: state, op, the subscription's tag, the words).
+[ -s /tmp/enodia-premium.json ] && echo "premium: $(head -c 400 /tmp/enodia-premium.json)"
+# Its standbys — new keys issued and not laid out yet (premium.sh run_pick): the config's name and the uptime of the issue, never the
+# text (it holds the key).
+for _dpn in /tmp/enodia-premium-next.*.at; do
+	[ -f "$_dpn" ] || continue
+	_dpb=${_dpn##*/}; _dpb=${_dpb#enodia-premium-next.}
+	echo "premium standby: ${_dpb%.at} — issued at uptime $(cut -f1 "$_dpn" 2>/dev/null | tr -cd '0-9') (now $(awk '{print int($1)}' /proc/uptime 2>/dev/null))"   # raw-uptime: printed for a person beside the mark it compares with
+done
 # Вход в панель: только режим/размер. Содержимое — ключи от панели (хэш пароля вскрывают офлайн,
 # .totp-recovery = коды восстановления, .totp-sessions = живые сессии), и в дамп оно не едет.
 # Здесь важен сам ФАКТ: нет .panel-pass ⇒ панель не поднимется вовсе, а «войти» будет нечем.
@@ -1170,6 +1188,14 @@ fi
 # NB для читателя дампа: UBIFS СЖИМАЕТ, поэтому суммы du выше и «занято» из df — РАЗНЫЕ единицы,
 # вычитать одно из другого нельзя (на BE7000 замерено du 21046 КБ при df-занято 15888 КБ).
 echo "NB: du (разбивка выше) — ЛОГИЧЕСКИЙ размер, df — реально занятые блоки; UBIFS жмёт, разница штатна."
+# The stock's copy of its settings container — 3.8 MB of BE6500's flash, the answer to «why does nothing fit» there. The owner
+# answers (read-only `status`): the flag, the copy, whether the person turned it off through us.
+sub "копия настроек прошивки (stock-backup.sh status — только показывает)"
+if [ -f "$ENODIA_DIR/stock-backup.sh" ]; then
+    sh "$ENODIA_DIR/stock-backup.sh" status 2>/dev/null || echo "(stock-backup.sh status не отработал)"
+else
+    echo "(stock-backup.sh нет — установка до этой функции)"
+fi
 
 # «Не забивается ли память?» — самый частый вопрос по дампу, и ОДНОЙ строкой free на него не
 # ответить: MemFree штатно падает под страничный кэш и на роутере с ним всё в порядке. Судить

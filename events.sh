@@ -58,6 +58,8 @@ if [ -f "$ENODIA_DIR/router-lib.sh" ]; then . "$ENODIA_DIR/router-lib.sh"; fi
 # загрузки, а скачок часов вперёд делает СВЕЖИЙ лок «протухшим» — и в журнал полезли бы два
 # писателя разом. Возраст записи в самом журнале считается иначе, там отметка переживает ребут
 # (см. `# clock-raw:` ниже). Шим = прежнее поведение для установки без библиотеки.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: the journal replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 command -v age_since >/dev/null 2>&1 || age_since() {
 	case "$1" in ''|*[!0-9]*) echo 999999; return ;; esac
@@ -117,6 +119,13 @@ level_of() {
 		# sched-clock — access schedules are not acting: the router clock is not synced yet (access-sched.sh, once per boot).
 		# sched-filter — «limited» is not acting (no filter component / it did not start) or acts again; geo-want-snap-skip — a
 		# category of a schedule too big for its flash snapshot (geo.sh _wanted_pass).
+		# subs-active-refused — the new config of the active server did not come up, the previous one is back; subs-held-gone — a
+		# server an exit stands on left its subscription (the config is kept); subs-exit-reup — an exit did not come up on its
+		# config changed by a subscription (subs-update.sh).
+		subs-active-refused|subs-held-gone|subs-exit-reup) echo warn ;;
+		# stockbak-reoff — a firmware update turned the stock settings backup on again; the person had it off, heal turned it off
+		# again (stock-backup.sh): done, but the stock changed a choice behind the person's back.
+		stockbak-reoff)           echo warn ;;
 		transport-missing|geo-snap-skip|geo-want-snap-skip|doh-auto-off|doh-dot-fallback|subs-active-gone|cross-switch|rule-heal|hev-restart-*|sched-clock|sched-filter) echo warn ;;
 		*)                        echo info ;;
 	esac
@@ -142,7 +151,7 @@ class_of() {
 		iplist-*|ipblock-*|geo-*) echo lists ;;
 		task-*)                   echo tasks ;;   # the user's own tasks (tasks.sh): failure / done — the mail choice is also per task
 		# sched-<id> / sched-clock — access schedules (access-sched.sh): the journal only, it sends no mail
-		rule-heal|clock-step|store-mode-fail|doh-auto-off|doh-enable-failed|doh-dot-fallback|doh-dot-back|hev-restart-*|sched-*) echo system ;;
+		rule-heal|clock-step|store-mode-fail|doh-auto-off|doh-enable-failed|doh-dot-fallback|doh-dot-back|hev-restart-*|sched-*|stockbak-reoff) echo system ;;
 		*)                        echo system ;;
 	esac
 }
@@ -222,8 +231,7 @@ cmd_add() {
 			# схлопнул бы его с сегодняшним. Судим голой разностью сознательно.
 			if [ "$old_ts" -gt 0 ] && [ "$((now - old_ts))" -lt "$dedup" ]; then
 				cnt=$((old_cnt + 1))
-				awk -F'\t' -v k="$key" -v t="$old_ts" '!($2==k && $1==t)' "$EV" > "$EV.new" 2>/dev/null
-				mv "$EV.new" "$EV" 2>/dev/null
+				lbl_commit_out "$EV" awk -F'\t' -v k="$key" -v t="$old_ts" '!($2==k && $1==t)' "$EV" 2>/dev/null
 			fi
 		fi
 	fi

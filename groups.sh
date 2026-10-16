@@ -71,6 +71,8 @@ ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 # утилиты conntrack в прошивке НЕТ ВООБЩЕ, и прежний `conntrack -F || true` был тихим no-op —
 # правило стояло, а поток шёл по-старому через NSS/ECM. Шим = прежнее поведение (частичный
 # apply-scripts не должен падать), полноценный сброс живёт в самой библиотеке.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
 G="$ENODIA_STATE/groups"
@@ -149,8 +151,7 @@ valid_id() { echo "$1" | grep -qE '^g[0-9]+$'; }
 migrate_reg() {
 	[ -s "$REG" ] || return 0
 	awk -F"$TAB" 'NF>0 && NF!=5 && NF!=6{c=1} END{exit c?0:1}' "$REG" || return 0
-	awk -F"$TAB" -v OFS="$TAB" 'NF==4{print $1,$2,$3,"0",$4; next} NF>0{print}' "$REG" > "$REG.mig" \
-		&& mv "$REG.mig" "$REG"
+	lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" 'NF==4{print $1,$2,$3,"0",$4; next} NF>0{print}' "$REG"
 }
 migrate_reg
 mfile() { printf '%s/%s.list' "$G" "$1"; }
@@ -272,12 +273,12 @@ set_count() {  # число членов ipset; фолбэк для ядра 4.4
 # Порядок перебора сетов задаёт awk-хеш — он стабилен для одного и того же ввода, поэтому conf не
 # «дрожит» между пересборками. Ни split(), ни index() (busybox awk их не знает): вместо разбора
 # строки-списка держим факты в карте have[домен,сет], а к родителю поднимаемся sub()'ом.
-emit_dnsconf() {
-	# Черновик с ПИДом в имени: без лока (шим-ветка) два прохода писали бы в один `.new` и
-	# выложили бы половину чужой сборки. Маска conf-dir'а — `*.conf`, так что промежуточное имя
-	# dnsmasq не подхватит, а mv в пределах /tmp атомарен.
-	_ed_n="$DNSCONF.$$.new"
-	: > "$_ed_n"
+# Черновик (label-lib.sh::lbl_commit_out, `<файл>.<пид>.new`) — с ПИДом в имени: без лока (шим-ветка) два прохода писали бы в
+# один `.new` и выложили бы половину чужой сборки. Маска conf-dir'а — `*.conf`, так что промежуточное имя dnsmasq не
+# подхватит, а mv в пределах /tmp атомарен. Целиком либо никак: sort и awk при неудачной записи выходят с кодом 0, и в
+# conf-dir ушёл бы обрубок `ipset=`-строки — dnsmasq с ним не стартует.
+emit_dnsconf() { lbl_commit_out "$DNSCONF" emit_dnsconf_text "$1"; }
+emit_dnsconf_text() {   # $1 — файл пар «домен⇥сет» → строки ipset= (нет пар — пустой текст)
 	if [ -s "$1" ]; then
 		sort -u "$1" | awk -F"$TAB" '
 			{ have[$1 SUBSEP $2] = 1; dom[$1] = 1; st[$2] = 1 }
@@ -292,9 +293,8 @@ emit_dnsconf() {
 					}
 					if (out != "") print "ipset=/" d "/" out
 				}
-			}' | sort >> "$_ed_n"
+			}' | sort
 	fi
-	mv "$_ed_n" "$DNSCONF"
 }
 
 # dev_wire "<id групп устройств>" — переиграть правила групп, привязанных к устройству.
@@ -702,8 +702,7 @@ case "$1" in
 		for _og in $(awk -F"$TAB" -v ip="$_dip" -v keep="$_gid" '$6==ip && $1!=keep{print $1}' "$REG" 2>/dev/null); do
 			_omf=$(mfile "$_og"); [ -f "$_omf" ] || continue
 			grep -qxF "$_val" "$_omf" 2>/dev/null || continue
-			grep -vxF "$_val" "$_omf" > "$_omf.tmp" 2>/dev/null
-			mv "$_omf.tmp" "$_omf"
+			lbl_commit_out "$_omf" lbl_grep -vxF "$_val" "$_omf" 2>/dev/null
 			[ -s "$_omf" ] || { reg_del_line "$_og"; rm -f "$_omf" 2>/dev/null; }
 		done
 		grep -qxF "$_val" "$(mfile "$_gid")" 2>/dev/null || echo "$_val" >> "$(mfile "$_gid")"
@@ -721,8 +720,7 @@ case "$1" in
 		for _gid in $(awk -F"$TAB" -v ip="$2" '$6==ip{print $1}' "$REG" 2>/dev/null); do
 			_mf=$(mfile "$_gid"); [ -f "$_mf" ] || continue
 			grep -qxF "$_val" "$_mf" 2>/dev/null || continue
-			grep -vxF "$_val" "$_mf" > "$_mf.tmp" 2>/dev/null
-			mv "$_mf.tmp" "$_mf"
+			lbl_commit_out "$_mf" lbl_grep -vxF "$_val" "$_mf" 2>/dev/null
 			_hit=1
 			# Пустая группа устройства — служебный мусор: человек её не заводил и в списке групп
 			# не увидит, а строка реестра и сет остались бы навсегда.

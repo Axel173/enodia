@@ -75,6 +75,45 @@ command -v jesc >/dev/null 2>&1 || {
 # у себя тоже — здесь мы лишь отвечаем человеку сразу и понятной строкой.
 # Сорсинг стоит 5 мс на POST (замерено на AX3600, самом слабом из поддержанных) — на фоне
 # нескольких форков самого действия это ничто. Шим = ПРАВИЛО, а не прежнее поведение.
+# A FILE REPLACED WHOLE OR NOT AT ALL — label-lib.sh (lbl_commit_out, lbl_without): grep and awk exit 0 when their write fails
+# (BusyBox; measured on BE7000 12.10.2026), and `{ grep -v …; printf …; } > tmp; mv tmp file` put a stump over the registry on a
+# partition with no free block — the list of subscriptions gone on a rename.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
+# The subscriptions' registry (`.subs`, tag⇥url⇥label, mode 600 — the links carry their tokens) with this tag's line replaced —
+# the three verbs that write it; subs_drop — without it (remove_sub). Written under umask 077: the temp file a line goes through IS
+# the registry after `mv`, and under uhttpd's umask it went 644 for a moment (subs_put's chmod) or for good (the removal's rewrite
+# had no chmod; review s.134, round 3).
+# sub_tag_free <tag> — may a NEW subscription take this tag? Not while configs of a removed one with the same tag are on the router
+# (see save_sub); a tag already in the registry is that subscription's own. _sl — how many such configs were found.
+sub_tag_free() {
+	_sl=0
+	grep -q "^$1$(printf '\t')" "$ENODIA_STATE/.subs" 2>/dev/null && return 0
+	for _sf in "$ENODIA_STATE"/configs/sub-"$1"-*.conf "$ENODIA_STATE"/xray-configs/sub-"$1"-*.json "$ENODIA_STATE"/hy2-configs/sub-"$1"-*.yaml; do
+		[ -e "$_sf" ] || continue
+		_sb=${_sf##*/}; _sb=${_sb%.*}
+		_so=$(sub_owner_tag "$_sb")
+		[ "${#_so}" -gt "${#1}" ] || _sl=$((_sl+1))
+	done
+	[ "$_sl" = 0 ]
+}
+# THE LINE'S KIND IS ITS LINK FIELD: an Amnezia Premium key (`vpn://`) or a subscription's URL. A save never turns one into the other
+# under the same tag (review s.136, panel 1 / L7): a link written over a key left Amnezia's place taken and its countries pruned as
+# «gone from the subscription»; a key over a link made the link's servers Premium ones nobody could remove. A key is changed by
+# adding a new subscription (the old one removed), as the mockup says.
+sub_link_of() { [ -f "$ENODIA_STATE/.subs" ] && grep "^$1$(printf '\t')" "$ENODIA_STATE/.subs" 2>/dev/null | head -n 1 | cut -d"$(printf '\t')" -f2; }
+subs_put() {
+	_spt=$(printf '\t')
+	( umask 077; lbl_commit_out "$ENODIA_STATE/.subs" lbl_without "$ENODIA_STATE/.subs" "^$1$_spt" "$1$_spt$2$_spt$3" ) 2>/dev/null || return 1
+	chmod 600 "$ENODIA_STATE/.subs" 2>/dev/null; return 0
+}
+subs_drop() {
+	[ -f "$ENODIA_STATE/.subs" ] || return 0
+	( umask 077; lbl_commit_out "$ENODIA_STATE/.subs" lbl_without "$ENODIA_STATE/.subs" "^$1$(printf '\t')" ) 2>/dev/null
+	chmod 600 "$ENODIA_STATE/.subs" 2>/dev/null; return 0
+}
+# `.sub-names` after the panel's ⟳: the other subscriptions' lines, then this one's block ($2 — base64 of «file⇥name» lines).
+sub_names_with() { sub_names_keep_other "$1"; printf '%s' "$2" | base64 -d 2>/dev/null | awk '{print}'; }
 if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
 command -v dom_ok >/dev/null 2>&1 || {
 	dom_ok() { [ -n "$1" ] && [ "${#1}" -le 253 ] || return 1
@@ -245,6 +284,10 @@ dot_fb_tail() {
 # снимаем ДО него (rm по симлинку снимает сам симлинк). Не вышло — скрипт ВСЁ РАВНО выполняется, а вывод уходит в /dev/null (ревью
 # с.98): отказ посреди работы хуже потерянного текста — вызыватели зовут cap_run и ПОСЛЕ `down` несущей, и `up`, не запущенный из-за
 # каталога, оставил бы роутер без неё. Человеку — что вывод не сохранён; код — настоящий, скрипта.
+# A FUNCTION of this CGI (a name without «.sh») goes the same way — a forked child (a subshell) writing into the file: a sequence
+# of steps that must not stop halfway (cfg_mv: the exits' registry, then the file) died with the CGI's own shell, and a second
+# «Удалить подписку» then deleted a config an exit named by its new name (review s.134, round 3). Its variables stay in the child —
+# such a function says its results in its output. The choice lives INSIDE cap_run: stands cut it out by its own markers.
 cap_run() {
 	for _crf in /tmp/enodia-cgi-out.*; do
 		[ -e "$_crf" ] || [ -L "$_crf" ] || continue
@@ -253,10 +296,10 @@ cap_run() {
 	_crd="/tmp/enodia-cgi-out.$$"; _crs=$1; shift
 	rm -rf "$_crd" 2>/dev/null
 	if ! ( umask 077; mkdir "$_crd" ) 2>/dev/null; then   # 700 — кодом, а не замеренной umask uhttpd (`mkdir -m` в git-bash врёт)
-		sh "$ENODIA_DIR/$_crs" "$@" >/dev/null 2>&1; _crr=$?
+		case "$_crs" in *.sh) sh "$ENODIA_DIR/$_crs" "$@" ;; *) ( "$_crs" "$@" ) ;; esac >/dev/null 2>&1; _crr=$?
 		CAP_OUT="вывод не сохранён: не удалось создать каталог вывода $_crd"; return "$_crr"
 	fi
-	sh "$ENODIA_DIR/$_crs" "$@" > "$_crd/out" 2>&1; _crr=$?
+	case "$_crs" in *.sh) sh "$ENODIA_DIR/$_crs" "$@" ;; *) ( "$_crs" "$@" ) ;; esac > "$_crd/out" 2>&1; _crr=$?
 	CAP_OUT=$(cat "$_crd/out" 2>/dev/null); rm -rf "$_crd"
 	return "$_crr"
 }
@@ -265,6 +308,20 @@ wui_run() { cap_run web-ui.sh "$@"; _wur=$?; WUI_OUT=$CAP_OUT; return "$_wur"; }
 # answer, this CGI only carries). Through cap_run: uhttpd's SIGKILL of a lost client must not cut a registry write halfway on
 # SIGPIPE. cap_run merges stderr into the same file, so a stray warning (`mv: …`) before the answer must not turn it into
 # «error: {…}» — the last line that is a JSON object is the answer (review s.106); anything else is a refusal with its last line.
+# warp_job — the `job` field of a WARP start → the owner's environment (see warp_get below).
+warp_job() {
+	ENODIA_WARP_JOB=$(field job)
+	case "$ENODIA_WARP_JOB" in ''|*[!a-f0-9]*) ENODIA_WARP_JOB="" ;; esac
+	[ "${#ENODIA_WARP_JOB}" -le 32 ] || ENODIA_WARP_JOB=""
+	export ENODIA_WARP_JOB
+}
+# premium_job — the same for an Amnezia Premium start (premium.sh `JOB`).
+premium_job() {
+	ENODIA_PREMIUM_JOB=$(field job)
+	case "$ENODIA_PREMIUM_JOB" in ''|*[!a-f0-9]*) ENODIA_PREMIUM_JOB="" ;; esac
+	[ "${#ENODIA_PREMIUM_JOB}" -le 32 ] || ENODIA_PREMIUM_JOB=""
+	export ENODIA_PREMIUM_JOB
+}
 owner_relay() {
 	cap_run "$@"
 	_orj=$(printf '%s\n' "$CAP_OUT" | grep '^{' | tail -n 1)
@@ -282,6 +339,104 @@ in_dir() {
 	IN_DIR="/tmp/enodia-cgi-in.$$"; rm -rf "$IN_DIR" 2>/dev/null
 	( umask 077; mkdir "$IN_DIR" ) 2>/dev/null || fail "не удалось создать временный каталог"
 	trap 'rm -rf "$IN_DIR"' EXIT
+}
+# slot_ids_of <transport> <config> — the numbers of the exits whose registry line names that config («5», «3,5»; empty — none).
+# The answer is the REGISTRY'S (slots.sh holders — the server screen's facts and the refusal to delete here, a subscription's
+# pruning in subs-update.sh); its output goes through a filter BY FORM: a copy older than the verb prints its usage line.
+# No registry file — no exits, and no fork either (the server screen asks on every opening).
+slot_ids_of() {
+	[ -s "$ENODIA_STATE/.slots" ] && [ -f "$ENODIA_DIR/slots.sh" ] || return 0
+	sh "$ENODIA_DIR/slots.sh" holders "$1" "$2" 2>/dev/null | grep -E '^[2-7](,[2-7])*$' | head -n 1
+}
+# AN EXIT NAMES THIS CONFIG — it is not deleted: the exit goes on by its working copy, cannot come up after a restart or a reboot,
+# and its screen says nothing of it. Every «Получить WARP» makes such a pair, so the trap was one click away (hardware walk
+# 12.10.2026: «Удалить конфиг» on WARP-2 under exit №5). The first holder is named; the road guard covers only an exit somebody rides.
+held_refuse() {   # $1 = transport, $2 = config name
+	_dhx=$(slot_ids_of "$1" "$2"); _dhx=${_dhx%%,*}
+	[ -z "$_dhx" ] || fail "конфиг $2 держит выход №$_dhx — сначала удалите выход или смените его сервер"
+}
+# cfg_mv <kind> <old> <new> [display] — a config FILE moves to a new name together with everything that names it: the exits'
+# registry (slots.sh rename-config), the active mark of its family, the display name (cfg-names.sh: the typed one when given, else
+# it moves with the file), the reserve's «home» and the rollback's name, the road (road.sh). ONE copy for rename_config and
+# remove_sub (a server a removed subscription kept leaves the subscription's namespace). The CALLER has checked both names and
+# holds the switch lock, and runs it only through cfg_mv_run (its own child: the steps must not stop halfway). It SAYS its result:
+# «slots N» (exits rebound) and maybe «warn …» (the display name was not written, the owner's words), code 0; «err …» (the
+# registry's own words, or the file system's refusal), code 1.
+cfg_mv() {
+	_mk=$1; _mo=$2; _mn=$3; _msl=0
+	case "$_mk" in
+		awg)  _md="$ENODIA_STATE/configs";      _me=conf; _ma="$ENODIA_STATE/.active" ;;
+		xray) _md="$ENODIA_STATE/xray-configs"; _me=json; _ma="$ENODIA_STATE/.xray-active" ;;
+		hy2)  _md="$ENODIA_STATE/hy2-configs";  _me=yaml; _ma="$ENODIA_STATE/.hy2-active" ;;
+		*) echo "err неизвестный тип конфига"; return 1 ;;
+	esac
+	if [ -f "$ENODIA_DIR/slots.sh" ]; then
+		# Отказ реестра — ЕГО словами: «имя уже указано у выхода №N» — не «переписать не удалось», а причина не начинать; метка
+		# `[slots]` — для лога, не для человека (ревью пачки 2, круг 2).
+		_ms=$(sh "$ENODIA_DIR/slots.sh" rename-config "$_mk" "$_mo" "$_mn" 2>&1) || { echo "err $(printf '%s' "$_ms" | tail -n 1 | sed 's/^\[slots\] //')"; return 1; }
+		_msl=$(printf '%s' "$_ms" | tail -n 1 | tr -cd '0-9'); [ -n "$_msl" ] || _msl=0
+	fi
+	# Смена только регистра — через временное имя: на ФС без регистра прямой `mv` ничего не сделал бы.
+	if [ "$(printf '%s' "$_mo" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$_mn" | tr 'A-Z' 'a-z')" ]; then
+		mv "$_md/$_mo.$_me" "$_md/.enodia-rn.$$" 2>/dev/null && { mv "$_md/.enodia-rn.$$" "$_md/$_mn.$_me" 2>/dev/null || { mv "$_md/.enodia-rn.$$" "$_md/$_mo.$_me" 2>/dev/null; false; }; }
+	else
+		mv "$_md/$_mo.$_me" "$_md/$_mn.$_me" 2>/dev/null
+	fi
+	if [ $? -ne 0 ]; then
+		[ "$_msl" -gt 0 ] && sh "$ENODIA_DIR/slots.sh" rename-config "$_mk" "$_mn" "$_mo" >/dev/null 2>&1
+		echo "err не удалось переименовать файл"; return 1
+	fi
+	_mac=$(cat "$_ma" 2>/dev/null | tr -d ' \r\n'); [ "$_mac" = "$_mo" ] && echo "$_mn" > "$_ma"
+	# Показ едет за файлом: набранное имя — новым показом, иначе прежний показ переезжает на новое имя файла. Сбой записи показа
+	# файл назад не возвращает (переименование уже состоялось), но ответ обязан это сказать (ревью с.95: успех без оговорки
+	# терял набранное имя молча, а строка старого ключа доставалась следующему файлу с тем же именем).
+	if [ -f "$ENODIA_DIR/cfg-names.sh" ]; then
+		if [ "$#" -ge 4 ]; then _mno=$(sh "$ENODIA_DIR/cfg-names.sh" mv "$_mk" "$_mo" "$_mn" "$4" 2>&1)
+		else _mno=$(sh "$ENODIA_DIR/cfg-names.sh" mv "$_mk" "$_mo" "$_mn" 2>&1); fi
+		[ $? = 0 ] || echo "warn $(printf '%s' "$_mno" | tail -n 1 | sed 's/^\[cfg-names\] //')"
+	fi
+	if [ "$_mk" = awg ]; then
+		for _rf in .failover-home .last.bak.name; do
+			_rv=$(cat "$ENODIA_STATE/$_rf" 2>/dev/null | tr -d ' \r\n'); [ "$_rv" = "$_mo" ] && echo "$_mn" > "$ENODIA_STATE/$_rf"
+		done
+		# Дорога к серверу (road.sh) — свойство файла конфига: едет за ним, иначе новое имя шло бы напрямую к заблокированному адресу.
+		[ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" mv awg "$_mo" "$_mn" >/dev/null 2>&1
+	fi
+	echo "slots $_msl"
+	return 0
+}
+# cfg_mv_run <kind> <old> <new> [display] — cfg_mv in its own child (cap_run): CFGMV_SLOTS / CFGMV_WARN / CFGMV_ERR from what it said.
+cfg_mv_run() {
+	cap_run cfg_mv "$@"; _mvr=$?
+	CFGMV_SLOTS=$(printf '%s\n' "$CAP_OUT" | sed -n 's/^slots //p' | tail -n 1 | tr -cd '0-9'); [ -n "$CFGMV_SLOTS" ] || CFGMV_SLOTS=0
+	CFGMV_WARN=$(printf '%s\n' "$CAP_OUT" | sed -n 's/^warn //p' | tail -n 1)
+	CFGMV_ERR=$(printf '%s\n' "$CAP_OUT" | sed -n 's/^err //p' | tail -n 1)
+	[ "$_mvr" = 0 ] || [ -n "$CFGMV_ERR" ] || CFGMV_ERR="не удалось переименовать конфиг"
+	return "$_mvr"
+}
+# kept_name <kind> <file> — the file name a server kept by a removed subscription takes: the old one without «sub-» (the tag
+# stays readable in it); still under «sub-» or not a valid first character — «own-» in front; the first of it and «-2» … «-9»
+# that its family's dir does not hold (`-e` asks the FS itself: on a drive that ignores letter case «LIB-DE» holds «lib-de» too).
+# Empty — none free. cfg_mv does not look: `mv` onto a taken name would replace the person's own config. A name an exit already
+# names is taken too, file or no file (a stale line after a backup import): the registry refuses it, and every retry of the
+# removal would pick it again (review s.134, round 3).
+kept_name() {
+	case "$1" in
+		awg)  _knd="$ENODIA_STATE/configs";      _kne=conf ;;
+		xray) _knd="$ENODIA_STATE/xray-configs"; _kne=json ;;
+		hy2)  _knd="$ENODIA_STATE/hy2-configs";  _kne=yaml ;;
+		*) return 0 ;;
+	esac
+	_knb=${2#sub-}
+	case "$_knb" in sub-*|[!A-Za-z0-9_]*) _knb="own-$_knb" ;; esac
+	for _kns in "" -2 -3 -4 -5 -6 -7 -8 -9; do
+		_knn="$_knb$_kns"
+		echo "$_knn" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$' || continue
+		[ -e "$_knd/$_knn.$_kne" ] && continue
+		[ -n "$(slot_ids_of "$1" "$_knn")" ] && continue
+		printf '%s' "$_knn"; return 0
+	done
+	return 0
 }
 wf_why() { _wy=$(printf '%s\n' "$1" | tail -n 1); printf '%s' "${_wy:-не удалось}" | jesc 300; }
 tok=$(field token)
@@ -401,26 +556,6 @@ if [ -f "$ENODIA_DIR/subs-lib.sh" ]; then . "$ENODIA_DIR/subs-lib.sh"; fi
 # Без библиотеки (старая установка) — молча ничего не пишем: поведение остаётся прежним.
 if [ -f "$ENODIA_DIR/lease-lib.sh" ]; then . "$ENODIA_DIR/lease-lib.sh"; fi
 command -v owner_note >/dev/null 2>&1 || owner_note() { return 0; }
-
-# del_sub_configs <tag> — удалить конфиги ПОДПИСКИ <tag>, НЕ задев соседние. Теги подписок
-# могут быть ПРЕФИКСАМИ друг друга («liberty» ⊂ «liberty-vpn»), а «-» разделяет и внутри тега →
-# голый глоб sub-<tag>-*.json смёл бы и «sub-<tag>-vpn-*.json» соседа. Владелец файла = ДЛИНЕЙШИЙ
-# тег-префикс среди ВСЕХ тегов .subs (зеркало ownerTag() в index.html). Удаляем лишь свои.
-del_sub_configs() {
-	_t="$1"; TAB=$(printf '\t')
-	_tags="$_t"; [ -f "$ENODIA_STATE/.subs" ] && _tags="$_tags $(cut -d"$TAB" -f1 "$ENODIA_STATE/.subs" 2>/dev/null)"
-	# ДВА каталога: подписка бывает смешанной (vless/vmess/trojan/ss ложатся xray-JSON'ом,
-	# hysteria2 — YAML'ом), и удаление подписки обязано уносить оба — иначе hy2-конфиги
-	# остаются сиротами с именем несуществующей подписки.
-	for _f in "$ENODIA_STATE"/xray-configs/sub-"$_t"-*.json "$ENODIA_STATE"/hy2-configs/sub-"$_t"-*.yaml; do
-		[ -e "$_f" ] || continue
-		_b=$(basename "$_f"); _own=""; _ol=-1
-		for _g in $_tags; do
-			case "$_b" in sub-"$_g"-*) _gl=${#_g}; [ "$_gl" -gt "$_ol" ] && { _own="$_g"; _ol=$_gl; } ;; esac
-		done
-		[ "$_own" = "$_t" ] && rm -f "$_f" 2>/dev/null
-	done
-}
 
 # --- Менеджер источников списков (lists-update.sh) ---------------------------
 # Категории-whitelist для generic-верб src_*. tunnel-cidr — маршрутизация (CIDR через VPN);
@@ -767,8 +902,8 @@ case "$act" in
 			live_src)        case "$v" in tun|direct|all) : ;; *) fail "значение tun/direct/all" ;; esac ;;
 			*) fail "неизвестная настройка" ;;
 		esac
-		P="$ENODIA_STATE/.prefs"; tmp="$P.$$"
-		{ [ -f "$P" ] && grep -v "^$k=" "$P"; printf '%s=%s\n' "$k" "$v"; } > "$tmp" 2>/dev/null && mv "$tmp" "$P" || { rm -f "$tmp" 2>/dev/null; fail "не удалось сохранить настройку"; }
+		P="$ENODIA_STATE/.prefs"
+		lbl_commit_out "$P" lbl_without "$P" "^$k=" "$k=$v" 2>/dev/null || fail "не удалось сохранить настройку"
 		printf '{"ok":true,"code":0,"msg":"настройка сохранена"}\n'
 		exit 0 ;;
 
@@ -1654,8 +1789,16 @@ EOF
 		[ -f "$ENODIA_STATE/configs/$name.conf" ] || fail "нет конфига $name"
 		active=$(cat "$ENODIA_STATE/.active" 2>/dev/null | tr -d ' \r\n')
 		[ "$name" = "$active" ] && fail "нельзя удалить активный конфиг ($name) — сначала переключитесь на другой"
+		# Конфиг служит ДОРОГОЙ (road.sh: на нём выход, по которому едут серверы) — удалить его значило бы снять дорогу у пассажиров молча.
+		if [ -f "$ENODIA_DIR/road.sh" ]; then
+			_dsv=$(sh "$ENODIA_DIR/road.sh" serves awg "$name" 2>/dev/null | tr -cd '0-9')
+			[ -n "$_dsv" ] && fail "конфиг $name служит дорогой (выход №$_dsv) — сначала переключите дорогу его пассажиров на «напрямую»"
+		fi
+		held_refuse awg "$name"
 		rm -f "$ENODIA_STATE/configs/$name.conf" || fail "не удалось удалить $name"
 		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del awg "$name" >/dev/null 2>&1   # настоящее имя — вместе с файлом
+		[ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" del awg "$name" >/dev/null 2>&1           # и дорога к серверу (road.sh)
+		[ -f "$ENODIA_DIR/warp.sh" ] && sh "$ENODIA_DIR/warp.sh" prune give >/dev/null 2>&1                # a WARP config takes its registration with it: the record here, the registration at Cloudflare (in the background)
 		printf '{"ok":true,"code":0,"msg":"awg-конфиг %s удалён"}\n' "$name"
 		exit 0 ;;
 	del_xray_server)
@@ -1665,6 +1808,7 @@ EOF
 		active=$(cat "$ENODIA_STATE/.xray-active" 2>/dev/null | tr -d ' \r\n')
 		{ [ "$name" = "$active" ] && [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = xray ]; } \
 			&& fail "это активный конфиг при включённом Xray — сначала переключитесь на другой транспорт"
+		held_refuse xray "$name"
 		rm -f "$ENODIA_STATE/xray-configs/$name.json"
 		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del xray "$name" >/dev/null 2>&1
 		[ "$name" = "$active" ] && rm -f "$ENODIA_STATE/.xray-active"
@@ -1676,6 +1820,7 @@ EOF
 		active=$(cat "$ENODIA_STATE/.hy2-active" 2>/dev/null | tr -d ' \r\n')
 		{ [ "$name" = "$active" ] && [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = hy2 ]; } \
 			&& fail "это активный конфиг при включённой Hysteria2 — сначала переключитесь на другой транспорт"
+		held_refuse hy2 "$name"
 		rm -f "$ENODIA_STATE/hy2-configs/$name.yaml"
 		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del hy2 "$name" >/dev/null 2>&1
 		[ "$name" = "$active" ] && rm -f "$ENODIA_STATE/.hy2-active"
@@ -1742,37 +1887,10 @@ EOF
 		_rwp=$(cat /tmp/enodia-watchdog.pid 2>/dev/null | tr -cd '0-9')
 		{ [ -e /tmp/enodia-watchdog.lock ] && [ -n "$_rwp" ] && [ -d "/proc/$_rwp" ]; } && fail "сторож сейчас проверяет туннель — повторите через минуту"
 		hold_switch
-		_rs=0
-		if [ -f "$ENODIA_DIR/slots.sh" ]; then
-			# Отказ реестра — ЕГО словами: «имя уже указано у выхода №N» — не «переписать не удалось», а причина не начинать; метка
-			# `[slots]` — для лога, не для человека (ревью пачки 2, круг 2).
-			_rs=$(sh "$ENODIA_DIR/slots.sh" rename-config "$kind" "$old" "$new" 2>&1) || fail "$(printf '%s' "$_rs" | tail -n 1 | sed 's/^\[slots\] //' | jesc 200)"
-			_rs=$(printf '%s' "$_rs" | tail -n 1 | tr -cd '0-9'); [ -n "$_rs" ] || _rs=0
-		fi
-		if [ "$_rlo" = "$_rln" ]; then
-			mv "$dir/$old.$ext" "$dir/.enodia-rn.$$" 2>/dev/null && { mv "$dir/.enodia-rn.$$" "$dir/$new.$ext" 2>/dev/null || { mv "$dir/.enodia-rn.$$" "$dir/$old.$ext" 2>/dev/null; false; }; }
-		else
-			mv "$dir/$old.$ext" "$dir/$new.$ext" 2>/dev/null
-		fi
-		if [ $? -ne 0 ]; then
-			[ "$_rs" -gt 0 ] && sh "$ENODIA_DIR/slots.sh" rename-config "$kind" "$new" "$old" >/dev/null 2>&1
-			fail "не удалось переименовать файл"
-		fi
-		_ra=$(cat "$af" 2>/dev/null | tr -d ' \r\n'); [ "$_ra" = "$old" ] && echo "$new" > "$af"
-		# Показ едет за файлом: набранное имя — новым показом, иначе прежний показ переезжает на новое имя файла. Сбой записи показа
-		# файл назад не возвращает (переименование уже состоялось), но ответ обязан это сказать (ревью с.95: успех без оговорки
-		# терял набранное имя молча, а строка старого ключа доставалась следующему файлу с тем же именем).
-		_rnw=""
-		if [ -f "$ENODIA_DIR/cfg-names.sh" ]; then
-			if [ "$_rdh" = 1 ]; then _rno=$(sh "$ENODIA_DIR/cfg-names.sh" mv "$kind" "$old" "$new" "$disp" 2>&1)
-			else _rno=$(sh "$ENODIA_DIR/cfg-names.sh" mv "$kind" "$old" "$new" 2>&1); fi
-			[ $? = 0 ] || _rnw=$(printf '%s' "$_rno" | tail -n 1 | sed 's/^\[cfg-names\] //' | jesc 160)
-		fi
-		if [ "$kind" = awg ]; then
-			for _rf in .failover-home .last.bak.name; do
-				_rv=$(cat "$ENODIA_STATE/$_rf" 2>/dev/null | tr -d ' \r\n'); [ "$_rv" = "$old" ] && echo "$new" > "$ENODIA_STATE/$_rf"
-			done
-		fi
+		# The file and everything that names it — one owner, cfg_mv (remove_sub moves the servers a subscription kept the same way).
+		if [ "$_rdh" = 1 ]; then cfg_mv_run "$kind" "$old" "$new" "$disp"; else cfg_mv_run "$kind" "$old" "$new"; fi \
+			|| fail "$(printf '%s' "$CFGMV_ERR" | jesc 200)"
+		_rs=$CFGMV_SLOTS; _rnw=$(printf '%s' "$CFGMV_WARN" | jesc 160)
 		if [ -n "$_rnw" ]; then
 			printf '{"ok":true,"code":0,"name":"%s","slots":%s,"msg":"конфиг «%s» переименован в «%s», но имя не записано: %s"}\n' "$new" "$_rs" "$old" "$new" "$_rnw"
 		else
@@ -1784,13 +1902,16 @@ EOF
 	# get_config_raw: отдаёт ВЕСЬ файл конфига base64-ом (вкл. секреты — uuid/ключи/пароль:
 	# владельцу роутера под токеном это ок; наружу без токена не уходит, в diag/бэкап-без-
 	# секретов — нет). Фронт строит из него форму (config→params) ИЛИ показывает как сырой JSON.
+	# AmneziaWG: the editor has no use for it (there is none) — it is read only by «Экспорт конфига» of the server screen, by the
+	# person's own button; everything else about an AmneziaWG config goes through get_config_info, which gives no keys.
 	get_config_raw)
 		kind=$(field kind); name=$(urldecode "$(field name)")
 		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя"
 		case "$kind" in
 			xray) cfg="$ENODIA_STATE/xray-configs/$name.json" ;;
 			hy2)  cfg="$ENODIA_STATE/hy2-configs/$name.yaml" ;;
-			*) fail "неизвестный тип (xray/hy2)" ;;
+			awg)  cfg="$ENODIA_STATE/configs/$name.conf" ;;
+			*) fail "неизвестный тип (xray/hy2/awg)" ;;
 		esac
 		[ -f "$cfg" ] || fail "нет конфига $name"
 		b=$(base64 < "$cfg" | tr -d '\r\n')
@@ -1819,10 +1940,24 @@ EOF
 		# «Параметры сети» действуют ТОЛЬКО на awg0 (net-tune.sh); выход (awgN) берёт строку конфига, иначе 1376 (transport-awg.sh).
 		# Конфиг, на котором стоит выход, получает и ЕГО число: иначе экран обещал бы выходу ручной MTU, которого у него нет.
 		xmtu=${mtu:-1376}; xsrc=config; [ -n "$mtu" ] || xsrc=default
-		xs=$(awk -F'\t' -v n="$name" '$3=="awg" && $4==n { printf "%s%s", (c++ ? "," : ""), $1 }' "$ENODIA_STATE/.slots" 2>/dev/null | tr -cd '0-9,')
+		xs=$(slot_ids_of awg "$name")
 		if [ -n "$_tm" ]; then mtu=$_tm; msrc=tun; elif [ -z "$mtu" ]; then mtu=1376; msrc=default; fi
 		[ "$_tmu" = 1 ] && msrc=unknown
-		printf '{"ok":true,"code":0,"endpoint":"%s","mtu":%s,"mtu_src":"%s","exits":[%s],"exit_mtu":%s,"exit_mtu_src":"%s"}\n' "$ep" "$mtu" "$msrc" "$xs" "$xmtu" "$xsrc"; exit 0 ;;
+		# ДОРОГА К СЕРВЕРУ (road.sh): её номер и потолок MTU — поверх всего прочего (сервер живёт внутри туннеля дороги). Потолка нет,
+		# пока дорога не поднята: считать не от чего — и экран так и скажет, без своей арифметики.
+		road=""; rcap=""
+		if [ -f "$ENODIA_DIR/road.sh" ]; then
+			road=$(sh "$ENODIA_DIR/road.sh" get awg "$name" 2>/dev/null | tr -cd '0-9' | cut -c1)
+			rcap=$(sh "$ENODIA_DIR/road.sh" mtu-cap awg "$name" 2>/dev/null | tr -cd '0-9' | cut -c1-5)
+		fi
+		if [ -n "$rcap" ]; then
+			[ "$mtu" -gt "$rcap" ] 2>/dev/null && { mtu=$rcap; msrc=road; }
+			[ "$xmtu" -gt "$rcap" ] 2>/dev/null && { xmtu=$rcap; xsrc=road; }
+		fi
+		# When the file was written, by the router's clock both ways (the panel says «конфиг взят N назад» of an Amnezia Premium server:
+		# its config is the key the router took, not a subscription's download; mockup cn-server-prem).
+		at=$(stat -c %Y "$cfg" 2>/dev/null | tr -cd '0-9'); now=$(date +%s 2>/dev/null | tr -cd '0-9')
+		printf '{"ok":true,"code":0,"endpoint":"%s","mtu":%s,"mtu_src":"%s","exits":[%s],"exit_mtu":%s,"exit_mtu_src":"%s","road":"%s","road_mtu":%s,"at":%s,"now":%s}\n' "$ep" "$mtu" "$msrc" "$xs" "$xmtu" "$xsrc" "$road" "${rcap:-null}" "${at:-0}" "${now:-0}"; exit 0 ;;
 	# save_config_raw: пишет ПОЛНЫЙ конфиг (из формы — пересобран фронтом, или сырой текст).
 	# Валидация: xray → JSON через jsonfilter (на роутере есть) + наличие outbound-протокола;
 	# hy2 → наличие server:. Атомарно (.new+mv). Если конфиг активен и транспорт его несёт —
@@ -1977,7 +2112,7 @@ EOF
 						_usame=0
 						[ "$_ud" = "$_ubase" ] && [ -z "$(sh "$ENODIA_DIR/cfg-names.sh" get "$kind" "$_ubase" 2>/dev/null)" ] && _usame=1
 						sh "$ENODIA_DIR/cfg-names.sh" list 2>/dev/null | awk -F'\t' -v k="$kind/$_ubase" -v p="$kind/$_ub-" -v d="$_ud" \
-							'($1 == k || substr($1, 1, length(p)) == p) && $2 == d { f = 1 } END { exit f ? 0 : 1 }' && _usame=1
+							'($1 == k || substr($1, 1, length(p)) == p) && ($2 "") == (d "") { f = 1 } END { exit f ? 0 : 1 }' && _usame=1   # the name — as TEXT («01» is not «1»)
 						# Не за потолок владельца (240 байт): длинный показ без различителя лучше, чем отказ записать имя вовсе.
 						[ "$_usame" = 1 ] && [ "$(printf '%s' "$_ud ($_un)" | wc -c)" -le 240 ] && _ud="$_ud ($_un)"
 					fi
@@ -2016,9 +2151,8 @@ EOF
 	# JSON-массив + vless://→xray JSON делает БРАУЗЕР; busybox JSON не собираем). Тело качаем
 	# В ФАЙЛ, а не в $var: часть панелей (durev) отдаёт gzip'ом БЕЗУСЛОВНО, NUL-байты gzip
 	# обрезали бы shell-переменную; od в busybox НЕТ — не читаем магию, а ПРОБУЕМ разжать
-	# (удалось+непусто ⇒ был gzip). del_sub: снять ТОЛЬКО конфиги по метке (зовёт refresh/
-	# import для идемпотентной перезаливки — строку .subs НЕ трогает). remove_sub: полное
-	# снятие (конфиги + строка .subs) для кнопки удаления подписки.
+	# (удалось+непусто ⇒ был gzip). remove_sub: полное снятие (конфиги + строка .subs) для кнопки
+	# удаления подписки; конфиги и карты имён снимает ВЛАДЕЛЕЦ (subs-update.sh drop).
 	save_sub)
 		tag=$(field tag)
 		url=$(urldecode "$(field url)")
@@ -2034,11 +2168,15 @@ EOF
 		# СЧЁТЧИКИ ПРИНАДЛЕЖАТ ССЫЛКЕ, А НЕ ТЕГУ: сменили адрес подписки — прежний остаток и срок
 		# рассказывают о ЧУЖОМ провайдере, и до первой закачки панель показывала бы их как свои.
 		# Тот же тег с тем же адресом (идемпотентная перезаливка) отметки сохраняет.
+		# A NEW SUBSCRIPTION MAY NOT TAKE A TAG WHOSE CONFIGS ARE STILL ON THE ROUTER. A removed subscription leaves the configs
+		# that were in use as the person's own — under their `sub-<tag>-` names; a newcomer with the same tag would own them
+		# again: report them «gone from the subscription» and, once they are free, DELETE them (review s.133, shown on the real
+		# scripts). The panel picks a free tag by itself (subTagFree) — this is the router's word for any other client.
+		sub_tag_free "$tag" || fail "имя занято: от удалённой подписки с таким именем на роутере остались серверы ($_sl) — назовите подписку иначе"
 		_oldu=$([ -f "$ENODIA_STATE/.subs" ] && grep "^$tag$TAB" "$ENODIA_STATE/.subs" 2>/dev/null | head -1 | cut -d"$TAB" -f2)
+		case "$_oldu" in vpn://*) fail "это имя у подписки Amnezia Premium — назовите подписку иначе" ;; esac
 		[ "$_oldu" = "$url" ] || sub_info_drop "$tag"
-		{ [ -f "$ENODIA_STATE/.subs" ] && grep -v "^$tag$TAB" "$ENODIA_STATE/.subs"
-		  printf '%s\t%s\t%s\n' "$tag" "$url" "$label"; } > "$ENODIA_STATE/.subs.new" 2>/dev/null
-		mv "$ENODIA_STATE/.subs.new" "$ENODIA_STATE/.subs" && chmod 600 "$ENODIA_STATE/.subs" 2>/dev/null
+		subs_put "$tag" "$url" "$label" || fail "не удалось сохранить подписку — нет места?"
 		printf '{"ok":true,"code":0,"msg":"подписка сохранена"}\n'; exit 0 ;;
 	# rename_sub: сменить ТОЛЬКО отображаемое имя (label) подписки. tag и конфиги sub-<tag>-*
 	# не трогаем (tag = внутренний ключ, фиксирован; переименование меняет лишь показ).
@@ -2051,8 +2189,7 @@ EOF
 		TAB=$(printf '\t')
 		url=$(grep "^$tag$TAB" "$ENODIA_STATE/.subs" | head -1 | cut -d"$TAB" -f2)
 		[ -n "$url" ] || fail "подписка не найдена"
-		{ grep -v "^$tag$TAB" "$ENODIA_STATE/.subs"; printf '%s\t%s\t%s\n' "$tag" "$url" "$label"; } > "$ENODIA_STATE/.subs.new" 2>/dev/null
-		mv "$ENODIA_STATE/.subs.new" "$ENODIA_STATE/.subs" && chmod 600 "$ENODIA_STATE/.subs" 2>/dev/null
+		subs_put "$tag" "$url" "$label" || fail "не удалось сохранить подписку — нет места?"
 		printf '{"ok":true,"code":0,"msg":"подписка переименована"}\n'; exit 0 ;;
 	# edit_sub_url: сменить ССЫЛКУ подписки (url в .subs), сохранив label. Метка/конфиги не трогаем;
 	# перетягивание серверов — отдельным refresh из панели. SSRF-гард как в save_sub.
@@ -2068,9 +2205,9 @@ EOF
 		# Счётчики принадлежат ССЫЛКЕ (см. save_sub): сменили адрес — остаток и срок теперь
 		# рассказывают о чужом провайдере, и до первой закачки панель выдавала бы их за свои.
 		_oldu=$(grep "^$tag$TAB" "$ENODIA_STATE/.subs" | head -1 | cut -d"$TAB" -f2)
+		case "$_oldu" in vpn://*) fail "у подписки Amnezia Premium нет ссылки — другой ключ добавляют новой подпиской" ;; esac
 		[ "$_oldu" = "$url" ] || sub_info_drop "$tag"
-		{ grep -v "^$tag$TAB" "$ENODIA_STATE/.subs"; printf '%s\t%s\t%s\n' "$tag" "$url" "$label"; } > "$ENODIA_STATE/.subs.new" 2>/dev/null
-		mv "$ENODIA_STATE/.subs.new" "$ENODIA_STATE/.subs" && chmod 600 "$ENODIA_STATE/.subs" 2>/dev/null
+		subs_put "$tag" "$url" "$label" || fail "не удалось сохранить подписку — нет места?"
 		printf '{"ok":true,"code":0,"msg":"ссылка обновлена"}\n'; exit 0 ;;
 	fetch_sub)
 		tag=$(field tag)
@@ -2096,35 +2233,56 @@ EOF
 		sub_fetch "$url" "$tmp" || { rm -f "$tmp"; fail "подписка недоступна или пустая"; }
 		data=$(base64 < "$tmp" | tr -d '\r\n'); rm -f "$tmp"
 		printf '{"ok":true,"code":0,"data":"%s"}\n' "$data"; exit 0 ;;
-	del_sub)
-		tag=$(field tag)
-		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
-		del_sub_configs "$tag"
-		printf '{"ok":true,"code":0,"msg":"конфиги подписки сняты"}\n'; exit 0 ;;
 	remove_sub)
 		tag=$(field tag)
 		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
-		del_sub_configs "$tag"   # снять конфиги ДО чистки строки .subs (нужен полный набор тегов)
-		if [ -f "$ENODIA_STATE/.subs" ]; then
-			TAB=$(printf '\t'); grep -v "^$tag$TAB" "$ENODIA_STATE/.subs" > "$ENODIA_STATE/.subs.new" 2>/dev/null
-			mv "$ENODIA_STATE/.subs.new" "$ENODIA_STATE/.subs" 2>/dev/null
-		fi
-		# Имена снимаем ПО ВЛАДЕЛЬЦУ, а не по префиксу (та же причина, что у del_sub_configs:
-		# «liberty» ⊂ «liberty-vpn» — голый грep уносил карту имён соседней подписки).
-		if [ -f "$ENODIA_STATE/.sub-names" ]; then
-			sub_names_keep_other "$tag" > "$ENODIA_STATE/.sub-names.new" 2>/dev/null
-			mv "$ENODIA_STATE/.sub-names.new" "$ENODIA_STATE/.sub-names" 2>/dev/null
-		fi
-		# …и карту выбранных выходов (.sub-picks, владелец — subs-update.sh): она ключуется теми же
-		# именами, и осиротевшие строки жили бы в ней вечно.
-		if [ -f "$ENODIA_STATE/.sub-picks" ]; then
-			sub_names_keep_other "$tag" "$ENODIA_STATE/.sub-picks" > "$ENODIA_STATE/.sub-picks.new" 2>/dev/null
-			mv "$ENODIA_STATE/.sub-picks.new" "$ENODIA_STATE/.sub-picks" 2>/dev/null
-		fi
+		# КОНФИГИ И КАРТЫ ИМЁН (.sub-names, .sub-picks) снимает ВЛАДЕЛЕЦ — `subs-update.sh drop`, ДО чистки строки .subs (владелец
+		# файла — длиннейший тег реестра). Здесь жила своя копия со своим списком каталогов: два семейства из трёх, без гарда
+		# «конфиг занят» — удаление подписки уносило и активный конфиг, и тот, на котором стоит выход. Занятые остаются СВОИМИ
+		# конфигами человека (их называет ответ). Отказ владельца — идёт обновление подписок — отказ и здесь: прогон тут же
+		# разложил бы её конфиги заново.
+		[ -f "$ENODIA_DIR/subs-update.sh" ] || fail "subs-update.sh не установлен (обновите скрипты роутера)"
+		# The servers it keeps are RENAMED below (cfg_mv), and a rename takes the switch lock and waits for no watchdog tick, as
+		# rename_config does — the same refusals, BEFORE anything is removed.
+		[ -e "$SWITCH_LOCK" ] && fail "идёт смена транспорта или сервера либо перезапуск компонентов — повторите через минуту"
+		_rwp=$(cat /tmp/enodia-watchdog.pid 2>/dev/null | tr -cd '0-9')
+		{ [ -e /tmp/enodia-watchdog.lock ] && [ -n "$_rwp" ] && [ -d "/proc/$_rwp" ]; } && fail "сторож сейчас проверяет туннель — повторите через минуту"
+		hold_switch
+		cap_run subs-update.sh drop "$tag"; rc=$?
+		# The owner refuses for TWO reasons: an Amnezia Premium work runs for the key (code 3) — or its run lock is held (its own
+		# words are a log line, «…выхожу»).
+		[ "$rc" = 3 ] && fail "идёт работа с Amnezia Premium (страна или новый ключ) — дождитесь её конца и удалите подписку снова"
+		[ "$rc" = 0 ] || fail "сейчас идёт обновление подписок — удалите подписку через минуту"
+		# A KEPT server leaves the subscription's namespace: under «sub-<tag>-» a subscription whose tag is a prefix of this one
+		# («test» ⊂ «test-vpn») owned it the moment the line was gone — counted it as its own server, said «исчез из подписки» about
+		# it and DELETED it once it was free (review s.134, round 2). Its file is renamed (kept_name: the old name without «sub-»),
+		# with everything that names it; its real name goes along. One that could not be moved keeps the line: the subscription
+		# stays, without its link, and a second removal tries again — nothing is left owned by a neighbour.
+		# Оставленные — НАСТОЯЩИМИ именами в «…», а не файлами: сервер человек знает по имени от провайдера, а владелец только что
+		# записал это имя показом конфига (cfg-names.sh). Нет имени — файл. Не больше восьми, дальше — счёт: ответ идёт в тост
+		# (обход на железе 13.10.2026).
+		kept=""; _kn=0; _kst=""
+		for _kf in $(printf '%s\n' "$CAP_OUT" | grep -E '^(awg|xray|hy2)/[A-Za-z0-9_.-]+$'); do
+			_kk=${_kf%%/*}; _ko=${_kf#*/}
+			_knw=$(kept_name "$_kk" "$_ko")
+			if [ -n "$_knw" ] && cfg_mv_run "$_kk" "$_ko" "$_knw"; then _ko=$_knw; else _kst="$_kst${_kst:+, }$_ko"; fi
+			_kn=$((_kn+1)); [ "$_kn" -le 8 ] || continue
+			_kd=""
+			[ -f "$ENODIA_DIR/cfg-names.sh" ] && _kd=$(sh "$ENODIA_DIR/cfg-names.sh" get "$_kk" "$_ko" 2>/dev/null | head -n 1 | jesc 120)
+			kept="$kept${kept:+, }«${_kd:-$_ko}»"
+		done
+		[ "$_kn" -le 8 ] || kept="$kept и ещё $((_kn-8))"
+		[ -z "$_kst" ] || fail "подписка удалена не до конца: занятые серверы не удалось переименовать ($(printf '%s' "$_kst" | jesc 200)) — она осталась без ссылки; повторите удаление"
+		subs_drop "$tag"
 		# …и счётчики провайдера (.sub-info, владелец — subs-lib.sh): строка ключуется ТЕГОМ, а
 		# теги люди заводят повторно — осиротевшая запись отдала бы новой подписке чужой остаток.
 		sub_info_drop "$tag"
-		printf '{"ok":true,"code":0,"msg":"подписка удалена"}\n'; exit 0 ;;
+		if [ -n "$kept" ]; then
+			printf '{"ok":true,"code":0,"msg":"подписка удалена. Оставлены как свои конфиги — они заняты (активный сервер или выход): %s"}\n' "$kept"
+		else
+			printf '{"ok":true,"code":0,"msg":"подписка удалена"}\n'
+		fi
+		exit 0 ;;
 	# set_sub_names: настоящие имена серверов подписки (эмодзи/флаги/юникод — как в v2rayNG).
 	# В имя ФАЙЛА такое не кладём (спецсимволы ломают глоб/скрипты), поэтому сырой remark
 	# храним отдельно: .sub-names = строки "sub-<tag>-<файл>⇥<remark>". names = base64 этих
@@ -2139,19 +2297,17 @@ EOF
 		# последнюю строку без \n (замер: 3 строки → 2 итерации) — то есть ПОСЛЕДНИЙ сервер
 		# подписки терял своё настоящее имя. `awk '{print}'` дописывает перевод строки любому
 		# последнему полю и ничего не меняет, если он уже есть.
-		{ sub_names_keep_other "$tag"
-		  printf '%s' "$names" | base64 -d 2>/dev/null | awk '{print}'; } > "$NM.new" 2>/dev/null
-		mv "$NM.new" "$NM" 2>/dev/null
+		lbl_commit_out "$NM" sub_names_with "$tag" "$names" 2>/dev/null || fail "не удалось сохранить имена — нет места?"
 		printf '{"ok":true,"code":0,"msg":"имена сохранены"}\n'; exit 0 ;;
 	# save_checks: кэш проверок серверов (пинг/скорость). Панель шлёт ВЕСЬ кэш (data=b64 TSV
-	# key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts). Полная замена — это хинты производительности, не критич-
-	# ные данные (last-writer-wins). Валидируем построчно (ключ + 8 полей), кап 2000 строк.
+	# key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts[⇥tms⇥via⇥dms⇥chb[⇥ncmp]]). Полная замена — это хинты производительности, не критич-
+	# ные данные (last-writer-wins). Валидируем построчно (ключ + ≥8 полей), кап 2000 строк; значения проверяет читатель (data).
 	save_checks)
 		raw=$(urldecode "$(field data)" | base64 -d 2>/dev/null)
 		TAB=$(printf '\t')
 		F="$ENODIA_STATE/.srv-checks"
-		printf '%s\n' "$raw" | awk -F"$TAB" 'NR<=2000 && NF>=8 && $1 ~ /^(awg|xray|hy2)\|[A-Za-z0-9._-]+$/{print}' > "$F.new" 2>/dev/null
-		mv "$F.new" "$F" 2>/dev/null && chmod 600 "$F" 2>/dev/null
+		printf '%s\n' "$raw" | lbl_commit_out "$F" awk -F"$TAB" 'NR<=2000 && NF>=8 && $1 ~ /^(awg|xray|hy2)\|[A-Za-z0-9._-]+$/{print}' 2>/dev/null
+		chmod 600 "$F" 2>/dev/null
 		printf '{"ok":true,"code":0}\n'; exit 0 ;;
 
 	# --- Устройства: режим конкретного IP (split / bypass / force / desync) -----------
@@ -2412,6 +2568,146 @@ EOF
 			                 *) fail "поле: name|transport|config|fallback" ;;
 			             esac ;;
 		esac ;;
+	# road_set: ДОРОГА К СЕРВЕРУ (road.sh) — пакеты конфига AmneziaWG к его серверу через выход <id> (пусто = напрямую). Проверки
+	# («в один шаг», только включённый AWG-выход) и ответ словами — у владельца; снятие дороги с работающей несущей переподнимает её
+	# (MTU пишет только подъём), поэтому — через run (cap_run), как смена конфига выхода.
+	road_set)
+		name=$(urldecode "$(field name)")
+		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя конфига"
+		rid=$(field id); case "$rid" in ''|[2-7]) ;; *) fail "битый номер выхода" ;; esac
+		# Лок смены — как у смены сервера: снятие дороги переподнимает несущую (`transport.sh restart`), а он без лока шёл бы поверх
+		# лестницы сторожа (ревью с.118, круг 2; класс C127).
+		hold_switch
+		run road.sh set awg "$name" "$rid" ;;
+	# chebur_*: ВТОРОЕ МНЕНИЕ О БЛОКИРОВКЕ (cheburcheck.sh) — переключатели, запуск проверки, её ответ. Opt-in, по умолчанию выкл:
+	# адрес сервера уходит стороннему российскому сервису, а панель ставят не только в России (решение человека 10.10.2026).
+	# Проверка — фоном у владельца (до ~80 с потока), панель опрашивает chebur_get.
+	chebur_set)
+		case "$(field what)" in
+			on) run cheburcheck.sh on ;; off) run cheburcheck.sh off ;;
+			auto_on) run cheburcheck.sh auto on ;; auto_off) run cheburcheck.sh auto off ;;
+			*) fail "что включить: on|off|auto_on|auto_off" ;;
+		esac ;;
+	chebur_check)
+		ip=$(field ip); echo "$ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || fail "нужен адрес IPv4"
+		run cheburcheck.sh check "$ip" force ;;
+	chebur_state)
+		owner_relay cheburcheck.sh state ;;
+	chebur_get)
+		ip=$(field ip); echo "$ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || fail "нужен адрес IPv4"
+		owner_relay cheburcheck.sh get "$ip" ;;
+	# warp_*: «ПОЛУЧИТЬ WARP» (warp.sh) — регистрация у Cloudflare, конфиг, выход и (по выбору) дорога для сервера. Фоном у
+	# владельца, панель опрашивает warp_status.
+	# `job` — the id the TAB gave the work it starts (hex): exported for the owner, which writes it into every status line of that
+	# work — the tab then knows its own job from one it merely sees running (warp.sh `JOB`). Not the form — no id, the work is nobody's.
+	warp_get)
+		rider=$(urldecode "$(field rider)")
+		[ -z "$rider" ] || echo "$rider" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя конфига"
+		warp_job; run warp.sh get "$rider" ;;
+	warp_status)
+		owner_relay warp.sh status ;;
+	# What is known about every WARP config (the record of its registration — warp.sh info); the token stays on the router.
+	warp_info)
+		owner_relay warp.sh info ;;
+	# An existing WARP config: pick the port again · a new registration into it · its masking. The owner refuses in words (not WARP,
+	# the main channel's server, another WARP job runs); the work goes in the background, the panel polls warp_status.
+	warp_repick|warp_reget|warp_mask)
+		name=$(urldecode "$(field name)")
+		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя конфига"
+		warp_job
+		case "$act" in
+			warp_repick) run warp.sh repick "$name" ;;
+			warp_reget)  run warp.sh reget "$name" ;;
+			warp_mask)
+				# `text` — the person's own masking, base64 (tags with `<` and `>`); absent or empty — the router's own. The form is
+				# judged by the owner; here only the alphabet of the envelope and a private file for it (in_dir).
+				_wmt=$(urldecode "$(field text)")
+				case "$_wmt" in '') run warp.sh mask "$name" gen ;; *[!A-Za-z0-9+/=]*) fail "неверные данные маскировки" ;; esac
+				in_dir
+				printf '%s' "$_wmt" | base64 -d > "$IN_DIR/mask" 2>/dev/null || fail "неверные данные маскировки"
+				run warp.sh mask "$name" "$IN_DIR/mask" ;;
+		esac ;;
+	# A WARP for ANOTHER device: registered and probed by the router, kept in RAM until taken ONCE. The config carries a private
+	# key — one base64 field, like «доступ домой» (vpnsrv_peer_conf).
+	warp_device)
+		warp_job; run warp.sh device ;;
+	warp_dev_take)
+		owner_relay warp.sh device-take ;;
+	# Где Cloudflare принял подключение выхода (экран выхода-WARP): трасса через его интерфейс — у владельца.
+	# premium_*: AMNEZIA PREMIUM (premium.sh) — a subscription whose link field is the service's key. The long works go in the
+	# background at the owner; the panel polls premium_status. A start may carry the tab's job id (as warp_*).
+	# save_premium: the key is checked by the owner WITHOUT the network (`check`), the registry line written, and Amnezia asked
+	# about the subscription at once — its screen shows the countries when the answer comes. The key travels in a private file.
+	save_premium)
+		tag=$(field tag)
+		label=$(urldecode "$(field label)")
+		key=$(urldecode "$(field key)" | tr -d ' \r\n\t')
+		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
+		printf '%s' "$key" | grep -qE '^vpn://[A-Za-z0-9_=-]+$' || fail "это не ключ vpn://"
+		[ "${#key}" -le 4096 ] || fail "слишком длинный ключ"
+		[ -f "$ENODIA_DIR/premium.sh" ] || fail "premium.sh не установлен (обновите скрипты роутера)"
+		in_dir
+		( umask 077; printf '%s\n' "$key" > "$IN_DIR/key" ) || fail "нет места для ключа"
+		cap_run premium.sh check "$IN_DIR/key"
+		_pck=$(printf '%s\n' "$CAP_OUT" | grep '^{' | tail -n 1)
+		_pckm=$(printf '%s' "$_pck" | sed -n 's/.*"msg":"\([^"]*\)".*/\1/p')
+		case "$_pck" in '{"ok":true'*) ;; *) fail "${_pckm:-ключ не принят}" ;; esac
+		_pckn=$(printf '%s' "$_pck" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
+		TAB=$(printf '\t')
+		sub_tag_free "$tag" || fail "имя занято: от удалённой подписки с таким именем на роутере остались серверы ($_sl) — назовите подписку иначе"
+		label=$(printf '%s' "$label" | tr -d '\000-\037\177')
+		[ -n "$label" ] || label=$_pckn
+		[ -n "$label" ] || label="Amnezia Premium"
+		_oldu=$(sub_link_of "$tag")
+		case "$_oldu" in
+			''|"$key") ;;
+			vpn://*) fail "это имя у подписки Amnezia Premium с другим ключом — новый ключ добавьте отдельной подпиской (старую удалите)" ;;
+			*) fail "это имя у обычной подписки — назовите подписку иначе" ;;
+		esac
+		# One key — one line: two lines of one key are one account on one installation, and each would lay out and prune the other's
+		# countries as its own.
+		_okt=$(awk -F"$TAB" -v k="$key" -v t="$tag" '$2 == k && $1 != t { print $1; exit }' "$ENODIA_STATE/.subs" 2>/dev/null)
+		[ -z "$_okt" ] || fail "этот ключ уже добавлен — подписка «$(grep "^$_okt$TAB" "$ENODIA_STATE/.subs" | head -1 | cut -d"$TAB" -f3- | tr -d '\000-\037\177"\\')»"
+		[ "$_oldu" = "$key" ] || sub_info_drop "$tag"
+		subs_put "$tag" "$key" "$label" || fail "не удалось сохранить подписку — нет места?"
+		premium_job
+		# Another Amnezia work running refuses the ask (code 1) — the answer says so instead of «спрашиваю» (review s.136 r2, L8):
+		# the screen would wait for countries that nobody went to get.
+		if cap_run premium.sh account "$tag"; then
+			printf '{"ok":true,"code":0,"msg":"подписка Amnezia Premium сохранена — спрашиваю о ней Amnezia","tag":"%s"}\n' "$tag"
+		else
+			printf '{"ok":true,"code":0,"msg":"подписка Amnezia Premium сохранена; спросить о ней Amnezia сейчас нельзя — идёт другая работа с Amnezia: когда она кончится, нажмите «Обновить»","tag":"%s","asked":false}\n' "$tag"
+		fi
+		exit 0 ;;
+	premium_status)
+		owner_relay premium.sh status ;;
+	premium_info)
+		tag=$(field tag)
+		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
+		owner_relay premium.sh info "$tag" ;;
+	premium_account|premium_pick|premium_unpick|premium_refresh|premium_revoke)
+		tag=$(field tag); cc=$(field cc); proto=$(field proto); name=$(field name); dev=$(field dev)
+		case "$act" in premium_refresh) ;; *) echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки" ;; esac
+		case "$act" in premium_pick|premium_unpick)
+			echo "$cc" | grep -qE '^[a-z][a-z0-9-]{1,15}$' || fail "плохой код страны"
+			case "$proto" in awg|vless) ;; *) fail "протокол — awg или vless" ;; esac ;;
+		esac
+		[ -f "$ENODIA_DIR/premium.sh" ] || fail "premium.sh не установлен (обновите скрипты роутера)"
+		premium_job
+		case "$act" in
+			premium_account) run premium.sh account "$tag" ;;
+			premium_pick)    run premium.sh pick "$tag" "$cc" "$proto" ;;
+			premium_unpick)  run premium.sh unpick "$tag" "$cc" "$proto" ;;
+			premium_refresh)
+				echo "$name" | grep -qE '^sub-[a-z0-9-]{1,80}$' || fail "плохое имя конфига"
+				run premium.sh refresh "$name" ;;
+			premium_revoke)
+				echo "$dev" | grep -qE '^[a-f0-9-]{36}$' || fail "плохой идентификатор устройства"
+				run premium.sh revoke "$tag" "$dev" ;;
+		esac ;;
+	warp_colo)
+		sid=$(field id); case "$sid" in [2-7]) ;; *) fail "битый номер выхода" ;; esac
+		owner_relay warp.sh colo "$sid" ;;
 	slot_pool)
 		# «Свой пул…» на десинк-выходе: создать «в VPN»-группу, СРАЗУ привязанную к слоту
 		# (домены юзер добавит в редакторе группы). id строгий 2..7; имя не валидируем —
@@ -2645,6 +2941,17 @@ EOF
 		dout=$(sh "$ENODIA_DIR/clean.sh" clean $dsel 2>/dev/null | grep '^{' | tail -1)
 		[ -n "$dout" ] || fail "чистка не отработала"
 		printf '%s\n' "$dout"; exit 0 ;;
+
+	# --- THE STOCK SETTINGS BACKUP (stock-backup.sh — the one owner of the stock flag and its copy). Through owner_relay: «off»
+	# is flag → removal → marker, and a closed tab (uhttpd's SIGKILL) must not cut it halfway; the owner answers one JSON line,
+	# a refusal by its code (`why`), which the panel words.
+	stock_backup)
+		[ -f "$ENODIA_DIR/stock-backup.sh" ] || fail "stock-backup.sh не установлен (обновите скрипты с GitHub)"
+		case "$(field op)" in
+			off) owner_relay stock-backup.sh off ;;
+			on)  owner_relay stock-backup.sh on ;;
+			*)   fail "нужно off|on" ;;
+		esac ;;
 
 	# --- ВНЕШНИЙ НАКОПИТЕЛЬ (usb-offload.sh — единственная истина; переезд с проверкой копии).
 	# Синхронно, как disk_clean: движок копирует 13 МБ максимум (секунды), НИЧЕГО не качает и

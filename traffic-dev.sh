@@ -70,9 +70,14 @@ command -v mac_norm >/dev/null 2>&1 || mac_norm() { printf '%s' "$1" | tr 'A-Z' 
 command -v mac_ok   >/dev/null 2>&1 || mac_ok()   { printf '%s' "$1" | grep -qE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'; }
 command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
 command -v clock_trusted >/dev/null 2>&1 || clock_trusted() { return 1; }
+# A file replaced whole or not at all — label-lib.sh::lbl_commit_out (awk exits 0 when its write fails: a full partition would
+# put a stump over the history). Its temp file is `<file>.<pid>.new`.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 
-# Temporary files are ours by the pid suffix; a signal must not leave them in RAM (C121: EXIT does not fire on a signal).
-td_cleanup() { rm -f "$TD_RUN/"*".$$" "$TD_CKPT.$$" "$TD_HIST.$$" "$TD_HOSTS.$$" 2>/dev/null; }
+# Temporary files are ours by the pid suffix (`.<pid>`, and `.<pid>.new` of lbl_commit_out); a signal must not leave them in
+# RAM (C121: EXIT does not fire on a signal).
+td_cleanup() { rm -f "$TD_RUN/"*".$$" "$TD_RUN/"*".$$.new" "$TD_CKPT.$$" "$TD_HIST.$$" "$TD_HOSTS.$$" "$TD_HIST.$$.new" "$TD_HOSTS.$$.new" 2>/dev/null; }
 trap td_cleanup EXIT
 trap 'exit 1' INT TERM HUP PIPE
 
@@ -161,25 +166,34 @@ td_close() {
 	# Names: the remembered file changes only when this day brings a new or another name for one of its devices (awk exits 1
 	# when nothing changed — no write).
 	: >> "$TD_HOSTS" 2>/dev/null
-	if [ -f "$TD_RUN/hosts" ] && awk -F'\t' -v H="$TD_HOSTS" -v R="$TD_RUN/hosts" -v T="$TAB" '
+	if [ -f "$TD_RUN/hosts" ]; then lbl_commit_out "$TD_HOSTS" awk -F'\t' -v H="$TD_HOSTS" -v R="$TD_RUN/hosts" -v T="$TAB" '
 			FILENAME == H { if (NF >= 2 && !($1 in h)) { h[$1] = $2; o[++n] = $1 }; next }
 			FILENAME == R { if (NF >= 2 && $2 != "") r[$1] = $2; next }
 			FNR > 1 { m = $1; sub(/ .*/, "", m)
 				# membership BEFORE the comparison: reading h[m] would create the element, and a new device would never be listed
 				if (!(m in r)) next
 				if (!(m in h)) { o[++n] = m; h[m] = r[m]; ch = 1 } else if (h[m] != r[m]) { h[m] = r[m]; ch = 1 } }
-			END { if (!ch) exit 1; for (i = 1; i <= n; i++) print o[i] T h[o[i]] }' "$TD_HOSTS" "$TD_RUN/hosts" "$1" > "$TD_HOSTS.$$"
-	then mv "$TD_HOSTS.$$" "$TD_HOSTS"; fi
-	rm -f "$TD_HOSTS.$$" 2>/dev/null
+			END { if (!ch) exit 1; for (i = 1; i <= n; i++) print o[i] T h[o[i]] }' "$TD_HOSTS" "$TD_RUN/hosts" "$1"
+	fi
 	_cf=$(awk -v today="$_cdt" "$TD_LINE_OK { print \$1; exit }" "$TD_HIST" 2>/dev/null)   # the first VALID line: a garbage one must not stall the trim
 	_ck=$(date -d "@$(( $2 - TD_KEEP * 86400 ))" +%F 2>/dev/null)
 	_ct=$(date -d "@$(( $2 - (TD_KEEP + 31) * 86400 ))" +%F 2>/dev/null)
 	if [ -n "$_cf" ] && [ -n "$_ct" ] && td_lt "$_cf" "$_ct"; then
-		awk -v k="$_ck" -v today="$_cdt" "$TD_LINE_OK"' && $1 >= k' "$TD_HIST" > "$TD_HIST.$$" && mv "$TD_HIST.$$" "$TD_HIST"
-		awk -F'\t' -v Hh="$TD_HIST" 'FILENAME == Hh { k = $0; sub(/^[^ ]* /, "", k); sub(/ .*/, "", k); m[k] = 1; next } ($1 in m)' \
-			"$TD_HIST" "$TD_HOSTS" > "$TD_HOSTS.$$" && mv "$TD_HOSTS.$$" "$TD_HOSTS"
+		lbl_commit_out "$TD_HIST" awk -v k="$_ck" -v today="$_cdt" "$TD_LINE_OK"' && $1 >= k' "$TD_HIST"
+		lbl_commit_out "$TD_HOSTS" awk -F'\t' -v Hh="$TD_HIST" 'FILENAME == Hh { k = $0; sub(/^[^ ]* /, "", k); sub(/ .*/, "", k); m[k] = 1; next } ($1 in m)' \
+			"$TD_HIST" "$TD_HOSTS"
 	fi
 	return 0
+}
+
+# The day's new text: its date and this boot's id, then the day's counters plus this tick's deltas, summed per device (the
+# caller's $_tday, $_tb, $_tdf and its `dlt.<pid>`). A function, because lbl_commit_out takes one command.
+td_day_text() {
+	printf '%s %s\n' "$_tday" "${_tb:--}"
+	{ if [ -s "$_tdf" ]; then awk 'NR > 1 && NF == 3' "$_tdf"; fi; cat "$TD_RUN/dlt.$$"; } |
+		awk 'BEGIN { OFMT = "%.0f"; CONVFMT = "%.0f" }
+			$1 ~ /^[0-9a-f:]+$/ || $1 == "other" { if (!($1 in s)) { s[$1] = 1; o[++n] = $1 }; r[$1] += $2; t[$1] += $3 }
+			END { for (i = 1; i <= n; i++) printf "%s %.0f %.0f\n", o[i], r[o[i]], t[o[i]] }'
 }
 
 cmd_tick() {
@@ -188,7 +202,7 @@ cmd_tick() {
 	# Temporary files of a dead process: uhttpd SIGKILLs a CGI whose client left (the trap is silent then) — a reader leaves its
 	# `rsnap.<pid>`/`rout.<pid>` in RAM; nobody else knows this directory (round 2).
 	for _tf in "$TD_RUN"/*.* "$TD_CKPT".* "$TD_HIST".* "$TD_HOSTS".*; do   # …and a killed tick's own on the flash (r.3)
-		_tp=${_tf##*.}; case "$_tp" in ''|*[!0-9]*) continue ;; esac
+		_tp=${_tf%.new}; _tp=${_tp##*.}; case "$_tp" in ''|*[!0-9]*) continue ;; esac   # `.<pid>` and lbl_commit_out's `.<pid>.new`
 		[ -d "/proc/$_tp" ] || rm -f "$_tf"
 	done
 	_tn=$(date +%s); _tt=$(date +%F); _tu=$(uptime_s); _tb=$(td_boot)
@@ -229,23 +243,17 @@ cmd_tick() {
 	# either way (review s.115, round 1). The fifth field = uptime when the pair was last seen.
 	# `last` is replaced BEFORE `day` (round 2): a reader between the two then misses this tick's delta for one answer (its live
 	# delta against the new base is ~0) instead of counting it twice (the new day plus a delta against the old base).
-	awk -F'\t' -v S="$_ts" -v up="$_tu" -v keep="$TD_CARRY" -v T="$TAB" '
+	lbl_commit_out "$TD_RUN/last" awk -F'\t' -v S="$_ts" -v up="$_tu" -v keep="$TD_CARRY" -v T="$TAB" '
 		BEGIN { print "#" T up }
 		FILENAME == S { s[$1 T $2] = 1; print $1 T $2 T $3 T $4 T up; next }
 		$1 != "#" && NF >= 5 && !(($1 T $2) in s) && $5 + keep >= up { print $1 T $2 T $3 T $4 T $5 }' \
-		"$_ts" "$_tlf" > "$TD_RUN/last.$$" && mv "$TD_RUN/last.$$" "$TD_RUN/last"
-	{
-		printf '%s %s\n' "$_tday" "${_tb:--}"
-		{ if [ -s "$_tdf" ]; then awk 'NR > 1 && NF == 3' "$_tdf"; fi; cat "$TD_RUN/dlt.$$"; } |
-			awk 'BEGIN { OFMT = "%.0f"; CONVFMT = "%.0f" }
-				$1 ~ /^[0-9a-f:]+$/ || $1 == "other" { if (!($1 in s)) { s[$1] = 1; o[++n] = $1 }; r[$1] += $2; t[$1] += $3 }
-				END { for (i = 1; i <= n; i++) printf "%s %.0f %.0f\n", o[i], r[o[i]], t[o[i]] }'
-	} > "$TD_RUN/day.$$" && mv "$TD_RUN/day.$$" "$_tdf"
+		"$_ts" "$_tlf"
+	lbl_commit_out "$_tdf" td_day_text
 	: >> "$TD_RUN/hosts"
-	awk -F'\t' -v H="$TD_RUN/hosts" -v T="$TAB" '
+	lbl_commit_out "$TD_RUN/hosts" awk -F'\t' -v H="$TD_RUN/hosts" -v T="$TAB" '
 		FILENAME == H { if (NF >= 2 && !($1 in h)) { h[$1] = $2; o[++n] = $1 }; next }
 		$7 != "" { if (!($1 in h)) o[++n] = $1; h[$1] = $7 }
-		END { for (i = 1; i <= n; i++) print o[i] T h[o[i]] }' "$TD_RUN/hosts" "$_ts" > "$TD_RUN/hosts.$$" && mv "$TD_RUN/hosts.$$" "$TD_RUN/hosts"
+		END { for (i = 1; i <= n; i++) print o[i] T h[o[i]] }' "$TD_RUN/hosts" "$_ts"
 	# The checkpoint: on the first tick of a boot (no `saved` — it records this boot's id at once), when it is missing, and every
 	# TD_SAVE of uptime. Uptime, not the wall clock: the clock jumps after a boot, uptime does not.
 	_tsv=$(cat "$TD_RUN/saved" 2>/dev/null); case "$_tsv" in ''|*[!0-9]*) _tsv="" ;; esac

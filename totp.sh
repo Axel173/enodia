@@ -84,6 +84,8 @@ totp_now() { date +%s 2>/dev/null; }
 # Часы «настоящие»? Тот же порог, что у выписки сертификата в web-ui.sh: до синхронизации на
 # роутере 1970 год, и любое время-зависимое решение в этот момент — ложь. Порог — у владельца
 # (clock-lib.sh::clock_sane, следит C82); шим той же строки — на случай payload без библиотеки.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 # …и аптайм оттуда же (uptime_s, следит C83). Шим ОБЯЗАТЕЛЕН: без него на payload без библиотеки
 # `uptime_s` это «command not found», totp_clock_base возвращает 1 — и сдвиг сессий после скачка
@@ -321,10 +323,8 @@ totp_lock_read() {                    # totp_lock_read <ключ> → "неуд�
 # либо целый новый. Разность «сейчас − отметка» здесь СЫРАЯ и это осознанно: файл живёт в /tmp,
 # то есть рождается ПОСЛЕ загрузки, а скачок часов вперёд лишь укорачивает паузу — сторона
 # безопасная (запереть хозяина скачком нельзя).   # clock-raw: отметка рождается после boot
-totp_lock_put() {                     # totp_lock_put <ключ> <неудач> <разблокировка>
-	_lp_n=$(totp_now); _lp_n=${_lp_n:-0}
-	_lp_t="$TOTP_FAIL.$$"
-	{
+# The file's new text (totp_lock_put's arguments; $_lp_n — its «now»): the key's own line, then the others'.
+totp_lock_text() {
 		[ "${2:-0}" -gt 0 ] 2>/dev/null && printf '%s %s %s %s\n' "$1" "$2" "$3" "$_lp_n"
 		if [ -s "$TOTP_FAIL" ]; then
 			# ПОТОЛОК РЕЖЕТ СНАЧАЛА ТО, ЧТО НЕ ЖАЛКО, И ЖАЛКО ЗДЕСЬ ДВА СОРТА СТРОК. Порядок вывода:
@@ -342,8 +342,10 @@ totp_lock_put() {                     # totp_lock_put <ключ> <неудач> 
 				       for(i=1;i<=np;i++) if(++c < cap) print P[i];
 				       for(i=1;i<=nr;i++) if(++c < cap) print R[i] }' "$TOTP_FAIL"
 		fi
-	} > "$_lp_t" 2>/dev/null && mv "$_lp_t" "$TOTP_FAIL" 2>/dev/null
-	rm -f "$_lp_t" 2>/dev/null
+}
+totp_lock_put() {                     # totp_lock_put <ключ> <неудач> <разблокировка>
+	_lp_n=$(totp_now); _lp_n=${_lp_n:-0}
+	lbl_commit_out "$TOTP_FAIL" totp_lock_text "$@" 2>/dev/null   # its temp file carries the pid — see above
 	return 0
 }
 
@@ -464,7 +466,8 @@ totp_rec_gen() {
 	while [ "$_i" -lt "$TOTP_REC_N" ]; do
 		_c=$(openssl rand -hex 5 2>/dev/null | tr -cd 'a-f0-9' | cut -c1-10)
 		[ "${#_c}" -eq 10 ] || { rm -f "$_tmp" 2>/dev/null; return 1; }
-		totp_sha256 "$_c" >> "$_tmp" || { rm -f "$_tmp" 2>/dev/null; return 1; }
+		_ch=$(totp_sha256 "$_c"); [ "${#_ch}" -eq 64 ] || { rm -f "$_tmp" 2>/dev/null; return 1; }
+		printf '%s\n' "$_ch" >> "$_tmp" || { rm -f "$_tmp" 2>/dev/null; return 1; }
 		_out="$_out $(printf '%s' "$_c" | cut -c1-5)-$(printf '%s' "$_c" | cut -c6-10)"
 		_i=$((_i + 1))
 	done
@@ -522,8 +525,7 @@ totp_sess_gc() {
 	# а зовут уборку и вход, и список, и счётчик; при годовом сроке истёкших строк почти не бывает,
 	# то есть записи были холостыми — и каждая ещё и окно для гонки с параллельной выдачей.
 	awk -F'\t' -v n="${_n:-0}" '$2+0 <= n+0 {f=1} END{exit f?0:1}' "$TOTP_SESS" 2>/dev/null || return 0
-	( umask 077; awk -F'\t' -v n="${_n:-0}" '$2+0 > n' "$TOTP_SESS" > "$TOTP_SESS.$$" 2>/dev/null ) &&
-		mv "$TOTP_SESS.$$" "$TOTP_SESS" 2>/dev/null || { rm -f "$TOTP_SESS.$$" 2>/dev/null; return 1; }
+	( umask 077; lbl_commit_out "$TOTP_SESS" awk -F'\t' -v n="${_n:-0}" '$2+0 > n' "$TOTP_SESS" 2>/dev/null ) || return 1
 	chmod 600 "$TOTP_SESS" 2>/dev/null
 	return 0
 }
@@ -584,9 +586,8 @@ totp_sess_clock_fix() {               # зовёт web-ui.sh start (cron раз 
 	if [ -s "$TOTP_SESS" ]; then
 		# `$2+0 > 0` — гард от битой строки: у неё `$2` нечисловой, и без гарда сдвиг записал бы
 		# туда САМ ШАГ, то есть «истекла в 1970» вместо «строка битая».
-		( umask 077; awk -F'\t' -v OFS='\t' -v lo="$_cf_old" -v hi="$((_cf_old + _cf_up))" -v d="$_cf_d" \
-			'$3+0 >= lo && $3+0 <= hi && $2+0 > 0 { $2 = $2 + d; $3 = $3 + d } { print }' "$TOTP_SESS" > "$TOTP_SESS.$$" 2>/dev/null ) &&
-			mv "$TOTP_SESS.$$" "$TOTP_SESS" 2>/dev/null || { rm -f "$TOTP_SESS.$$" 2>/dev/null; return 1; }
+		( umask 077; lbl_commit_out "$TOTP_SESS" awk -F'\t' -v OFS='\t' -v lo="$_cf_old" -v hi="$((_cf_old + _cf_up))" -v d="$_cf_d" \
+			'$3+0 >= lo && $3+0 <= hi && $2+0 > 0 { $2 = $2 + d; $3 = $3 + d } { print }' "$TOTP_SESS" 2>/dev/null ) || return 1
 		chmod 600 "$TOTP_SESS" 2>/dev/null
 	fi
 	# ОТМЕТКУ СТАВИМ ПОСЛЕДНЕЙ. Поставленная раньше, она делала провал сдвига (нет места на /data)
@@ -638,8 +639,7 @@ totp_sess_level() {
 totp_sess_upgrade() {                 # totp_sess_upgrade <токен>
 	_up_t=$(printf '%s' "$1" | tr -cd 'a-f0-9')
 	totp_sess_check "$_up_t" || return 1
-	( umask 077; awk -F'\t' -v OFS='\t' -v h="$(totp_sha256 "$_up_t")" '$1==h { $6=2 } { print }' "$TOTP_SESS" > "$TOTP_SESS.$$" 2>/dev/null ) &&
-		mv "$TOTP_SESS.$$" "$TOTP_SESS" 2>/dev/null || { rm -f "$TOTP_SESS.$$" 2>/dev/null; return 1; }
+	( umask 077; lbl_commit_out "$TOTP_SESS" awk -F'\t' -v OFS='\t' -v h="$(totp_sha256 "$_up_t")" '$1==h { $6=2 } { print }' "$TOTP_SESS" 2>/dev/null ) || return 1
 	chmod 600 "$TOTP_SESS" 2>/dev/null
 	return 0
 }
@@ -704,8 +704,7 @@ totp_sess_list() {                    # totp_sess_list [токен текуще�
 totp_sess_keep_only() {               # totp_sess_keep_only <токен>
 	_ko_t=$(printf '%s' "${1:-}" | tr -cd 'a-f0-9')
 	totp_sess_check "$_ko_t" || return 1
-	( umask 077; awk -F'\t' -v h="$(totp_sha256 "$_ko_t")" '$1==h' "$TOTP_SESS" > "$TOTP_SESS.$$" 2>/dev/null ) &&
-		mv "$TOTP_SESS.$$" "$TOTP_SESS" 2>/dev/null || { rm -f "$TOTP_SESS.$$" 2>/dev/null; return 1; }
+	( umask 077; lbl_commit_out "$TOTP_SESS" awk -F'\t' -v h="$(totp_sha256 "$_ko_t")" '$1==h' "$TOTP_SESS" 2>/dev/null ) || return 1
 	chmod 600 "$TOTP_SESS" 2>/dev/null
 	return 0
 }
@@ -719,8 +718,7 @@ totp_sess_revoke() {                  # totp_sess_revoke <id>
 	# Существование проверяем ТЕМ ЖЕ awk, а не grep'ом с табом в шаблоне: литеральный таб внутри
 	# кавычек — первое, что теряется при копировании файла редактором.
 	awk -F'\t' -v h="$_rv_i" '$1==h{f=1} END{exit f?0:1}' "$TOTP_SESS" 2>/dev/null || return 1
-	( umask 077; awk -F'\t' -v h="$_rv_i" '$1!=h' "$TOTP_SESS" > "$TOTP_SESS.$$" 2>/dev/null ) &&
-		mv "$TOTP_SESS.$$" "$TOTP_SESS" 2>/dev/null || { rm -f "$TOTP_SESS.$$" 2>/dev/null; return 1; }
+	( umask 077; lbl_commit_out "$TOTP_SESS" awk -F'\t' -v h="$_rv_i" '$1!=h' "$TOTP_SESS" 2>/dev/null ) || return 1
 	chmod 600 "$TOTP_SESS" 2>/dev/null
 	return 0
 }

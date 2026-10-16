@@ -119,6 +119,11 @@ command -v is_private_ip >/dev/null 2>&1 || is_private_ip() {
 # clock-lib: возраст отметки времени. Голая разность `now - отметка` врёт ровно на величину скачка
 # часов (RTC нет, стоковый ntp доезжает через ~13 мин после загрузки) — тут это выглядело бы как
 # «телефон на связи был 21 час назад» у пира, подключившегося минуту назад.
+# go_quiet (daemon-lib.sh) — the daemon's start without its banner in the log; nothing else of the library is used here.
+if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
+command -v go_quiet >/dev/null 2>&1 || go_quiet() { "$@"; }   # the shim of a missing library: the launch as it was, with the banner
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: peers.tsv replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 command -v age_since >/dev/null 2>&1 || age_since() {
     case "$1" in ''|*[!0-9]*) echo 999999; return ;; esac
@@ -272,7 +277,7 @@ next_free_id() {
 }
 
 peer_del_line() {   # $1=id ; переписываем файл целиком (sed -i по TAB на busybox капризен)
-    awk -F'\t' -v id="$1" '$1!=id' "$PEERS" > "$PEERS.tmp" 2>/dev/null && mv "$PEERS.tmp" "$PEERS"
+    lbl_commit_out "$PEERS" awk -F'\t' -v id="$1" '$1!=id' "$PEERS" 2>/dev/null
 }
 
 cmd_peer_add() {
@@ -344,8 +349,7 @@ peer_mode_apply() {   # $1=id $2=mode
 }
 
 peer_set_field() {   # $1=id $2=номер поля $3=значение
-    awk -F'\t' -v OFS='\t' -v id="$1" -v f="$2" -v v="$3" '$1==id {$f=v} {print}' "$PEERS" > "$PEERS.tmp" \
-        && mv "$PEERS.tmp" "$PEERS"
+    lbl_commit_out "$PEERS" awk -F'\t' -v OFS='\t' -v id="$1" -v f="$2" -v v="$3" '$1==id {$f=v} {print}' "$PEERS"
 }
 
 cmd_peer_mode() {
@@ -450,7 +454,7 @@ srv_carrier_up() {
     # «доступа домой» — такой же демон Go с тем же безлимитным пулом буферов.
     # grep по ФОРМЕ — гард на рассинхрон версий: старый net-tune.sh печатает на этот верб `usage: …`
     # в stdout, и оно стало бы первым аргументом env (демон не стартует). См. шапку net-tune.sh.
-    env $(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$') "$ENODIA_BIN/amneziawg-go" "$IFACE" || { log "amneziawg-go $IFACE не стартовал"; return 1; }
+    go_quiet env $(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$') "$ENODIA_BIN/amneziawg-go" "$IFACE" || { log "amneziawg-go $IFACE не стартовал"; return 1; }
     _i=0; while ! srv_running && [ "$_i" -lt 10 ]; do sleep 1; _i=$((_i + 1)); done
     srv_running || { log "$IFACE не появился"; srv_kill_daemon; return 1; }
     srv_setconf

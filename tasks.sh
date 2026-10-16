@@ -62,6 +62,8 @@ TK_CR=$(printf '\r')
 TK_TAB=$(printf '\t')
 TK_OFF="$ENODIA_STATE/.tasks-off"   # exists only in the «off» form: the plain lines we wrote (see «adopted lines»)
 
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
 command -v clock_sane >/dev/null 2>&1 || clock_sane() { _csn=${1:-$(date +%s 2>/dev/null)}; case "$_csn" in ''|*[!0-9]*) return 1 ;; esac; [ "$_csn" -gt 1700000000 ] 2>/dev/null && [ "$_csn" -lt 4102444800 ] 2>/dev/null; }
@@ -438,14 +440,14 @@ tk_drop_first() {   # stdin without the FIRST line equal to $1
 	_fd=0
 	while IFS= read -r _fl || [ -n "$_fl" ]; do
 		if [ "$_fd" = 0 ] && [ "$_fl" = "$1" ]; then _fd=1; continue; fi
-		printf '%s\n' "$_fl"
+		printf '%s\n' "$_fl" || return 1   # a write that failed stops the copy: the caller renames only a whole file
 	done
 }
 # <file> <line>: the first equal line out, in place; TKD counts the lines dropped (the derivation's own bookkeeping, see below)
-tk_drop_in() { tk_drop_first "$2" < "$1" > "$1.n" && mv -f "$1.n" "$1" && [ "$_fd" = 1 ] && TKD=$((TKD + 1)); return 0; }
-tk_drop_all() {   # <file> <text>: every line with it (rc 1 of grep = none left)
+tk_drop_in() { tk_drop_first "$2" < "$1" > "$1.n" && mv -f "$1.n" "$1" && [ "$_fd" = 1 ] && TKD=$((TKD + 1)); return 0; }   # write-blind: tk_drop_first asks every printf, and it must run in THIS shell — it sets _fd
+tk_drop_all() {   # <file> <text>: every line with it (lbl_grep: none left is an answer); whole or not at all — label-lib.sh
 	_dac=$(grep -cF -- "$2" "$1" 2>/dev/null); case "$_dac" in ''|*[!0-9]*) _dac=0 ;; esac
-	grep -vF -- "$2" "$1" > "$1.n"; mv -f "$1.n" "$1" && TKD=$((TKD + _dac)); return 0
+	lbl_commit_out "$1" lbl_grep -vF -- "$2" "$1" && TKD=$((TKD + _dac)); return 0
 }
 # tk_fam_plain (after tk_load) -> TKF_JOB, TKF_ORG: the UNMARKED lines of the task's family — its job word for word, and the line
 # it came from while the task still runs that command (spaces at the end aside); "" = none

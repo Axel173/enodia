@@ -62,7 +62,9 @@
 #   dns-merge.sh clear         — снять агрегат (uninstall/deactivate)
 
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
-LIVE=/tmp/dnsmasq.d          # второй conf-dir (RAM); сток копирует сюда /etc при рестарте
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
+LIVE=/tmp/dnsmasq.d         # второй conf-dir (RAM); сток копирует сюда /etc при рестарте
 ETC=/etc/dnsmasq.d           # ПЕРВЫЙ conf-dir по порядку чтения (см. шапку) — здесь и живёт агрегат
 OUT_BASE=00-ipset-merge.conf
 OUT="$ETC/$OUT_BASE"
@@ -131,7 +133,7 @@ extract_pairs() {
 				if (s ~ /,/) sub(/^[^,]*,/, "", s); else break
 			}
 		}' $_args 2>/dev/null > "$PAIRS"
-	sort -u "$PAIRS" > "$PAIRS.s" 2>/dev/null && mv "$PAIRS.s" "$PAIRS"
+	lbl_commit_out "$PAIRS" sort -u "$PAIRS" 2>/dev/null
 }
 
 # Агрегация. КРИТЕРИЙ ОДИН: строку пишем, только если ПОБЕДИТЕЛЬ БЕДНЕЕ ОБЪЕДИНЕНИЯ.

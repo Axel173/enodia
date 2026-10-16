@@ -143,6 +143,28 @@ ipt_top() {
 	iptables -I "$_itc" "$_itp" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"
 }
 
+# mss_clamp <iface> / mss_unclamp <iface> — THE MSS OF TCP LEAVING THROUGH A CARRIER, one owner (BE7000 10.10.2026).
+# The router's OWN connection that goes into a tunnel by MARK is routed twice: first without the mark — to the ISP's interface, and TCP
+# writes the MSS of THAT interface (1460) into its SYN, — then mangle OUTPUT marks it and it leaves through the carrier. The far side
+# answers with segments the carrier cannot take. With a plain tunnel the VPS clamps the MSS itself and nobody noticed; a server on a
+# ROAD lives inside another tunnel (MTU 1188 inside WARP's 1280), the VPS knows nothing about it — and every big answer to the router
+# itself was lost: the updater could not fetch its package («нет связи с GitHub»), a TLS handshake to 1.1.1.1 took 4.6 s instead
+# of 0.2. Measured on the road: the same file bound to the carrier (`--interface`, MSS by its MTU) — 0.7 s, by mark — a timeout;
+# through an exit without a road both ways answer alike. Clients' connections are clamped by the stock rule in FORWARD; this rule
+# is for what the router sends itself, so it stands in POSTROUTING — the only mangle hook AFTER the re-route (in OUTPUT the packet
+# still looks at the ISP's interface). `--clamp-mss-to-pmtu` reads the interface MTU per packet ⇒ a rider that road.sh lowered needs
+# no second rule. It lives and dies with the carrier's NAT rule: whoever adds or removes `-o <iface> -j MASQUERADE` calls these
+# (dev/ipt-wait-test.sh counts the pairs). No TCPMSS target in the kernel — the call fails quietly: the old path.
+mss_clamp() {
+	iptables -t mangle -C POSTROUTING -o "$1" -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null && return 0
+	iptables -t mangle -A POSTROUTING -o "$1" -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
+	return 0
+}
+mss_unclamp() {
+	iptables -t mangle -D POSTROUTING -o "$1" -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
+	return 0
+}
+
 # ipt_jump_state <цепочка> <цель> — стоит ли наш прыжок: 0 — стоит, 1 — нет (или нет самой цели: её снёс reload), 2 — проверить
 # не удалось. Отвечает вербам `wired` владельцев (их спрашивает сторож при выключенном VPN): чинит он ТОЛЬКО по 1 — «не смог
 # проверить» (лок занят, сбой вызова) ≠ «снесено», иначе ложная починка кончается сбросом соединений. Цели нет, а саму цепочку

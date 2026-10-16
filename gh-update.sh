@@ -150,6 +150,8 @@ gh_code_refused() { case "$(gh_code_get)" in 429|403) return 0 ;; *) return 1 ;;
 # шим: старая установка без свежей библиотеки обязана вести себя ровно как раньше, а не падать.
 if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
 command -v curl_ca_opt >/dev/null 2>&1 || curl_ca_opt() { return 0; }
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 
 # Опция доверия для ЭТОГО роутера. Пусто = системного доверия хватает (обычный случай).
 gh_ca_opt() { curl_ca_opt; }
@@ -582,13 +584,11 @@ BS_CACHE="$ENODIA_STATE/.bin-sha"
 # Ключ файла «размер mtime»; пусто — файла нет. Путь — отдельным полем строки кэша.
 bs_key() { stat -c '%s %Y' "$1" 2>/dev/null; }
 # Строка кэша: имя⇥путь⇥ключ⇥sha⇥версия — ОДНА на имя (путь у бинаря один, его даёт bin_path). Атомарно, рядом + `mv`.
-bs_put() {
-    _bpt="$BS_CACHE.$$.new"   # хвост .new — под маской мусора clean.sh (оборванная запись не копится)
-    if { [ -f "$BS_CACHE" ] && awk -F'\t' -v n="$1" '$1 != n' "$BS_CACHE"; printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"; } > "$_bpt" 2>/dev/null; then
-        mv -f "$_bpt" "$BS_CACHE" 2>/dev/null || rm -f "$_bpt" 2>/dev/null
-    else rm -f "$_bpt" 2>/dev/null; fi
-    return 0
+_bs_text() {   # the cache's new text: the other names' lines, then this name's
+    if [ -f "$BS_CACHE" ]; then awk -F'\t' -v n="$1" '$1 != n' "$BS_CACHE" || return 1; fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"
 }
+bs_put() { lbl_commit_out "$BS_CACHE" _bs_text "$@" 2>/dev/null; return 0; }   # whole or not at all (label-lib.sh; its temp ends in .new — under clean.sh's mask)
 # sha256 стоящего файла: из кэша, если ключ тот же, иначе считаем и запоминаем. Версию при НОВОМ содержимом забываем, а при
 # том же хеше (сменился только ключ: переезд на накопитель, сдвиг mtime) — держим: иначе «стоит A» пропадало бы на ровном месте.
 bs_sha() {   # $1 = имя, $2 = путь

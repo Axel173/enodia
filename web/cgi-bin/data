@@ -949,8 +949,8 @@ emit_subs_run() {
 # --- КАРТОЧКА «ПОДПИСКИ»: сколько ещё работает каждая. Три источника в одном ответе: реестр
 # (метка), конфиги (сколько серверов) и `.sub-info` (что подписка сообщила о себе заголовком
 # `subscription-userinfo` — владелец разбора subs-lib.sh).
-# СПИСОК СПРАШИВАЕМ У РОУТЕРА (`subs-update.sh list` — «tag⇥метка⇥серверов»), а не считаем сами:
-# счёт по ВЛАДЕЛЬЦУ (длиннейший подходящий тег, ОБА семейства конфигов) уже написан там, и вторая
+# СПИСОК СПРАШИВАЕМ У РОУТЕРА (`subs-update.sh list` — «tag⇥метка⇥серверов⇥xray⇥hy2⇥awg»), а не считаем сами:
+# счёт по ВЛАДЕЛЬЦУ (длиннейший подходящий тег, ВСЕ семейства конфигов) уже написан там, и вторая
 # копия разошлась бы с первой на первом же теге-префиксе («liberty» ⊂ «liberty-vpn») — ровно та
 # грабля, за которую в этом проекте уже платили картой имён.
 # ВОЗРАСТ СЧИТАЕТ РОУТЕР — точнее, панель считает его от НАШЕГО `now`: у роутера нет RTC, и от
@@ -968,10 +968,28 @@ emit_subs() {
 	# подоболочкой (накопленный `out` умер бы вместе с ней), а СВОЙ временный файл пришлось бы
 	# снимать и на обрыве — панель закрывает соединение, CGI получает сигнал, и EXIT-ловушка на
 	# busybox не срабатывает. Временный файл heredoc'а ведёт сам шелл, и сирот он не оставляет.
-	while IFS="$TAB" read -r tag label n || [ -n "$tag" ]; do
+	# After the total the owner prints the count of each family (xray, hy2, awg) — the list line of a mixed subscription names
+	# them. A copy of the script older than that prints three fields: the counts are then absent, not zero (`fam` is left out).
+	while IFS="$TAB" read -r tag label n snx snh sna srest || [ -n "$tag" ]; do
 		# «подписок нет» — человеческая строка того же верба (у неё нет ни TAB, ни числа):
 		# машинному читателю она не адресована, и счётчик её отсеивает.
 		case "$n" in ''|*[!0-9]*) continue ;; esac
+		# Each count — a number as shell arithmetic prints it (no leading zero: in JSON that is not a number), four digits at most.
+		sfam=""; sfok=1
+		for sfv in "$snx" "$snh" "$sna"; do
+			case "$sfv" in 0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]) : ;; *) sfok=0 ;; esac
+		done
+		[ "$sfok" = 1 ] && sfam=",\"fam\":{\"xray\":$snx,\"hy2\":$snh,\"awg\":$sna}"
+		# The kind (the owner's last field): an Amnezia Premium key or a link. A copy of the owner older than the field — a link.
+		skind=link; case "$srest" in premium*) skind=premium ;; esac
+		# …and for a Premium one, its places: «устройств 4 из 7» of the list line — from Amnezia's last answer the router keeps
+		# (premium.sh account), not asked here. Numbers by their text (a leading zero is no JSON number), four digits at most.
+		sdev=""
+		if [ "$skind" = premium ] && [ -s "$DS/premium/$tag.account" ] && command -v jsonfilter >/dev/null 2>&1; then
+			du=$(jsonfilter -i "$DS/premium/$tag.account" -e '@.active_device_count' 2>/dev/null | head -n 1 | tr -cd '0-9' | cut -c1-4 | sed 's/^0*//')
+			dm=$(jsonfilter -i "$DS/premium/$tag.account" -e '@.max_device_count' 2>/dev/null | head -n 1 | tr -cd '0-9' | cut -c1-4 | sed 's/^0*//')
+			[ -n "$dm" ] && sdev=",\"dev\":[${du:-0},$dm]"
+		fi
 		tag=$(printf '%s' "$tag" | tr -cd 'a-z0-9-')
 		[ -n "$tag" ] || continue
 		# `jtxt`, а не `jesc`: метка — ДАННЫЕ человека, и `jesc` вырезал бы из «Speed [50m]» «код цвета» (ревью приёмки, круг 3; тот же
@@ -999,7 +1017,7 @@ emit_subs() {
 		case "$ex" in ''|*[!0-9]*) ex=0 ;; *) z=${ex%%[!0]*}; ex=${ex#$z}; [ -n "$ex" ] || ex=0 ;; esac
 		z=${n%%[!0]*}; n=${n#$z}; [ -n "$n" ] || n=0
 		case "$hv" in 1) hv=true ;; *) hv=false ;; esac
-		out="$out${out:+,}{\"tag\":\"$tag\",\"label\":\"$label\",\"srv\":$n,\"ok\":$ok,\"err\":$er,\"have\":$hv,\"up\":$up,\"down\":$dn,\"total\":$tt,\"expire\":$ex}"
+		out="$out${out:+,}{\"tag\":\"$tag\",\"label\":\"$label\",\"kind\":\"$skind\"$sdev,\"srv\":$n$sfam,\"ok\":$ok,\"err\":$er,\"have\":$hv,\"up\":$up,\"down\":$dn,\"total\":$tt,\"expire\":$ex}"
 	done <<EOF
 $(sh "$D/subs-update.sh" list 2>/dev/null)
 EOF
@@ -1265,26 +1283,36 @@ emit_tech() {
 		"$dsrc" "$dadr" "$dvia" "$dpro" "$dres" "$dprx" "$dbin" "$dspl" "$mtu" "$mif"
 }
 
-# --- Кэш проверок серверов (.srv-checks, TSV key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts) → JSON-объект
-# key→{st,ms,method,cdn,mbps,kind,ts}. Пишет панель (action save_checks); тут только читаем. -----
+# --- Кэш проверок серверов (.srv-checks, TSV key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts[⇥tms⇥via⇥dms⇥chb[⇥ncmp]]) → JSON-объект
+# key→{st,ms,method,cdn,mbps,kind,ts,tms,via,dms,chb,ncmp}. Пишет панель (action save_checks); тут только читаем. Хвост — «дорога к
+# серверу» (10.10.2026): st=blk — напрямую молчит, через туннель отвечает (tms); via — номер выхода-дороги, число ms — через неё,
+# dms — напрямую; chb — второе мнение «вердикт:блоков:ответили»; ncmp=1 — the silent server had nothing to be compared through
+# (cgi-bin/ping). Строка прежней формы (8 или 12 полей) — без хвоста. -----
 emit_checks() {
 	F="$DS/.srv-checks"
 	printf '{'
 	first=1
 	if [ -f "$F" ]; then
 		TAB=$(printf '\t')
-		while IFS="$TAB" read -r key st ms method cdn mbps kind ts; do
+		chb_on=0; [ -f "$DS/.chebur" ] && chb_on=1
+		while IFS="$TAB" read -r key st ms method cdn mbps kind ts tms via dms chb ncmp; do
 			case "$key" in 'awg|'*|'xray|'*|'hy2|'*) : ;; *) continue ;; esac
 			msj=$ms;   case "$msj" in ''|*[!0-9]*) msj=null ;; esac
 			mbj=$mbps; case "$mbj" in ''|*[!0-9.]*) mbj=null ;; esac
 			case "$cdn" in 1) cdj=true ;; *) cdj=false ;; esac
-			case "$st" in ok) stj=ok ;; *) stj=dead ;; esac
+			case "$st" in ok) stj=ok ;; blk) stj=blk ;; *) stj=dead ;; esac
+			tmj=$tms;  case "$tmj" in ''|*[!0-9]*) tmj=null ;; esac
+			dmj=$dms;  case "$dmj" in ''|*[!0-9]*) dmj=null ;; esac
+			case "$via" in [2-7]) ;; *) via="" ;; esac
+			printf '%s' "$chb" | grep -qE '^(blocked|clear|uncertain):[0-9]{1,3}:[0-9]{1,3}$' || chb=""
+			[ "$chb_on" = 1 ] || chb=""   # второе мнение выключено — ни следа его вердикта (кэш пишет панель, выключение его не чистит)
 			case "$kind" in speed) kj=speed ;; *) kj=ping ;; esac
 			case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
 			case "$method" in *[!A-Za-z0-9:._-]*|'') method="-" ;; esac
+			case "$ncmp" in 1) ncj=true ;; *) ncj=false ;; esac
 			[ "$first" = 1 ] || printf ','; first=0
-			printf '"%s":{"st":"%s","ms":%s,"method":"%s","cdn":%s,"mbps":%s,"kind":"%s","ts":%s}' \
-				"$key" "$stj" "$msj" "$method" "$cdj" "$mbj" "$kj" "$ts"
+			printf '"%s":{"st":"%s","ms":%s,"method":"%s","cdn":%s,"mbps":%s,"kind":"%s","ts":%s,"tms":%s,"via":"%s","dms":%s,"chb":"%s","ncmp":%s}' \
+				"$key" "$stj" "$msj" "$method" "$cdj" "$mbj" "$kj" "$ts" "$tmj" "$via" "$dmj" "$chb" "$ncj"
 		done < "$F"
 	fi
 	printf '}\n'
@@ -1428,6 +1456,10 @@ case "$sec" in
 	# обязан быть ОДИН, иначе панель предложит снести не то, что движок снесёт.
 	disk) if [ -f "$D/clean.sh" ]; then sh "$D/clean.sh" json
 	      else printf '{"engine":false,"total_b":0,"used_b":0,"free_b":0,"awg_b":0,"cats":[],"junk":[],"junk_b":0,"snaps_b":0,"snaps_n":0,"ramlogs_b":0,"ramlogs_n":0,"stocklogs_b":0,"stocklogs_n":0}\n'; fi ;;
+	# stockbak — THE STOCK SETTINGS BACKUP (stock-backup.sh status): is it on, what it holds, may it be turned off / back on.
+	# The owner decides `offer`/`can_on`; the panel only shows. No owner yet — engine false (an older code set).
+	stockbak) if [ -f "$D/stock-backup.sh" ]; then sh "$D/stock-backup.sh" status
+	          else printf '{"engine":false,"present":false,"offer":false,"can_on":false}\n'; fi ;;
 	# ram — КТО ЕСТ ОПЕРАТИВНУЮ ПАМЯТЬ (ram-usage.sh json). Отдельной секцией, а не полем в
 	# sysinfo: тот опрашивается раз в 5 с ради температуры и ЦП, а здесь обход всего /proc —
 	# полсотни forks, которые незачем платить в таком ритме. Панель тянет это ЛЕНИВО, по клику.

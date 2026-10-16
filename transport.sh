@@ -43,6 +43,7 @@
 #   transport.sh slot-health <id>  — жив ли доп-выход (0 жив / 1 просел / 2 плагин не умеет)
 #   transport.sh slot-probe <id>   — снятый выход: проба без перепроводки (0 вернули · 1 нет · 3 ключ занят · 4 несущая не встала · 5 уже есть · 6 выход сменили · 2 не умеет)
 #   transport.sh slot-iface <id>   — имя несущей доп-выхода (учёт трафика); пусто = считать нечем
+#   transport.sh slot-age <id>     — сколько секунд живёт демон несущей выхода (сторож: совсем молодую не судят); пусто = неизвестно
 #   transport.sh slot-list         — транспорты, готовые нести доп-выход (см. slot_ready)
 
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
@@ -501,6 +502,7 @@ cmd_cold() {
 # флаг «несёт весь дом»), тёплый резерв awg0 (его гасит `cold`). Своей копии «как выключить» тут нет — только «осталось ли».
 cmd_live() {
     ip rule show 2>/dev/null | grep -qE 'fwmark 0x[1-7] lookup (1000|100[2-7])' && return 0
+    ip rule show 2>/dev/null | grep -qE '^8[2-7]:' && return 0   # roads to servers (road.sh) — «off» removes them too
     for _lt in 1000 1002 1003 1004 1005 1006 1007; do [ -n "$(ip route show table "$_lt" 2>/dev/null)" ] && return 0; done   # not-wan: таблицы НЕСУЩИХ, про аплинк отвечает ip-lib.sh
     ip link show awg0 >/dev/null 2>&1 && return 0
     [ -f "$ENODIA_STATE/.zapret-on" ] && return 0
@@ -605,6 +607,15 @@ cmd_slot_iface() {
     # шум в учёт нельзя: берём первую строку и режем пробелы (тот же приём, что у чтения .transport).
     printf '%s\n' "$_sifo" | head -n1 | tr -d ' \t\r'
 }
+# HOW OLD AN EXIT'S CARRIER IS — seconds since its daemon started (the plugin's fact, from /proc; nothing — no daemon, or the
+# plugin does not know the verb). The watchdog asks it before it judges a carrier that has NEVER shaken hands: one that is seconds
+# old has not been asked yet. A QUIET verb, like slot-iface: on codes 1/2 nothing is printed — a refusal's words («выход №5 …»)
+# would be read as a number.
+cmd_slot_age() {
+    _sago=$(_slot_dispatch slot-age "$1" 2>/dev/null); _sagr=$?
+    [ "$_sagr" = 0 ] || return "$_sagr"
+    printf '%s\n' "$_sago" | head -n1 | tr -d ' \t\r'
+}
 
 # Поднять несущие ВСЕХ включённых слотов (boot/heal, зовёт heal.sh 5.13b). Ф0: плагины
 # слоты не умеют — каждый слот сообщит и останется на fallback; mark-core переигрываем один
@@ -677,6 +688,7 @@ case "$1" in
     slot-health) cmd_slot_health "$2" ;;
     slot-probe) cmd_slot_probe "$2" ;;   # снятый выход: проба сервера без перепроводки, ответил — вернуть (сторож)
     slot-iface) cmd_slot_iface "$2" ;;   # имя несущей выхода №N (учёт трафика); пусто = считать нечем
+    slot-age)  cmd_slot_age "$2" ;;       # how old the exit's carrier is, s (the watchdog); nothing = unknown
     slot-list) cmd_slot_list ;;      # транспорты, готовые нести ДОП-ВЫХОД (пикер в панели; ≠ list)
-    *) echo "usage: $0 active|configured|ready [t]|marking <t>|names|list|installed [t]|next <t>|up [t]|down [t]|cold [t]|rewarm <t>|switch <t> [--home]|restart|health [t]|live|failover [t]|dns [t]|slots-up|slots-down|slot-up <id>|slot-down <id>|slot-health <id>|slot-probe <id>|slot-iface <id>|slot-list"; exit 2 ;;
+    *) echo "usage: $0 active|configured|ready [t]|marking <t>|names|list|installed [t]|next <t>|up [t]|down [t]|cold [t]|rewarm <t>|switch <t> [--home]|restart|health [t]|live|failover [t]|dns [t]|slots-up|slots-down|slot-up <id>|slot-down <id>|slot-health <id>|slot-probe <id>|slot-iface <id>|slot-age <id>|slot-list"; exit 2 ;;
 esac

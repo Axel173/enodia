@@ -104,12 +104,22 @@ meta_xray() {
 	# ПЕРВОЕ вхождение, как у host/network/security всегда; прежний жадный sed брал у sni/fp ПОСЛЕДНЕЕ, и карточка сводила адрес
 	# одного outbound с SNI другого. Наши генераторы пишут по ключу в строке — на них ответ байт-в-байт прежний (стенд
 	# dev/list-cgi-test.sh держит оба случая).
+	# A CHAIN (`dialerProxy` — Amnezia Premium's relay → exit): the first "address" is the EXIT, reached through the relay; the address
+	# the router dials — and the one the ISP sees and may block — is the relay's. The owner answers it (xray-transport.sh endpoint, the
+	# same as cgi-bin/ping asks); the panel's row, header and second opinion judged the exit (review s.136 r2, panel 13).
 	{
 		for f in "$@"; do printf 'F\t%s\n' "$f"; done
+		if [ -f "$D/xray-transport.sh" ]; then
+			grep -l '"dialerProxy"' "$@" 2>/dev/null | while IFS= read -r f; do
+				_rh=$(sh "$D/xray-transport.sh" endpoint "$f" 2>/dev/null </dev/null | head -n 1 | cut -f1 | tr -cd 'A-Za-z0-9.:-')
+				[ -z "$_rh" ] || printf 'R\t%s\t%s\n' "$f" "$_rh"
+			done
+		fi
 		grep -H -oE '"(serverName|fingerprint|address|protocol|network|security|flow)"[[:space:]]*:[[:space:]]*"[^"]*"' "$@" 2>/dev/null \
 			| sed "s#^\(.*\)\.json:\"\([A-Za-z]*\)\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"\$#K$TAB\1.json$TAB\2$TAB\3#"
 	} | awk -F"$TAB" '
 		$1 == "F" { nm = $2; sub(/^.*\//, "", nm); sub(/\.json$/, "", nm); gsub(/["\\]/, "", nm); name[$2] = nm; ord[++n] = $2; next }
+		$1 == "R" { relay[$2] = $3; next }
 		$1 == "K" {
 			v = $4; gsub(/["\\]/, "", v)
 			# Протокол outbound — ПЕРВЫЙ из четвёрки (inbound socks и freedom в неё не входят); нет ни одного — vless.
@@ -119,6 +129,7 @@ meta_xray() {
 		END {
 			for (i = 1; i <= n; i++) {
 				p = ord[i]; pp = (p in pr) ? pr[p] : "vless"
+				if (p in relay) val[p "\taddress"] = relay[p]
 				printf "%s\"%s\":{\"proto\":\"%s\",\"sni\":\"%s\",\"fp\":\"%s\",\"host\":\"%s\",\"network\":\"%s\",\"security\":\"%s\",\"flow\":\"%s\"}", \
 					(i > 1 ? "," : ""), name[p], pp, val[p "\tserverName"], val[p "\tfingerprint"], val[p "\taddress"], val[p "\tnetwork"], val[p "\tsecurity"], val[p "\tflow"]
 			}
@@ -154,7 +165,10 @@ subs_list() {
 		# разбор ВСЕГО ответа (ревью приёмки, круг 2). Обычную метку это не меняет ни на байт. Диапазон — ПЕРВЫМ: busybox не читает
 		# восьмеричный код сразу после `\\` и снимал бы только кавычку с косой (замер на BE7000, круг 3; следит C111).
 		label=$(printf '%s' "$label" | tr -d '\000-\037"\\')
-		out="$out${out:+,}{\"tag\":\"$tag\",\"label\":\"$label\"}"
+		# The KIND, never the link itself: an Amnezia Premium key (premium.sh) — its servers are countries Amnezia issued, and the
+		# server's screen offers «a new config» instead of an editor or «the subscription changes it».
+		kind=link; case "$url" in vpn://*) kind=premium ;; esac
+		out="$out${out:+,}{\"tag\":\"$tag\",\"label\":\"$label\",\"kind\":\"$kind\"}"
 	done < "$DS/.subs"
 	printf '%s' "$out"
 }
@@ -198,16 +212,34 @@ awg_gen() {
 	sh "$D/transport-awg.sh" conf-gen "$@" 2>/dev/null | awk -F"$(printf '\t')" '$1 ~ /^[A-Za-z0-9._-]+$/ && $2 ~ /^(wg|[0-9]\.[0-9])$/ { printf "%s\"%s\":\"%s\"", (c++ ? "," : ""), $1, $2 }'
 }
 
+# ENDPOINT каждого конфига AmneziaWG — {"конфиг":"адрес:порт"}: строка сервера на экране ПОДПИСКИ (как host у Hysteria2 — там
+# человек смотрит, что подписка принесла, и адрес — первое, по чему он узнаёт сервер). Ключей не отдаём. Один grep по всем файлам и
+# один awk (правило файла: ни процесса на конфиг); путь режем ЖАДНО до «.conf:» перед словом Endpoint — двоеточие бывает и в пути
+# хранилища. Первая строка Endpoint файла; управляющие байты, кавычка и косая — вон (диапазон ПЕРВЫМ, C111).
+awg_ep() {
+	set --; for f in "$DS"/configs/*.conf; do [ -f "$f" ] && set -- "$@" "$f"; done
+	[ $# -gt 0 ] || return 0
+	grep -H -E '^[[:space:]]*Endpoint[[:space:]]*=' "$@" 2>/dev/null \
+		| sed "s#^\(.*\)\.conf:[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*#\1$TAB#" | tr -d '\000-\010\013-\037"\\' \
+		| awk -F"$TAB" '{ n = $1; sub(/^.*\//, "", n); if (n in s) next; s[n] = 1; v = $2; gsub(/[ \r]/, "", v)
+			if (n ~ /^[A-Za-z0-9._-]+$/ && v != "") printf "%s\"%s\":\"%s\"", (c++ ? "," : ""), n, v }'
+}
+
 aw_active=$(cat "$DS/.active"      2>/dev/null | tr -d ' \r\n"\\')
 xr_active=$(cat "$DS/.xray-active" 2>/dev/null | tr -d ' \r\n"\\')
 hy_active=$(cat "$DS/.hy2-active"  2>/dev/null | tr -d ' \r\n"\\')
 
 printf '{"transport":"%s",' "$t"
-printf '"awg":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"held":{%s},"gen":{%s}},'  "${aw_active:-?}" "$(is_ready awg)"  "$(bin_present awg)"  "$(list_dir "$DS/configs" conf)" "$(awg_held)" "$(awg_gen)"
+printf '"awg":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"held":{%s},"gen":{%s},"ep":{%s}},'  "${aw_active:-?}" "$(is_ready awg)"  "$(bin_present awg)"  "$(list_dir "$DS/configs" conf)" "$(awg_held)" "$(awg_gen)" "$(awg_ep)"
 printf '"xray":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},' "${xr_active:-?}" "$(is_ready xray)" "$(bin_present xray)" "$(list_dir "$DS/xray-configs" json)" "$(meta_xray)"
 printf '"hy2":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},'  "${hy_active:-?}" "$(is_ready hy2)"  "$(bin_present hy2)"  "$(list_dir "$DS/hy2-configs" yaml)" "$(meta_hy2)"
 printf '"subs":[%s],' "$(subs_list)"
 # Настоящие имена конфигов, добавленных руками (cfg-names.sh, ключ «вид/файл»): разбор — у владельца, один запуск на список.
 printf '"cfgnames":{%s},' "$([ -f "$D/cfg-names.sh" ] && sh "$D/cfg-names.sh" json 2>/dev/null)"
+# Дороги к серверам (road.sh: «вид/файл» → номер выхода-дороги) — тот же приём: разбор у владельца, один запуск на список.
+printf '"roads":{%s},' "$([ -f "$D/road.sh" ] && [ -s "$DS/.cfg-via" ] && sh "$D/road.sh" json 2>/dev/null)"
+# Which AmneziaWG configs ARE WARP (warp.sh list: `name⇥i1`) → {"name":1|0} — 1 = carries a masking I1. The owner judges by the
+# server key; the panel only draws (the «WARP» badge, the road exits, the «no masking» warning).
+printf '"warp":{%s},' "$([ -f "$D/warp.sh" ] && sh "$D/warp.sh" list 2>/dev/null | awk -F'\t' '{ printf "%s\"%s\":%s", (c++ ? "," : ""), $1, $2 }')"
 printf '"names":{%s}}' "$(names_map)"
 printf '\n'

@@ -38,6 +38,8 @@ LOCK_STALE=${LOCK_STALE:-3600}
 # Возраст лока — через age_since (clock-lib.sh): лок в /tmp рождается после загрузки, а часы без RTC
 # прыгают вперёд через ~13 мин ⇒ голая разность объявляет живой лок протухшим и пускает второй тик
 # считать те же дельты. Шим = прежнее поведение. [[watchdog-clock-step-false-death]]
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 command -v clock_sane >/dev/null 2>&1 || clock_sane() { _csn=${1:-$(date +%s 2>/dev/null)}; case "$_csn" in ''|*[!0-9]*) return 1 ;; esac; [ "$_csn" -gt 1700000000 ] 2>/dev/null && [ "$_csn" -lt 4102444800 ] 2>/dev/null; }
 # Имя WAN-интерфейса — у владельца (ip-lib.sh::wan_iface, следит C81); шим = прежняя строка.
@@ -159,7 +161,7 @@ if [ -z "$wan_if" ]; then
 fi
 
 had_last=0; [ -f "$LAST" ] && had_last=1
-{                                                          # для следующей дельты
+ta_last_text() {                                           # для следующей дельты
     printf '%s %s %s %s %s %s\n' "$vif" "$vrx" "$vtx" "$wrx" "$wtx" "${wan_if:-?}"
     # Строку выхода пишем ТОЛЬКО когда несущая у него есть: её ОТСУТСТВИЕ и есть признак «считать
     # нечем» для читателя — web/cgi-bin/traffic берёт имя интерфейса ОТСЮДА, чтобы не форкать
@@ -168,9 +170,11 @@ had_last=0; [ -f "$LAST" ] && had_last=1
         eval "_sif=\$sif$_k; _r=\$s${_k}rx; _t=\$s${_k}tx"
         [ -n "$_sif" ] && printf 's%s %s %s %s\n' "$_k" "$_sif" "$_r" "$_t"
     done
-    :          # группа не кончается на `[ ] && …`: rc-страж, а не украшение (класс Б5-9)
-} > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
-# ЧЕРЕЗ ВРЕМЕННЫЙ ФАЙЛ, как и посуточный рядом. `> "$LAST"` СНАЧАЛА обрезает файл, и всё это время
+    :          # функция не кончается на `[ ] && …`: rc-страж, а не украшение (класс Б5-9)
+}
+lbl_commit_out "$LAST" ta_last_text
+# ЧЕРЕЗ ВРЕМЕННЫЙ ФАЙЛ, как и посуточный рядом (и целиком либо никак — label-lib.sh::lbl_commit_out: записалось ли, говорит
+# не код писателя, а приёмник). `> "$LAST"` СНАЧАЛА обрезает файл, и всё это время
 # читатель (панель дёргает CGI раз в пять секунд) может застать его пустым или в половину строки:
 # тогда шестое поле не разберётся, файл сойдёт за «старого формата», и «незаписанной дельтой»
 # окажется весь кумулятивный счётчик WAN — на экране это скачок в десятки гигабайт. Раньше окно
@@ -245,7 +249,7 @@ now=$(date +%s); today=$(date +%F)
 # $0 через OFS/CONVFMT — оба заданы), поэтому день, начавшийся без выходов, дописывается сам.
 # Exit k sits at $(2k+3)/$(2k+4): the first three exits keep $7..$12 as before 05.10.2026, exits 5..7 appended at $13..$18,
 # so a 12-field day of the old format simply grows (the readers take a missing field as zero).
-awk -v today="$today" -v now="$now" -v a="$dvrx" -v b="$dvtx" -v c="$dwrx" -v d="$dwtx" -v ns="$nslot" \
+lbl_commit_out "$DAILY" awk -v today="$today" -v now="$now" -v a="$dvrx" -v b="$dvtx" -v c="$dwrx" -v d="$dwtx" -v ns="$nslot" \
     -v km="$_kmax" 'BEGIN{OFMT="%.0f";CONVFMT="%.0f"}
   $2==today { $3+=a; $4+=b; $5+=c; $6+=d
               if(ns) for(k=2;k<=km;k++){ f=2*k+3; $f+=ENVIRON["TA_D" k "R"]; $(f+1)+=ENVIRON["TA_D" k "T"] }
@@ -254,7 +258,7 @@ awk -v today="$today" -v now="$now" -v a="$dvrx" -v b="$dvtx" -v c="$dwrx" -v d=
   END { if(!seen){ printf "%.0f %s %.0f %.0f %.0f %.0f", now, today, a, b, c, d
                    if(ns) for(k=2;k<=km;k++) printf " %.0f %.0f", ENVIRON["TA_D" k "R"]+0, ENVIRON["TA_D" k "T"]+0
                    printf "\n" } }
-' "$DAILY" > "$DAILY.tmp" && mv "$DAILY.tmp" "$DAILY"
+' "$DAILY"
 
 # подрезать историю до KEEP последних дней
 lines=$(wc -l < "$DAILY" 2>/dev/null); case "$lines" in ''|*[!0-9]*) lines=0;; esac

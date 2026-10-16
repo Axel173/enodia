@@ -96,6 +96,7 @@ pi_safe() {
         configs/*|xray-configs/*|hy2-configs/*) return 1 ;;
         *.sh|*.conf.example|VERSION|update-manifest.txt|hev.yaml|web/*) return 0 ;;
         geo-*-catalog.txt|bin-manifest.txt) return 0 ;;
+        amnezia-gw.pem) return 0 ;;   # Amnezia's PUBLIC key for Premium (premium.sh) — by its one name, not «any .pem»
         *) return 1 ;;
     esac
 }

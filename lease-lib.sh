@@ -56,6 +56,8 @@ fi
 LEASE_OWNER_MAX=300          # кольцо: строка ~50 Б, потолок держит файл в пределах 15 КБ на 20-МБ флеше
 # «Часы настоящие?» — у владельца (clock-lib.sh::clock_sane, следит C82): отметку времени владельца
 # адреса ставим только настоящими часами. Шим той же строки — на случай payload без библиотеки.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 command -v clock_sane >/dev/null 2>&1 || clock_sane() { _csn=${1:-$(date +%s 2>/dev/null)}; case "$_csn" in ''|*[!0-9]*) return 1 ;; esac; [ "$_csn" -gt 1700000000 ] 2>/dev/null && [ "$_csn" -lt 4102444800 ] 2>/dev/null; }
 
@@ -171,19 +173,23 @@ owner_note() {
     _lot=$(date +%s 2>/dev/null); clock_sane "$_lot" || _lot=0   # порог — у clock-lib.sh (C82)
     _lof=$(dirname "$LEASE_OWNER_FILE")
     [ -d "$_lof" ] || return 1
-    _lotmp="$LEASE_OWNER_FILE.tmp.$$"
-    { [ -f "$LEASE_OWNER_FILE" ] && awk -F'\t' -v w="$1" '$1!=w' "$LEASE_OWNER_FILE" 2>/dev/null | tail -n "$LEASE_OWNER_MAX"
-      printf '%s\t%s\t%s\t%s\n' "$1" "$_lom" "$_loh" "$_lot"
-    } > "$_lotmp" 2>/dev/null || { rm -f "$_lotmp" 2>/dev/null; return 1; }
-    mv "$_lotmp" "$LEASE_OWNER_FILE" 2>/dev/null || { rm -f "$_lotmp" 2>/dev/null; return 1; }
+    # Whole or not at all — label-lib.sh::lbl_commit_out (awk exits 0 when its write fails).
+    lbl_commit_out "$LEASE_OWNER_FILE" _owner_text "$1" "$_lom" "$_loh" "$_lot" 2>/dev/null || return 1
     return 0
+}
+_owner_text() {   # the snapshot's new text: the other addresses' newest lines, then this address's (ip, mac, host, time)
+    # A snapshot that could not be READ is a failure (the writer leaves the file as it was): through the pipe into `tail` awk's
+    # code was lost, and this address's line alone would have replaced three hundred others.
+    if [ -f "$LEASE_OWNER_FILE" ]; then
+        _lox=$(awk -F'\t' -v w="$1" '$1!=w' "$LEASE_OWNER_FILE" 2>/dev/null) || return 1
+        [ -z "$_lox" ] || printf '%s\n' "$_lox" | tail -n "$LEASE_OWNER_MAX"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
 }
 
 owner_forget() {
     [ -n "$1" ] || return 1
     [ -f "$LEASE_OWNER_FILE" ] || return 0
-    _lotmp="$LEASE_OWNER_FILE.tmp.$$"
-    awk -F'\t' -v w="$1" '$1!=w' "$LEASE_OWNER_FILE" 2>/dev/null > "$_lotmp" || { rm -f "$_lotmp" 2>/dev/null; return 1; }
-    mv "$_lotmp" "$LEASE_OWNER_FILE" 2>/dev/null || { rm -f "$_lotmp" 2>/dev/null; return 1; }
+    lbl_commit_out "$LEASE_OWNER_FILE" awk -F'\t' -v w="$1" '$1!=w' "$LEASE_OWNER_FILE" 2>/dev/null || return 1
     return 0
 }

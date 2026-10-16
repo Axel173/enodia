@@ -95,6 +95,8 @@
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
 ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 # «Какая сеть на каком wlN» — только отсюда (см. шапку про .bypass-ifaces).
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/wifi-lib.sh" ]; then . "$ENODIA_DIR/wifi-lib.sh"; fi
 # Шим на случай частичного apply-scripts: правила по сетям продолжают работать, но как до
 # 04.08.2026 — строка хранилища трактуется как ИМЯ ИНТЕРФЕЙСА (осознанная деградация, не мёртвый код).
@@ -371,8 +373,21 @@ store_add() {   # $1 файл, $2 значение
 }
 store_del() {   # $1 файл, $2 значение
     [ -f "$1" ] || return 0
-    grep -vxF -- "$2" "$1" > "$1.tmp" 2>/dev/null
-    mv "$1.tmp" "$1"
+    lbl_commit_out "$1" lbl_grep -vxF -- "$2" "$1" 2>/dev/null   # whole or not at all (label-lib.sh): a grep that failed leaves the store as it was
+}
+# A HOST ADDRESS HAS TWO SPELLINGS — `X` and `X/32` — ONE rule to the kernel (iptables and ipset alike), two different lines to a
+# store. The stores keep what the person typed, and the panel's screens send different spellings: «Что запрашивает» always
+# `X/32`, «Маршрутизация» as typed, the device WARP card bare. Removed by the literal line, a rule made on one screen was not
+# removed from another: the kernel rule went (or, with the arbiter, stayed), the store line survived and came back at the next
+# replay — «снял правило, а оно на месте» (review s.130). So the address stores of BOTH directions are edited through these two:
+# a removal takes both spellings, an addition makes no second line for an address that is there. Subnets — as written.
+dst_store_del() {   # $1 store, $2 address
+    store_del "$1" "$2"
+    case "$2" in */32) store_del "$1" "${2%/32}" ;; */*) ;; *) store_del "$1" "$2/32" ;; esac
+}
+dst_store_add() {   # $1 store, $2 address
+    case "$2" in */32) _dsa="${2%/32}" ;; */*) store_add "$1" "$2"; return 0 ;; *) _dsa="$2/32" ;; esac
+    grep -qxF -- "$_dsa" "$1" 2>/dev/null || store_add "$1" "$2"
 }
 
 # --- применение/снятие ОДНОГО правила (идемпотентно) ---
@@ -518,6 +533,10 @@ allow_sync() {
     return 0
 }
 
+# Road rules («дорога к серверу», road.sh) are DERIVED from the endpoint stores: whoever changes a store rebuilds them, so a
+# carrier riding another exit gets its `to <server> lookup 100N` the moment its endpoint is known, and loses it with it.
+road_wire() { [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" wire >/dev/null 2>&1; return 0; }
+
 # --- endpoint активной несущей мимо VPN (анти-петля, см. шапку про .endpoint-bypass) ---
 # Replace-семантика: храним ОДИН IP (endpoint активной несущей). Зовётся из
 # transport-*.sh up (а switch-vpn делегирует в transport-awg up -> покрыты и смена
@@ -540,15 +559,16 @@ endpoint_set() {   # $1 = IPv4 endpoint'а (пусто = снять)
         done < "$STORE_EP"
     fi
     : > "$STORE_EP"
-    [ -z "$new" ] && { echo "[apply-bypass] endpoint-исключение снято"; return 0; }
+    [ -z "$new" ] && { road_wire; echo "[apply-bypass] endpoint-исключение снято"; return 0; }
     # строго IPv4 — в VPN_EXCLUDE кладём только числовой адрес (не имя: iptables -d
     # с именем резолвит ОДИН раз и может уйти в дохлый туннель; имя резолвит несущая).
     echo "$new" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || {
-        echo "[apply-bypass] endpoint '$new' не IPv4 — пропуск"; return 0; }
+        road_wire; echo "[apply-bypass] endpoint '$new' не IPv4 — пропуск"; return 0; }
     echo "$new" > "$STORE_EP"
     rule_add_dst "$new"
     allow_sync
     ct_flush_dst "$new"                              # сбросить уже зациклившиеся сессии к VPS
+    road_wire
     echo "[apply-bypass] endpoint $new -> мимо VPN (анти-петля)"
 }
 
@@ -565,11 +585,16 @@ STORE_EP_SLOT_PREFIX="$ENODIA_STATE/.endpoint-bypass-s"
 
 # Нужен ли этот IP-endpoint ещё где-то (кроме store $2) — тогда его ACCEPT-правило НЕ снимаем.
 _ep_needed_elsewhere() {   # $1=ip  $2=свой store (исключить из проверки)
-    _ip="$1"; _self="$2"
+    # ONE kernel rule, TWO spellings of one address: a person's rule is stored as typed, and `1.2.3.4/32` is `-d 1.2.3.4` to
+    # iptables. Compared bare, a carrier leaving the server took the person's `/32` rule out of the kernel (the line stayed in
+    # the panel with no effect), and a person removing their rule took a carrier's anti-loop (see dst_user_gone). The person's
+    # own verbs remove BOTH spellings from the store first (dst_store_del), so the `/32` line below speaks to the carriers.
+    _ip="${1%/32}"; _self="$2"
     # `$_self` исключаем и для ОСНОВНОГО store: арбитром пользуется и endpoint_set, а без этой
     # проверки он всегда находил бы адрес «нужным» в собственном файле и не снимал бы правило НИКОГДА.
     [ "$STORE_EP" != "$_self" ] && grep -qxF "$_ip" "$STORE_EP" 2>/dev/null && return 0   # основной endpoint
     grep -qxF "$_ip" "$STORE_DST" 2>/dev/null && return 0     # осознанный юзер-вырез «мимо VPN»
+    grep -qxF "$_ip/32" "$STORE_DST" 2>/dev/null && return 0  # …the same address, typed with its mask
     # Every exit's store that EXISTS (glob, not an id list: a list of ids dropped exits 5..7, and the
     # rule of a VPS shared with exit 6 was removed on the main server's failover — review s.106).
     for _f in "${STORE_EP_SLOT_PREFIX}"*; do
@@ -578,6 +603,12 @@ _ep_needed_elsewhere() {   # $1=ip  $2=свой store (исключить из �
     done
     return 1
 }
+# A PERSON'S «мимо VPN» rule goes away ($1 — the address as stored, its store line already removed): the kernel rule goes with it
+# unless a carrier's endpoint is the same address — that ACCEPT is then the carrier's anti-loop too, the rule is ONE. Removed
+# blindly, the carrier's own packets to its server were marked into the tunnel again (the loop of [[endpoint-in-iplist-loop]])
+# until the next raise. The panel makes the coincidence ordinary: «пускать этот WARP из дома напрямую» writes such a rule for a
+# Cloudflare address, and the router's own WARP exit may sit on that very address.
+dst_user_gone() { _ep_needed_elsewhere "$1" "" || rule_del_dst "$1"; }
 
 endpoint_slot_set() {   # $1 = id слота (2..7); $2 = IPv4 endpoint'а (пусто = снять)
     ensure_chain
@@ -592,13 +623,14 @@ endpoint_slot_set() {   # $1 = id слота (2..7); $2 = IPv4 endpoint'а (пу
         fi
     fi
     : > "$store"
-    if [ -z "$new" ]; then rm -f "$store"; echo "[apply-bypass] endpoint слота №$_sid снят"; return 0; fi
+    if [ -z "$new" ]; then rm -f "$store"; road_wire; echo "[apply-bypass] endpoint слота №$_sid снят"; return 0; fi
     echo "$new" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || {
-        rm -f "$store"; echo "[apply-bypass] endpoint слота №$_sid '$new' не IPv4 — пропуск"; return 0; }
+        rm -f "$store"; road_wire; echo "[apply-bypass] endpoint слота №$_sid '$new' не IPv4 — пропуск"; return 0; }
     echo "$new" > "$store"
     rule_add_dst "$new"
     allow_sync
     ct_flush_dst "$new"
+    road_wire
     echo "[apply-bypass] endpoint слота №$_sid $new -> мимо VPN (анти-петля)"
 }
 
@@ -756,15 +788,15 @@ rebuild_force() {
 # обе формы строки (`IP` и `IP<TAB>sN`) снимаются одинаково.
 force_store_set() {   # $1 = IP, $2 = пусто (основной) | sN
     touch "$STORE_FORCE_IPS"
-    awk -F"$TAB" -v ip="$1" '$1!=ip' "$STORE_FORCE_IPS" > "$STORE_FORCE_IPS.tmp" 2>/dev/null
-    mv "$STORE_FORCE_IPS.tmp" "$STORE_FORCE_IPS"
-    if [ -n "$2" ]; then printf '%s\t%s\n' "$1" "$2" >> "$STORE_FORCE_IPS"
-    else printf '%s\n' "$1" >> "$STORE_FORCE_IPS"; fi
+    lbl_commit_out "$STORE_FORCE_IPS" force_store_text "$1" "$2" 2>/dev/null   # the old line out and the new one in — one write
+}
+force_store_text() {   # the store without the address's line, then its new line ($2 empty — the main tunnel)
+    awk -F"$TAB" -v ip="$1" '$1!=ip' "$STORE_FORCE_IPS" || return 1
+    if [ -n "$2" ]; then printf '%s\t%s\n' "$1" "$2"; else printf '%s\n' "$1"; fi
 }
 force_store_del() {   # $1 = IP (обе формы строки)
     [ -f "$STORE_FORCE_IPS" ] || return 0
-    awk -F"$TAB" -v ip="$1" '$1!=ip' "$STORE_FORCE_IPS" > "$STORE_FORCE_IPS.tmp" 2>/dev/null
-    mv "$STORE_FORCE_IPS.tmp" "$STORE_FORCE_IPS"
+    lbl_commit_out "$STORE_FORCE_IPS" awk -F"$TAB" -v ip="$1" '$1!=ip' "$STORE_FORCE_IPS" 2>/dev/null
 }
 
 # Сбросить conntrack, чтобы смена режима применилась к УЖЕ установленным
@@ -1115,6 +1147,7 @@ apply_all() {
         _e=$(head -1 "$_f" | tr -d ' \r\n')
         [ -n "$_e" ] && { rule_add_dst "$_e"; eps="$eps${eps:+,}$_e"; }
     done
+    road_wire   # дороги к серверам — следом за эндпоинтами (boot/repair: ip rule пережил fw3 reload, но не ребут)
     echo "[apply-bypass] восстановлено: ip=$n_ip, dst=$n_dst, vpn-dst=$n_vdst, iface=$n_if, guest=$g, endpoint=${ep:-нет}${eps:+, слот-endpoint=$eps}"
     # «целиком через VPN» (force) — отдельная цепочка VPN_FORCE
     rebuild_force
@@ -1151,16 +1184,16 @@ case "$1" in
     # чтобы CLI и панель не расходились.
     del-ip)    [ -z "$2" ] && { echo "нужен IP";    exit 1; }; desync_drop "$2"; store_del "$STORE_IPS" "$2"; rule_del_ip "$2"; store_del "$STORE_KEEP" "$2"; rebuild_keep >/dev/null; conntrack_flush; echo "IP $2 убран из хранилища" ;;
     add-dst)   [ -z "$2" ] && { echo "нужен CIDR";  exit 1; }; dst_ok "$2" || { echo "нужен IPv4 или CIDR"; exit 1; }
-        ensure_chain; store_del "$STORE_VPN_DST" "$2"; vpn_dst_del "$2"; store_add "$STORE_DST" "$2"; rule_add_dst "$2"; conntrack_flush; echo "dst $2 -> хранилище + мимо VPN" ;;
-    del-dst)   [ -z "$2" ] && { echo "нужен CIDR";  exit 1; }; store_del "$STORE_DST" "$2"; rule_del_dst "$2"; conntrack_flush; echo "dst $2 убран из хранилища" ;;
+        ensure_chain; dst_store_del "$STORE_VPN_DST" "$2"; vpn_dst_del "$2"; dst_store_add "$STORE_DST" "$2"; rule_add_dst "$2"; conntrack_flush; echo "dst $2 -> хранилище + мимо VPN" ;;
+    del-dst)   [ -z "$2" ] && { echo "нужен CIDR";  exit 1; }; dst_store_del "$STORE_DST" "$2"; dst_user_gone "$2"; conntrack_flush; echo "dst $2 убран из хранилища" ;;
     # --- «в VPN» по адресу назначения (обратное к add-dst). Направление у адреса ОДНО:
     #     сперва снимаем противоположное правило, иначе адрес попал бы разом и в ACCEPT
     #     (VPN_EXCLUDE), и в MARK — а цепочка вырезов идёт первой и молча победила бы
     #     («добавил в VPN, ничего не изменилось»). Ровно как domain.sh: add/bypass
     #     начинают со снятия прежней строки.
     add-vpn-dst) [ -z "$2" ] && { echo "нужен CIDR"; exit 1; }; dst_ok "$2" || { echo "нужен IPv4 или CIDR"; exit 1; }
-        store_del "$STORE_DST" "$2"; rule_del_dst "$2"; store_add "$STORE_VPN_DST" "$2"; vpn_dst_add "$2"; conntrack_flush; echo "dst $2 -> хранилище + в VPN" ;;
-    del-vpn-dst) [ -z "$2" ] && { echo "нужен CIDR"; exit 1; }; store_del "$STORE_VPN_DST" "$2"; vpn_dst_del "$2"; conntrack_flush; echo "dst $2 убран из хранилища (правила нет)" ;;
+        dst_store_del "$STORE_DST" "$2"; dst_user_gone "$2"; dst_store_add "$STORE_VPN_DST" "$2"; vpn_dst_add "$2"; conntrack_flush; echo "dst $2 -> хранилище + в VPN" ;;
+    del-vpn-dst) [ -z "$2" ] && { echo "нужен CIDR"; exit 1; }; dst_store_del "$STORE_VPN_DST" "$2"; vpn_dst_del "$2"; conntrack_flush; echo "dst $2 убран из хранилища (правила нет)" ;;
     endpoint-set) endpoint_set "$2" ;;   # IP endpoint'а несущей мимо VPN (пусто = снять); зовёт transport-*.sh up
     endpoint-slot-set) endpoint_slot_set "$2" "$3" ;;   # <id> <IP|""> endpoint доп-выхода мимо VPN (авто из transport-*.sh slot-up)
     # Панель шлёт ИМЯ ИНТЕРФЕЙСА (оно у неё под рукой и валидируется в cgi-bin/action), а в

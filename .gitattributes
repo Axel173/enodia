@@ -33,6 +33,9 @@ SHA256SUMS            text eol=lf
 
 # Бинарники под роутер (ELF/UPX) — НИКОГДА не трогать text-конверсией (иначе порча).
 *.user                binary
+# Amnezia's public key for Premium (premium.sh): its EXACT bytes are a key — the gateway lists' AES key is SHA-512 of them (799
+# bytes, no final LF). A conversion of line ends would be a different key; C138 pins the sum.
+amnezia-gw.pem        binary
 
 # .ps1 намеренно НЕ трогаем: он работает на ПК как есть (UTF-8 BOM важен для
 # PowerShell 5 на ру-Windows), пусть остаётся под глобальным core.autocrlf.

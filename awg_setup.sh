@@ -14,7 +14,10 @@ interface_config="$ENODIA_STATE/awg0.conf"
 # awg0 минуты спустя после выключения (ревью ветки, круг 2). Спрашиваем здесь, в единственном месте, где awg0 рождается, — ДО (ничего
 # не делаем, даже firewall reload) и ПОСЛЕ подъёма (выключили по ходу — гасим свой демон). Владелец ответа — daemon-lib.sh.
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
+command -v go_quiet >/dev/null 2>&1 || go_quiet() { "$@"; }   # the shim of a missing library: the launch as it was, with the banner
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 # Отметка «несущую только что подняли» (clock-lib.sh, разбор у вызова ниже). Нет библиотеки — отметки нет, как раньше.
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 command -v carrier_up_mark >/dev/null 2>&1 || carrier_up_mark() { return 0; }
@@ -33,6 +36,7 @@ fi
 # возвращал пусто → `ip a add` ниже падал, и awg0 оставался БЕЗ IPv4 (handshake идёт,
 # данные не ходят, rx≈0). Идиома та же, что для DNS в install.sh.
 address=$(grep -E '^[[:space:]]*Address[[:space:]]*=' "$config_file" | head -1 | sed 's/^[^=]*=[[:space:]]*//' | cut -d',' -f1 | tr -d ' \t\r')
+# dns-raw: the first look, before the libraries are loaded — replaced below by dns-lib.sh::conf_dns (the first value that IS an address)
 dns=$(grep -E '^[[:space:]]*DNS[[:space:]]*=' "$config_file" | head -1 | sed 's/^[^=]*=[[:space:]]*//' | cut -d',' -f1 | tr -d ' \t\r')
 # MTU — wg-quick-директива (в awg0.conf НЕ идёт, см. awk ниже), но применяем её к awg0
 # отдельно через `ip link set mtu`. Конфиги Cloudflare WARP несут MTU=1280 — без него
@@ -63,8 +67,7 @@ if [ -f "$interface_config" ]; then
     # смене сервера — порт жил бы в нём до неё (ревью 27.09.2026). Снимаем на месте; grep впереди — без записи на флеш зря.
     # Регистр имени ключа — любой (wg читает его без учёта регистра); правка — через файл рядом и `mv`, как у генератора.
     if grep -qiE '^[[:space:]]*listenport[[:space:]]*=' "$interface_config" 2>/dev/null; then
-        awk '{ t = tolower($0) } !(t ~ /^[[:space:]]*listenport[[:space:]]*=/)' "$interface_config" > "$interface_config.lp" 2>/dev/null \
-            && mv "$interface_config.lp" "$interface_config"
+        lbl_commit_out "$interface_config" awk '{ t = tolower($0) } !(t ~ /^[[:space:]]*listenport[[:space:]]*=/)' "$interface_config" 2>/dev/null
     fi
 else
     # ВАЖНО: вырезаем ВСЕ wg-quick-only директивы. `awg setconf` (форк wg setconf) их НЕ
@@ -107,6 +110,15 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # файл — генератор awg0.conf, и «тихо ничего не сгенерировали» читалось бы как «awg не поднялся».
 if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; else
     echo "нет $ENODIA_DIR/dns-lib.sh — обновите установку (панель → «Обновление» или переустановка с компьютера)" >&2; exit 1
+fi
+# DNS — the first value of the line that IS an address (dns-lib.sh::conf_dns, the reader the carrier plugin asks too): wg-quick
+# takes search domains in `DNS =`, and «the first comma part» above could be a word — the guest's DNAT below would name it.
+# A library older than the function keeps the value parsed above.
+if command -v conf_dns >/dev/null 2>&1; then
+    _dns0=$dns; dns=$(conf_dns "$config_file")
+    # The line «DNS: …» above printed the first look: say it when the resolver is another value (hardware walk 13.10.2026 — the
+    # log said «DNS: corp.local» over a config whose resolver was taken as 1.1.1.1).
+    [ "$dns" = "$_dns0" ] || echo "DNS: резолвер — ${dns:-нет адреса в строке} (первое значение строки, «$_dns0», — не адрес)"
 fi
 ep_src=$(grep -E '^[[:space:]]*Endpoint[[:space:]]*=' "$config_file" | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d ' \t\r')
 ep_host=$(echo "$ep_src" | sed 's/:[0-9]*$//')
@@ -198,7 +210,7 @@ rm -f /var/run/amneziawg/awg0.sock /var/run/wireguard/awg0.sock 2>/dev/null
 # верб уходит в ветку `*)`, а та печатает `usage: …` в STDOUT — и без фильтра это слово встало бы
 # первым аргументом env, то есть awg0 не поднялся бы ВООБЩЕ. Свой фильтр держим тут же, рядом с
 # env: вынесенный в библиотеку он сам может оказаться устаревшей копией.
-env $(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$') "$ENODIA_BIN/amneziawg-go" awg0
+go_quiet env $(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$') "$ENODIA_BIN/amneziawg-go" awg0
 "$ENODIA_BIN/awg" setconf awg0 "$interface_config"
 if [ -n "$address" ]; then
     ip a add "$address" dev awg0

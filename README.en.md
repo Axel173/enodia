@@ -24,7 +24,16 @@ panel on the router itself.
 - Split routing by domains, subnets, geo categories and rule groups, separately for devices and
   Wi-Fi networks.
 - Several VPN protocols and up to six additional exits through other servers.
+- Subscriptions: Xray, Hysteria2, AmneziaWG and WireGuard servers from one link (3x-ui included), updated on a
+  schedule. Any saved server can be handed back by the panel — as a link, a QR code or a file.
+- An Amnezia Premium key goes where a subscription link goes: the router takes the configs of the countries you pick
+  from Amnezia by itself (AmneziaWG or VLESS) and holds one place of the subscription for all of them. A new key takes
+  its place only once it carries; a server that went silent is moved to the reserve, and the watchdog takes it a new key in
+  the background.
 - Bypassing blocks without your own server: ByeDPI and Zapret.
+- A server whose address your ISP blocked: the panel says so («address blocked»), not «not responding», and sends it
+  over a road — another exit, for example your own Cloudflare WARP, which the router gets by itself with one button; if
+  the ISP starts cutting WARP's port, the watchdog picks another one by itself.
 - Home access: the router works as an AmneziaWG server, a phone connects with a QR code.
 - Encrypted DNS (DoH/DoT), ad blocking, panel login with two-factor authentication.
 - Watchdog: restarts the tunnel, switches to a backup server, emails you about failures.
@@ -43,7 +52,8 @@ panel on the router itself.
 
 The project has been run and worked on Xiaomi BE3600, BE6500, BE7000, BE10000, BE10000 PRO and AX3600
 routers with stock firmware. The setup wizard opens root SSH access by itself with the built-in
-[xmir-patcher](https://github.com/Axel173/xmir-patcher).
+[xmir-patcher](https://github.com/Axel173/xmir-patcher). If the firmware keeps a backup copy of its settings (on the BE6500
+it takes almost 4 MB of flash), the wizard and the panel offer to turn that copy off — and name the price first.
 
 ## Protocols
 

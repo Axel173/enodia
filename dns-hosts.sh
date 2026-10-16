@@ -25,6 +25,8 @@ SRC="$ENODIA_STATE/.dns-hosts"
 CONFDIR=/tmp/dnsmasq.d
 CONF="$CONFDIR/08-dns-hosts.conf"
 TAB=$(printf '\t')
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 
 # Рестарт — ЧЕРЕЗ dns-merge.sh: он объявлен единственной точкой рестарта dnsmasq для подсистем,
 # и вторая копия `/etc/init.d/dnsmasq restart` здесь была ровно тем дублем, который эта договорённость
@@ -88,6 +90,9 @@ valid_ip() {
 # grep — «любой символ», и правка `a.b` молча сносила соседнее `axb` (ревью шага 5a, круг 1; стенд
 # dev/dns-hosts-cgi-test.sh). Нет файла — пусто.
 others_than() { [ -f "$SRC" ] && awk -F"$TAB" -v d="$1" '$1!=d' "$SRC"; }
+# The store's new text: the other names, then this one. A store that could not be READ is a failure — else the new line alone
+# would replace it (the writer then leaves the file as it was).
+others_with() { if [ -f "$SRC" ]; then others_than "$1" || return 1; fi; printf '%s\t%s\n' "$1" "$2"; }
 # ДРУГАЯ СЕМЬЯ АДРЕСОВ. `address=/дом/<IPv4>` задаёт ответ на A, а что будет с AAAA, решает ВЕРСИЯ dnsmasq: с 2.86 запрос
 # другой семьи уходит к upstream как обычно (замер BE7000, 2.86, 21.09.2026: заглушка 0.0.0.0 — AAAA от провайдера, `::` —
 # A от провайдера); раньше, по документации, другая семья получала пустой ответ (AX3600 с 2.80 не замерен). Экран говорит
@@ -108,8 +113,9 @@ build() {   # $1 = куда писать; по умолчанию ЖИВОЙ con
 	mkdir -p "$CONFDIR"
 	if [ -s "$SRC" ]; then
 		# каждая непустая строка "домен<TAB>ip" → address=/домен/ip
-		awk -F"$TAB" 'NF>=2 && $1!="" && $2!=""{ printf "address=/%s/%s\n", $1, $2 }' "$SRC" > "$_bt.new" 2>/dev/null
-		mv "$_bt.new" "$_bt" 2>/dev/null
+		# Целиком либо никак (label-lib.sh: awk при неудачной записи выходит с кодом 0, а обрубок `address=`-строки dnsmasq
+		# не примет). Черновик — ВНЕ conf-dir: тот объявлен без маски, демон читает в нём всё подряд; /tmp — та же ФС.
+		lbl_commit_out_as "/tmp/.enodia-dns-hosts.draft.$$" "$_bt" awk -F"$TAB" 'NF>=2 && $1!="" && $2!=""{ printf "address=/%s/%s\n", $1, $2 }' "$SRC" 2>/dev/null
 	else
 		rm -f "$_bt" 2>/dev/null
 	fi
@@ -127,8 +133,7 @@ case "$1" in
 		# подхватить её в это окно и оставить сеть без DNS.
 		_dhb=/tmp/.enodia-dns-hosts.bak.$$
 		[ -f "$SRC" ] && cp "$SRC" "$_dhb" 2>/dev/null
-		{ others_than "$d"; printf '%s\t%s\n' "$d" "$ip"; } > "$SRC.new" 2>/dev/null
-		mv "$SRC.new" "$SRC" 2>/dev/null
+		lbl_commit_out "$SRC" others_with "$d" "$ip" 2>/dev/null || { rm -f "$_dhb" 2>/dev/null; echo "не удалось записать — нет места?"; exit 1; }
 		_dhc=/tmp/.enodia-dns-hosts.cand.$$
 		build "$_dhc"
 		if [ -f "$_dhc" ] && ! conf_test "$_dhc"; then
@@ -146,7 +151,7 @@ case "$1" in
 		# имя, которого уже не было (сняли с другого устройства). Сверка ТОЧНАЯ (awk по полю), а не регуляркой:
 		# точка в домене у grep — «любой символ».
 		awk -F"$TAB" -v d="$d" '$1==d{f=1} END{exit !f}' "$SRC" 2>/dev/null || { echo "такого имени нет"; exit 1; }
-		if [ -f "$SRC" ]; then others_than "$d" > "$SRC.new" 2>/dev/null; mv "$SRC.new" "$SRC" 2>/dev/null; fi
+		if [ -f "$SRC" ]; then lbl_commit_out "$SRC" others_than "$d" 2>/dev/null || { echo "не удалось записать — нет места?"; exit 1; }; fi
 		build; reload; echo "ok" ;;
 	apply) build; reload; echo "ok" ;;
 	build) build; echo "ok" ;;

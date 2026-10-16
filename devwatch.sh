@@ -48,6 +48,8 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # и тот же порядок, иначе «что победит» отвечало бы про правило, которого в ядре нет. Без файла — ответ
 # «правил по портам нет» (файл обязательный, ставится вместе с этим).
 if [ -f "$ENODIA_DIR/port-lib.sh" ]; then . "$ENODIA_DIR/port-lib.sh"; fi
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if ! command -v age_since >/dev/null 2>&1; then
     # clock-raw: библиотеки нет — считаем голой разностью, как было до неё
     age_since() { echo $(( $(date +%s) - $1 )); }
@@ -974,15 +976,14 @@ _dead_merge() {
 	# первый тик) у первой же строки из stdin FNR==NR тоже истинно, и все свежие записи уехали бы
 	# в разбор журнала — где их отсеет `NF>=6`. Итог: журнал вечно пуст, и ни одной ошибки в логе.
 	# Формы разные по построению: журнал несёт отметку времени шестым полем, свежая запись — нет.
-	awk -v now="$(now)" -v cap="$DEAD_MAX" '
+	lbl_commit_out "$DEADLOG" awk -v now="$(now)" -v cap="$DEAD_MAX" '
 		NF>=7 { k=$1" "$2" "$3" "$4; if(!(k in O)){O[k]=1; n++} TX[k]=$5+0; F[k]=$6+0; TS[k]=$7+0; next }
 		NF==5 { k=$1" "$2" "$3" "$4
 		  if(!(k in O)){ if(n>=cap) next; O[k]=1; n++; F[k]=now }
 		  if($5+0>TX[k]) TX[k]=$5+0
 		  TS[k]=now }
 		END{ for(k in O) print k" "TX[k]" "F[k]" "TS[k] }
-	' "$DEADLOG" - > "$DEADLOG.new" 2>/dev/null && mv "$DEADLOG.new" "$DEADLOG" 2>/dev/null
-	rm -f "$DEADLOG.new" 2>/dev/null
+	' "$DEADLOG" - 2>/dev/null
 }
 
 # JSON-массив активных соединений {ip,port,rule,route,via,noreply} клиента <ip> из conntrack (уник.

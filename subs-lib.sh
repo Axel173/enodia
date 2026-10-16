@@ -19,6 +19,8 @@
 SUBS_STATE="$ENODIA_STATE"
 # Имя WAN — у владельца (ip-lib.sh::wan_iface, следит C81): им биндится вторая попытка закачки
 # подписки МИМО туннеля (sub_fetch). Шим = та же строка на случай частичной установки.
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
 command -v wan_iface >/dev/null 2>&1 || wan_iface() { ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'; }
 
@@ -157,15 +159,14 @@ sub_info_put() {
 	else
 		_perr=$_pnow
 	fi
-	{ [ -f "$_pf" ] && grep -v "^$_pt$SUBS_TAB" "$_pf" 2>/dev/null
-	  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_pt" "$_pok" "$_perr" "$_phv" "$_pup" "$_pdn" "$_ptt" "$_pex"
-	# ИМЯ ВРЕМЕННОГО — С ПИДОМ И С ХВОСТОМ `.new`, и оба нужны. Пид: писателей ДВА и без общего
+	# ЦЕЛИКОМ ЛИБО НИКАК — label-lib.sh::lbl_commit_out (grep при неудачной записи выходит с кодом 0). ИМЯ ВРЕМЕННОГО У НЕГО —
+	# С ПИДОМ И С ХВОСТОМ `.new`, и оба нужны. Пид: писателей ДВА и без общего
 	# лока (cron и CGI импорта), а с общим именем один успел бы сделать `mv` НЕДОПИСАННОГО файла
 	# другого — это уже не потеря отметки, а битая строка. Хвост: `*.new` — то, что `clean.sh`
 	# знает как мусор, а обрыв процесса ровно между записью и `mv` иначе оставил бы на флеше
 	# файл, которого не опознаёт никто.
-	} > "$_pf.$$.new" 2>/dev/null && mv "$_pf.$$.new" "$_pf" 2>/dev/null
-	rm -f "$_pf.$$.new" 2>/dev/null
+	lbl_commit_out "$_pf" lbl_without "$_pf" "^$_pt$SUBS_TAB" \
+		"$_pt$SUBS_TAB$_pok$SUBS_TAB$_perr$SUBS_TAB$_phv$SUBS_TAB$_pup$SUBS_TAB$_pdn$SUBS_TAB$_ptt$SUBS_TAB$_pex" 2>/dev/null
 	return 0
 }
 
@@ -175,8 +176,7 @@ sub_info_drop() {
 	_dt="$1"; _df="$SUBS_STATE/.sub-info"
 	case "$_dt" in ''|*[!a-z0-9-]*) return 1 ;; esac
 	[ -f "$_df" ] || return 0
-	grep -v "^$_dt$SUBS_TAB" "$_df" > "$_df.$$.new" 2>/dev/null
-	mv "$_df.$$.new" "$_df" 2>/dev/null || rm -f "$_df.$$.new" 2>/dev/null
+	lbl_commit_out "$_df" lbl_grep -v "^$_dt$SUBS_TAB" "$_df" 2>/dev/null
 	return 0
 }
 
@@ -268,7 +268,7 @@ sub_label_of() { [ -f "$SUBS_STATE/.subs" ] && grep "^$1$SUBS_TAB" "$SUBS_STATE/
 # sub_owner_tag <имя-конфига> — ЧЬЯ это подписка. Теги бывают префиксами друг друга
 # («liberty» ⊂ «liberty-vpn»), а «-» встречается и ВНУТРИ тега ⇒ голый префикс `sub-<tag>-`
 # ловит чужие файлы. Владелец = ДЛИННЕЙШИЙ подходящий тег среди всех тегов реестра
-# (зеркало ownerTag() в panel.js и del_sub_configs в cgi-bin/action).
+# (зеркало ownerTag() в panel.js; им же судит subs-update.sh — prune_stale и cmd_drop).
 sub_owner_tag() {
 	_b="$1"; _own=""; _ol=-1
 	for _g in $(sub_tags); do
