@@ -87,7 +87,7 @@ BGPID=/tmp/enodia-proto-install.pid
 RESERVE_B="$DATA_RESERVE_B"   # 2.5 МБ неснижаемого запаса на /data (единственная цифра — в store-lib.sh)
 
 # Реестр связок. Новый компонент = ОДНО слово в PKGS + по строке в трёх case ниже.
-PKGS="awg xray hy2 byedpi zapret doh tls filter"
+PKGS="awg xray hy2 byedpi zapret doh quic tls filter"
 
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG"; }
 # СОСТОЯНИЕ ПИШЕМ АТОМАРНО (запись рядом + `mv`): `>` сперва ОБРЕЗАЕТ файл, и читатель, попавший между обрезкой и записью,
@@ -101,13 +101,13 @@ pkg_known()  { case " $PKGS " in *" $1 "*) return 0 ;; esac; return 1; }
 pkg_label()  { case "$1" in
         awg) echo "AmneziaWG" ;; xray) echo "Xray" ;; hy2) echo "Hysteria2" ;;
         byedpi) echo "ByeDPI" ;; zapret) echo "Zapret" ;;
-        doh) echo "Шифрованный DNS" ;; tls) echo "HTTPS панели" ;; filter) echo "Фильтр по категориям" ;;
+        doh) echo "Шифрованный DNS" ;; quic) echo "DoQ и DoH3" ;; tls) echo "HTTPS панели" ;; filter) echo "Фильтр по категориям" ;;
     esac; }
 # Свои бинари связки (их и удаляем).
 pkg_own()    { case "$1" in
         awg) echo "amneziawg-go awg" ;; xray) echo "xray" ;; hy2) echo "hysteria" ;;
         byedpi) echo "byedpi" ;; zapret) echo "nfqws" ;;
-        doh) echo "https-dns-proxy dot-proxy" ;; tls) echo "panel-tls" ;; filter) echo "dns-filter" ;;
+        doh) echo "https-dns-proxy dot-proxy" ;; quic) echo "quic-dns-proxy" ;; tls) echo "panel-tls" ;; filter) echo "dns-filter" ;;
     esac; }
 # ОБЩИЕ бинари: нужны связке, но принадлежат не ей (ref-count при удалении).
 pkg_shared() { case "$1" in xray|hy2|byedpi) echo "hev" ;; esac; }
@@ -166,7 +166,7 @@ pkg_run_old() { for b in $(pkg_files "$1"); do [ "$(bst_field "$b" 5)" = old ] &
 #     of an exit since disabled or moved to another transport. No owner verb reaches it (`slot-down` of a disabled exit refuses,
 #     `down` of an inactive transport would tear the ACTIVE one's routing), so it is named, not restarted — a reboot clears it;
 #   · NOT OURS — in no pidfile at all (a throwaway xray-test.sh instance): it ends by itself.
-RST_ORDER="doh zapret filter slot2 slot3 slot4 slot5 slot6 slot7 server warm-awg main tls"   # short cuts first; the main tunnel late, the panel's own HTTPS last
+RST_ORDER="doh quic zapret filter slot2 slot3 slot4 slot5 slot6 slot7 server warm-awg main tls"   # short cuts first; the main tunnel late, the panel's own HTTPS last
 # What the scan reads — top-level, so the sandbox stand points them at its own world (dev/pkg-restart-test.sh), as with LOCK/BGPID.
 RST_PROC=/proc
 RST_PIDDIR=/tmp
@@ -215,7 +215,9 @@ rst_unit() {   # $1 = pid, $2 = бинарь, $3 = активный трансп
             byedpi-s[2-7])   rst_slot_of "${_run##*-s}" byedpi ;;
             hev-s[2-7])      rst_slot_of "${_run##*-s}" xray hy2 byedpi ;;
             zapret-nfqws)    echo zapret ;;
-            doh)             echo doh ;;
+            # One pidfile for the encrypted-DNS proxy, whichever program runs it: the QUIC program belongs to its OWN component — a stale
+            # quic-dns-proxy filed under `doh` was on neither row, and nothing offered its restart (review s.150, round 1).
+            doh)             if [ "$2" = quic-dns-proxy ]; then echo quic; else echo doh; fi ;;
             panel-tls)       echo tls ;;
             dns-filter)      echo filter ;;
         esac
@@ -278,7 +280,7 @@ rst_scan() {   # $@ = связки → RST_UNITS (в порядке RST_ORDER), 
 rst_label() { case "$1" in
         main) echo "основной канал" ;; warm-awg) echo "тёплый резерв AmneziaWG" ;; server) echo "«доступ домой»" ;;
         slot[2-7]) echo "дополнительный выход №${1#slot}" ;; zapret) echo "Zapret (nfqws)" ;;
-        doh) echo "шифрованный DNS" ;; tls) echo "HTTPS панели" ;; filter) echo "фильтр по категориям" ;; *) echo "$1" ;;
+        doh) echo "шифрованный DNS" ;; quic) echo "шифрованный DNS (DoQ и DoH3)" ;; tls) echo "HTTPS панели" ;; filter) echo "фильтр по категориям" ;; *) echo "$1" ;;
     esac; }
 # CAN A UNIT BE RESTARTED NOW — one answer for the offer (list-json `rst_units`) and the run (cmd_restart): the main carrier only while
 # it CARRIES. No default route in table 1000 means the watchdog holds traffic direct (FAILOPEN — a network state, not the string in
@@ -317,7 +319,7 @@ rst_one() {   # $1 = unit → код владельца (0 — перезапу�
     log "Перезапускаю: $(rst_label "$1")…"
     echo "=== $(date '+%H:%M:%S') $1" >> "$RST_OWNER_LOG" 2>/dev/null
     case "$1" in
-        doh)       sh "$ENODIA_DIR/doh-lib.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;
+        doh|quic)  sh "$ENODIA_DIR/doh-lib.sh" restart >> "$RST_OWNER_LOG" 2>&1 ;;   # one owner of the proxy, whichever program
         zapret)    sh "$ENODIA_DIR/zapret.sh" reload >> "$RST_OWNER_LOG" 2>&1 ;;                   # nfqws only: rules and set stay
         slot[2-7]) sh "$ENODIA_DIR/transport.sh" slot-down "${1#slot}" >> "$RST_OWNER_LOG" 2>&1
                    sh "$ENODIA_DIR/transport.sh" slot-up "${1#slot}" >> "$RST_OWNER_LOG" 2>&1 ;;
@@ -423,6 +425,11 @@ pkg_state() {
     _n=0; _h=0
     for b in $(pkg_own "$1");   do _n=$((_n+1)); have_bin "$b" && _h=$((_h+1)); done
     [ "$_h" = 0 ] && { echo absent; return 0; }
+    if [ "$1" = zapret ] && [ -f "$ENODIA_DIR/zapret.sh" ]; then
+        sh "$ENODIA_DIR/zapret.sh" installed >/dev/null 2>&1 || {
+            [ "$?" = 2 ] || { echo partial; return 0; }
+        }
+    fi
     for b in $(pkg_shared "$1"); do _n=$((_n+1)); have_bin "$b" && _h=$((_h+1)); done
     if [ "$_h" = "$_n" ]; then echo installed; else echo partial; fi
 }
@@ -469,6 +476,14 @@ pkg_hold() {
              # (doh-lib.sh::doh_auto_active), в подоболочке: библиотека тащит свои пути и шимы.
              [ -f "$ENODIA_DIR/doh-lib.sh" ] && ( . "$ENODIA_DIR/doh-lib.sh"; doh_auto_active ) 2>/dev/null && \
                  { echo "шифрованный DNS сейчас держит DNS сети сам (прямой режим) — сперва выключите «Включать само в прямых режимах»"; return 0; } ;;
+        # The QUIC program is the chosen protocol's own: while DoQ/DoH3 is picked and the layer holds DNS (the switch or the auto
+        # mode — the doh row above, the same owner), removing it would leave the proxy with nothing to start on its next restart.
+        quic) case "$(cat "$ENODIA_STATE/.doh-proto" 2>/dev/null)" in doq|doh3)
+                  if [ "$(cat "$ENODIA_STATE/.doh-on" 2>/dev/null)" = on ] || \
+                     { [ -f "$ENODIA_DIR/doh-lib.sh" ] && ( . "$ENODIA_DIR/doh-lib.sh"; doh_auto_active ) 2>/dev/null; }; then
+                      echo "шифрованный DNS работает по DoQ или DoH3 — сперва выберите в «Шифрованном DNS» другой протокол"; return 0
+                  fi ;;
+              esac ;;
         tls) [ -f "$ENODIA_STATE/.panel-tls" ] && { echo "включён HTTPS панели — снимете и потеряете вход"; return 0; } ;;
         # a schedule with «limited» in its week would go fully OPEN without the filter (fail-open) — the owner answers who
         filter) if [ -f "$ENODIA_DIR/access-sched.sh" ] && sh "$ENODIA_DIR/access-sched.sh" uses-filter >/dev/null 2>&1; then
@@ -514,6 +529,9 @@ pkg_add_b() {       # $1 = связка, $2 = scope (пусто | data)
         _n=$(sh "$GH" bin-size "$b" 2>/dev/null | tr -d ' \r'); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
         _s=$((_s+_n))
     done
+    if [ "$1" = zapret ] && [ -f "$ENODIA_DIR/nfq-platform.sh" ]; then
+        _nk=$(sh "$ENODIA_DIR/nfq-platform.sh" bytes-needed); _s=$((_s+${_nk:-0}))
+    fi
     echo "$_s"
 }
 # «Сколько ОСВОБОДИТ» — ФАКТИЧЕСКИЕ байты файлов на диске (манифест мог отстать от того, что
@@ -533,6 +551,9 @@ pkg_del_b() {       # $1 = связка, $2 = ВЕСЬ список снимае
             _n=$(stat -c%s "$_hp" 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
             _s=$((_s+_n))
         fi
+    fi
+    if [ "$1" = zapret ] && [ -f "$ENODIA_DIR/nfq-platform.sh" ]; then
+        _nk=$(sh "$ENODIA_DIR/nfq-platform.sh" bytes-installed); _s=$((_s+${_nk:-0}))
     fi
     echo "$_s"
 }
@@ -650,7 +671,7 @@ cmd_list_json() {
 plan_calc() {       # $1 = ставим, $2 = снимаем
     bst_load
     P_INS=$(norm_list "$1"); P_DEL=$(norm_list "$2")
-    P_ERR=""; P_BLOCK=""; P_NEED=0; P_FREED=0; P_UNK=0; P_NEED_ST=0; P_FREED_ST=0; P_TAKES=0; P_SHORT=0; P_UPD=""; P_FILES=""; _pcnt=" "
+    P_ERR=""; P_BLOCK=""; P_NEED=0; P_FREED=0; P_UNK=0; P_NEED_ST=0; P_FREED_ST=0; P_TAKES=0; P_SHORT=0; P_UPD=""; P_FILES=""; _pcnt=" "; _pnfq=0
     for p in $P_INS; do
         pkg_known "$p" || { P_ERR="$P_ERR неизвестный компонент: $p"; continue; }
         in_list "$p" "$P_DEL" && { P_ERR="$P_ERR $p указан и на установку, и на удаление"; continue; }
@@ -672,6 +693,12 @@ plan_calc() {       # $1 = ставим, $2 = снимаем
             [ "$_n" = 0 ] && P_UNK=1
             if [ "$(bin_dest "$b")" = "$ENODIA_BIN/$b" ]; then P_NEED=$((P_NEED + _n)); else P_NEED_ST=$((P_NEED_ST + _n)); fi
         done
+        # Kernel support always lives in ENODIA_BIN, independently of the nfqws binary destination.
+        if [ "$p" = zapret ] && [ "$_pnfq" = 0 ] && [ -f "$ENODIA_DIR/nfq-platform.sh" ]; then
+            _pnfq=1
+            _nk=$(sh "$ENODIA_DIR/nfq-platform.sh" bytes-needed)
+            P_NEED=$((P_NEED + ${_nk:-0}))
+        fi
     done
     # ЧТО ВЕЗТИ — решение ПЛАНА, и закачка его не пересматривает (ревью ветки, круг 3): do_install считал состояние связки заново,
     # уже после предыдущих связок того же плана, и частичная Hysteria2, которой Xray только что привёз hev, становилась «целой» —
@@ -790,7 +817,12 @@ do_remove() {       # $1 = связка, $2 = весь список снимае
     # Гард `-f` + `sh` (класс Б5-9): при `-x` снятый бит выполнения давал ТИХИЙ пропуск teardown
     # и бодрое «Снимаю Zapret…» в логе при живых правилах и живом nfqws.
     if [ "$1" = zapret ]; then
-        [ -f "$ENODIA_DIR/zapret.sh" ] && sh "$ENODIA_DIR/zapret.sh" remove >> "$LOG" 2>&1
+        [ -f "$ENODIA_DIR/zapret.sh" ] || { I_WHY="нет zapret.sh — обновите скрипты"; return 1; }
+        if ! sh "$ENODIA_DIR/zapret.sh" remove >> "$LOG" 2>&1; then
+            I_WHY=$(grep '^\[zapret\] FAIL: ' "$LOG" 2>/dev/null | tail -n 1 | sed 's/^\[zapret\] FAIL: //')
+            I_WHY=${I_WHY:-"Zapret не снят — причина в журнале операции"}
+            return 1
+        fi
         return 0
     fi
     for _pf in $(pkg_pids "$1"); do kill_by_pidfile "$_pf"; done
@@ -817,7 +849,8 @@ do_install() {      # $1 = связка
         # Причину отказа называет zapret.sh строкой «[zapret] FAIL: …» (закачку он ведёт в СВОЙ журнал, и строк fetch-bin здесь
         # нет) — без неё итог говорил только «zapret не установился» (ревью шага 6c, круг 2).
         # Обновление — тот же верб с ключом: стоящий nfqws без него zapret.sh честно оставляет как есть («уже установлен»).
-        _zu=""; bin_outdated nfqws && _zu=update
+        # The partial component may only need kernel support. Fetch exactly what the plan budgeted.
+        _zu=""; in_list nfqws "$P_FILES" && _zu=update
         if ! sh "$ENODIA_DIR/zapret.sh" install $_zu >> "$LOG" 2>&1; then
             _zw=$(grep '^\[zapret\] FAIL: ' "$LOG" 2>/dev/null | tail -n 1 | sed 's/^\[zapret\] FAIL: //')
             log "zapret не установился"; I_WHY=${I_WHY:-${_zw:-"zapret не установился"}}; return 1
@@ -886,6 +919,7 @@ do_install() {      # $1 = связка
         awg|xray|hy2) log "$(pkg_label "$1") установлен. Включить — в «Соединение → Транспорт» (нужен активный конфиг)." ;;
         byedpi) log "ByeDPI установлен. Включить — в «Соединение → Транспорт»." ;;
         doh) log "Компоненты шифрованного DNS установлены. Включить — в «Сеть → Шифрованный DNS»." ;;
+        quic) log "DoQ и DoH3 установлены. Выбрать — в «Сеть → Шифрованный DNS», «Протокол и резолвер»." ;;
         tls) log "Компонент HTTPS установлен. Включить — в «Панель → Доступ к панели»." ;;
         filter) log "Фильтр по категориям установлен. Действует в окнах «ограничено» — «Маршрутизация → Расписания доступа»." ;;
     esac
@@ -979,7 +1013,14 @@ cmd_apply() {
             log "Всё нужное скачано — меняю набор."
         fi
     fi
-    for p in $P_DEL; do do_remove "$p" "$P_DEL"; done
+    I_WHY=""
+    for p in $P_DEL; do
+        if ! do_remove "$p" "$P_DEL"; then
+            set_state FAIL
+            log "Снятие компонентов не завершено: ${I_WHY:-причина в журнале операции}"
+            return 1
+        fi
+    done
     [ -n "$P_DEL" ] && sync 2>/dev/null
     _rc=0; I_WHY=""
     for p in $P_INS; do do_install "$p" || _rc=1; done

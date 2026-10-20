@@ -478,10 +478,19 @@ _drs=$(cat /tmp/enodia-doh-retunnel.stamp 2>/dev/null | tr -cd '0-9')
 # только при установленной программе DoH, и «протокол: dot» строкой выше без этой строки спорил бы со списком
 # процессов ниже (там https_dns_proxy). Подоболочка: библиотека сорсится без побочек, но дампу её имена ни к чему.
 _dhs=$( [ -f "$ENODIA_DIR/doh-lib.sh" ] && . "$ENODIA_DIR/doh-lib.sh" && command -v doh_health_state >/dev/null 2>&1 && doh_health_state )
+# ODoH: цель, ретранслятор (выбор и текущий по лестнице), якоря; откат «DoH напрямую к цели» — у владельца (doh_health_state).
+_dho() { printf '%s\n' "$_dhs" | sed -n "s/^$1=//p"; }
+[ "$(cat "$ENODIA_STATE/.doh-proto" 2>/dev/null)" = odoh ] && echo "ODoH: цель $(cat "$ENODIA_STATE/.doh-odoh-target" 2>/dev/null || echo '(деф. cloudflare)')   ретранслятор: $(cat "$ENODIA_STATE/.doh-odoh-relay" 2>/dev/null || echo auto) (сейчас: $(_dho odoh_relay))   якоря: $(cat "$ENODIA_STATE/.doh-odoh-ips" 2>/dev/null | tr '\n' ';')"
+case "$_dhs" in *odohfb=1*)
+    echo "Выбран ODoH, а шифрует DoH напрямую к цели: ни один ретранслятор не отдал имён — откат $(_dho odohfb_age) с назад, проверка ретрансляторов через $(_dho odohfb_retry) с (-1 = неизвестно)" ;;
+esac
 case "$_dhs" in *dotfb=1*)
     echo "Выбран DoT, а шифрует DoH: порт 853 текущим путём не проходил — переехал $(printf '%s\n' "$_dhs" | sed -n 's/^dotfb_age=//p') с назад, повтор DoT через $(printf '%s\n' "$_dhs" | sed -n 's/^dotfb_retry=//p') с (-1 = неизвестно)" ;;
 esac
-ps 2>/dev/null | grep -E '[h]ttps_dns_proxy|[d]ot-proxy' | head -4 || echo "(прокси шифрованного DNS не запущен)"
+case "$_dhs" in *quicfb=1*)
+    echo "Выбран $(cat "$ENODIA_STATE/.doh-proto" 2>/dev/null), а шифрует $(_dho quicfb_to): QUIC текущим путём не отдавал имён — переехал $(_dho quicfb_age) с назад, повтор через $(_dho quicfb_retry) с (-1 = неизвестно)" ;;
+esac
+ps 2>/dev/null | grep -E '[h]ttps_dns_proxy|[d]ot-proxy|[q]uic-dns-proxy' | head -4 || echo "(прокси шифрованного DNS не запущен)"
 # Живость АВТО-режима: демон бежит ≠ резолвер отвечает. Ровно этот разрыв съел вечер 09.08.2026 —
 # https_dns_proxy жив, лог полон «curl request failed», а по дампу DoH выглядел здоровым. Печатаем
 # карантин (его ставит doh_health_tick после отката) и СВОДКУ ЛОГА: строка «сколько провалов» тут
@@ -1089,7 +1098,7 @@ command -v bin_on_store >/dev/null 2>&1 || bin_on_store() { return 1; }
 # накопителем показывает «xray · роутер» и не объясняет НИЧЕГО: читатель решает, что переезд
 # сломался, и лечит здоровое. Шим на старую библиотеку: «не закреплён».
 command -v bin_pinned >/dev/null 2>&1 || bin_pinned() { return 1; }
-DMP_BINS="amneziawg-go awg xray hysteria hev byedpi nfqws https-dns-proxy dot-proxy panel-tls dns-filter"
+DMP_BINS="amneziawg-go awg xray hysteria hev byedpi nfqws https-dns-proxy dot-proxy quic-dns-proxy panel-tls dns-filter"
 # СВЕЖА ЛИ СБОРКА — вопрос с одним владельцем (gh-update.sh bin-status: sha стоящего против манифеста, без сети). Без него
 # дамп отвечал «какая версия кода», но не «какая сборка бинаря»: жалоба «DoT уводит на DoH» на dot-proxy до 1.2 и после
 # выглядела одинаково. Прежний апдейтер верба не знает — тогда колонки нет, а не выдуманный ответ.

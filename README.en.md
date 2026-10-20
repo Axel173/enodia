@@ -31,11 +31,13 @@ panel on the router itself.
   its place only once it carries; a server that went silent is moved to the reserve, and the watchdog takes it a new key in
   the background.
 - Bypassing blocks without your own server: ByeDPI and Zapret.
+  On AX3600 stock firmware 1.1.21, the Zapret component includes a kernel support package;
+  compatibility is checked before loading modules. Other firmware builds and BE3600 need separate validation.
 - A server whose address your ISP blocked: the panel says so («address blocked»), not «not responding», and sends it
   over a road — another exit, for example your own Cloudflare WARP, which the router gets by itself with one button; if
   the ISP starts cutting WARP's port, the watchdog picks another one by itself.
 - Home access: the router works as an AmneziaWG server, a phone connects with a QR code.
-- Encrypted DNS (DoH/DoT), ad blocking, panel login with two-factor authentication.
+- Encrypted DNS (DoH, DoT, DoQ and DoH3 over QUIC, and ODoH — through a relay: the resolver never learns whose questions they are), ad blocking, panel login with two-factor authentication.
 - Watchdog: restarts the tunnel, switches to a backup server, emails you about failures.
 - Access schedules for children and consoles: when a device may go online, a daily minute limit and «limited»
   windows — the chosen categories (social networks, messengers, video, games, any pool of the geo catalogue, own sites and

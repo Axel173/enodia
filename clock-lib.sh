@@ -264,16 +264,21 @@ clock_http_date() {
 }
 
 # clock_rebase_stamps <сдвиг_с> — перенести отметки-эпохи в /tmp на величину сдвига часов.
-# Только файлы, чьё содержимое — ОДНО целое число (эпоха): так пишут все троттлы сторожа
+# Только файлы, чья ПЕРВАЯ строка начинается целым числом (эпохой): так пишут все троттлы сторожа
 # (`date +%s > stamp`). Отметка в /tmp могла родиться лишь ПОСЛЕ загрузки ⇒ до сдвига она
 # заведомо «в старых часах», и перенос на ту же величину возвращает ей настоящий возраст.
+# An epoch may carry a word after it — «<epoch> <word>» (the encrypted-DNS ladder flags, doh-lib.sh::doh_lv_fallback: the rung the
+# proxy moved to): the epoch is shifted, the rest kept as it is. The old form skipped such a file (its digits and letters joined), and
+# after a clock step the ladder's retry clock froze at «0 s ago» until a reboot (review s.150, round 1).
+# CLOCK_STAMP_GLOB — the stand's own /tmp (dev/clock-sync-test.sh runs THIS body, not a copy of it).
 clock_rebase_stamps() {
 	_rb_n=0
-	for _rb_f in /tmp/enodia-*.stamp /tmp/.enodia-*.stamp; do
+	for _rb_f in ${CLOCK_STAMP_GLOB:-/tmp/enodia-*.stamp /tmp/.enodia-*.stamp}; do
 		[ -f "$_rb_f" ] || continue
-		_rb_v=$(cat "$_rb_f" 2>/dev/null | tr -d ' \r\n')
-		case "$_rb_v" in ''|*[!0-9]*) continue ;; esac
-		echo $(( _rb_v + $1 )) > "$_rb_f" 2>/dev/null && _rb_n=$((_rb_n + 1))
+		_rb_v=$(head -n 1 "$_rb_f" 2>/dev/null | tr -d '\r' | sed 's/^ *//')
+		_rb_e=${_rb_v%% *}; _rb_t=${_rb_v#"$_rb_e"}
+		case "$_rb_e" in ''|*[!0-9]*) continue ;; esac
+		echo "$(( _rb_e + $1 ))$_rb_t" > "$_rb_f" 2>/dev/null && _rb_n=$((_rb_n + 1))
 	done
 	return 0
 }

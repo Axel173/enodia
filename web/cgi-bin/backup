@@ -91,6 +91,7 @@ SETTINGS="$SETTINGS .probe-pool .probe-pool-s2 .probe-pool-s3 .probe-pool-s4 .pr
 SETTINGS="$SETTINGS .split-runet .notify-off .notify-mute"                           # раздельный резолв рунета; «уведомления выключены»; выключенные поводы писем
 SETTINGS="$SETTINGS .doh-on .doh-proto .doh-resolver .doh-auto .doh-nextdns-id"      # шифрованный DNS
 SETTINGS="$SETTINGS .doh-custom-url .doh-custom-sni .doh-custom-ips .doh-custom-dot-port"   # ...и СВОЙ резолвер (адрес + якоря + порт DoT)
+SETTINGS="$SETTINGS .doh-odoh-target .doh-odoh-relay .doh-odoh-custom-target .doh-odoh-custom-relay .doh-odoh-ips"   # ...и ODoH (цель, ретранслятор, их якоря)
 SETTINGS="$SETTINGS .dns-hosts .ipv6-block .tun-mtu .go-memlimit"                    # DNS-hosts, IPv6-блок, MTU, потолок ОЗУ демона
 SETTINGS="$SETTINGS iplist.conf iplist.custom lists"                                 # списки и их источники
 SETTINGS="$SETTINGS .gh-ref .gh-bin-tag .update-interval .subs-interval"  # обновления
@@ -160,6 +161,8 @@ SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                            
 #          который люди пересылают в чат. Возвращать — только в SECRETS и только осознанно.
 # EXCLUDE: geo/providers.tsv — реестр провайдеров гео дормант: панель дропдауна не имеет,
 #          svc_lines() жёстко отдаёт v2fly. Добавление завело бы вторую мёртвую запись.
+# EXCLUDE: .nfq-kmods — the intent «the Zapret kernel package is installed HERE» (nfq-platform.sh): it belongs to this router's
+#          components, like the binaries; on another router it would claim a package that was never installed.
 # Секреты + конфиги + активные маркеры/рабочие файлы (входят только при secrets=1).
 # .subs = URL-подписки (кред), .sub-names = имена серверов подписки — с конфигами (полный бэкап).
 # .cfg-names = настоящие имена конфигов, добавленных руками (cfg-names.sh), — тоже С КОНФИГАМИ (ревью с.95): архив «без ключей»
@@ -623,6 +626,18 @@ RESTORE
 	   && [ "$(sh "$ENODIA_DIR/packages.sh" pkg-state doh 2>/dev/null)" = absent ]; then
 		_w "Шифрованный DNS включён, но его компонента нет — поставьте в «Компонентах»."
 	fi
+	# ODoH выбран, а программа DoH прежняя (ключа ODoH не знает): тумблер «вкл», шифрования нет — сказать (ответ владельца, doh_odoh_capable).
+	if [ "$(cat "$ENODIA_STATE/.doh-proto" 2>/dev/null)" = odoh ] && [ -f "$ENODIA_DIR/doh-lib.sh" ] \
+	   && [ "$(sh "$ENODIA_DIR/packages.sh" pkg-state doh 2>/dev/null)" != absent ] \
+	   && ! ( . "$ENODIA_DIR/doh-lib.sh"; command -v doh_odoh_capable >/dev/null 2>&1 && doh_odoh_capable ); then
+		_w "Выбран ODoH, а программа шифрованного DNS его не умеет — обновите её в «Компонентах»."
+	fi
+	# DoQ/DoH3 chosen, their own component absent (review s.150): nothing encrypts until it is installed — say which component.
+	case "$(cat "$ENODIA_STATE/.doh-proto" 2>/dev/null)" in doq|doh3)
+		if [ "$(sh "$ENODIA_DIR/packages.sh" pkg-state quic 2>/dev/null)" = absent ]; then
+			_w "Выбран DoQ или DoH3, а компонента «DoQ и DoH3» нет — поставьте его в «Компонентах»."
+		fi ;;
+	esac
 	if [ -f "$ENODIA_STATE/.panel-tls" ] \
 	   && [ "$(sh "$ENODIA_DIR/packages.sh" pkg-state tls 2>/dev/null)" = absent ]; then
 		_w "HTTPS панели включён, но его компонента нет — поставьте в «Компонентах»."

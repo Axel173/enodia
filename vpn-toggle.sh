@@ -60,6 +60,7 @@ command -v wd_tick_alive >/dev/null 2>&1 || wd_tick_alive() { return 1; }
 command -v heal_alive >/dev/null 2>&1 || heal_alive() { return 1; }
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -d "/proc/$1" ]; }
 SETTLE_PID="/tmp/enodia-vpnoff-settle.pid"
+SETTLE_PENDING="/tmp/enodia-vpnoff-pending"   # Refused owners outlive any already-running settler.
 WD_LOG="/tmp/enodia-watchdog.log"           # след доводчика — там же, где видны все смены несущей
 # ВЕДЁТ ЛИ НЕСУЩУЮ КТО-ТО ЕЩЁ: чужая смена (switching-лок), живой тик сторожа, живой прогон heal (бутовый или переигрыш). Протухший
 # switching-лок судит и снимает СТОРОЖ (`switch_lock_held`, SWITCH_STALE) — второй копии суждения о протухании здесь нет.
@@ -67,7 +68,7 @@ settle_busy() { [ -e "$SWITCH_LOCK" ] || wd_tick_alive || heal_alive; }
 # ЛОК «ПРОВЕРКА ФЛАГА + ПОВТОР СНЯТИЯ» у доводчика ⟷ «СНЯТИЕ ФЛАГА» (cmd_flag_clear: `on` и `switch --home`). Без него «Включить VPN», нажатое, пока доводчик снимал,
 # оставляло VPN «включённым» без несущей: доводчик флаг уже проверил и снимал дальше (ревью ветки, круг 2). Держатель — живой
 # процесс vpn-toggle (его пид в файле; труп забираем сразу, лок переживает `kill -9`), живого ждём не дольше минуты: секция — секунды
-# снятия, дольше значит завис, и включение важнее. Ловушки нет НАМЕРЕННО: снятие внутри секции ставит и снимает свои.
+# снятия; timeout must refuse ON while this live owner can still mutate carriers. Ловушки нет НАМЕРЕННО: снятие внутри секции ставит и снимает свои.
 SETTLE_LOCK="/tmp/enodia-vpnoff-settle.lock"
 settle_lock_take() {
     _stw=0
@@ -220,10 +221,11 @@ cmd_off() {
     # уносит САМ `down` (stop_daemons → xtun исчезает вместе с hev) — фиксируй мы после него,
     # хвост спасался бы только для awg. Лок у накопителя свой: занят кроном — выйдет молча.
     [ -f "$ENODIA_DIR/traffic-acct.sh" ] && sh "$ENODIA_DIR/traffic-acct.sh" >/dev/null 2>&1
+    _offfail=0
     _offt=$(active_transport)
     if [ "$_offt" != none ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
         echo "Отпускаю несущую транспорта $_offt (маршрут и DNS — прямые)…"
-        sh "$ENODIA_DIR/transport.sh" down "$_offt" >/dev/null 2>&1
+        sh "$ENODIA_DIR/transport.sh" down "$_offt" >/dev/null 2>&1 || _offfail=1
     fi
     # ДОП-ВЫХОДЫ — ТОЖЕ РЕСУРС, А НЕ ТОЛЬКО МАРКА. Снятые выше слотовые `ip rule` выключают
     # ТУННЕЛЬНЫЙ выход, но zapret-выход не маршрутизирует вовсе: он правит пакеты на форварде по
@@ -234,7 +236,7 @@ cmd_off() {
     # ребута с флагом, — а heal с флагом слоты не поднимает. Реестр не трогаем (выход остаётся
     # `on`): выключили VPN, а не выход; обратно поднимет `on` через heal replay, как и ребут.
     if [ -f "$ENODIA_DIR/transport.sh" ]; then
-        _offs=$(sh "$ENODIA_DIR/transport.sh" slots-down 2>&1)
+        _offs=$(sh "$ENODIA_DIR/transport.sh" slots-down 2>&1) || _offfail=1
         [ -n "$_offs" ] && printf '%s\n' "$_offs" | sed 's/^/  /'
     fi
     # ТЁПЛЫЙ РЕЗЕРВ — ТОЖЕ РЕСУРС. `down` у awg оставляет awg0 живым НАРОЧНО: пока везёт другой
@@ -266,12 +268,17 @@ cmd_off() {
     # дожидаемся конца и повторяем это же снятие — оно идемпотентно. Новую автоматику флаг не пустит, ждать только уже идущую.
     # С тех пор несущую при флаге не берёт и сама автоматика (плагины — daemon-lib.sh::carrier_run, перебор серверов, awg_setup,
     # mark-core): доводчик остался СТРАХОВКОЙ на дорогу, которую ещё не научили, и повторяет снятие, только если что-то вернулось.
-    if [ "$OFF_SETTLE" != 1 ] && { [ "$_busy0" = 1 ] || [ "$_offlk" = 0 ] || wd_tick_alive || heal_alive; }; then
+    if [ "$_offfail" = 1 ]; then : > "$SETTLE_PENDING"; else rm -f "$SETTLE_PENDING"; fi
+    if [ "$OFF_SETTLE" != 1 ] && { [ "$_offfail" = 1 ] || [ "$_busy0" = 1 ] || [ "$_offlk" = 0 ] || wd_tick_alive || heal_alive; }; then
         if command -v start-stop-daemon >/dev/null 2>&1; then
-            start-stop-daemon -S -b -m -p "$SETTLE_PID" -x /bin/sh -- "$ENODIA_DIR/vpn-toggle.sh" off-settle >/dev/null 2>&1
+            start-stop-daemon -S -b -m -p "$SETTLE_PID" -x /bin/sh -- "$ENODIA_DIR/vpn-toggle.sh" off-settle "$_offfail" >/dev/null 2>&1
         else
-            ( sh "$ENODIA_DIR/vpn-toggle.sh" off-settle >/dev/null 2>&1 & )
+            ( sh "$ENODIA_DIR/vpn-toggle.sh" off-settle "$_offfail" >/dev/null 2>&1 & )
         fi
+    fi
+    if [ "$_offfail" = 1 ]; then
+        echo "Выключение сохранено, но часть правил пока не снята. Доводчик повторит попытку."
+        return 1
     fi
     echo "VPN глобально ВЫКЛЮЧЕН. Трафик идёт через провайдера (включая доп-выходы)."
     echo "Не забудьте: ipconfig /flushdns на клиентах."
@@ -282,33 +289,67 @@ cmd_off() {
 #     как протухший): прежние 900 с были меньше перебора большого пула (SWITCH_STALE 1800), и доводчик выходил раньше смены;
 #     включили VPN обратно — ждать нечего, выходим сразу;
 #   · проверка флага и повтор снятия — ПОД ЛОКОМ, общим с `on` (settle_lock_take);
-#   · повтор — ТОЛЬКО ЕСЛИ ЧТО-ТО ВЕРНУЛОСЬ (`transport.sh live`): лишнее снятие — это второй сброс conntrack всего дома и рестарт
+#   · retry also follows an explicit owner refusal; otherwise only if live resources returned: лишнее снятие — это второй сброс conntrack всего дома и рестарт
 #     dnsmasq. Старая копия оркестратора без верба (код 2) — «не знаю», значит повторяем, как раньше.
+#   · retries of a REFUSED off are bounded (SETTLE_TRIES, pauses SETTLE_PAUSE doubling): each is a whole `off` again — an awg
+#     `down` flushes conntrack of the whole house — and a refusal that never passes (a foreign mount of the iptables extensions,
+#     a hung platform owner) repeated it forever. Giving up keeps the intent (.vpn-off) and the pending mark: the journal says
+#     so, and the next «Отключить VPN» tries again.
+SETTLE_TRIES=6
+SETTLE_PAUSE=5
 cmd_off_settle() {
-    _osw=0
-    while [ -f "$VPN_OFF_FLAG" ] && settle_busy; do sleep 2; _osw=$((_osw + 2)); done
-    if settle_lock_take; then
-        if [ ! -f "$VPN_OFF_FLAG" ]; then
-            :                                   # пока ждали, VPN включили обратно — доводить нечего
-        elif ! carrier_left; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') vpn-toggle: VPN выключили посреди чужой смены несущей — ждал ${_osw} с, ничего не вернулось" >> "$WD_LOG" 2>/dev/null
-        else
-            echo "$(date '+%Y-%m-%d %H:%M:%S') vpn-toggle: VPN выключили посреди чужой смены несущей — довожу выключение (ждал ${_osw} с)" >> "$WD_LOG" 2>/dev/null
-            OFF_SETTLE=1
-            cmd_off >/dev/null 2>&1
+    # A refused owner must be retried even when no carrier process is alive.
+    _osretry=${1:-0}
+    _ostry=0; _ospause=$SETTLE_PAUSE
+    while :; do
+        # A refused off waits before EVERY retry, the first too: right after the refusal its owner is still busy, and a retry is a
+        # whole `off` again (house-wide conntrack flush).
+        if [ "$_osretry" = 1 ]; then sleep "$_ospause"; _ospause=$((_ospause * 2)); fi
+        _osw=0
+        while [ -f "$VPN_OFF_FLAG" ] && settle_busy; do sleep 2; _osw=$((_osw + 2)); done
+        _osagain=0
+        if settle_lock_take; then
+            if [ ! -f "$VPN_OFF_FLAG" ]; then
+                :
+            elif [ "$_osretry" != 1 ] && [ ! -f "$SETTLE_PENDING" ] && ! carrier_left; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') vpn-toggle: выключение доведено, ничего не вернулось (ждал ${_osw} с)" >> "$WD_LOG" 2>/dev/null
+            else
+                echo "$(date '+%Y-%m-%d %H:%M:%S') vpn-toggle: довожу выключение (ждал ${_osw} с)" >> "$WD_LOG" 2>/dev/null
+                OFF_SETTLE=1
+                cmd_off >/dev/null 2>&1 || _osagain=1
+            fi
+            settle_lock_drop
+        elif [ -f "$VPN_OFF_FLAG" ]; then
+            _osagain=1
         fi
-        settle_lock_drop
-    fi
+        [ "$_osagain" = 1 ] || break
+        _ostry=$((_ostry + 1))
+        if [ "$_ostry" -ge "$SETTLE_TRIES" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') vpn-toggle: выключение не доведено за $_ostry попыток — оставляю до перезагрузки" >> "$WD_LOG" 2>/dev/null
+            # The way out named is one the person HAS: with VPN off the header offers «Включить», not «Отключить», and a reboot
+            # with the off flag raises nothing of the VPN (heal), so what the refusing owner kept is gone with the RAM.
+            [ -f "$ENODIA_DIR/events.sh" ] && sh "$ENODIA_DIR/events.sh" add vpn-off-fail 3600 "VPN выключен не до конца" \
+                "Часть правил после «Отключить VPN» не снята: их владелец отказал $_ostry раз подряд, и что-то из выключенного может ещё работать (например, десинк Zapret). Перезагрузите роутер: VPN останется выключенным, а остатки уйдут. Разбор — в журнале сторожа." >/dev/null 2>&1
+            break
+        fi
+        # The pause at the top releases the flag lock between retries, so a new explicit ON can cancel us.
+        _osretry=1
+    done
     rm -f "$SETTLE_PID" 2>/dev/null
 }
+
 # СНЯТИЕ ФЛАГА «VPN выключен вручную» — ЕДИНСТВЕННОЕ место (следит C117). Снимающих двое: «Включить VPN» (`on`) и выбор транспорта
 # человеком (`transport.sh switch <t> --home`, верб `flag-clear`), и оба — ПОД ЛОКОМ ДОВОДЧИКА: иначе доводчик, уже проверивший флаг,
 # продолжал снимать после них — «включено» без несущей (ревью ветки: круг 2 — у `on`, круг 3 — у `--home`, где снятие было голым
-# `rm`). Лок не взялся за минуту (доводчик завис) — флаг снимаем всё равно: включение важнее.
+# `rm`). A live owner may need more than a minute for several refusals: timeout refuses ON without clearing intent.
 cmd_flag_clear() {
-    _onl=0; settle_lock_take && _onl=1
+    # A timed-out live owner can still execute cold/down. Do not publish ON across it.
+    if ! settle_lock_take; then
+        echo "Выключение ещё завершается — включение не выполнено. Повторите попытку."
+        return 1
+    fi
     rm -f "$VPN_OFF_FLAG" 2>/dev/null
-    [ "$_onl" = 1 ] && settle_lock_drop
+    settle_lock_drop
     return 0
 }
 carrier_left() {
@@ -531,7 +572,7 @@ cmd_repair() {
 cmd_on() {
     # Флаг снимаем ПЕРВЫМ делом: ниже мы зовём repair и `heal.sh replay`, а они этот же флаг
     # читают — оставленный, он погасил бы ровно то включение, ради которого нас позвали.
-    cmd_flag_clear
+    cmd_flag_clear || return 1
     # СНЯТОЕ ДЕАКТИВАЦИЕЙ — ПЕРВЫМ ЖЕ ШАГОМ (`uninstall.sh cron-restore`): расписание и намерение «доступа домой». После «Отключить
     # VPN» cron-строк нет вовсе, а без них роутер живёт без сторожа (мёртвый VPS = дом без интернета: fail-open делать некому), без
     # heal (ребут ничего не поднимет) и без обновления списков — при зелёной панели; что снято, знает ТОЛЬКО снимавший, своей копии
@@ -666,7 +707,7 @@ cmd_excluded() {
 case "$1" in
     status|"")    cmd_status ;;
     off)          cmd_off ;;
-    off-settle)   cmd_off_settle ;;     # внутренний: фон доводчика выключения (cmd_off)
+    off-settle)   cmd_off_settle "$2" ;;     # внутренний: фон доводчика выключения (cmd_off)
     flag-clear)   cmd_flag_clear ;;     # внутренний: снять флаг выключения под локом доводчика (transport.sh switch --home)
     on)           cmd_on ;;
     repair)       cmd_repair ;;

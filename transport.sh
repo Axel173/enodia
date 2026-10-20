@@ -171,7 +171,11 @@ transport_installed() {
         # byedpi несёт трафик через общий hev (tun2socks-слой) — без него он не транспорт.
         byedpi) [ -x "$(bin_path byedpi)" ] && [ -x "$(bin_path hev)" ] ;;
         # zapret работает на форварде через NFQUEUE, а не через socks ⇒ hev ему не нужен.
-        zapret) [ -x "$(bin_path nfqws)" ] ;;
+        # …and its kernel side, answered by the owner of the kernel package (nfq-platform.sh `ready`: a native kernel needs nothing;
+        # else the cache, or the person's intent and the bundle to rebuild it — zapret.sh nfq_installed asks the same). Asked
+        # straight, not through the plugin: the status poll asks this every 10 s, and starting zapret.sh for it cost 3× per poll.
+        zapret) [ -x "$(bin_path nfqws)" ] || return 1
+                [ ! -f "$ENODIA_DIR/nfq-platform.sh" ] || sh "$ENODIA_DIR/nfq-platform.sh" ready >/dev/null 2>&1 ;;
         *)      return 1 ;;
     esac
 }
@@ -274,7 +278,7 @@ slot_ready() {
         # плагин (он же кэширует); код 2 = старая копия без верба ⇒ не сужу, веду себя как раньше.
         # Имя `_szp` СВОЁ: `local` в busybox нет, а `$p` тут общий на всю функцию и `_zp` уже занят
         # в transport_ready — на одинаковых именах этот проект уже обжигался (см. `srv_rules`).
-        zapret) [ -x "$(bin_path nfqws)" ] || return 1
+        zapret) transport_installed zapret || return 1
                 _szp=$(plugin_for zapret)
                 sh "$_szp" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ] ;;
         *)      return 1 ;;
@@ -374,8 +378,12 @@ cmd_switch() {
         if [ "$new" = zapret ] && [ -x "$(bin_path nfqws)" ]; then
             _zp2=$(plugin_for zapret)
             if [ -f "$_zp2" ]; then
-                sh "$_zp2" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ] || \
+                if ! { sh "$_zp2" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ]; }; then
                     _why="сборка iptables на этом роутере не умеет NFQUEUE — десинк здесь невозможен"
+                # The kernel can, but its support package is not in place (AX3600): the cure is the component, not a config.
+                elif ! { sh "$_zp2" installed >/dev/null 2>&1 || [ "$?" = 2 ]; }; then
+                    _why="не установлен пакет поддержки ядра — Роутер → Компоненты → Zapret"
+                fi
             fi
         fi
         echo "[transport] '$new' не готов ($_why)"; return 1
@@ -398,7 +406,11 @@ cmd_switch() {
     # implied AmneziaWG, see implied) is still that same transport: without this `cur` would be empty and nothing went down.
     [ "$SWITCH_RESTART" = 1 ] && [ -z "$cur" ] && cur=$new
     if [ -n "$cur" ] && { [ "$cur" != "$new" ] || [ "$SWITCH_RESTART" = 1 ]; }; then
-        cp=$(plugin_for "$cur"); [ -f "$cp" ] && sh "$cp" down
+        cp=$(plugin_for "$cur")
+        if [ -f "$cp" ] && ! sh "$cp" down; then
+            echo "[transport] прежний транспорт '$cur' не снят — смена отменена"
+            return 1
+        fi
         [ "$SWITCH_RESTART" = 1 ] && [ -f "$cp" ] && sh "$cp" cold
     fi
     # ВЫБОР ТРАНСПОРТА ЧЕЛОВЕКОМ — ЭТО И ЕСТЬ ВКЛЮЧЕНИЕ, поэтому флаг «человек выключил VPN» снимаем ЗДЕСЬ.
@@ -409,8 +421,15 @@ cmd_switch() {
     if [ "$_home_pick" = 1 ]; then
         # Снимает ВЛАДЕЛЕЦ флага, под локом доводчика выключения (vpn-toggle.sh::cmd_flag_clear, C117): голый `rm` здесь оставлял
         # «включено» без несущей, если доводчик как раз повторял снятие (ревью ветки, круг 3). Старый vpn-toggle без верба — как раньше.
-        if [ -f "$ENODIA_DIR/vpn-toggle.sh" ] && sh "$ENODIA_DIR/vpn-toggle.sh" flag-clear >/dev/null 2>&1; then :
-        else rm -f "$ENODIA_STATE/.vpn-off" 2>/dev/null; fi   # flag-fallback: vpn-toggle без верба flag-clear (установка старее) — как раньше
+        _fc=2
+        if [ -f "$ENODIA_DIR/vpn-toggle.sh" ]; then
+            sh "$ENODIA_DIR/vpn-toggle.sh" flag-clear; _fc=$?
+        fi
+        case "$_fc" in
+            0) : ;;
+            2) rm -f "$ENODIA_STATE/.vpn-off" 2>/dev/null ;;   # flag-fallback: old owner without this verb.
+            *) echo "[transport] выключение ещё завершается — '$new' не поднимаю"; return 1 ;;
+        esac
     elif [ -f "$ENODIA_STATE/.vpn-off" ]; then
         echo "[transport] VPN выключили вручную посреди автоматической смены — '$new' не поднимаю"; return 1
     fi
@@ -562,13 +581,19 @@ TAB=$(printf '\t')
 # Диспетч верба в плагин транспорта слота БЕЗ переигрыша маркировки (внутренний кирпич:
 # slots-up гоняет его в цикле и переигрывает mark-core ОДИН раз на всех). Код 2 = «плагин
 # слоты не умеет» (Ф0-норма, usage-шум глотаем), 1 = слот не найден/выключен/нет плагина.
+# On slot-down «no plugin» is 2 as well: a transport this code does not know raised nothing, so there is nothing to take down.
 _slot_dispatch() {
     sverb="$1"; sid="$2"
     sline=$([ -f "$SLOTS_SH" ] && sh "$SLOTS_SH" show "$sid" 2>/dev/null)
     [ -n "$sline" ] || { echo "[transport] нет слота №$sid"; return 1; }
     [ "$(echo "$sline" | cut -f6)" = on ] || { echo "[transport] слот №$sid выключен"; return 1; }
     st=$(echo "$sline" | cut -f3); scfg=$(echo "$sline" | cut -f4)
-    sp=$(plugin_for "$st"); [ -f "$sp" ] || { echo "[transport] нет плагина для '$st'"; return 1; }
+    sp=$(plugin_for "$st")
+    if [ ! -f "$sp" ]; then
+        echo "[transport] нет плагина для '$st'"
+        [ "$sverb" = slot-down ] && return 2
+        return 1
+    fi
     sout=$(sh "$sp" "$sverb" "$sid" "$scfg" 2>&1); src=$?
     if [ "$src" = 2 ]; then
         echo "[transport] '$st' пока не умеет слоты — выход №$sid живёт по fallback-политике"
@@ -643,9 +668,10 @@ cmd_slots_down() {
     [ -f "$SLOTS_SH" ] || return 0
     sids=$(sh "$SLOTS_SH" list-enabled 2>/dev/null | cut -f1)
     [ -n "$sids" ] || return 0
-    for sid in $sids; do _slot_dispatch slot-down "$sid"; done
+    _sd_fail=0
+    for sid in $sids; do _slot_dispatch slot-down "$sid" || [ "$?" = 2 ] || _sd_fail=1; done   # 2 = nothing to take down
     apply_marking
-    return 0
+    return "$_sd_fail"
 }
 
 # Верб `slots` (статус включённых доп-выходов) СНЯТ — это был мёртвый дубль: на тот же вопрос

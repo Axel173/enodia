@@ -406,12 +406,15 @@ emit_devices() {
 	# десинка — ровно тот худший режим, о котором предупреждает шапка rebuild_desync. Второй
 	# признак спрашиваем у плагина (verb nfq-ok, проба кэширована), rc=2 = старая копия не знает
 	# верба ⇒ НЕ сужу (та же идиома, что в emit_zapret ниже и в transport.sh).
-	dsr=false
-	if [ -x "$(bin_path nfqws)" ]; then
-		dsr=true
+	# `desync_why` — why not, for the rule builder's card: nobin (no nfqws) · nopkg (nfqws, but the kernel package is not in place —
+	# AX3600) · nonfq (a kernel without NFQUEUE). «No nfqws» about a router that has it sent people to install what they have.
+	dsr=false; dsw=nobin
+	if sh "$D/transport.sh" installed zapret >/dev/null 2>&1; then
+		dsr=true; dsw=""
 		if [ -f "$D/zapret.sh" ]; then
-			sh "$D/zapret.sh" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ] || dsr=false
+			sh "$D/zapret.sh" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ] || { dsr=false; dsw=nonfq; }
 		fi
+	elif [ -x "$(bin_path nfqws)" ]; then dsw=nopkg
 	fi
 	# КТО СПРАШИВАЕТ. Лестница ядра считается ДЛЯ ИСТОЧНИКА, и по умолчанию человек спрашивает про
 	# устройство, с которого открыл панель, — его адрес знает только сервер (REMOTE_ADDR). Без этого
@@ -429,7 +432,7 @@ emit_devices() {
 		_lanip=$(ip -4 addr show "$_lif" 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2; exit}')
 		case "$you" in 127.*) you="" ;; "$_lanip") you="" ;; esac
 	fi
-	printf '],"you":"%s","desync_ready":%s}\n' "$you" "$dsr"
+	printf '],"you":"%s","desync_ready":%s,"desync_why":"%s"}\n' "$you" "$dsr" "$dsw"
 }
 
 # --- Сайты: пользовательские домены (dnsmasq) + bypass-dst (сайты мимо VPN) ----
@@ -680,7 +683,7 @@ emit_update() {
 	ix=false; [ -x "$(bin_path xray)" ]        && ix=true
 	ih=false; [ -x "$(bin_path hysteria)" ]    && ih=true
 	ib=false; [ -x "$(bin_path byedpi)" ]      && ib=true
-	iz=false; [ -x "$(bin_path nfqws)" ]       && iz=true   # zapret (ортогональный транспорт, alt-ось не занимает) — для add-on строки
+	iz=false; sh "$D/transport.sh" installed zapret >/dev/null 2>&1 && iz=true   # zapret (ортогональный транспорт, alt-ось не занимает) — для add-on строки; binary + support package (AX3600)
 	ready=$(sh "$D/transport.sh" list 2>/dev/null); rj=""
 	for r in $ready; do rj="$rj${rj:+,}\"$r\""; done
 	vn=$(sed -n 's/^VERSION=//p' "$D/VERSION" 2>/dev/null | head -1 | tr -d '"\\ \r')
@@ -859,7 +862,9 @@ emit_zapret() {
 	live=false
 	sh "$D/zapret.sh" wired >/dev/null 2>&1; rcw=$?
 	case "$rcw" in 0) live=true ;; 2) live=$on ;; esac
-	inst=false; [ -x "$(bin_path nfqws)" ] && inst=true
+	inst=false; sh "$D/transport.sh" installed zapret >/dev/null 2>&1 && inst=true
+	# `bin` — nfqws itself: «not installed» and «installed but its kernel package is missing» (AX3600) are different screens.
+	zbin=false; [ -x "$(bin_path nfqws)" ] && zbin=true
 	# УМЕЕТ ЛИ ЭТОТ РОУТЕР десинк ВООБЩЕ (ядро/iptables с NFQUEUE). Бинарь на месте и правил ноль —
 	# ровно тот случай, где карточка предлагала кнопку, гасящую туннель ради транспорта, который
 	# здесь не встанет (AX3600, ядро 4.4 без libxt_NFQUEUE). Ответ — у плагина (verb nfq-ok, проба
@@ -903,8 +908,8 @@ EOF
 	# Прогресс фоновой до/переустановки или удаления nfqws (zapret.sh install/remove) — для polling.
 	ist=$(cat "$DS/.zapret-install.state" 2>/dev/null | tr -d ' \r\n'); [ -n "$ist" ] || ist=IDLE
 	imsg=$(tail -n 1 "$DS/.zapret-install.log" 2>/dev/null | jesc 300)
-	printf '{"on":%s,"live":%s,"installed":%s,"nfq":%s,"back":"%s","args":"%s","default":"%s","isdefault":%s,"cats":"%s","categories":[%s],"presets":[%s],"install_state":"%s","install_msg":"%s"}\n' \
-		"$on" "$live" "$inst" "$nfq" "$back" "$aj" "$dj" "$isdef" "$scj" "$cj" "$pj" "$ist" "$imsg"
+	printf '{"on":%s,"live":%s,"installed":%s,"bin":%s,"nfq":%s,"back":"%s","args":"%s","default":"%s","isdefault":%s,"cats":"%s","categories":[%s],"presets":[%s],"install_state":"%s","install_msg":"%s"}\n' \
+		"$on" "$live" "$inst" "$zbin" "$nfq" "$back" "$aj" "$dj" "$isdef" "$scj" "$cj" "$pj" "$ist" "$imsg"
 }
 
 # read_subs_last — отметка последнего прогона подписок (.subs-last = «ts⇥ok|fail⇥сводка») в
@@ -1198,6 +1203,40 @@ emit_doh() {
 	doh_bin=false
 	[ -x "$(bin_path https-dns-proxy)" ] && doh_bin=true
 	arr=$(printf '%s' "$list" | awk '{for(i=1;i<=NF;i++) printf "%s\"%s\"", (i>1?",":""), $i}')
+	# КАТАЛОГ С ПОДПИСЯМИ — у владельца одна таблица (doh-lib.sh::DOH_CATALOG): имя, владелец (пусто = он и есть имя) и страна, а
+	# слова «свой профиль»/«свой резолвер» и название страны — панели. Своей копии списка у панели больше нет. Библиотека старше
+	# таблицы — пустой каталог, и панель подписывает ключами из `resolvers`. Строки — наши, кавычек в них не бывает.
+	# No QUIC field (s.151): whether a resolver answers DoQ/DoH3 the router asks its own path on the choice — a list measured from the
+	# project's routers would only tell people elsewhere what holds for us.
+	cat_json=$(printf '%s\n' "${DOH_CATALOG:-}" | awk -F'|' 'NF > 1 { printf "%s{\"k\":\"%s\",\"n\":\"%s\",\"op\":\"%s\",\"cc\":\"%s\"}", (n++ ? "," : ""), $1, $2, $3, $4 }')
+	# ODoH (doh-lib.sh, блок «OBLIVIOUS DoH»): выбор цели и ретранслятора, свои адреса, чем идём сейчас, откат и обе таблицы — те же
+	# четыре поля, что у каталога резолверов. `odoh_capable` — умеет ли программа DoH ODoH (прежняя сборка — нет: плитка зовёт
+	# обновить её в «Компонентах»). Библиотека старше ODoH — пустые поля, и панель ODoH не предлагает.
+	o_cap=false; o_t=''; o_r=''; o_ct=''; o_cr=''; o_now=''; o_ips=''; o_tj=''; o_rj=''; o_sig=''
+	if command -v doh_odoh_target >/dev/null 2>&1; then
+		doh_odoh_capable && o_cap=true
+		o_t=$(doh_odoh_target); o_r=$(doh_odoh_relay_pick); o_now=$(doh_odoh_relay_now)
+		command -v doh_odoh_config_sig >/dev/null 2>&1 && o_sig=$(doh_odoh_config_sig)
+		o_ct=$(cat "$DS/.doh-odoh-custom-target" 2>/dev/null | tr -d '\r\n' | jesc 300)
+		o_cr=$(cat "$DS/.doh-odoh-custom-relay" 2>/dev/null | tr -d '\r\n' | jesc 300)
+		[ "$(doh_proto)" = odoh ] && o_ips=$(doh_odoh_ips | jesc 200)
+		o_tj=$(printf '%s\n' "$DOH_ODOH_TARGETS" | awk -F'|' 'NF > 1 && $1 != "custom" { printf "%s{\"k\":\"%s\",\"n\":\"%s\",\"op\":\"%s\",\"cc\":\"%s\"}", (n++ ? "," : ""), $1, $2, $3, $4 }')
+		o_rj=$(printf '%s\n' "$DOH_ODOH_RELAYS" | awk -F'|' 'NF > 1 && $1 != "custom" { printf "%s{\"k\":\"%s\",\"n\":\"%s\",\"op\":\"%s\",\"cc\":\"%s\"}", (n++ ? "," : ""), $1, $2, $3, $4 }')
+	fi
+	h_ofb=false; h_ofba=-1; h_ofbr=-1
+	if [ -n "${_hs:-}" ]; then
+		[ "$(dns_num "$_hs" odohfb)" = 1 ] && h_ofb=true
+		h_ofba=$(dns_num "$_hs" odohfb_age); h_ofbr=$(dns_num "$_hs" odohfb_retry)
+	fi
+	# DoQ/DoH3 (doh-lib.sh, the QUIC level of the ladder): the component is here (`quic_installed` — the tiles offer it or a door to
+	# «Компоненты»), and the rung the proxy fell to — since when, the next try, which (dot|doh). From the owner's health lines.
+	q_inst=false; [ -x "$(bin_path quic-dns-proxy)" ] && q_inst=true
+	h_qfb=false; h_qfba=-1; h_qfbr=-1; h_qfbt=''
+	if [ -n "${_hs:-}" ]; then
+		[ "$(dns_num "$_hs" quicfb)" = 1 ] && h_qfb=true
+		h_qfba=$(dns_num "$_hs" quicfb_age); h_qfbr=$(dns_num "$_hs" quicfb_retry)
+		h_qfbt=$(printf '%s\n' "$_hs" | sed -n 's/^quicfb_to=//p' | tr -cd 'a-z')
+	fi
 	# installing/install_msg — фоновая доустановка бинарей по воздуху (верб doh_fetch_bin). Панель
 	# по ним крутит кнопку и показывает прогресс; msg = последняя строка лога (там же и причина
 	# неудачи, если сеть не дала). Кавычки/бэкслеши режем — строка едет в JSON без эскейпа.
@@ -1218,8 +1257,8 @@ emit_doh() {
 	if [ "$pbc" = 2 ] && [ -f /tmp/enodia-proto-install.pid ] && [ -d "/proc/$(cat /tmp/enodia-proto-install.pid 2>/dev/null)" ]; then pkg_busy=true; fi
 	[ "$pkg_busy" = true ] && [ "$pmine" = 1 ] && installing=true
 	[ "$pmine" = 1 ] && [ -f "$DS/.proto-install.log" ] && imsg=$(tail -n1 "$DS/.proto-install.log" 2>/dev/null | jesc 160)
-	printf '{"on":%s,"auto":%s,"auto_active":%s,"installed":%s,"dot_installed":%s,"proto":"%s","proto_now":"%s","running":%s,"installing":%s,"pkg_busy":%s,"install_msg":"%s","resolver":"%s","nextdns_id":"%s","custom_url":"%s","custom_ips":"%s","cur_src":"%s","cur_dns":"%s","cur_via":"%s","untun":%s,"untun_age":%s,"retun_in":%s,"cool":%s,"miss":%s,"miss_max":%s,"dotfb":%s,"dotfb_age":%s,"dotfb_retry":%s,"bail_in":%s,"split_conflict":%s,"split_on":%s,"doh_bin":%s,"resolvers":[%s]}\n' \
-		"$on" "$auto" "$auto_active" "$installed" "$dot_inst" "$proto" "$proto_now" "$running" "$installing" "$pkg_busy" "$imsg" "$res" "$nid" "$cust" "$custips" "$cur_src" "$cur_dns" "$cur_via" "$h_untun" "$h_uage" "$h_retun" "$h_cool" "$h_miss" "$h_mmax" "$h_dfb" "$h_dfba" "$h_dfbr" "$h_bail" "$split_conflict" "$split_on" "$doh_bin" "$arr"
+	printf '{"on":%s,"auto":%s,"auto_active":%s,"installed":%s,"dot_installed":%s,"proto":"%s","proto_now":"%s","running":%s,"installing":%s,"pkg_busy":%s,"install_msg":"%s","resolver":"%s","nextdns_id":"%s","custom_url":"%s","custom_ips":"%s","cur_src":"%s","cur_dns":"%s","cur_via":"%s","untun":%s,"untun_age":%s,"retun_in":%s,"cool":%s,"miss":%s,"miss_max":%s,"dotfb":%s,"dotfb_age":%s,"dotfb_retry":%s,"bail_in":%s,"split_conflict":%s,"split_on":%s,"doh_bin":%s,"resolvers":[%s],"catalog":[%s],"odoh_capable":%s,"odoh_target":"%s","odoh_relay":"%s","odoh_relay_now":"%s","odoh_custom_target":"%s","odoh_custom_relay":"%s","odoh_ips":"%s","odohfb":%s,"odohfb_age":%s,"odohfb_retry":%s,"odoh_targets":[%s],"odoh_relays":[%s],"odoh_sig":"%s","quic_installed":%s,"quicfb":%s,"quicfb_age":%s,"quicfb_retry":%s,"quicfb_to":"%s"}\n' \
+		"$on" "$auto" "$auto_active" "$installed" "$dot_inst" "$proto" "$proto_now" "$running" "$installing" "$pkg_busy" "$imsg" "$res" "$nid" "$cust" "$custips" "$cur_src" "$cur_dns" "$cur_via" "$h_untun" "$h_uage" "$h_retun" "$h_cool" "$h_miss" "$h_mmax" "$h_dfb" "$h_dfba" "$h_dfbr" "$h_bail" "$split_conflict" "$split_on" "$doh_bin" "$arr" "$cat_json" "$o_cap" "$o_t" "$o_r" "$o_now" "$o_ct" "$o_cr" "$o_ips" "$h_ofb" "$h_ofba" "$h_ofbr" "$o_tj" "$o_rj" "$o_sig" "$q_inst" "$h_qfb" "$h_qfba" "$h_qfbr" "$h_qfbt"
 }
 
 # --- ЛЕНТА ТЕХНИЧЕСКОГО СОСТОЯНИЯ «Обзора» (техбар): факты, которые меняются САМИ, без участия
@@ -1230,7 +1269,7 @@ emit_doh() {
 # число доп-выходов — в `status` (его и так поллят). Дублировать чужой ответ ради одной ленты
 # значит завести второй источник правды для чипа, который стоит рядом с первым.
 emit_tech() {
-	dsrc=""; dadr=""; dvia=""; dpro=doh; dres=cloudflare; dprx=1; dbin=""
+	dsrc=""; dadr=""; dvia=""; dpro=doh; dres=cloudflare; drel=""; dprx=1; dbin=""; dsig=""
 	# DNS-путь — у владельца слоя (doh-lib.sh::dns_now), тот же ответ, что в карточке
 	# «Шифрованный DNS». Нет либы → пустой класс, и чип DNS панель просто не рисует.
 	if [ -f "$D/doh-lib.sh" ]; then
@@ -1249,6 +1288,13 @@ emit_tech() {
 		# Имя резолвера — тем же путём: без `tr -d` оно приезжало как «cloudflare » (замер на
 		# железе 10.09.2026), и чип ленты печатал лишний пробел перед закрывающим тегом.
 		command -v doh_resolver_name >/dev/null 2>&1 && dres=$(doh_resolver_name | tr -d '\r\n' | jesc 40)
+		# Выбран ODoH — отвечает ЦЕЛЬ (doh-lib.sh::doh_odoh_target), и на ODoH, и на откате «DoH напрямую к цели»: выбор резолвера DoH
+		# при этом лежит нетронутым, и лента назвала бы резолвер, к которому прокси не ходит.
+		command -v doh_named >/dev/null 2>&1 && dres=$(doh_named | tr -d '\r\n' | jesc 40)
+		# …и ретранслятор, через который прокси идёт СЕЙЧАС (лестница «авто» переходит на второй): экран «Шифрованный DNS» называет его в
+		# «Кто отвечает» и перерисовывается, когда лента сказала другое (ревью с.145, круг 1).
+		command -v doh_odoh_relay_now >/dev/null 2>&1 && [ "$(doh_proto)" = odoh ] && drel=$(doh_odoh_relay_now | tr -d '\r\n' | jesc 40)
+		command -v doh_odoh_config_sig >/dev/null 2>&1 && dsig=$(doh_odoh_config_sig)
 		# ЖИВ ЛИ ТОТ, КОМУ ОТДАН DNS. Класс пути `doh` считает конфиг dnsmasq (upstream =
 		# 127.0.0.1#5053), и он остаётся `doh`, даже когда прокси УМЕР — а это уже не «шифруется»,
 		# это СЕТЬ БЕЗ ИМЁН: dnsmasq форвардит в мёртвый порт, пока сторож не поднимет демона.
@@ -1279,8 +1325,8 @@ emit_tech() {
 	fi
 	case "$mtu" in ''|*[!0-9]*) mtu=0 ;; esac
 	mif=$(printf '%s' "$mif" | tr -cd 'a-zA-Z0-9_.-')
-	printf '{"dns_src":"%s","dns_addr":"%s","dns_via":"%s","dns_proto":"%s","dns_resolver":"%s","dns_proxy":%s,"dns_bin":"%s","dns_split":%s,"mtu":%s,"mtu_if":"%s"}\n' \
-		"$dsrc" "$dadr" "$dvia" "$dpro" "$dres" "$dprx" "$dbin" "$dspl" "$mtu" "$mif"
+	printf '{"dns_src":"%s","dns_addr":"%s","dns_via":"%s","dns_proto":"%s","dns_resolver":"%s","dns_relay":"%s","dns_proxy":%s,"dns_bin":"%s","dns_split":%s,"mtu":%s,"mtu_if":"%s","dns_odoh_sig":"%s"}\n' \
+		"$dsrc" "$dadr" "$dvia" "$dpro" "$dres" "$drel" "$dprx" "$dbin" "$dspl" "$mtu" "$mif" "$dsig"
 }
 
 # --- Кэш проверок серверов (.srv-checks, TSV key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts[⇥tms⇥via⇥dms⇥chb[⇥ncmp]]) → JSON-объект

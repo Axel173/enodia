@@ -42,7 +42,7 @@ from collections import namedtuple
 
 # Версия PC-стороны проекта. Держится В СИНХРОНЕ с `version` в pyproject.toml и requirements.txt
 # (копии сознательные — uv-путь и pip-путь; разъезд ловит C35). См. CHANGELOG.md.
-PROJECT_VERSION = "1.2.0"
+PROJECT_VERSION = "1.3.0"
 
 # --- Зависимость paramiko (in-process SSH) — с авто-доустановкой ---
 # paramiko ОБЯЗАТЕЛЕН (in-process SSH). Если его нет — НЕ падаем молча с кодом 1: на
@@ -340,6 +340,9 @@ BIN_NAMES = (
     # DNS» (пикер DoH/DoT в панели). Наш код (dev/dot), статик mbedTLS под обе арки (~300 КБ),
     # ноль version-skew по построению. Тоже чистая опция.
     "dot-proxy.user",
+    # quic-dns-proxy — DNS over QUIC and DNS over HTTP/3 (our code, dev/quic; static wolfSSL + ngtcp2 + nghttp3, both arches,
+    # ~350 KB): the QUIC protocols of «Шифрованный DNS», its own component. An option too, OFF by default.
+    "quic-dns-proxy.user",
     # panel-tls — HTTPS-терминатор перед uhttpd панели (наш код, dev/tls; статик mbedTLS,
     # обе арки, ~290 КБ). Стоковый uhttpd HTTPS не поднимет: его крипто-плагин libustream-ssl
     # в прошивке отсутствует, а собранный нами не заводится из-за вендорски патченого

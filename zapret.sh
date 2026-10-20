@@ -102,8 +102,10 @@ command -v bin_prune >/dev/null 2>&1 || bin_prune() { return 0; }
 # в корне. Дефолт закрывает весь класс разом (тот же приём, что в packages.sh).
 : "${BIN_DIR:=$ENODIA_DIR}"
 NFQWS=$(bin_path nfqws)                # бинарь nfqws (bin/nfqws.user) — UPX-static aarch64
-TLS_BIN="$ENODIA_DIR/zapret-tls.bin"      # фейк TLS-ClientHello (встроен base64 ниже)
-QUIC_BIN="$ENODIA_DIR/zapret-quic.bin"    # фейк QUIC-Initial (встроен base64 ниже)
+# The fakes' paths carry zapret's own prefix: doh-lib.sh, sourced below, names the DoQ/DoH3 PROGRAM's path QUIC_BIN, and while
+# these were TLS_BIN/QUIC_BIN the library overwrote ours — the QUIC fake was written over the program's place (see ensure_fakes).
+ZT_FAKE_TLS="$ENODIA_DIR/zapret-tls.bin"      # фейк TLS-ClientHello (встроен base64 ниже)
+ZT_FAKE_QUIC="$ENODIA_DIR/zapret-quic.bin"    # фейк QUIC-Initial (встроен base64 ниже)
 SET=zapret_set                         # ipset сайтов «десинк-direct» ПО ДОМЕНАМ (наполняет dnsmasq)
 # ВТОРОЙ пул того же десинка — ПО IP (CIDR). Наполняет менеджер источников (lists-update.sh,
 # категория zapret-cidr), здесь он только «ещё одно слово» в ZAPRET_SETS. ЗАЧЕМ отдельный сет,
@@ -166,7 +168,7 @@ QUIC_B64='wwAAAAEIeOeYRrvzeYQAAESesuIbTYvML8k+74FJlUpbpjZLkRkbfQ7pPzj/kZL9Fu+3og
 # Слой шифрованного DNS (doh-lib.sh): при включённом DoH резолв идёт через локальный прокси
 # (dnsmasq→127.0.0.1#5053), :443 резолвера держим МИМО маркировки (туннеля нет). ВЫКЛ (дефолт) →
 # doh_apply_dns даёт 1, прежний прямой путь байт-в-байт. Шим на случай установки без lib.
-[ -f "$ENODIA_DIR/doh-lib.sh" ] && . "$ENODIA_DIR/doh-lib.sh"
+if [ -f "$ENODIA_DIR/doh-lib.sh" ]; then . "$ENODIA_DIR/doh-lib.sh"; fi
 command -v doh_apply_dns >/dev/null 2>&1 || doh_apply_dns() { return 1; }
 # Наш upstream dnsmasq пишет ОДИН владелец (doh-lib.sh, разбор там). Нет библиотеки — прежняя пара «записать + рестарт».
 command -v dns_upstream_put >/dev/null 2>&1 || dns_upstream_put() { mkdir -p /etc/dnsmasq.d; { echo no-resolv; for _dus in "$@"; do echo "server=$_dus"; done; } > /etc/dnsmasq.d/00-upstream.conf; /etc/init.d/dnsmasq restart >/dev/null 2>&1 || killall -HUP dnsmasq 2>/dev/null; }
@@ -210,8 +212,9 @@ zt_desync_live() { zt_transport_active || zt_any_slot_enabled || zt_any_src_wire
 # ЕДИНСТВЕННЫЙ МАШИННЫЙ ОТВЕТ «есть ли на роутере ЖИВОЙ десинк» (0 — да, 1 — нет; неизвестный верб
 # у старой копии = 2, и вызыватель обязан это различать). Спрашивает тот, кто ОТЧИТЫВАЕТСЯ ЧЕЛОВЕКУ
 # перед снятием: экран удаления обещал «Zapret (nfqws + NFQUEUE)» по одному лишь факту БИНАРЯ на
-# диске — а nfqws кладёт бутстрап ПК на КАЖДОЙ установке, в том числе на ядре 4.4 (AX3600), где
-# NFQUEUE вырезан и zapret невозможен в принципе. Обещание снять то, чего никогда не было,
+# диске — а nfqws кладёт бутстрап ПК на КАЖДОЙ установке, включая ядра без штатного NFQUEUE.
+# Exact-firmware support packages are checked separately from the nfqws executable.
+# Обещание снять то, чего никогда не было,
 # читается как «система тут стояла — и её сносят».
 # $ON_FLAG проверяем ОТДЕЛЬНО от zt_desync_live: флаг «zapret несёт весь дом» переживает упавший
 # демон, и снимать его всё равно придётся.
@@ -289,12 +292,27 @@ desync_args() {
     echo "$DEFAULT_ARGS"
 }
 # Подставить пути фейков вместо токенов @tls/@quic (перед запуском nfqws).
-resolve_args() { printf '%s' "$1" | sed "s#@tls#$TLS_BIN#g; s#@quic#$QUIC_BIN#g"; }
+resolve_args() { printf '%s' "$1" | sed "s#@tls#$ZT_FAKE_TLS#g; s#@quic#$ZT_FAKE_QUIC#g"; }
 
 # ---- ресурсы (фейки + ipset) -------------------------------------------------
 ensure_fakes() {
-    [ -s "$TLS_BIN" ]  || printf '%s' "$TLS_B64"  | base64 -d > "$TLS_BIN"  2>/dev/null
-    [ -s "$QUIC_BIN" ] || printf '%s' "$QUIC_B64" | base64 -d > "$QUIC_BIN" 2>/dev/null
+    [ -s "$ZT_FAKE_TLS" ]  || printf '%s' "$TLS_B64"  | base64 -d > "$ZT_FAKE_TLS"  2>/dev/null
+    [ -s "$ZT_FAKE_QUIC" ] || printf '%s' "$QUIC_B64" | base64 -d > "$ZT_FAKE_QUIC" 2>/dev/null
+    zt_fake_misplaced_drop
+}
+# The 1.3.0-dev.8 test build (20.10.2026) wrote the QUIC fake at the DoQ/DoH3 program's path (the name clash above): integrity read
+# «расходится», and on a drive without permission bits (exFAT) the 1200 bytes passed for an installed program — DoQ would start
+# them. A file there whose bytes ARE our fake is never the program ⇒ removed; the program's own bytes never match (size first).
+zt_fake_misplaced_drop() {
+    _zfm=$(bin_path quic-dns-proxy)
+    [ -f "$_zfm" ] && [ -s "$ZT_FAKE_QUIC" ] || return 0
+    [ "$(wc -c < "$_zfm")" = "$(wc -c < "$ZT_FAKE_QUIC")" ] || return 0
+    [ "$(md5sum < "$_zfm" | cut -d' ' -f1)" = "$(md5sum < "$ZT_FAKE_QUIC" | cut -d' ' -f1)" ] || return 0
+    rm -f "$_zfm" 2>/dev/null
+    # Said only once it is gone, and NOT as a «[zapret] » line: apply-bypass.sh desync-add-ip takes the engine's last such line as
+    # its refusal reason, and a later step failing without words of its own would have read «снят фейк QUIC…» (review s.151 L2).
+    [ -e "$_zfm" ] || echo "zapret: снят фейк QUIC, записанный тестовой сборкой на место программы DoQ и DoH3: $_zfm" >&2
+    return 0
 }
 # Создаём ОБА пула всегда, даже когда CIDR-пул пуст/выключен: правило `-m set --match-set` не
 # вставляется, если сета нет, а порядок «кто первый — zapret или менеджер источников» не задан.
@@ -431,7 +449,20 @@ zt_chain_gc() {
 # удачная не оставляет следа. Результат кэшируем на /tmp: за прогон нас зовут многократно, а
 # ответ меняется только с прошивкой.
 NFQ_CAP=/tmp/.enodia-zapret-nfq-cap
+NFQ_PLATFORM="$ENODIA_DIR/nfq-platform.sh"
+# One platform owner serves transport, slots and whole-device desync; native kernels need no package.
+nfq_platform() { [ ! -f "$NFQ_PLATFORM" ] || sh "$NFQ_PLATFORM" "$@"; }
+# «Installed» = the binary and the platform's `ready` (native kernel: nothing needed; else the kernel package's cache, or the
+# person's intent and the bundle to rebuild it from — a move to a drive loses the cache, not the intent). One light call: the
+# status poll asks this every 10 s.
+nfq_installed() {
+    [ -x "$NFQWS" ] || return 1
+    [ ! -f "$NFQ_PLATFORM" ] || sh "$NFQ_PLATFORM" ready
+}
+# `prepare` rebuilds a lost cache itself when the intent is there (nfq-platform.sh km_prepare).
+nfq_prepare() { nfq_supported && nfq_installed && nfq_platform prepare; }
 nfq_supported() {
+    if [ -f "$NFQ_PLATFORM" ] && sh "$NFQ_PLATFORM" supported >/dev/null 2>&1; then return 0; fi
     [ -f "$NFQ_CAP" ] && { [ "$(cat "$NFQ_CAP" 2>/dev/null)" = 1 ]; return $?; }
     # `-w` ОБЯЗАТЕЛЕН и на пробе: спрашивают нас из CGI панели и из тика сторожа, а в это же время
     # apply-bypass/geo/mark-core держат xtables-лок.
@@ -464,12 +495,14 @@ nfq_set_rules() {   # <set> <add|del>
     # бы ВЫШЕ всех цепочек, продолжая перебивать правила устройства (то самое, что мы чиним).
     while iptables -t mangle -D PREROUTING -m set --match-set "$_ns" dst -j ACCEPT 2>/dev/null; do :; done
     if [ "$2" = del ]; then
+        nfq_platform wire-set "$_ns" del || return 1
         while iptables -t mangle -D "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT 2>/dev/null; do :; done
         for proto in tcp udp; do
             while iptables -t mangle -D POSTROUTING -p $proto --dport 443 -m set --match-set "$_ns" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null; do :; done
         done
         zt_chain_gc
     else
+        nfq_platform wire-set "$_ns" add || return 1
         zt_chain_ensure
         iptables -t mangle -C "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT 2>/dev/null || \
             iptables -t mangle -A "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT
@@ -497,6 +530,7 @@ nfq_set_rules() {   # <set> <add|del>
 # напрямую, а его TLS/QUIC-рукопожатия проходят через nfqws», а не «каждый его пакет через nfqws».
 nfq_src_rules() {   # <ip> <add|del>
     _si="$1"
+    nfq_platform wire-src "$_si" "$2" || return 1
     if [ "$2" = del ]; then
         for proto in tcp udp; do
             while iptables -t mangle -D POSTROUTING -s "$_si" -p $proto --dport 443 $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null; do :; done
@@ -504,7 +538,10 @@ nfq_src_rules() {   # <ip> <add|del>
     else
         for proto in tcp udp; do
             iptables -t mangle -C POSTROUTING -s "$_si" -p $proto --dport 443 $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null || \
-                iptables -t mangle -I POSTROUTING 1 -s "$_si" -p $proto --dport 443 $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass
+                iptables -t mangle -I POSTROUTING 1 -s "$_si" -p $proto --dport 443 $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass || {
+                    nfq_src_rules "$_si" del
+                    return 1
+                }
         done
     fi
 }
@@ -512,8 +549,8 @@ nfq_src_rules() {   # <ip> <add|del>
 # см. ZAPRET_SETS).
 # Анти-петлю снимает НЕ здесь, а teardown под гардом (её может держать активный zapret-СЛОТ рядом
 # с VPN — тогда nfqws/анти-петля живут).
-rules_add() { for _zs in $ZAPRET_SETS; do nfq_set_rules "$_zs" add; done; nfq_antiloop add; }
-rules_del() { for _zs in $ZAPRET_SETS; do nfq_set_rules "$_zs" del; done; }
+rules_add() { for _zs in $ZAPRET_SETS; do nfq_set_rules "$_zs" add || return 1; done; nfq_antiloop add; }
+rules_del() { for _zs in $ZAPRET_SETS; do nfq_set_rules "$_zs" del || return 1; done; }
 
 # ---- демон nfqws ------------------------------------------------------------
 # ЗАПУСК ЧЕРЕЗ `sh -c exec`, а не напрямую бинарём. Причина: `start-stop-daemon -b` заворачивает
@@ -527,9 +564,14 @@ spawn_nfqws() {
     start-stop-daemon -S -b -m -p "$NFQ_PID" -x /bin/sh -- -c "exec '$NFQWS' --qnum=$QNUM $args >>'$NFQ_LOG' 2>&1"
 }
 stop_nfqws() {
-    start-stop-daemon -K -p "$NFQ_PID" 2>/dev/null
-    kill "$(cat "$NFQ_PID" 2>/dev/null)" 2>/dev/null
+    _snp=$(cat "$NFQ_PID" 2>/dev/null | tr -cd '0-9')
+    start-stop-daemon -K -p "$NFQ_PID" >/dev/null 2>&1   # -K reports to STDOUT: it landed in callers' answers (CGI JSON)
+    [ -z "$_snp" ] || kill "$_snp" 2>/dev/null
     rm -f "$NFQ_PID" 2>/dev/null
+    # kill returns before the process dies; the queue it binds keeps nfnetlink_queue in use, and the platform's release right
+    # after would leave the module loaded until a reboot.
+    if [ -n "$_snp" ] && command -v daemon_wait_gone >/dev/null 2>&1; then daemon_wait_gone "$_snp" 3; fi
+    return 0
 }
 # Код возврата ЧЕСТНЫЙ: `start-stop-daemon -S -b` отдаёт 0 за факт ФОРКА, а не за живой демон, и
 # отвергнутая nfqws стратегия давала «nfqws перезапущен» при фактически ВЫКЛЮЧЕННОМ десинке. Судим
@@ -552,7 +594,7 @@ restart_nfqws() {
 # анти-петлю оставляем жить, если их держит активный zapret-СЛОТ рядом с VPN (Ф1) — иначе
 # выключение zapret-транспорта при живом слоте убило бы десинк слота.
 teardown() {
-    rules_del
+    rules_del || return 1
     del_dnsmasq
     # Флашим ТОЛЬКО пул КАТЕГОРИЙ — он наш (его наполнял снятый выше сниппет dnsmasq). Пулы
     # менеджера источников (zapret_cidr по IP и zapret_dom со своими доменами) — чужие: у них свой
@@ -569,20 +611,22 @@ teardown() {
     nfq_antiloop del
     stop_nfqws
     ct_flush
+    nfq_platform release
 }
 
 cmd_apply() {
     if [ ! -f "$ON_FLAG" ]; then
         teardown
-        return 0
+        return $?
     fi
     [ -x "$NFQWS" ] || { log "НЕТ бинаря $NFQWS — поставьте Zapret в «Роутер → Компоненты»"; return 1; }
+    nfq_prepare || return 1
     ensure_fakes
     ensure_set
     del_dnsmasq          # снять легаси-сниппет вшитых категорий (см. комментарий у функции)
     migrate_cats         # разовый перенос старого выбора в гео-реестр
-    rules_add
-    proc_alive "$NFQ_PID" || spawn_nfqws
+    rules_add || return 1
+    proc_alive "$NFQ_PID" || spawn_nfqws || return 1
     ct_flush
     log "десинк ВКЛ (пулы: $(pool_summary); стратегия: $(desync_args))"
 }
@@ -594,6 +638,9 @@ cmd_apply() {
 cmd_rewire() {
     ensure_set
     [ -f "$ON_FLAG" ] || return 0
+    # «VPN выключен» is a state (C67): the flag a refused teardown kept (the off settler gave up) is no order to wire whole-house
+    # desync after a reboot — heal's list reapply and geo builds call us, and «перезагрузите роутер» promised the rest goes away.
+    [ ! -f "$ENODIA_STATE/.vpn-off" ] || return 0
     rules_add
     ct_flush
 }
@@ -601,7 +648,7 @@ cmd_rewire() {
 # ВНУТРЕННЯЯ функция (НЕ CLI-verb): teardown + сброс ON_FLAG. Зовут cmd_t_down (релинквиш) и
 # cmd_remove. Своего verb'а `off` нет умышленно: zapret теперь ТРАНСПОРТ — снимать его надо через
 # оркестратор (`transport.sh down zapret` / switch на другой), иначе ON_FLAG и .transport разойдутся.
-cmd_off() { rm -f "$ON_FLAG"; teardown; log "десинк ВЫКЛ (правила сняты, nfqws остановлен, набор сброшен)"; }
+cmd_off() { teardown || return 1; rm -f "$ON_FLAG"; log "десинк ВЫКЛ (правила сняты, nfqws остановлен, набор сброшен)"; }
 
 # ============================================================
 # ТРАНСПОРТ-АДАПТЕР (zapret как 5-й транспорт; зовёт ОРКЕСТРАТОР transport.sh через plugin_for).
@@ -627,7 +674,9 @@ cmd_t_up() {
         return 1
     }
     touch "$ON_FLAG"
-    cmd_apply || return 1
+    # A refused raise leaves nothing behind: the orchestrator rolls `.transport` back WITHOUT our `down`, and a flag left here made
+    # the next `rewire` (every geo build, every list refresh) wire whole-house desync rules over the VPN — with no nfqws to run them.
+    cmd_apply || { teardown >/dev/null 2>&1; rm -f "$ON_FLAG"; log "up: не поднялся — правила сняты, флаг снят"; return 1; }
     set_direct_dns
     echo zapret > "$TRANSPORT_FLAG"
     rm -f /tmp/enodia-watchdog.xstate /tmp/enodia-failover-episode 2>/dev/null
@@ -636,7 +685,7 @@ cmd_t_up() {
     log "транспорт = ZAPRET (десинк направо, БЕЗ VPS; весь трафик напрямую, категории через nfqws)"
 }
 cmd_t_down() {
-    cmd_off                 # rm ON_FLAG + teardown (правила/nfqws/dnsmasq-сниппет/ipset)
+    cmd_off || return 1      # Keep intent and DNS if the platform owner refused removal.
     dns_direct_rules del    # снять наши DNS-RETURN (следующий транспорт поставит свой DNS)
     set_dnsmasq_direct      # dnsmasq на прямой резолвер — fail-open до подъёма следующего транспорта
     rm -f /tmp/enodia-watchdog.xstate /tmp/enodia-failover-episode 2>/dev/null
@@ -692,6 +741,7 @@ cmd_slot_up() {   # <id> <config-игнор> — поднять zapret-деси�
         log "slot-up: ничего не меняю; обход без VPS на этом железе даёт ByeDPI"
         return 1
     }
+    nfq_prepare || return 1
     ensure_fakes
     # ПРАВИЛА СТАВИМ ВСЕГДА, а наборы при необходимости создаём пустыми (см. zt_ensure_slot_set).
     # Прежняя логика «есть набор — ставим, нет — пропускаем» выглядела бережной, а на деле давала
@@ -707,10 +757,11 @@ cmd_slot_up() {   # <id> <config-игнор> — поднять zapret-деси�
             log "слот №$_id: набор $_s не создан — правило не ставлю (десинк этого набора не заработает)"
             continue
         fi
-        nfq_set_rules "$_s" add
+        # A refused step undoes the sets already wired: their ACCEPT would take the group past the tunnel with nothing to desync it.
+        nfq_set_rules "$_s" add || { cmd_slot_down "$_id" >/dev/null 2>&1; return 1; }
     done
     nfq_antiloop add
-    proc_alive "$NFQ_PID" || spawn_nfqws
+    proc_alive "$NFQ_PID" || spawn_nfqws || { cmd_slot_down "$_id" >/dev/null 2>&1; return 1; }
     ct_flush
     log "слот №$_id: zapret-десинк рядом с VPN (сеты grp_vpn_s$_id/geo_vpn_s$_id; стратегия: $(desync_args))"
     log "слот №$_id: правила стоят заранее — пока наборы пусты, десинк ничего не заворачивает и включится сам при первой привязке группы или гео-категории"
@@ -719,7 +770,7 @@ cmd_slot_up() {   # <id> <config-игнор> — поднять zapret-деси�
 cmd_slot_down() {   # <id> — снять zapret-десинк слота
     _id="$1"
     case "$_id" in [2-7]) ;; *) return 1 ;; esac
-    for _s in $(zt_slot_sets "$_id"); do nfq_set_rules "$_s" del; done
+    for _s in $(zt_slot_sets "$_id"); do nfq_set_rules "$_s" del || return 1; done
     # nfqws/анти-петля ОБЩИЕ: гасим, только если не нужны НИ транспорту, НИ ДРУГОМУ zapret-слоту,
     # НИ устройствам «целиком в десинк» (правила по источнику живут отдельно от слотов).
     if ! zt_transport_active && ! zt_any_slot_enabled "$_id" && ! zt_any_src_wired; then
@@ -728,6 +779,7 @@ cmd_slot_down() {   # <id> — снять zapret-десинк слота
     fi
     ct_flush
     log "слот №$_id: zapret-десинк снят"
+    nfq_platform release
     return 0
 }
 
@@ -739,20 +791,46 @@ cmd_slot_down() {   # <id> — снять zapret-десинк слота
 # apply-bypass) — иначе один и тот же список парсили бы двое.
 # Контракт: 0 = сделано, 1 = нельзя (нет бинаря / битый IP) — вызывающий обязан честно отказать
 # человеку, а не молча записать режим, которого на роутере нет.
+# A raw-only selector is an orphan only outside a source transaction. Serialize complete
+# wiring with reconciliation/removal; mangle then publishes ownership before src-wire returns.
+zt_source_run() (
+    _zl=/tmp/enodia-zapret-source.lock
+    if ! mkdir "$_zl" 2>/dev/null; then
+        # Another uid's entry in the shared /tmp is not a lock (the rule of nfq-platform.sh km_mine): it would refuse every device op.
+        # A lock gone since the failed mkdir (stat answers nothing) is a hand-off: remove nothing, the mkdir below decides.
+        _zu=$(id -u 2>/dev/null); _zs=$(stat -c %u "$_zl" 2>/dev/null)
+        if [ -z "$_zs" ]; then :
+        elif [ -L "$_zl" ] || { [ -n "$_zu" ] && [ "$_zs" != "$_zu" ]; }; then rm -rf "$_zl" 2>/dev/null
+        else
+            _zp=$(cat "$_zl/pid" 2>/dev/null)
+            case "$_zp" in ''|*[!0-9]*) : ;; *)
+                if ! kill -0 "$_zp" 2>/dev/null; then rm -f "$_zl/pid"; rmdir "$_zl" 2>/dev/null; fi ;;
+            esac
+        fi
+        mkdir "$_zl" 2>/dev/null || { log 'операция с устройствами Zapret уже выполняется'; return 1; }
+    fi
+    echo $$ > "$_zl/pid"
+    trap 'rm -f "$_zl/pid"; rmdir "$_zl" 2>/dev/null' EXIT
+    trap 'exit 1' INT TERM HUP PIPE
+    "$@"
+)
 cmd_src_wire() {   # <ip>
     _sip=$(printf '%s' "$1" | tr -d ' \r\n')
     echo "$_sip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || { log "src-wire: нужен IPv4"; return 1; }
     [ -x "$NFQWS" ] || { log "src-wire: НЕТ бинаря $NFQWS — поставьте Zapret в «Роутер → Компоненты»"; return 1; }
     # Третий потребитель того же nfqws (устройство «целиком в десинк») — и ему бинаря так же мало.
+    # ONE line with the cause: apply-bypass shows the engine's LAST line, and a second «ничего не меняю» line hid the reason.
     nfq_supported || {
-        log "src-wire: сборка iptables на этом роутере не умеет NFQUEUE (нет libxt_NFQUEUE) — десинк по источнику невозможен"
-        log "src-wire: ничего не меняю; обход без VPS на этом железе даёт ByeDPI"
+        log "src-wire: сборка iptables на этом роутере не умеет NFQUEUE (нет libxt_NFQUEUE) — десинк по источнику невозможен; обход без VPS на этом железе даёт ByeDPI"
         return 1
     }
+    # The platform's `ready` says nothing of its own: without this line the refusal fell back to «нет nfqws» with nfqws in place.
+    nfq_installed || { log "src-wire: не установлен пакет поддержки ядра — Роутер → Компоненты → Zapret"; return 1; }
     ensure_fakes
-    nfq_src_rules "$_sip" add
+    nfq_prepare || return 1
+    nfq_src_rules "$_sip" add || return 1
     nfq_antiloop add
-    proc_alive "$NFQ_PID" || spawn_nfqws
+    proc_alive "$NFQ_PID" || spawn_nfqws || return 1
     # Точечно по источнику: рвать сессии всей сети из-за одного устройства незачем (зеркало
     # ports_conntrack в apply-bypass). Без сброса NSS/ECM держал бы старый путь до таймаута.
     ct_flush_src "$_sip"
@@ -762,28 +840,32 @@ cmd_src_wire() {   # <ip>
 cmd_src_unwire() {   # <ip>
     _sip=$(printf '%s' "$1" | tr -d ' \r\n')
     echo "$_sip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
-    nfq_src_rules "$_sip" del
+    nfq_src_rules "$_sip" del || return 1
     if ! zt_transport_active && ! zt_any_slot_enabled && ! zt_any_src_wired; then
         nfq_antiloop del
         stop_nfqws
     fi
     ct_flush_src "$_sip"
     log "устройство $_sip: десинк по источнику снят"
+    nfq_platform release
     return 0
 }
-# Что РЕАЛЬНО проводнено в mangle (по строке на IP) — машинный ответ для владельца списка:
+# Actual mangle/raw source selectors, including an interrupted add before the persistent list was written.
 # apply-bypass сверяет им своё хранилище и снимает осиротевшее. Источник истины про ПРАВИЛА —
 # сам mangle, а не файл: после fw3-reload/ребута правил нет, а файл на месте (и наоборот).
 cmd_src_list() {
+    {
     iptables -t mangle -S POSTROUTING 2>/dev/null \
         | grep -e "--queue-num $QNUM" \
-        | sed -n 's/^-A POSTROUTING -s \([0-9.]*\)\/32 .*/\1/p' | sort -u
+        | sed -n 's/^-A POSTROUTING -s \([0-9.]*\)\/32 .*/\1/p'
+    nfq_platform sources
+    } | sort -u
 }
 # Снять ВСЕ правила по источнику разом — не зная списка (его владелец может быть уже удалён:
 # зовут uninstall.sh и cmd_remove). Демон здесь НЕ гасим: у cmd_remove следом идёт cmd_off, а
 # uninstall.sh снимает несущую своим порядком (правила → демоны).
 cmd_src_clear() {
-    for _sip in $(cmd_src_list); do nfq_src_rules "$_sip" del; done
+    for _sip in $(cmd_src_list); do nfq_src_rules "$_sip" del || return 1; done
     return 0
 }
 
@@ -801,6 +883,11 @@ ilog() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >> "$INSTALL_LOG"; }
 
 cmd_install() {   # $1 = update — заменить стоящий nfqws свежей сборкой (решает движок компонентов по bin-status)
     : > "$INSTALL_LOG"; iset_state RUNNING
+    if [ -f "$NFQ_PLATFORM" ] && sh "$NFQ_PLATFORM" supported >/dev/null 2>&1; then
+        if ! sh "$NFQ_PLATFORM" install >> "$INSTALL_LOG" 2>&1; then
+            iset_state FAIL; echo '[zapret] FAIL: не установлен пакет поддержки ядра'; return 1
+        fi
+    fi
     _zwas=0; [ -x "$NFQWS" ] && _zwas=1
     if [ "$_zwas" = 1 ] && [ "$1" != update ]; then
         # Бинарь уже на месте — НЕ переигрываем правила (не дёргаем conntrack/dnsmasq зря); лишь
@@ -829,7 +916,7 @@ cmd_install() {   # $1 = update — заменить стоящий nfqws све
         # ОБНОВЛЕНИЕ правил не переигрывает: живой nfqws продолжает исполнять прежнюю сборку (замена файла его не трогает), а
         # переигрыш дёрнул бы conntrack и dnsmasq ради того, что заработает только после перезапуска демона.
         if [ "$_zwas" = 1 ]; then iset_state OK; ilog "nfqws обновлён. Включённый десинк работает на прежней сборке до перезапуска (проще всего — перезагрузить роутер)"; return 0; fi
-        [ -f "$ON_FLAG" ] && cmd_apply >> "$INSTALL_LOG" 2>&1
+        [ -f "$ON_FLAG" ] && [ ! -f "$ENODIA_STATE/.vpn-off" ] && cmd_apply >> "$INSTALL_LOG" 2>&1   # not under «VPN выключен» (C67)
         iset_state OK; ilog "nfqws установлен. Десинк: $([ -f "$ON_FLAG" ] && echo ВКЛ || echo выключен)"
         return 0
     fi
@@ -844,13 +931,19 @@ cmd_install() {   # $1 = update — заменить стоящий nfqws све
 
 cmd_remove() {
     : > "$INSTALL_LOG"; iset_state RUNNING
+    # The planner may have checked before a concurrent src-wire finished. Actual mangle
+    # ownership closes the gap before apply-bypass publishes its persistent registration.
+    if zt_any_src_wired; then
+        iset_state FAIL; echo '[zapret] FAIL: десинк используется устройством'; return 1
+    fi
     ilog "Удаляю zapret: снимаю правила/nfqws/dnsmasq, выключаю десинк…"
     # Правила по ИСТОЧНИКУ снимаем ПЕРВЫМИ и сами: teardown их не знает (их владелец —
     # apply-bypass), а оставленные висеть они пережили бы удаление бинаря. Внешне это fail-open
     # (`--queue-bypass` пропускает пакеты), но в mangle остался бы мусор, ссылающийся на
     # несуществующую очередь, и ref-count навсегда считал бы демон нужным.
-    cmd_src_clear >> "$INSTALL_LOG" 2>&1
-    cmd_off >> "$INSTALL_LOG" 2>&1   # teardown + сброс .zapret-on (десинк больше не поднимется)
+    cmd_src_clear >> "$INSTALL_LOG" 2>&1 || { iset_state FAIL; echo '[zapret] FAIL: правила устройств не сняты'; return 1; }
+    cmd_off >> "$INSTALL_LOG" 2>&1 || { iset_state FAIL; echo '[zapret] FAIL: правила транспорта не сняты'; return 1; }
+    nfq_platform remove >> "$INSTALL_LOG" 2>&1 || { iset_state FAIL; echo '[zapret] FAIL: ресурсы ядра ещё используются'; return 1; }
     # Сносим ОБЕ возможные копии — резидентную и на накопителе (зеркало do_remove в packages.sh).
     # Одного `rm "$NFQWS"` мало: bin_path предпочитает накопитель, поэтому забытый на /data файл
     # пережил бы удаление и на следующем старте выдал бы себя за установленный nfqws.
@@ -885,14 +978,16 @@ cmd_status() {
     echo "--- в десинк по гео ---"; cmd_categories | sed 's/^/  /' | grep . || echo "  (не выбрано)"
     echo "--- стратегия ---"; desync_args
     echo "--- бинарь ---"; [ -x "$NFQWS" ] && echo "$NFQWS есть" || echo "НЕТ $NFQWS"
-    # ВТОРОЙ признак, без которого первого МАЛО: умеет ли ЯДРО перехват. На AX3600/BE3600 (4.4)
-    # libxt_NFQUEUE вырезан — nfqws приезжает бутстрапом и лежит, а десинка здесь не будет НИКОГДА.
-    # Срез уходит в дамп, то есть в разбор: без этой строки читатель видит «бинарь есть, демон не
-    # запущен», ищет причину в стратегии и конфиге и не находит её там в принципе. Ответ у
-    # nfq_supported (проба кэширована на /tmp) — своей копии признака не заводим.
+    # Kernel capability and installation are separate: an exact firmware may have an available
+    # support package which has not been installed yet. Keep both answers owned by their probes.
     echo "--- NFQUEUE в ядре ---"
     if nfq_supported; then echo "умеет"
     else echo "НЕ умеет (iptables без libxt_NFQUEUE) — десинк на этом роутере невозможен, обход без VPS даёт ByeDPI"; fi
+    if [ -f "$NFQ_PLATFORM" ] && sh "$NFQ_PLATFORM" supported >/dev/null 2>&1; then
+        echo "--- пакет поддержки ---"
+        sh "$NFQ_PLATFORM" profile
+        if sh "$NFQ_PLATFORM" installed; then echo "установлен"; else echo "не установлен — Роутер → Компоненты → Zapret"; fi
+    fi
     echo "--- nfqws ---"; proc_alive "$NFQ_PID" && echo "pid $(cat $NFQ_PID) жив" || echo "не запущен"
     for _zs in $ZAPRET_SETS; do
         zn=$(ipset list "$_zs" 2>/dev/null | grep -c '^[0-9]'); echo "--- ipset $_zs (IP): ${zn:-0} ---"
@@ -1082,6 +1177,7 @@ case "$1" in
     # transport_ready: незачем предлагать в панели транспорт, который здесь физически не встанет
     # (AX3600: iptables без libxt_NFQUEUE). Проба кэширована — вызовов много, ответ один.
     nfq-ok)    nfq_supported ;;
+    installed) nfq_installed ;;
     # Вербы, которые БЕРУТ несущую (весь дом через десинк или выход), — через carrier_run (daemon-lib.sh): при выключенном вручную VPN
     # отказ, выключение по ходу отпускает поднятое. Десинк УСТРОЙСТВ (src-*) — не VPN и живёт при выключенном; reload и свип при нём
     # служат только устройствам (см. zt_transport_active).
@@ -1094,13 +1190,13 @@ case "$1" in
     slot-up)   carrier_run cmd_slot_down cmd_slot_up "$2" "$3" ;;
     slot-down) cmd_slot_down "$2" ;;
     # десинк по ИСТОЧНИКУ (устройство целиком в десинк) — зовёт apply-bypass.sh, владелец списка.
-    src-wire)   cmd_src_wire "$2" ;;
-    src-unwire) cmd_src_unwire "$2" ;;
-    src-clear)  cmd_src_clear ;;
+    src-wire)   zt_source_run cmd_src_wire "$2" ;;
+    src-unwire) zt_source_run cmd_src_unwire "$2" ;;
+    src-clear)  zt_source_run cmd_src_clear ;;
     src-list)   cmd_src_list ;;   # что РЕАЛЬНО проводнено в mangle (машинно, по строке на IP)
     dns)       set_direct_dns ;;   # переиграть DNS (DoH toggle/смена резолвера) — прямой режим через doh_apply_dns
     install)   cmd_install "$2" ;;
-    remove)    cmd_remove ;;
+    remove)    zt_source_run cmd_remove ;;
     apply)     cmd_apply ;;
     rewire)    cmd_rewire ;;   # досборка правил под пулы источников (зовут lists-update.sh zapret-*)
     status)    cmd_status ;;

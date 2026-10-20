@@ -883,6 +883,9 @@
        600–1000 px card beside a 190 px one left 400–790 px of blank). No wrapper markup: decks painted card by card (deckPaint)
        replace a card in place, and a wrapper around two cards would break that. The tall card comes FIRST in the markup. */
     .vwrap>.r2,.vwrap>.tpane>.r2{grid-row:span 2}
+    /* eq — a card of a ROW of peers stretches to the tallest of the row (mockup 16.10.2026, «Шифрованный DNS»: short cards left blank
+       strips under them). Only for peers — a lone short card beside a tall one is r2's job. */
+    .vwrap>.eq,.vwrap>.tpane>.eq{align-self:stretch}
     /* Широкая дверь (макет `.door.wide`: «Журнал действий») — две колонки сетки дверей. */
     .doors>.door.wide{grid-column:span 2}
     /* Дети прозрачной панели вкладки — те же правила колоды, что у прямых детей: ряд кнопок и заметка — во всю строку. */
@@ -1114,6 +1117,11 @@
   /* Потолок 560 — у ОДНОСТРОЧНЫХ (конец строки глазу нужен рядом); поле списка (`Fld(…,'area')` макета) идёт во всю
      ширину карточки, моноширинным: в нём домены и адреса, их сверяют посимвольно. */
   .f input,.f select,.inrow input{max-width:560px}
+  /* Моноширинное поле внутри `.f` (адреса ODoH) — `.f input{font:inherit}` сильнее `.mono`, и адрес набирался шрифтом текста. */
+  .f input.mono{font-family:var(--font-mono)}
+  /* …но список остаётся СПИСКОМ (макет: `.f select` без appearance): `appearance:none` выше снимал с него стрелку, и выбор цели
+     ODoH и «Запускать как» в «Задачах» читались полями ввода (сверка с макетом 16.10.2026). */
+  .f select{-webkit-appearance:auto;appearance:auto}
   .f textarea{min-height:78px;font-family:var(--font-mono);font-size:12.5px;resize:vertical}
   /* «Задачи» (07.10.2026, by the mockup): the five cron fields stay in ONE row on a phone too — a cron line reads only as a
      whole. The code editor has no soft wrap: a wrapped shell line reads as two. Settings side by side in a full-width strip —
@@ -1290,6 +1298,12 @@
   .dsfld>input,.dsfld>select,.dsfld>textarea{display:block;margin-top:5px}
   /* Шаг 5a («Сеть»): выбор резолвера — рядом с кнопкой, как поле ссылки (`.lnkrow>input`), а не во всю ширину с кнопкой под ним. */
   .lnkrow>select{flex:1 1 auto;min-width:0}
+  /* ODoH: «Цель» и «Ретранслятор» — два поля с подписью и кнопка в одном ряду (макет nw-dns), поле не шире 330; в узкой карточке
+     ряд переносится, и кнопка встаёт под полями. Кнопка — по низу полей: подпись над полем, а не рядом с кнопкой. */
+  .fpair{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+  .fpair>.f{flex:1 1 220px;max-width:330px;margin-top:0;min-width:0}
+  /* Строка «зачем этот протокол» между плитками и его выбором (макет nw-dns: 11 над, 10 под). */
+  .cline.dnsp-why{margin:11px 0 10px}
   /* Два поля рядом — `.f2` макета (две равные колонки), но по ширине КАРТОЧКИ: в узкой колонке — друг под другом. */
   /* The fields of a row carry no `.f` margin of their own (the second one kept it and sat 11 px lower than the first — BE7000,
      08.10.2026); the gap between stacked ones is the grid's. `.keep` (macket) — two columns at any width: a time range «С — До». */

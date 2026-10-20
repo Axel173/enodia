@@ -96,6 +96,8 @@ pi_safe() {
         configs/*|xray-configs/*|hy2-configs/*) return 1 ;;
         *.sh|*.conf.example|VERSION|update-manifest.txt|hev.yaml|web/*) return 0 ;;
         geo-*-catalog.txt|bin-manifest.txt) return 0 ;;
+        nfq-kmods.txt|nfq-kmods/*.tar.gz) return 0 ;; # signed, exact-firmware support data
+        nfq-kmods/README.txt|nfq-kmods/enodia_noflow.c) return 0 ;;
         amnezia-gw.pem) return 0 ;;   # Amnezia's PUBLIC key for Premium (premium.sh) — by its one name, not «any .pem»
         *) return 1 ;;
     esac

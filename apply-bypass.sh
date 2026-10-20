@@ -962,17 +962,18 @@ rebuild_keep() {
 # ему текущие сессии, а на буте нас зовут раньше, чем поднимется несущая.
 rebuild_desync() {
     [ -f "$ZAPRET_SH" ] || { [ -s "$STORE_DESYNC" ] && echo "[apply-bypass] десинк устройств: нет zapret.sh — пропуск"; return 0; }
+    _dsremove_fail=0
     _wired=$(sh "$ZAPRET_SH" src-list 2>/dev/null)
     for _old in $_wired; do
         grep -qxF "$_old" "$STORE_DESYNC" 2>/dev/null && continue
-        sh "$ZAPRET_SH" src-unwire "$_old" >/dev/null 2>&1
+        desync_unwire "$_old" || { _dsremove_fail=1; continue; }
         # Снять и ВТОРУЮ половину режима — ACCEPT «идти напрямую». Ловушка (поймана на железе
         # 04.08.2026 первым же прогоном): без этого устройство оставалось выведенным из туннеля,
         # но уже без десинка — то есть тихо получало ХУДШИЙ из режимов, которого никто не просил.
         # Гард по .bypass-ips обязателен: тот же ACCEPT может принадлежать режиму «мимо VPN».
         grep -qxF "$_old" "$STORE_IPS" 2>/dev/null || rule_del_ip "$_old"
     done
-    [ -s "$STORE_DESYNC" ] || { echo "[apply-bypass] десинк устройств: нет"; return 0; }
+    [ -s "$STORE_DESYNC" ] || { echo "[apply-bypass] десинк устройств: нет зарегистрированных"; return "$_dsremove_fail"; }
     _dsn=0; _dsfail=""
     while IFS= read -r _dsip; do
         [ -n "$_dsip" ] || continue
@@ -986,13 +987,22 @@ rebuild_desync() {
     # Провал src-wire = нет бинаря nfqws (или ядро не приняло NFQUEUE). Устройство при этом идёт
     # НАПРЯМУЮ, но без десинка — молчать об этом нельзя: в панели режим виден, а эффекта нет.
     echo "[apply-bypass] десинк устройств: $_dsn${_dsfail:+, БЕЗ десинка (нет nfqws?):$_dsfail}"
+    return "$_dsremove_fail"
+}
+# Refusal (including a busy source transaction) must precede persist/direct-path edits.
+desync_unwire() {
+    if [ -f "$ZAPRET_SH" ] && ! sh "$ZAPRET_SH" src-unwire "$1" >/dev/null 2>&1; then
+        echo "[apply-bypass] не удалось снять десинк устройства $1 — повторите после завершения текущей операции" >&2
+        return 1
+    fi
+    return 0
 }
 # Снять «в десинк» с адреса, если он там был (зовут противоположные вербы: режим устройства ОДИН).
 desync_drop() {   # $1 = IP
     [ -s "$STORE_DESYNC" ] || return 0
     grep -qxF "$1" "$STORE_DESYNC" 2>/dev/null || return 0
+    desync_unwire "$1" || return 1
     store_del "$STORE_DESYNC" "$1"
-    [ -f "$ZAPRET_SH" ] && sh "$ZAPRET_SH" src-unwire "$1" >/dev/null 2>&1
     return 0
 }
 
@@ -1178,11 +1188,11 @@ case "$1" in
     # --- вырезы «мимо VPN». conntrack_flush ОБЯЗАТЕЛЕН в каждой ветке, ровно как в force-*
     #     ниже: без него правило есть, а трафик идёт по-старому (NSS/ECM держит маршрут).
     #     Доказано на железе — см. комментарий к conntrack_flush.
-    add-ip)    [ -z "$2" ] && { echo "нужен IP";    exit 1; }; ensure_chain; desync_drop "$2"; store_add "$STORE_IPS" "$2"; rule_add_ip "$2"; conntrack_flush; echo "IP $2 -> хранилище + применён" ;;
+    add-ip)    [ -z "$2" ] && { echo "нужен IP";    exit 1; }; desync_drop "$2" || exit 1; ensure_chain; store_add "$STORE_IPS" "$2"; rule_add_ip "$2"; conntrack_flush; echo "IP $2 -> хранилище + применён" ;;
     # Снятие «мимо VPN» уносит и исключение из него: без выреза оно бессмысленно (устройство и так
     # метится ядром), а осиротевшая строка врала бы тумблером в панели. Владелец связи — движок,
     # чтобы CLI и панель не расходились.
-    del-ip)    [ -z "$2" ] && { echo "нужен IP";    exit 1; }; desync_drop "$2"; store_del "$STORE_IPS" "$2"; rule_del_ip "$2"; store_del "$STORE_KEEP" "$2"; rebuild_keep >/dev/null; conntrack_flush; echo "IP $2 убран из хранилища" ;;
+    del-ip)    [ -z "$2" ] && { echo "нужен IP";    exit 1; }; desync_drop "$2" || exit 1; store_del "$STORE_IPS" "$2"; rule_del_ip "$2"; store_del "$STORE_KEEP" "$2"; rebuild_keep >/dev/null; conntrack_flush; echo "IP $2 убран из хранилища" ;;
     add-dst)   [ -z "$2" ] && { echo "нужен CIDR";  exit 1; }; dst_ok "$2" || { echo "нужен IPv4 или CIDR"; exit 1; }
         ensure_chain; dst_store_del "$STORE_VPN_DST" "$2"; vpn_dst_del "$2"; dst_store_add "$STORE_DST" "$2"; rule_add_dst "$2"; conntrack_flush; echo "dst $2 -> хранилище + мимо VPN" ;;
     del-dst)   [ -z "$2" ] && { echo "нужен CIDR";  exit 1; }; dst_store_del "$STORE_DST" "$2"; dst_user_gone "$2"; conntrack_flush; echo "dst $2 убран из хранилища" ;;
@@ -1223,7 +1233,7 @@ case "$1" in
            sh "$ENODIA_DIR/slots.sh" list 2>/dev/null | awk -F"$TAB" -v i="${_fs#s}" '$1==i && $3=="zapret"{f=1} END{exit !f}'; then
             echo "выход №${_fs#s} — десинк (zapret): он работает по адресам назначения, направить в него устройство целиком нельзя"; exit 1
         fi
-        desync_drop "$2"
+        desync_drop "$2" || exit 1
         force_store_set "$2" "$_fs"; rebuild_force; conntrack_flush
         echo "IP $2 -> ЦЕЛИКОМ через VPN${_fs:+ (выход №${_fs#s})} (+хранилище)" ;;
     force-del-ip)  [ -z "$2" ] && { echo "нужен IP";    exit 1; }; force_store_del "$2"; rebuild_force; conntrack_flush; echo "IP $2 -> обычный режим (раздельный)" ;;
@@ -1345,7 +1355,11 @@ case "$1" in
         # а панель показывала бы «в десинк». Отказываем с причиной ДО записи в хранилище.
         # Вывод движка десинка глушим: свою причину печатаем сами, а дублировать её в одной
         # строке ответа панели («…НЕТ бинаря… десинк недоступен…») незачем.
-        sh "$ZAPRET_SH" src-wire "$2" >/dev/null 2>&1 || { echo "десинк недоступен: нет nfqws (поставьте Zapret в «Роутер → Компоненты»)"; exit 1; }
+        # …but a refusal names ITS cause: a busy device operation or the kernel package's owner were reported as «нет nfqws»
+        # with Zapret installed (review s.147). The engine's last own line; none — the old text.
+        _dsw=$(sh "$ZAPRET_SH" src-wire "$2" 2>&1) || {
+            _dsy=$(printf '%s\n' "$_dsw" | grep -E '^\[(zapret|nfq-platform)\] ' | tail -n 1 | sed 's/^\[[a-z-]*\] //; s/^src-wire: //')
+            echo "десинк недоступен: ${_dsy:-нет nfqws (поставьте Zapret в «Роутер → Компоненты»)}"; exit 1; }
         force_store_del "$2"; rebuild_force >/dev/null
         store_del "$STORE_IPS" "$2"; store_del "$STORE_KEEP" "$2"; rebuild_keep >/dev/null
         ensure_chain; store_add "$STORE_DESYNC" "$2"; rule_add_ip "$2"
@@ -1353,12 +1367,12 @@ case "$1" in
         echo "IP $2 -> напрямую + десинк рукопожатий (nfqws по источнику)" ;;
     desync-del-ip)
         [ -z "$2" ] && { echo "нужен IP"; exit 1; }
+        desync_unwire "$2" || exit 1
         store_del "$STORE_DESYNC" "$2"
         # ACCEPT «идти напрямую» снимаем ТОЛЬКО если он наш: тот же самый кирпич принадлежит режиму
         # «мимо VPN», и без гарда снятие десинка молча возвращало бы устройство в туннель (гард-
         # зеркало уже стоит в rebuild_desync — здесь его просто забыли).
         grep -qxF "$2" "$STORE_IPS" 2>/dev/null || rule_del_ip "$2"
-        [ -f "$ZAPRET_SH" ] && sh "$ZAPRET_SH" src-unwire "$2" >/dev/null 2>&1
         ct_flush_src "$2"
         echo "IP $2 -> обычный режим (раздельный)" ;;
     desync-list)   # по строке на IP — читает панель

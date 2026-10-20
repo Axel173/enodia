@@ -781,7 +781,7 @@ cmd_set() {
     # старый и en=on — диспетч требует именно этого) → запись → up НОВЫМ.
     reup=0
     case "$field" in transport|config) [ "$old_en" = on ] && reup=1 ;; esac
-    [ "$reup" = 1 ] && [ -f "$ENODIA_DIR/transport.sh" ] && sh "$ENODIA_DIR/transport.sh" slot-down "$id" >/dev/null 2>&1
+    if [ "$reup" = 1 ]; then slot_deactivate "$id" || return 1; fi
     # Not saved — the registry is busy for longer than the wait, or the write did not land: the registry kept the OLD line and
     # its carrier was taken down above — bring that one back, whichever of the two it was.
     _swhy=""
@@ -875,6 +875,15 @@ rebind_owners() {
 # сете: del честно вернул их в grp_vpn, а add обратно в grp_vpn_s<N> не забрал. Правила слота
 # стояли, сет был ПУСТ ⇒ пул молча ехал основным VPN. Несущую тем временем поднимал лишь
 # следующий тик watchdog (idem-slot-up) — до него выход не работал вовсе.
+slot_deactivate() {
+    [ -f "$ENODIA_DIR/transport.sh" ] || return 0
+    # 2 = nothing of a plugin to take down (no slot layer, or a transport this code does not know): slot-up raised nothing either.
+    # Only a real refusal keeps the exit — else it could be neither disabled nor deleted, and «повторите» would never help.
+    sh "$ENODIA_DIR/transport.sh" slot-down "$1" >/dev/null 2>&1 && return 0
+    [ "$?" = 2 ] && return 0
+    echo "[slots] выход №$1 не снят — настройки сохранены, повторите операцию"
+    return 1
+}
 slot_activate() {
     id="$1"
     if [ -f "$ENODIA_DIR/transport.sh" ]; then sh "$ENODIA_DIR/transport.sh" slot-up "$id" >/dev/null 2>&1
@@ -902,7 +911,8 @@ cmd_toggle() {
         slot_road_guard "$id" "выключайте выход" || return 1
         # Порядок: slot-down ПОКА слот ещё on (диспетч требует on: плагин снимает свою несущую/
         # десинк), ПОТОМ пишем off и снимаем ядро-следы (mark/ip rule) — cmd_unwire.
-        [ -f "$TRANSPORT_SH" ] && sh "$TRANSPORT_SH" slot-down "$id" >/dev/null 2>&1
+        # Already off (a second tab, a repeated click): the dispatch refuses an off exit, so only the idempotent cleanup below runs.
+        if [ "$(slot_line "$id" | cut -f6)" = on ]; then slot_deactivate "$id" || return 1; fi
         if ! write_en "$id" off; then   # still `on` in the registry, and its carrier is down already — bring it back
             [ -f "$TRANSPORT_SH" ] && sh "$TRANSPORT_SH" slot-up "$id" >/dev/null 2>&1
             return 1
@@ -941,7 +951,7 @@ cmd_del() {
     # Включённый слот — сперва опустить несущую/десинк через оркестратор (строка ещё on, диспетч
     # работает), потом снять ядро-следы и удалить из реестра.
     if [ "$(printf '%s' "$line" | cut -f6)" = on ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
-        sh "$ENODIA_DIR/transport.sh" slot-down "$id" >/dev/null 2>&1
+        slot_deactivate "$id" || return 1
     fi
     cmd_unwire "$id"
     # без полей = удалить строку (последняя ⇒ файл убираем целиком). Not removed — the registry is busy for longer than the wait,

@@ -10,6 +10,11 @@
 VERSION
 update-manifest.txt
 bin-manifest.txt
+nfq-kmods.txt
+nfq-kmods/ax3600-stock-1.1.21.tar.gz
+nfq-kmods/README.txt
+nfq-kmods/enodia_noflow.c
+nfq-platform.sh
 
 # Роутерные скрипты (ядро + плагины + рантайм)
 mark-core.sh

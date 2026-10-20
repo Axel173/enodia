@@ -611,6 +611,14 @@ if [ -f "$ENODIA_DIR/bin/dot-proxy.user" ]; then
     chmod +x "$ENODIA_BIN/dot-proxy"
     ok "dot-proxy (DoT) установлен"
 fi
+# quic-dns-proxy (DoQ, DoH3) — our DNS-over-QUIC / DNS-over-HTTP/3 forwarder, the QUIC protocols of the same layer; its own component
+# («DoQ и DoH3», packages.sh `quic`) on its own TLS stack (wolfSSL), ~350 KB, OFF by default.
+if [ -f "$ENODIA_DIR/bin/quic-dns-proxy.user" ]; then
+    log "Найден quic-dns-proxy.user (DoQ и DoH3), ставлю..."
+    mv "$ENODIA_DIR/bin/quic-dns-proxy.user" "$ENODIA_BIN/quic-dns-proxy"
+    chmod +x "$ENODIA_BIN/quic-dns-proxy"
+    ok "quic-dns-proxy (DoQ и DoH3) установлен"
+fi
 # panel-tls (HTTPS панели) — наш TLS-терминатор перед uhttpd панели (статик mbedTLS, ~290 КБ).
 # Стоковый uhttpd свой HTTPS не поднимет: он грузит крипто плагином libustream-ssl, которого в
 # прошивке нет, а собранный нами не заводится (вендорски патченый struct ustream — см. web-ui.sh).
@@ -636,7 +644,7 @@ fi
 # установке. Отсюда и жалоба «половину пакетов будто не видит». Печатаем ФАКТ, и спрашиваем его у
 # bin_path — он знает про внешний накопитель, поэтому «нет на /data» ≠ «нет вообще».
 _have=""; _miss=""
-for _b in amneziawg-go awg xray hev hysteria byedpi nfqws https-dns-proxy dot-proxy panel-tls dns-filter; do
+for _b in amneziawg-go awg xray hev hysteria byedpi nfqws https-dns-proxy dot-proxy quic-dns-proxy panel-tls dns-filter; do
     if [ -x "$(bin_path "$_b")" ]; then _have="$_have $_b"; else _miss="$_miss $_b"; fi
 done
 ok "Бинари на роутере:${_have:- (ни одного!)}"

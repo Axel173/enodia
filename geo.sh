@@ -1099,8 +1099,12 @@ emit_head() {
 	# nfq-ok, проба кэширована), своей копии пробы не заводим; rc=2 = старая копия верба не знает
 	# ⇒ НЕ сужу, прежнее поведение байт-в-байт (та же идиома, что в transport.sh и cgi-bin/data).
 	_zi=false
-	if [ -x "$(bin_path nfqws)" ]; then
-		_zi=true
+	# «Installed» is the orchestrator's answer — the binary AND, where the kernel needs it, the support package (AX3600): the binary
+	# alone offered «в десинк» there before the package was in place.
+	# No orchestrator (a partial copy) — the binary, as before.
+	if [ -f "$ENODIA_DIR/transport.sh" ]; then sh "$ENODIA_DIR/transport.sh" installed zapret >/dev/null 2>&1 && _zi=true
+	elif [ -x "$(bin_path nfqws)" ]; then _zi=true; fi
+	if [ "$_zi" = true ]; then
 		if [ -f "$ENODIA_DIR/zapret.sh" ]; then
 			sh "$ENODIA_DIR/zapret.sh" nfq-ok >/dev/null 2>&1 || [ "$?" = 2 ] || _zi=false
 		fi

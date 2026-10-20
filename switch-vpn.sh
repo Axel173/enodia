@@ -753,7 +753,10 @@ switch_to() {
         ''|awg) ;;
         *) if [ -f "$ENODIA_DIR/transport.sh" ]; then
                printf "${BLUE}[транспорт]${NC} отпускаю текущую несущую (%s) — переходим на AmneziaWG\n" "$cur_t"
-               sh "$ENODIA_DIR/transport.sh" down "$cur_t" >/dev/null 2>&1 || true
+               if ! sh "$ENODIA_DIR/transport.sh" down "$cur_t"; then
+                   echo "Прежний транспорт не снят — переключение отменено. Повторите попытку."
+                   return 1
+               fi
            fi ;;
     esac
 

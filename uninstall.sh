@@ -130,7 +130,7 @@ SET_PREFIXES="enodia_ iplist_ grp_ geo_ zapret_ blocklist_ xiaomi_"
 # переживший демон будет уже нечем.
 DAEMON_DIRS="$ENODIA_DIR $ENODIA_BIN"
 [ "${BIN_DIR:-$ENODIA_BIN}" != "$ENODIA_BIN" ] && DAEMON_DIRS="$DAEMON_DIRS $BIN_DIR"
-DAEMONS="amneziawg-go xray hysteria byedpi hev nfqws https-dns-proxy dot-proxy dns-filter"
+DAEMONS="amneziawg-go xray hysteria byedpi hev nfqws https-dns-proxy dot-proxy quic-dns-proxy dns-filter"
 # panel-tls — инфраструктура ПАНЕЛИ, а не VPN. `deactivate` обещает «панель работает», а вход в
 # неё мог идти по HTTPS: убив терминатор, мы рвём сессию человеку ровно в тот момент, когда он
 # нажал кнопку, и вернёт его только cron `web-ui.sh start` (до 5 минут). На `purge` панель и так
@@ -443,6 +443,16 @@ step_hosts() {
 # 4b. RAM-СЛЕД. `/tmp` гибнет на ребуте, но «снёс и работаю дальше» — законный сценарий, а
 #     пережившие удаление штамп/лок встречают ПЕРЕустановку: heal увидит свой бутовый лок и
 #     пропустит первый прогон, склейка dnsmasq — штамп «пары не менялись» и пропустит сборку.
+step_nfq_platform() {
+    # Finalize after consumers and daemons stopped, before deleting a live mount's source.
+    [ -f "$ENODIA_DIR/nfq-platform.sh" ] || return 0
+    _unp=release; [ "$1" != full ] || _unp=remove
+    if ! sh "$ENODIA_DIR/nfq-platform.sh" "$_unp" >> "$REPORT" 2>&1; then
+        set_state FAIL
+        log "Не сняты ресурсы NFQUEUE — файлы и панель оставлены. Устраните причину и повторите."
+        return 1
+    fi
+}
 step_ram() {         # $1 = full → вместе с логами и снимками (только purge)
     [ "$1" = full ] || return 0
     # Логи спрашиваем у ВЛАДЕЛЬЦА списка (clean.sh ramlogs-list) — второй копии реестра не
@@ -1105,20 +1115,23 @@ cmd_deactivate() {
     log "=== ДЕАКТИВАЦИЯ: снимаю обвязку VPN, файлы и настройки ОСТАВЛЯЮ ==="
     step_jobs           # ПЕРВЫМ: фоновая задача, убитая позже, успела бы переиграть снятое
     step_rules
+    # Намерение — ПОД ДРУГИМ ИМЕНЕМ (`server/.on-deact`): под `.on` его видят сторож и heal, и первое же горячее подключение
+    # накопителя (hotplug-tick → тик сторожа, в `full` — heal целиком) поднимало сервер с портом наружу на роутере, про который экран
+    # сказал «снято»; план и экран «Доступ домой» при этом звали его включённым (ревью шага 6d, круг 2). Обратно в `.on` его
+    # превращает только «включить обратно» — `cron-restore` (зовут `vpn-toggle on` и `transport switch`), а поднимает `heal.sh replay`.
+    # Right after `step_rules` (its `vpn-server.sh down` removed both flags), before any step that can refuse: a FAIL return below
+    # would otherwise lose the setting — the retry reads `_srv_on=0`.
+    if [ "$_srv_on" = 1 ] && [ -d "$ENODIA_STATE/server" ]; then : > "$ENODIA_STATE/server/.on-deact"; fi
     # `keep` — область снятия: панель (её цепочки, её cron-строка) и закрепление адресов в локалке
     # к обвязке VPN не относятся, см. CRON_PANEL. Тот же аргумент обязан дойти до ВЕРДИКТА, иначе
     # оставленное намеренно вернулось бы строкой «НЕ СНЯТО».
     step_sweep keep     # то, что владелец не снял (его может не быть — ранние версии)
     step_daemons
+    step_nfq_platform || return 1
     step_sets
     step_cron keep
     step_dnsmasq keep
     step_hosts          # ДО вердикта: он про hosts спрашивает
-    # Намерение — ПОД ДРУГИМ ИМЕНЕМ (`server/.on-deact`): под `.on` его видят сторож и heal, и первое же горячее подключение
-    # накопителя (hotplug-tick → тик сторожа, в `full` — heal целиком) поднимало сервер с портом наружу на роутере, про который экран
-    # сказал «снято»; план и экран «Доступ домой» при этом звали его включённым (ревью шага 6d, круг 2). Обратно в `.on` его
-    # превращает только «включить обратно» — `cron-restore` (зовут `vpn-toggle on` и `transport switch`), а поднимает `heal.sh replay`.
-    if [ "$_srv_on" = 1 ] && [ -d "$ENODIA_STATE/server" ]; then : > "$ENODIA_STATE/server/.on-deact"; fi
     # RAM-след при деактивации НЕ чистим СОЗНАТЕЛЬНО: система остаётся установленной, логи и штампы
     # ещё нужны для разбора. Единственное, что снималось тут раньше, — сид в /etc/hosts, и у него
     # теперь свой шаг выше; вызов `step_ram` без `full` стал бы пустым, а читался бы как работа.
@@ -1157,6 +1170,7 @@ cmd_purge() {
     step_rules
     step_sweep          # то, что владелец не снял (его может не быть — ранние версии)
     step_daemons "$DAEMONS_PURGE"
+    step_nfq_platform full || return 1
     step_sets
     step_cron
     step_dnsmasq

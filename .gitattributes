@@ -33,6 +33,8 @@ SHA256SUMS            text eol=lf
 
 # Бинарники под роутер (ELF/UPX) — НИКОГДА не трогать text-конверсией (иначе порча).
 *.user                binary
+nfq-kmods/*.tar.gz     binary
+nfq-kmods/*.c          text eol=lf
 # Amnezia's public key for Premium (premium.sh): its EXACT bytes are a key — the gateway lists' AES key is SHA-512 of them (799
 # bytes, no final LF). A conversion of line ends would be a different key; C138 pins the sum.
 amnezia-gw.pem        binary
@@ -54,6 +56,9 @@ amnezia-gw.pem        binary
 # «not applied» (09.10.2026), with nothing changed in the code.
 *.c                   text eol=lf
 *.h                   text eol=lf
+# Our patches over upstream sources (dev/doh/odoh/hdp-odoh.patch): `patch` under WSL matches context lines byte for byte —
+# a CRLF copy of the patch would not apply to the LF upstream tree.
+*.patch               text eol=lf
 # Манифест зависимостей ПК-стороны: читают uv/pip на macOS и Linux. Правила на *.toml не
 # было вовсе — ровно поэтому requirements.txt приехал в репо с CRLF при живом «*.txt eol=lf»
 # (внешний аудит 18.08.2026): без правила git отдаёт файл по core.autocrlf машины.

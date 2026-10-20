@@ -1429,6 +1429,26 @@ doh_health_sweep() {
             4) log "DoH: DoT снова отдаёт имена — шифрованный DNS вернулся на выбранный DoT" ;;
             # Повтор — не на следующей сверке, а через DOH_DOT_RETRY (бэкофф doh_port_tick; ревью ветки, круг 3).
             5) log "DoH: DoT текущим путём не отдаёт имён, и DoH того же резолвера тоже — остаюсь на DoT, следующая попытка переезда — через $(( ${DOH_DOT_RETRY:-3600} / 60 )) мин" ;;
+            # The QUIC level (DoQ/DoH3 → a rung on the other TLS stack): which protocols — the library's labels (doh_proto_label).
+            # From a rung that went mute in its turn (DOH_LV_FROM — doh-lib.sh::doh_lv_fallback): both protocols are named.
+            6) if [ -n "${DOH_LV_FROM:-}" ]; then
+                   log "DoH: ни $(doh_proto_label "$(doh_proto)"), ни $(doh_proto_label "$DOH_LV_FROM") текущим путём не отдают имён, а $(doh_proto_label "$(doh_proto_now)") того же резолвера отдаёт — шифрованный DNS переведён на $(doh_proto_label "$(doh_proto_now)")"
+               else
+                   log "DoH: $(doh_proto_label "$(doh_proto)") текущим путём не отдаёт имён, а $(doh_proto_label "$(doh_proto_now)") того же резолвера отдаёт — шифрованный DNS переведён на $(doh_proto_label "$(doh_proto_now)")"
+               fi ;;
+            7) log "DoH: $(doh_proto_label "$(doh_proto)") снова отдаёт имена — шифрованный DNS вернулся на выбранный протокол" ;;
+            # «Other rungs», not «below»: since round 2 a mute bottom rung tries the live rungs ABOVE it too (doh_lv_up).
+            8) log "DoH: $(doh_proto_label "$(doh_proto_now)") текущим путём не отдаёт имён, и другие ступени тоже — остаюсь как есть, следующая попытка переезда — через $(( ${DOH_QUIC_RETRY:-3600} / 60 )) мин" ;;
+        esac
+    fi
+    # ODoH — та же сверка для посредника: ретранслятор молчит ⇒ другой, затем DoH напрямую к цели; с отката раз в DOH_ODOH_RETRY —
+    # обратно на ODoH. Какая ступень сработала, пишет в журнал панели сама библиотека (doh_odoh_event), здесь — строка лога сторожа.
+    if command -v doh_odoh_tick >/dev/null 2>&1; then
+        doh_odoh_tick wan_probe_ok; case $? in
+            3) log "DoH: ODoH не отдавал имён — переключился на следующую ступень (другой ретранслятор или DoH напрямую к цели)" ;;
+            4) log "DoH: ретранслятор снова отвечает — шифрованный DNS вернулся на ODoH" ;;
+            # 6 — the ladder found nothing alive recently and waits (doh_odoh_tick): nothing changed, nothing to log every tick.
+            5) log "DoH: ODoH не отдаёт имён ни через один ретранслятор, и DoH к цели тоже — DNS остаётся как есть, следующая попытка — через $(( ${DOH_ODOH_RETRY:-900} / 60 )) мин" ;;
         esac
     fi
     doh_health_tick wan_probe_ok; _dhr=$?

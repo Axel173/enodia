@@ -115,6 +115,8 @@ level_of() {
 		# Оба «работает, но не штатно» — тот же уровень, что у failover-ok\rollback выше;
 		# тревожного слова в ключе нет, значит глоб их не возьмёт — только это перечисление.
 		# doh-dot-fallback — выбран DoT, а порт 853 не проходит: DNS шифруется, но по DoH (doh-lib.sh).
+		# odoh-fallback — ODoH chosen, no relay answers: DNS is encrypted, but by DoH straight to the target, which sees the address.
+		# doh-quic-fallback — DoQ or DoH3 chosen, QUIC does not pass: DNS is encrypted, but by DoT or DoH of the same resolver (doh-lib.sh).
 		# hev-restart-* — залипшую прослойку TUN→прокси сторож перезапустил сам (slot-tun-lib.sh): работает, но соединения рвались.
 		# sched-clock — access schedules are not acting: the router clock is not synced yet (access-sched.sh, once per boot).
 		# sched-filter — «limited» is not acting (no filter component / it did not start) or acts again; geo-want-snap-skip — a
@@ -126,7 +128,7 @@ level_of() {
 		# stockbak-reoff — a firmware update turned the stock settings backup on again; the person had it off, heal turned it off
 		# again (stock-backup.sh): done, but the stock changed a choice behind the person's back.
 		stockbak-reoff)           echo warn ;;
-		transport-missing|geo-snap-skip|geo-want-snap-skip|doh-auto-off|doh-dot-fallback|subs-active-gone|cross-switch|rule-heal|hev-restart-*|sched-clock|sched-filter) echo warn ;;
+		transport-missing|geo-snap-skip|geo-want-snap-skip|doh-auto-off|doh-dot-fallback|doh-quic-fallback|odoh-fallback|subs-active-gone|cross-switch|rule-heal|hev-restart-*|sched-clock|sched-filter) echo warn ;;
 		*)                        echo info ;;
 	esac
 }
@@ -151,7 +153,8 @@ class_of() {
 		iplist-*|ipblock-*|geo-*) echo lists ;;
 		task-*)                   echo tasks ;;   # the user's own tasks (tasks.sh): failure / done — the mail choice is also per task
 		# sched-<id> / sched-clock — access schedules (access-sched.sh): the journal only, it sends no mail
-		rule-heal|clock-step|store-mode-fail|doh-auto-off|doh-enable-failed|doh-dot-fallback|doh-dot-back|hev-restart-*|sched-*|stockbak-reoff) echo system ;;
+		# vpn-off-fail — «Отключить VPN» gave up after its bounded retries (vpn-toggle.sh cmd_off_settle): the journal only, no mail.
+		rule-heal|clock-step|store-mode-fail|doh-auto-off|doh-enable-failed|doh-dot-fallback|doh-dot-back|doh-quic-*|odoh-*|hev-restart-*|sched-*|stockbak-reoff|vpn-off-fail) echo system ;;
 		*)                        echo system ;;
 	esac
 }
