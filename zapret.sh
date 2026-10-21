@@ -278,9 +278,17 @@ migrate_cats() {
 
 # ---- стратегия (аргументы nfqws) --------------------------------------------
 # Санитайз под charset аргументов nfqws (буквы/цифры/пробел/-+,.:/=_@). @ — для токенов фейков.
+# …AND BY OPTION (review s.153 r2): the strategy travels in the settings backup, and nfqws runs as ROOT — the charset stops a shell,
+# not an option. Dropped whole: what WRITES a file or changes who nfqws is (--pidfile, --debug[=@file], --daemon, --user/--uid/
+# --gid, --hostlist-auto*), and ANY word that carries a path (`/` or `..`) — a fake's file would go out as packet payload, and the
+# value decides, not the option's name: nfqws takes `--opt value` as well as `--opt=value`, and getopt_long takes an abbreviated
+# name (review s.153 r3). The project's strategies carry no path at all: fakes are @tokens (@tls, @quic), the import drops file
+# lists. A name allow-list would be stricter — backlog.
 strip_sani() {
     printf '%s' "$1" | tr '\r\n' '  ' \
-        | sed 's#[^A-Za-z0-9 +,.:/=_@-]##g; s#[[:space:]]\{1,\}# #g; s#^ ##; s# $##'
+        | sed 's#[^A-Za-z0-9 +,.:/=_@-]##g; s#[[:space:]]\{1,\}# #g; s#^ ##; s# $##' \
+        | tr ' ' '\n' | grep -vE '^--(pidfile|debug|daemon|user|uid|gid|hostlist-auto[a-z-]*)(=|$)|/|\.\.' \
+        | tr '\n' ' ' | sed 's# $##'
 }
 # Аргументы из .zapret-args (непустой, без #-комментов) либо DEFAULT_ARGS.
 desync_args() {

@@ -9,6 +9,35 @@
 : "${ENODIA_BIN:=/data/usr/app/enodia-bin}"
 config_file="$ENODIA_STATE/amnezia_for_awg.conf"
 interface_config="$ENODIA_STATE/awg0.conf"
+
+# guest_dns on|migrate — THE GUESTS' DNS GOES TO THE ROUTER'S dnsmasq (192.168.33.1), whatever server a guest asked — not to the
+# tunnel's resolver. It used to be DNAT-ed to the config's `DNS =` (172.29.172.254 at Amnezia), reachable only through awg0 while
+# AmneziaWG carries AND encrypted DNS is off (restore_vpn_dns lays that route only then). Measured on BE7000 20.10.2026 (VPN on,
+# AmneziaWG, DoT on, guests «мимо VPN»): `ip route get 172.29.172.254 from 192.168.33.10 iif br-guest` → `dev eth0` — a private
+# address out of the ISP port, the guest network without names; the same with the VPN switched off, another transport carrying or
+# FAILOPEN. dnsmasq resolves the way the router does now (the tunnel, DoH/DoT, plain), and the alt transports never laid this DNAT —
+# guests resolved there already. Capturing a guest's own DNS server stays, as before.
+# Every guest DNAT with another target goes (the tunnel resolver of this or a previous config, the old form on a router updated over
+# it) — compared WHOLE, to the end of the line: reload comes once per boot now (the zone below), and a stale rule would stay FIRST.
+# `migrate` — only where such an old rule exists (the update's path, install.sh: a router that never had the rule gets none);
+# the verb `guest-dns` runs this alone, without a config, the zone or the daemon (review s.152 r1 B-L2: the fix reached a running
+# router only at its next reboot). Uninstall sweeps the rule by its own pattern (uninstall.sh, nat PREROUTING).
+guest_dns() {
+    _gdo=$(iptables -t nat -S PREROUTING 2>/dev/null | grep -E -- '^-A PREROUTING -s 192\.168\.33\.0/24 .*--dport 53 -j DNAT --to-destination ' \
+        | grep -vE -- '--to-destination 192\.168\.33\.1:53$')
+    [ "$1" = migrate ] && [ -z "$_gdo" ] && return 0
+    printf '%s\n' "$_gdo" | sed -n 's/^-A /-D /p' | while read -r _gd; do iptables -t nat $_gd 2>/dev/null; done
+    iptables -t nat -C PREROUTING -p udp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination 192.168.33.1:53 2>/dev/null || iptables -t nat -A PREROUTING -p udp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination 192.168.33.1:53
+    iptables -t nat -C PREROUTING -p tcp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination 192.168.33.1:53 2>/dev/null || iptables -t nat -A PREROUTING -p tcp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination 192.168.33.1:53
+    [ "$1" = migrate ] && echo "Гостевая сеть: DNS гостей — к dnsmasq роутера (прежнее правило к резолверу туннеля снято)"
+    return 0
+}
+case "${1:-}" in
+    guest-dns)
+        # The xtables lock — ipt-lib.sh's wrapper, as for the whole file below; without it a rule SILENTLY does not go in.
+        if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
+        guest_dns "${2:-on}"; exit 0 ;;
+esac
 # «ОТКЛЮЧИТЬ VPN» — awg0 НЕ ПОДНИМАЕМ ДАЖЕ ТЁПЛЫМ РЕЗЕРВОМ. Нас зовут пятеро (heal на буте, смена и перебор серверов switch-vpn,
 # плагин awg, доустановка протокола), и каждый прошёл свою проверку флага РАНЬШЕ: перебор серверов досчитывал до живого и поднимал
 # awg0 минуты спустя после выключения (ревью ветки, круг 2). Спрашиваем здесь, в единственном месте, где awg0 рождается, — ДО (ничего
@@ -30,14 +59,12 @@ if [ ! -f "$config_file" ]; then
     exit 1
 fi
 
-# Парсим Address/DNS устойчиво к формату конфига: «=» с пробелами ИЛИ без, dual-stack
+# Парсим Address устойчиво к формату конфига: «=» с пробелами ИЛИ без, dual-stack
 # через запятую (берём первый токен = IPv4), хвостовой CR. Старый `-F' = '` требовал
 # РОВНО «Address = X»: на экспорте без пробелов (Address=...) или с IPv6 через запятую он
 # возвращал пусто → `ip a add` ниже падал, и awg0 оставался БЕЗ IPv4 (handshake идёт,
 # данные не ходят, rx≈0). Идиома та же, что для DNS в install.sh.
 address=$(grep -E '^[[:space:]]*Address[[:space:]]*=' "$config_file" | head -1 | sed 's/^[^=]*=[[:space:]]*//' | cut -d',' -f1 | tr -d ' \t\r')
-# dns-raw: the first look, before the libraries are loaded — replaced below by dns-lib.sh::conf_dns (the first value that IS an address)
-dns=$(grep -E '^[[:space:]]*DNS[[:space:]]*=' "$config_file" | head -1 | sed 's/^[^=]*=[[:space:]]*//' | cut -d',' -f1 | tr -d ' \t\r')
 # MTU — wg-quick-директива (в awg0.conf НЕ идёт, см. awk ниже), но применяем её к awg0
 # отдельно через `ip link set mtu`. Конфиги Cloudflare WARP несут MTU=1280 — без него
 # awg0 остался бы на дефолтных 1420 (крупные пакеты через WARP фрагментируются/теряются).
@@ -59,7 +86,6 @@ mtu=$(grep -E '^[[:space:]]*MTU[[:space:]]*=' "$config_file" | head -1 | sed 's/
 # пути; альтернатива (оставить 1420) — тихая деградация в 200 раз на пути с PMTU<1500.
 AWG_MTU_DEFAULT=1376
 echo "AmneziaWG client address: $address"
-echo "DNS: $dns"
 
 if [ -f "$interface_config" ]; then
     echo "$interface_config already exists"
@@ -110,15 +136,6 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # файл — генератор awg0.conf, и «тихо ничего не сгенерировали» читалось бы как «awg не поднялся».
 if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; else
     echo "нет $ENODIA_DIR/dns-lib.sh — обновите установку (панель → «Обновление» или переустановка с компьютера)" >&2; exit 1
-fi
-# DNS — the first value of the line that IS an address (dns-lib.sh::conf_dns, the reader the carrier plugin asks too): wg-quick
-# takes search domains in `DNS =`, and «the first comma part» above could be a word — the guest's DNAT below would name it.
-# A library older than the function keeps the value parsed above.
-if command -v conf_dns >/dev/null 2>&1; then
-    _dns0=$dns; dns=$(conf_dns "$config_file")
-    # The line «DNS: …» above printed the first look: say it when the resolver is another value (hardware walk 13.10.2026 — the
-    # log said «DNS: corp.local» over a config whose resolver was taken as 1.1.1.1).
-    [ "$dns" = "$_dns0" ] || echo "DNS: резолвер — ${dns:-нет адреса в строке} (первое значение строки, «$_dns0», — не адрес)"
 fi
 ep_src=$(grep -E '^[[:space:]]*Endpoint[[:space:]]*=' "$config_file" | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d ' \t\r')
 ep_host=$(echo "$ep_src" | sed 's/:[0-9]*$//')
@@ -315,7 +332,7 @@ fi
 # ПОЧЕМУ ЭТОТ БЛОК СТОИТ ПОСЛЕ `firewall reload`, А НЕ ДО (найдено ревью, батч 4).
 # fw3 reload флашит ВСЕ iptables. Раньше блок стоял ВЫШЕ него — и наш же reload сносил
 # свежепоставленные правила через пару строк: в рантайме от «гостевой сети» жила только
-# uci-зона, а DNAT гостевого DNS на $dns и MASQUERADE 192.168.33.0/24 не существовали
+# uci-зона, а DNAT гостевого DNS и MASQUERADE 192.168.33.0/24 не существовали
 # НИКОГДА (симптом: гость в VPN, но резолвит мимо/не резолвит вовсе). ip route/ip rule
 # reload не трогает, но держим их вместе с остальным блоком — читается как одно целое.
 #
@@ -363,24 +380,8 @@ iptables -C FORWARD -i br-guest -s 192.168.33.1 -p udp --sport 53 -j ACCEPT 2>/d
 iptables -C FORWARD -i br-guest -o awg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i br-guest -o awg0 -j ACCEPT
 iptables -C FORWARD -i awg0 -o br-guest -j ACCEPT 2>/dev/null || iptables -A FORWARD -i awg0 -o br-guest -j ACCEPT
 
-# NAT: DNS-запросы гостя -> upstream ($dns).
-# Гард на пустой $dns: в конфиге может не быть строки `DNS=` вовсе (нативные .conf её несут не
-# всегда), и правило собиралось как `--to-destination :53` — iptables ругался в лог, а правила
-# не было. Для Address такой случай логировался, для DNS — нет; теперь говорим прямо.
-# DNAT НА DNS ПРЕЖНЕГО СЕРВЕРА — СНЯТЬ. Его смывал firewall reload на каждой смене сервера; теперь reload бывает раз на
-# загрузку (см. зону выше), и правило прошлого конфига осталось бы ПЕРВЫМ: у WARP DNS = 1.1.1.1, у Amnezia — 172.29.172.254,
-# и гость после смены слал бы запросы туда, куда новый туннель не ведёт (гостевая сеть без имён). Снимаем всё, что смотрит
-# не в $dns; пустой $dns — снимаем всё (гость идёт к dnsmasq роутера, как и обещает строка ниже).
-iptables -t nat -S PREROUTING 2>/dev/null \
-    | grep -E -- '^-A PREROUTING -s 192\.168\.33\.0/24 .*--dport 53 -j DNAT --to-destination ' \
-    | grep -vF -- "--to-destination ${dns:-x}:53" | sed 's/^-A /-D /' \
-    | while read -r _gd; do iptables -t nat $_gd 2>/dev/null; done
-if [ -n "$dns" ]; then
-    iptables -t nat -C PREROUTING -p udp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination ${dns}:53 2>/dev/null || iptables -t nat -A PREROUTING -p udp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination ${dns}:53
-    iptables -t nat -C PREROUTING -p tcp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination ${dns}:53 2>/dev/null || iptables -t nat -A PREROUTING -p tcp -s 192.168.33.0/24 --dport 53 -j DNAT --to-destination ${dns}:53
-else
-    echo "ВНИМАНИЕ: поля DNS нет в $config_file — DNAT гостевого DNS не ставим (гость пойдёт к dnsmasq роутера)." >&2
-fi
+# NAT: a guest's DNS goes to the ROUTER's dnsmasq — guest_dns above.
+guest_dns on
 
 # NAT: MASQUERADE гостя через awg0
 iptables -t nat -C POSTROUTING -s 192.168.33.0/24 -o awg0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 192.168.33.0/24 -o awg0 -j MASQUERADE

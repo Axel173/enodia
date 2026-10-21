@@ -61,6 +61,7 @@ if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot()   { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
 SLOTS_FILE="$ENODIA_STATE/.slots"
 MIN_ID=2
 MAX_ID=7
@@ -100,6 +101,8 @@ valid_transport() {
 }
 
 slot_line() { grep "^$1$TAB" "$SLOTS_FILE" 2>/dev/null | head -n1; }
+# The kernel's rule of exit <id> — its `ip rule` line of `fwmark 0x<id>` (mark-core owns it); empty when there is none.
+slot_rule() { ip rule show 2>/dev/null | grep "fwmark 0x$1 " | head -n1; }
 
 # --- ЗАПИСЬ В РЕЕСТР: лок + атомарная подмена ------------------------------------------------
 # Реестр правят НЕСКОЛЬКО потребителей (клик в панели, второй клик, slot-* из сторожа/heal), а
@@ -354,7 +357,7 @@ slot_state() {   # <id> <transport> <fallback>
         if [ "$_srul" = 1 ] && [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null; then echo up; else echo down; fi
         return 0
     fi
-    _srl=$(ip rule show 2>/dev/null | grep "fwmark 0x$_sid " | head -n1)
+    _srl=$(slot_rule "$_sid")
     [ -n "$_srl" ] || { echo down; return 0; }
     if ip route show table "100$_sid" 2>/dev/null | grep -q '^default'; then   # not-wan: несущая СЛОТА (table 100N), а не основная и не WAN
         # Маршрут есть — но у socks-выходов (byedpi/xray/hy2) он ведёт в tun2socks, а тот без
@@ -810,7 +813,13 @@ cmd_set() {
     # fallback — политику ip rule держит mark-core (владелец правил слота): без переигровки у
     # выхода с УПАВШЕЙ несущей осталась бы прежняя политика (main вместо direct и наоборот).
     if [ "$field" = fallback ] && [ "$old_en" = on ] && [ -f "$ENODIA_DIR/mark-core.sh" ]; then
+        _sfr=$(slot_rule "$id")
         sh "$ENODIA_DIR/mark-core.sh" >/dev/null 2>&1
+        # A down exit's rule moved (direct ↔ the main tunnel): its established flows would ride the old way under ECM — only its own
+        # are flushed (ct-lib.sh; review s.153 r2). Only when the rule REALLY moved: a live exit keeps 100N, and with the VPN off
+        # mark-core changes nothing — and after a reboot there is no save rule, so ct-lib's fail-safe would tear the whole house
+        # (review s.153 r3).
+        [ "$(slot_rule "$id")" = "$_sfr" ] || ct_flush_slot "$id"
     fi
     echo "[slots] слот №$id: $field обновлён"
 }
@@ -926,7 +935,7 @@ cmd_toggle() {
 # Снять СЛЕДЫ слота из ядра: MARK/ACCEPT его сетов в mangle + ip rule его марки. Сеты и
 # таблицу НЕ трогаем (сеты — собственность groups/geo, несущую слота опустит её плагин в Ф1+).
 # После снятия mangle-правил ОБЯЗАТЕЛЕН conntrack -F: NSS/ECM-offload держит старый маршрут
-# для установленных соединений (грабля проекта). Дешёвого точечного -D по сету нет — флашим.
+# для установленных соединений (грабля проекта). Сброс — только соединений ЭТОГО выхода (ct-lib.sh: марка 0xN сохранена в conntrack), не всего дома.
 cmd_unwire() {
     id="$1"
     valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
@@ -940,7 +949,7 @@ cmd_unwire() {
     # fallback=main держит правило слота в table 1000 (FALLBACK-AWARE в mark-core) — снимаем
     # ОБЕ формы (без pref: матч по fwmark 0xN однозначен, основной 0x1 не заденем).
     ip rule del fwmark "0x$id" table 1000 2>/dev/null || true
-    ct_flush
+    ct_flush_slot "$id"   # only this exit's flows (ct-lib.sh): the house keeps its connections
 }
 
 cmd_del() {

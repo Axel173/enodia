@@ -36,7 +36,7 @@
 #
 # Использование:
 #   switch-vpn.sh                — список конфигов
-#   switch-vpn.sh <имя>          — переключиться на configs/<имя>.conf
+#   switch-vpn.sh <имя>          — переключиться на configs/<имя>.conf (код 0 — встал; 4 — не встал, прежний сервер AmneziaWG возвращён; 1 — иное)
 #   switch-vpn.sh status         — текущий статус
 #   switch-vpn.sh rollback       — вручную откатиться на .last.bak
 #   switch-vpn.sh failover       — перебрать резервы и встать на первый рабочий
@@ -820,7 +820,7 @@ switch_to() {
             return 1
         fi
         printf "${YELLOW}=> откатываюсь на снимок${NC}\n"
-        rollback
+        switch_rollback
         return $?
     fi
     if [ "$_sw_ic" != 0 ]; then
@@ -866,7 +866,7 @@ Check the log and free space: cat /tmp/enodia-switch-vpn-setup.log; df -h"
         # Отпускали ЧУЖУЮ несущую — её же и возвращаем: откат поднял бы СТАРЫЙ awg-конфиг и через
         # apply_routing записал бы `.transport=awg`, то есть смена СЕРВЕРА сменила бы ТРАНСПОРТ.
         if alt_back; then return 1; fi
-        rollback
+        switch_rollback
         return $?
     fi
 
@@ -889,10 +889,17 @@ Check the log and free space: cat /tmp/enodia-switch-vpn-setup.log; df -h"
         printf "${RED}[FAIL]${NC} %s не подключается (handshake не пришёл за %d сек)\n" "$target" "$HS_WAIT"
         printf "${YELLOW}=> автооткат на предыдущий конфиг${NC}\n\n"
         if alt_back; then return 1; fi
-        rollback
+        switch_rollback
         return $?
     fi
 }
+
+# THE SWITCH'S CODE AFTER ITS OWN ROLLBACK (found 04.10.2026, s.98). The rollback came back — but the server the person chose did
+# NOT come up, and code 0 made the panel's toast green over «[ОТКАТ OK] вернулся на …». Code 4 = «rolled back: the previous server
+# carries, the chosen one did not come up» — not 0 (what was asked did not happen) and not 1 (the house is not left without the
+# VPN). The hand verb `rollback` keeps rollback's own 0: there the return IS what was asked. Readers: the panel's CGI (`run`: ok
+# only on 0) and subs-update.sh::refresh_awg (judges by the working copy, not by the code).
+switch_rollback() { rollback && return 4; return 1; }
 
 # Откат на сохранённый бэкап. СУДИМ ПО ФЛАГУ ЭТОГО ПРОГОНА (_sw_bak), а не по наличию файла:
 # см. разбор у снимка в switch_to. Ручной верб `rollback` флага не имеет — там он пуст, и
@@ -1317,6 +1324,23 @@ case "$1" in
         if key_busy "$2"; then printf "${RED}[FAIL]${NC} %s\n" "$KEY_BUSY"; exit 1; fi
         install_config "$_st_src" "$2" || exit 1
         printf "${GREEN}[OK]${NC} конфиг %s разложен (awg.conf + amnezia_for_awg.conf). Несущая НЕ тронута.\n" "$2"
+        # THE WARM RESERVE GOES ONTO THE NEW COPY (review s.152 r1 A-M1/B-L1). Another transport carries and awg0 stands by for the
+        # return home — the watchdog decides that return by ITS handshake (fo_home_transport_back). Left on the old server, a dead
+        # old address never shook hands again and the return never came, though the chosen server answered; ensure_carrier's
+        # address check is reached only on that return. The same rule as subs-update.sh::refresh_awg and road.sh's `warm`; the
+        # carrier that carries is not touched (rewarm refuses while AmneziaWG carries). No warm awg0 — nothing to re-raise. The road
+        # rules follow the reserve inside the rewarm (transport-awg.sh::cmd_rewarm wires them once awg0.conf is rebuilt — an Endpoint
+        # by NAME is read off it; wired here, before it, the rule of such a config was dropped — review s.152 r3).
+        _st_t=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
+        case "$_st_t" in ''|awg) ;; *)
+            if [ -e /sys/class/net/awg0 ] && ! carrier_barred && [ -f "$ENODIA_DIR/transport.sh" ]; then
+                if sh "$ENODIA_DIR/transport.sh" rewarm awg >/dev/null 2>&1 </dev/null; then
+                    printf "${GREEN}[OK]${NC} тёплый резерв AmneziaWG поднят на нём.\n"
+                else
+                    printf "${YELLOW}[warn]${NC} тёплый резерв AmneziaWG на новом конфиге не поднялся — вернётся с ближайшим переходом на AmneziaWG.\n"
+                fi
+            fi ;;
+        esac
         ;;
     refresh)
         # THE TEXT OF THE ACTIVE CONFIG CHANGED ON DISK (a subscription rewrote configs/<name>.conf): bring the working copies

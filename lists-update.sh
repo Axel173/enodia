@@ -39,6 +39,9 @@ if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
+# The legacy iplist.conf is READ, never run (conf-lib.sh: it travels in backups); no library — the migration's defaults.
+if [ -f "$ENODIA_DIR/conf-lib.sh" ]; then . "$ENODIA_DIR/conf-lib.sh"; fi
+command -v conf_load >/dev/null 2>&1 || conf_load() { return 1; }
 # Под `[ -f ]` (инвариант проекта): провалившийся `.` в ash — фатальная ошибка спецбилтина, шелл
 # выходит НА МЕСТЕ и молча. Библиотека здесь — весь движок, шима быть не может ⇒ честный отказ.
 if [ -f "$ENODIA_DIR/lists-lib.sh" ]; then . "$ENODIA_DIR/lists-lib.sh"; else
@@ -63,7 +66,11 @@ jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 migrate_tunnel_cidr() {
 	_reg=$(reg_path tunnel-cidr); [ -f "$_reg" ] && return 0
 	IPLIST_URL=''; IPLIST_SITES=''; IPLIST_CUSTOM_MODE=''; IPLIST_CUSTOM_FILE="$ENODIA_STATE/iplist.custom"
-	[ -f "$ENODIA_STATE/iplist.conf" ] && . "$ENODIA_STATE/iplist.conf"
+	conf_load "$ENODIA_STATE/iplist.conf" IPLIST_URL IPLIST_SITES IPLIST_CUSTOM_MODE   # the custom list — always our own file
+	# An archive's values are not trusted into the registry (review s.153 r1–2): a url only as a web address (fetch_url refuses the
+	# rest anyway — not stored, the default source instead); IPLIST_CUSTOM_FILE is not read at all (a file the backup keeps out
+	# would be copied into a blob every export carries).
+	case "$IPLIST_URL" in http://*|https://*) ;; *) IPLIST_URL='' ;; esac
 	_base='https://iplist.opencck.org/?format=text&data=cidr4'
 	if   [ -n "$IPLIST_URL" ];   then _u="$IPLIST_URL"; _l="свой URL"
 	elif [ -n "$IPLIST_SITES" ]; then _u="$_base"; for _s in $IPLIST_SITES; do _u="$_u&site=$_s"; done; _l="сайты: $IPLIST_SITES"

@@ -47,6 +47,7 @@ command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$
 # No ipt-lib.sh with `mss_clamp` (a partial update) ⇒ the old path: no clamp.
 command -v mss_clamp >/dev/null 2>&1 || { mss_clamp() { :; }; mss_unclamp() { :; }; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
 TABLE=1000
 IFACE=awg0
 FWMARK=0x1
@@ -196,7 +197,8 @@ FW3_WIPED=0
 # `awk -F'= *'` отдавал 43 знака без хвостового «=» против 44 у демона ⇒ сверка не сходилась НИКОГДА, и
 # каждый подъём поверх тёплого резерва пересоздавал awg0 с `awg_setup` и firewall reload (замер на BE7000,
 # 27.09.2026: фолбэк «Выкл» на неизменный сервер — «awg0 поднят с ДРУГИМ сервером — пересоздаю»).
-carrier_matches_conf() {
+carrier_matches_conf() { carrier_keys_match && carrier_endpoint_fresh; }
+carrier_keys_match() {
     _cmw=$(wg_bin); [ -n "$_cmw" ] || return 0          # сверять нечем — прежнее поведение
     # Пиров бывает несколько, а порядок их у userspace-демона случаен (обход Go-map): «последний в файле ↔ первый у демона» давал
     # ложное «другой сервер» и пересоздание с firewall reload (ревью 28.09.2026, круг 2) ⇒ КАЖДЫЙ пир демона обязан быть в конфиге.
@@ -221,10 +223,35 @@ carrier_matches_conf() {
     [ -n "$_cmq" ] || return 0
     [ "$_cmp" = "$_cmq" ]
 }
+# …AND THE SAME ADDRESS (found 13.10.2026, s.132). The server's keys outlived a move — a subscription moved it to another address with
+# the same keys, or the address was edited by hand — and a warm awg0 kept knocking on the old one until the watchdog's ladder
+# recreated it. The address is judged only when a layout came AFTER this daemon was set up: awg0.conf is derived, install_config
+# removes it on every layout and awg_setup builds it again only when the interface is recreated. It is there — the daemon was built
+# from it, and a recreate would not change the address (awg_setup takes the same file: a hand edit of awg.conf without removing it
+# is the loop of the project map's rake); it is gone — a recreate builds a new one. And only an IPv4 literal: a name is resolved at
+# build time (DDNS — another address without a config change), IPv6 is not our case. The daemon's live address may also move by
+# itself (WireGuard roaming: the server answered from another address) — that costs one extra recreate: after it awg0.conf is there.
+carrier_endpoint_fresh() {
+    [ -f "$ENODIA_STATE/awg0.conf" ] && return 0
+    command -v is_ipv4 >/dev/null 2>&1 || return 0      # no dns-lib (a partial update) — not judged
+    _cew=$(wg_bin); [ -n "$_cew" ] || return 0
+    _cec=$(sed -n 's/^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*//p' "$ACTIVE_CONF" 2>/dev/null | sed "s/#.*//" | tr -d ' \t\r')
+    [ -n "$_cec" ] || return 0
+    for _cex in $_cec; do
+        case "${_cex##*:}" in ''|*[!0-9]*) return 0 ;; esac   # no port — not judged
+        is_ipv4 "${_cex%:*}" || return 0                    # a name or an IPv6 literal — not judged
+    done
+    _ced=$("$_cew" show "$IFACE" endpoints 2>/dev/null | awk '{print $2}' | tr -d '\r')
+    for _cex in $_ced; do
+        [ "$_cex" = "(none)" ] && continue
+        printf '%s\n' "$_cec" | grep -qxF -e "$_cex" || return 1
+    done
+    return 0
+}
 ensure_carrier() {
     if ip link show "$IFACE" >/dev/null 2>&1; then
         carrier_matches_conf && return 0
-        log "awg0 поднят с ДРУГИМ сервером (конфиг сменили, пока несущая была тёплым резервом) — пересоздаю"
+        log "awg0 поднят с ДРУГИМ сервером или адресом (конфиг сменили, пока несущая была тёплым резервом) — пересоздаю"
         ip link del "$IFACE" 2>/dev/null
     fi
     for s in /etc/init.d/awg /etc/init.d/amneziawg /etc/init.d/amnezia; do
@@ -557,7 +584,7 @@ cmd_slot_up() {   # $1 = id, $2 = cfg
     # keep its MTU above the road's ceiling. The return probe has the same line.
     [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" mtu-fix >/dev/null 2>&1
     [ "$SLOT_FRESH" = 1 ] && slot_wait_hs "$(slot_iface "$_id")"
-    ct_flush
+    ct_flush_slot "$_id"   # only this exit's flows (ct-lib.sh): a global flush tore the whole house on every flap
     log "слот №$_id: awg-несущая $(slot_iface "$_id") в table $(slot_table "$_id") (конфиг $_cfg)"
     return 0
 }
@@ -569,18 +596,18 @@ cmd_slot_down() {   # $1 = id
     [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1   # снять анти-петлю слота
     awg_kill_daemon "$_if"                      # гасим демон (владелец TUN) — TUN уходит следом
     ip link del "$_if" 2>/dev/null              # cleanup, если TUN пережил демон
-    ct_flush
+    ct_flush_slot "$_id"
     log "слот №$_id: awg-несущая $_if снята"
     return 0
 }
 
 # ВОЗВРАТ СНЯТОГО ВЫХОДА — ПРОБА СЕРВЕРА БЕЗ ПЕРЕПРОВОДКИ (тестер 02.10.2026: выход, снятый сторожем, лежал до ручного «выключить
-# и включить» или ребута). Пробовать полным slot-up нельзя: он кончается ct_flush — сброс УСТАНОВЛЕННЫХ соединений всего дома, — и
+# и включить» или ребута). Пробовать полным slot-up нельзя: он кончается сбросом соединений выхода (до 20.10.2026 — всего дома), — и
 # на лежащем сервере сторож платил бы этим на каждой попытке. Проба — свой awgN БЕЗ маршрута в table 100N: mark-core судит выход
 # по default в 100N (slots.sh slot_state — так же), значит метки выхода по-прежнему едут запасным путём, а панель видит то же
 # состояние. Анти-петля — ДО первого пакета: иначе рукопожатие ушло бы в основной туннель (IP сервера в iplist_set) и «прошло»
 # там, где прямой путь к серверу закрыт, — выход вернулся бы, чтобы через три минуты лечь снова. Первый пакет шлёт keepalive на
-# подъёме (slot_keepalive до `ip link set up`). Рукопожатие есть — достраиваем выход ровно как slot-up (маршрут + ct_flush), нет —
+# подъёме (slot_keepalive до `ip link set up`). Рукопожатие есть — достраиваем выход ровно как slot-up (маршрут + ct_flush_slot), нет —
 # снимаем всё поднятое; сброса соединений у неудачной попытки нет. Коды: 0 — выход вернулся · 1 — сервер не ответил · 3 — ключ занят
 # живым держателем: сервер ни при чём, причину покажет панель (key_clash) · 4 — несущая не встала (нет конфига, программы AmneziaWG,
 # демон не стартовал; причина строкой выше): сервер НЕ СУДИЛИ, и письмо «сервер не отвечает» было бы неправдой · 5 — несущая уже
@@ -635,7 +662,7 @@ cmd_slot_probe() {   # $1 = id, $2 = cfg
                 # Потолок MTU дороги (road.sh): mtu-fix бежал при анти-петле — ДО интерфейса, и вернувшийся выход ехал бы по WARP 1280
                 # со своими 1376 (ревью с.118, круг 2). slot-up does the same: its anti-loop also goes in before the first packet.
                 [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" mtu-fix >/dev/null 2>&1
-                ct_flush
+                ct_flush_slot "$_id"
                 log "слот №$_id: сервер ответил за ${_w}с — awg-несущая $_if снова в table $(slot_table "$_id") (конфиг $_cfg)"
                 return 0
             fi
@@ -819,7 +846,16 @@ cmd_rewarm() {
         ""|awg) log "rewarm: AmneziaWG сейчас несёт трафик — это основной канал, а не резерв"; return 1 ;;
     esac
     cmd_cold
-    if ensure_carrier; then replay_fw3 repair; log "тёплый резерв AmneziaWG поднят заново ($IFACE)"; return 0; fi
+    if ensure_carrier; then
+        replay_fw3 repair
+        # THE ROADS AFTER THE RESERVE IS UP (review s.152 r2/r3): road.sh derives the main rule from `.active`'s Endpoint, and a
+        # NAME there is read off awg0.conf — which install_config removed and ensure_carrier's awg_setup has just rebuilt. Wired
+        # before (in `stage`), a road config by name lost its rule; not wired at all, a reserve raised on a config that rides a road
+        # knocked straight at its blocked address, and the home return never came. bring_up wires after awg_setup for the same
+        # reason; wire also lowers the road's MTU. No `.cfg-via` — nothing to do.
+        [ -f "$ENODIA_DIR/road.sh" ] && [ -s "$ENODIA_STATE/.cfg-via" ] && sh "$ENODIA_DIR/road.sh" wire >/dev/null 2>&1
+        log "тёплый резерв AmneziaWG поднят заново ($IFACE)"; return 0
+    fi
     replay_fw3 repair
     log "rewarm: $IFACE не поднялся — резерв пропал до следующей загрузки"
     return 1

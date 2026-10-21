@@ -74,7 +74,13 @@ if [ -f "$_dl" ]; then . "$_dl"; fi
 command -v resolve_ipv4 >/dev/null 2>&1 || resolve_ipv4() { nslookup "$1" 2>/dev/null | awk '/^Name:/{f=1;next} f&&/Address/{x=$NF; if(x ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/){print x; exit}}'; }
 
 [ -f "$CONF" ] || { echo "$(date) notify: нет $CONF — почта не настроена, письмо не ушло" >>"$LOG"; exit 3; }
-. "$CONF"
+# READ, never run (conf-lib.sh): notify.conf travels in the settings backup, and sourced, a foreign archive's line ran as root
+# with the next mail. No library (a partial update) — no mail settings: «не заполнен» below, never the file run.
+_cl="$(dirname "$0")/conf-lib.sh"
+if [ -f "$_cl" ]; then . "$_cl"; fi
+command -v conf_load >/dev/null 2>&1 || conf_load() { return 1; }
+SMTP_HOST=""; SMTP_PORT=""; SMTP_TLS=""; SMTP_USER=""; SMTP_PASS=""; MAIL_TO=""
+conf_load "$CONF" SMTP_HOST SMTP_PORT SMTP_TLS SMTP_USER SMTP_PASS MAIL_TO
 
 if [ -z "$SMTP_HOST" ] || [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ] || [ -z "$MAIL_TO" ]; then
     echo "$(date) notify: notify.conf не заполнен (нет SMTP_PASS?) — письмо не ушло" >>"$LOG"

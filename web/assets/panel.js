@@ -10097,6 +10097,7 @@
     "настройки почты неполные — нужны сервер, логин, пароль и адрес получателя":"the email settings are incomplete — a server, login, password and recipient address are needed",
     "Письмо не ушло: настройки почты не читаются — пересохраните форму настройки почты":"The email was not sent: the email settings cannot be read — save the email settings form again",
     "пароль пуст и прежнего нет — введите пароль приложения":"password is empty and there is no previous one — enter the app password",
+    "прежний пароль не сохранить как есть — введите пароль приложения заново":"the previous password cannot be kept as it is — enter the app password again",
     "пароль: только латиница, цифры и знаки ._@!#%^*+=:~- — без пробелов и кавычек":"password: Latin letters, digits and the characters ._@!#%^*+=:~- only — no spaces or quotes",
     "не удалось записать notify.conf":"failed to write notify.conf","журнал событий недоступен — обновите скрипты роутера":"event log unavailable — update the router scripts",
     "обновление уже идёт":"an update is already running",
@@ -12635,6 +12636,9 @@
     // точного ключа быть не может. Хвост длинный и специфичный — стоит выше коротких токенов.
     [/ выбран для AmneziaWG\. Чтобы пойти через него, включите AmneziaWG в «Транспорт VPN» наверху панели\./g,
      " selected for AmneziaWG. To route through it, turn AmneziaWG on in «VPN transport» at the top of the panel."],
+    // …and the stage's warning glued to it: the warm reserve did not come up on the new copy (switch-vpn.sh stage, review s.152 r1).
+    ["тёплый резерв AmneziaWG на новом конфиге не поднялся — вернётся с ближайшим переходом на AmneziaWG.",
+     "the AmneziaWG warm reserve did not come up on the new config — it comes back with the next switch to AmneziaWG."],
     // Загрузка конфига сервера (`upload_config`): хвост — ВЫШЕ общего «^Конфиг », иначе тот съедал начало, и тост оставался
     // полурусским, а значит русским целиком (ревью dev233, круг 2).
     // …и импорт руками, имя файла которого уже было у ДРУГОГО конфига: роутер сохранил под свободным (ревью с.95). Имена — данные.

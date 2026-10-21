@@ -2,6 +2,8 @@
 # ct-lib.sh — ЕДИНСТВЕННЫЙ ответ проекта на вопрос «сбросить УЖЕ УСТАНОВЛЕННЫЕ соединения»,
 # чтобы только что поставленное правило начало действовать СЕЙЧАС, а не когда сайт отвиснет сам.
 # Сорсится (`. ct-lib.sh`), сам ничего не печатает и не меняет.
+# Owns ONE kernel rule (`ct_mark_save`: the packet mark copied into the ct mark) — only so a flush can be scoped to one path
+# (`ct_flush_slot`/`ct_flush_route`, the section below).
 #
 # ЗАЧЕМ ВООБЩЕ. Qualcomm NSS/ECM ускоряет уже установленные потоки в железе: пакеты такого потока
 # netfilter БОЛЬШЕ НЕ ВИДИТ. Поэтому у нас инвариант: любая ветка, меняющая mangle/ipset, обязана
@@ -45,6 +47,88 @@ ct_flush() {
 	if _ct_have_tool; then conntrack -F >/dev/null 2>&1 || true; return 0; fi
 	_ct_ecm_defunct || true
 	return 0
+}
+
+# --- A FLUSH SCOPED TO ONE PATH (tester 20.10.2026: «one exit falls — games and RDP of the whole house drop») ---------------
+# Every exit's slot-up/slot-down ended with ct_flush: one episode «exit dies → returns» was two house-wide `conntrack -F`. The
+# stock wan zone answers an unknown packet with `tcp-reset`, so a server packet that arrived before the client's next one met no
+# entry and got an RST: video reconnects quietly, a game or an RDP session drops. The flows that really change path on an exit's
+# flap are the exit's own (its mark) and the carriers riding it as a road (`ip rule to <server> lookup 100N`).
+#
+# HOW A FLOW IS TOLD APART AFTER THE FACT. The packet mark (MARK 0xN in mangle) lives on packets, not on the connection; the ct
+# mark is the connection's. ONE rule copies the low byte of the packet mark into the ct mark on every ORIGINAL-direction packet
+# (mangle POSTROUTING, the last hook every forwarded and local packet passes — after any MARK+ACCEPT pair, so no family of rules
+# changes). Original direction only: a reply carries mark 0 and would wipe the flow's mark. The low byte only: our marks are
+# 0x1 (main) and 0x2..0xN (exits); nfqws's own 0x40000000 and anything the stock puts above stay out. Measured 20.10.2026: BE7000
+# (5.4, iptables 1.6.2, conntrack 1.4.4) and AX3600 (4.4) take the rule; the ct mark was free on both (every entry mark=0).
+#
+# FAIL-SAFE. A scoped flush that finds no such rule in the kernel (an fw3 reload wiped mangle, an old mark-core, the rule refused)
+# would delete NOTHING — every flow would read mark 0 — so it falls back to the global flush: never less than before. Flows that
+# began before the rule went in carry mark 0 too; the kernel paths that put it in (boot heal, repair after an update) flush
+# globally themselves. Without the conntrack tool (kernel 4.4) everything degrades to the accelerator knob, as the rest of this file.
+#
+# WHO STILL FLUSHES GLOBALLY, AND WHY: a transport switch, FAILOPEN, «Отключить VPN» and repair change more than one path at once
+# (the DoH anchors' mark form, the tunnel resolver's route, every rule) — unmarked flows move there too; zapret marks nothing.
+CT_MARK_MASK=0xff
+# The rule goes in through ipt-lib.sh's wait for the xtables lock (ENODIA_DIR is the includer's, as for doh-lib/slot-tun-lib): a
+# lock held by a stock cron would otherwise refuse it silently — and every scoped flush would fall back to the global one.
+if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
+CT_SAVE_CHAIN=POSTROUTING
+CT_SAVE_SPEC="-m conntrack --ctdir ORIGINAL -m comment --comment enodia-ctmark -j CONNMARK --save-mark --nfmask $CT_MARK_MASK --ctmask $CT_MARK_MASK"
+
+# ct_mark_save on|off|check — the ONLY owner of that rule. `on` (mark-core, every wiring) keeps it FIRST in the chain: zapret's
+# wiring inserts its NFQUEUE at 1 too (after mark-core at boot), and NFQUEUE's verdict ends the chain for the packets it takes — a
+# rule found lower is moved back to the top (review s.153 r1). `off` (mark-core unwire) removes every copy. `check` answers 0 only
+# when the rule is there; any other answer of `-C` (lock, no module) is «not there» — the safe direction.
+ct_mark_save() {
+	case "$1" in
+		on)    case "$(iptables -t mangle -S "$CT_SAVE_CHAIN" 2>/dev/null | sed -n 2p)" in *"--comment enodia-ctmark "*) return 0 ;; esac
+		       while iptables -t mangle -D "$CT_SAVE_CHAIN" $CT_SAVE_SPEC 2>/dev/null; do :; done
+		       iptables -t mangle -I "$CT_SAVE_CHAIN" 1 $CT_SAVE_SPEC 2>/dev/null ;;
+		off)   while iptables -t mangle -D "$CT_SAVE_CHAIN" $CT_SAVE_SPEC 2>/dev/null; do :; done; return 0 ;;
+		check) iptables -t mangle -C "$CT_SAVE_CHAIN" $CT_SAVE_SPEC 2>/dev/null ;;
+		*)     return 1 ;;
+	esac
+}
+
+# ct_flush_mark <mark> — the flows whose ct mark (its low byte) is <mark>.
+ct_flush_mark() {
+	[ -n "$1" ] || return 0
+	if _ct_have_tool; then conntrack -D --mark "$1/$CT_MARK_MASK" >/dev/null 2>&1 || true; return 0; fi
+	_ct_ecm_defunct || true
+	return 0
+}
+
+# ct_flush_route <mark> <table> — the flows whose path goes through <table>: <mark> itself (asked even when its ip rule points
+# elsewhere right now — a down exit with fallback=main sends its mark to 1000 until it is back) and, by the kernel's own rules
+# (`ip rule`), every other mark and every destination (a road: `to <server> lookup 100N`) that leads into <table>.
+ct_flush_route() {
+	if ! _ct_have_tool || ! ct_mark_save check; then ct_flush; return 0; fi
+	ct_flush_mark "$1"
+	[ -n "$2" ] || return 0
+	ip rule show 2>/dev/null | awk -v t="$2" '{
+		l = ""; m = ""; d = ""
+		for (i = 1; i < NF; i++) {
+			if ($i == "lookup" || $i == "table") l = $(i + 1)
+			if ($i == "fwmark") m = $(i + 1)
+			if ($i == "to") d = $(i + 1)
+		}
+		if (l != t) next
+		if (m != "") print "m " m; else if (d != "") print "d " d
+	}' | while read -r _ctk _ctv; do
+		case "$_ctk" in
+			m) ct_flush_mark "${_ctv%%/*}" ;;
+			d) ct_flush_dst "${_ctv%/32}" ;;
+		esac
+	done
+	return 0
+}
+
+# ct_flush_slot <id> — an exit's flap: its mark 0x<id> and whatever rides its table 100<id>. A word that is not a number is a
+# caller's error — the global flush, not a silent no-op.
+ct_flush_slot() {
+	case "$1" in ''|*[!0-9]*) ct_flush; return 0 ;; esac
+	ct_flush_route "0x$1" "100$1"
 }
 
 # ct_flush_src <ip> — точечно по ИСТОЧНИКУ (не рвём сессии всей сети). Без утилиты вырождается в

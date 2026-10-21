@@ -64,6 +64,9 @@ SWITCH_LOCK=/tmp/enodia-switching.lock
 # «бинаря нет» и «бинарь на выдернутой флешке» обязаны читаться ОДИНАКОВО — как «транспорт не
 # готов», после чего работает штатный fail-open. Без накопителя — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
+# An exit's own flows flushed once more after mark-core re-points its rule (slot_reflush below); no library — as before, no flush here.
+if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { :; }
 command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$ENODIA_BIN/$1"; }
 
 # Реестр: порядок приоритета и cross-перебора. Порядок = приоритет cross («awg» как
@@ -603,8 +606,11 @@ _slot_dispatch() {
     return $src
 }
 
-cmd_slot_up()   { _slot_dispatch slot-up "$1";   src=$?; apply_marking; return $src; }
-cmd_slot_down() { _slot_dispatch slot-down "$1"; src=$?; apply_marking; return $src; }
+# The plugin flushed the exit's flows inside its verb, but mark-core moves the exit's `ip rule` only HERE (up → its 100N; down with
+# fallback=main → 1000): connections that made fresh entries in between ride the old way under ECM. One more flush of the exit's
+# own flows after the re-point — scoped, so it costs the house nothing (review s.153 r1; the global flush had the same window).
+cmd_slot_up()   { _slot_dispatch slot-up "$1";   src=$?; apply_marking; ct_flush_slot "$1"; return $src; }
+cmd_slot_down() { _slot_dispatch slot-down "$1"; src=$?; apply_marking; ct_flush_slot "$1"; return $src; }
 # Здоровье ДОП-ВЫХОДА (Ф3) — БЕЗ переигрыша маркировки, её зовёт watchdog каждый тик. Плагин отвечает 0 = жив / 1 = просел;
 # 2 = «не умеет slot-health» (тогда сторож решает по своим признакам, как для awg/byedpi); 5 = сервер жив, путь через hev мёртв и
 # перезапуск не помог; 4 = путь через hev мёртв, но идёт смена транспорта — не судили. Маршрутов проба не меняет, но
@@ -615,7 +621,7 @@ cmd_slot_health() { _slot_dispatch slot-health "$1"; }
 # лишь при ответе (разбор — transport-awg.sh cmd_slot_probe). Маркировку переигрываем ТОЛЬКО при возврате: неудачная попытка
 # ничего не меняла, а переигрыш на каждой — лишняя работа каждые пару минут. Коды плагина: 0 вернулся · 1 нет ответа · 3 ключ
 # занят · 4 несущая не встала (сервер не судили) · 5 несущая уже есть · 6 выход сменили по ходу · 2 не умеет (альты, старый плагин).
-cmd_slot_probe() { _slot_dispatch slot-probe "$1"; src=$?; [ "$src" = 0 ] && apply_marking; return $src; }
+cmd_slot_probe() { _slot_dispatch slot-probe "$1"; src=$?; [ "$src" = 0 ] && { apply_marking; ct_flush_slot "$1"; }; return $src; }
 
 # ИМЯ НЕСУЩЕЙ ДОП-ВЫХОДА (`awgN` у awg, `xtunN` у альтов, ПУСТО у zapret — своей несущей у десинка
 # нет вовсе). Спрашивает УЧЁТ ТРАФИКА: «сколько прошло через выход №N» считается по счётчикам его

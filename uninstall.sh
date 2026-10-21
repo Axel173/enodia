@@ -61,6 +61,10 @@ command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null
 # «Жив ли держатель и тот ли это процесс» — единственный ответ у daemon-lib.sh (план спрашивает, идёт ли снятие). Шим —
 # прежнее «жив» (частичный apply-scripts не должен ронять план).
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
+# One lock around the crontab with its other writers (cron-lib.sh: six of them read-modify-write the file, and the later write
+# dropped the earlier one's line); no library (a partial update) — no lock, as before.
+if [ -f "$ENODIA_DIR/cron-lib.sh" ]; then . "$ENODIA_DIR/cron-lib.sh"; fi
+command -v cron_hold >/dev/null 2>&1 || { cron_hold() { :; }; cron_drop() { :; }; }
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
 command -v pkg_install_alive >/dev/null 2>&1 || pkg_install_alive() { return 1; }
 command -v uninstall_alive >/dev/null 2>&1 || uninstall_alive() {
@@ -375,7 +379,11 @@ sweep_run() {        # $1 = count|del ; $2 = keep → цепочки ПАНЕЛ�
     # нет в CHAINS_FILTER, — а раз доборка судит по СОСТОЯНИЮ ядра, исключение обязано быть и у неё.
     _jump="AWG|VPN_|VPNSRV"
     [ "$2" = keep ] || _jump="$_jump|PANEL_WAN"
-    _our="match-set ($_sp)|-[io] ($_if)|-j ($_jump)"
+    # …and the guests' DNS DNAT of awg_setup.sh (guest_dns: to the router's dnsmasq, or the old form — to the tunnel's resolver): no
+    # set, interface or chain of ours to know it by, and it outlived the removal (review s.152 r1 B-L2). Only a DNAT from the guest
+    # subnet to port 53 matches — nothing of the stock's own.
+    # …and ct-lib.sh's ct-mark save rule (mangle POSTROUTING): no set, interface or chain either — known by its own comment.
+    _our="match-set ($_sp)|-[io] ($_if)|-j ($_jump)|^-A PREROUTING -s 192\\.168\\.33\\.0/24 .*--dport 53 -j DNAT |--comment enodia-ctmark( |\$)"
     # Цепочки-родители перечислены явно: `-S` без имени отдаёт и наши собственные цепочки, а их
     # содержимое снимается вместе с ними ниже — считать его дважды значит соврать в плане.
     for _pr in "mangle PREROUTING" "mangle OUTPUT" "mangle POSTROUTING" "nat PREROUTING" \
@@ -555,6 +563,7 @@ step_cron() {        # $1 = keep → строку панели оставляе�
     _ct=/etc/crontabs/root
     _kept=""
     [ -f "$_ct" ] || return 0
+    cron_hold "$_ct"   # held through `tasks.sh apply` below: the child passes by ENODIA_CRON_HOLDER, a third writer waits
     _was=$(cron_ours -c "$_ct" 2>/dev/null); [ -n "$_was" ] || _was=0
     # `&& mv` тут был ловушкой: busybox `grep -v`, не напечатав НИ ОДНОЙ строки, возвращает 1 —
     # а это ровно случай «в кроне только наши строки» (файл заводит наш же установщик через
@@ -588,7 +597,7 @@ step_cron() {        # $1 = keep → строку панели оставляе�
     if [ "$_cdr" != 1 ]; then
         rm -f "$_ct.new" 2>/dev/null
         log "ВНИМАНИЕ: новый crontab записать не удалось (нет места?) — расписание НЕ снято, файл оставлен как был."
-        return 0
+        cron_drop; return 0
     fi
     # Adopted lines. A task line is ours, the line it replaced was not — the firmware's SSH-access patch among them: removed with
     # ours, SSH closed after the next reboot (review s.106). The crontab without our lines goes to `tasks.sh apply`, and it writes
@@ -601,6 +610,7 @@ step_cron() {        # $1 = keep → строку панели оставляе�
         else log "ВНИМАНИЕ: ${_rel:-tasks.sh не ответил} — строки, взятые задачами из crontab, не отданы: верните их в «Задачах» или по SSH."; fi
     fi
     [ -f "$_ct.new" ] && mv "$_ct.new" "$_ct"
+    cron_drop
     /etc/init.d/cron restart >/dev/null 2>&1 || /etc/init.d/crond restart >/dev/null 2>&1
     log "Cron: снято строк $_was$_kept."
     # Access schedules once more, now that their tick line is gone: a tick that started between step_rules and here put its
@@ -621,13 +631,14 @@ cmd_cron_restore() {
     if [ -f "$ENODIA_STATE/server/.on-deact" ]; then mv -f "$ENODIA_STATE/server/.on-deact" "$ENODIA_STATE/server/.on" 2>/dev/null; fi
     _ct=/etc/crontabs/root
     mkdir -p /etc/crontabs 2>/dev/null
+    cron_hold "$_ct"   # through `tasks.sh apply` below, as step_cron
     [ -f "$_ct" ] || : > "$_ct"
     _n=0; _ctw=""
     if [ -s "$CRON_SAVE" ]; then
     # A working copy next to the file: the restored lines and the tasks' derivation reach the crontab in ONE write (below). Copied
     # line by line — a file without a trailing \n would glue the first restored line onto its last one.
     _ctw="$_ct.restore"
-    while IFS= read -r _l || [ -n "$_l" ]; do printf '%s\n' "$_l"; done < "$_ct" > "$_ctw" || { rm -f "$_ctw"; echo "не удалось записать crontab"; return 1; }
+    while IFS= read -r _l || [ -n "$_l" ]; do printf '%s\n' "$_l"; done < "$_ct" > "$_ctw" || { rm -f "$_ctw"; cron_drop; echo "не удалось записать crontab"; return 1; }
     # `|| [ -n "$_l" ]` — файл без хвостового \n иначе потерял бы ПОСЛЕДНЮЮ строку (грабля busybox).
     while IFS= read -r _l || [ -n "$_l" ]; do
         [ -n "$_l" ] || continue
@@ -682,6 +693,7 @@ cmd_cron_restore() {
         if [ "$_n" != 0 ]; then mv -f "$_ctw" "$_ct"; /etc/init.d/cron restart >/dev/null 2>&1 || /etc/init.d/crond restart >/dev/null 2>&1
         else rm -f "$_ctw"; fi
     fi
+    cron_drop
     [ -s "$CRON_SAVE" ] || { echo "расписание не снималось — возвращать нечего"; return 0; }
     rm -f "$CRON_SAVE"
     echo "Расписание возвращено: строк $_n (сторож, самовосстановление, обновление списков)."

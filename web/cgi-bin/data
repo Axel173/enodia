@@ -79,6 +79,12 @@ command -v ip_is_local   >/dev/null 2>&1 || ip_is_local()   { return 0; }
 # сообщение посреди буквы (с 24.09.2026 сводку режет по записи сам писатель — subs-lib.sh::sub_sum_cut).
 # Шим = ПРЕЖНЕЕ поведение файла, если либа не доехала.
 if [ -f "$D/json-lib.sh" ]; then . "$D/json-lib.sh"; fi
+# notify.conf — read by the ONE parser of settings files (conf-lib.sh), the same answer notify.sh gets.
+if [ -f "$D/conf-lib.sh" ]; then . "$D/conf-lib.sh"; fi
+command -v conf_load >/dev/null 2>&1 || conf_load() {   # no library: the PREVIOUS read-only sed (the panel never sourced the file)
+	[ -f "$1" ] || return 1; _cof=$1; shift
+	for _cok in "$@"; do _cov=$(sed -n "s/^$_cok=//p" "$_cof" 2>/dev/null | head -1 | tr -d "\"'\\\\"); eval "$_cok=\$_cov"; done
+}
 command -v jesc >/dev/null 2>&1 || {
 	jesc() { tr -d '\033\r' | sed 's/\[[0-9;]*m//g' | tr '\n\t' '  ' | cut -c1-"$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 }
@@ -625,13 +631,12 @@ emit_wifi() {
 # для префилла формы. Пароль НЕ отдаём наружу — только флаг has_pass.
 emit_notify() {
 	en=true;  [ -f "$DS/.notify-off" ] && en=false
-	cf=false
-	if [ -s "$DS/notify.conf" ] && grep -q '^SMTP_PASS=.' "$DS/notify.conf" 2>/dev/null; then cf=true; fi
-	host=$(sed -n 's/^SMTP_HOST=//p' "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
-	port=$(sed -n 's/^SMTP_PORT=//p' "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
-	tls=$(sed -n  's/^SMTP_TLS=//p'  "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
-	user=$(sed -n 's/^SMTP_USER=//p' "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
-	mto=$(sed -n  's/^MAIL_TO=//p'   "$DS/notify.conf" 2>/dev/null | head -1 | tr -d '"\\')
+	# The values notify.sh will send with (conf-lib.sh: the last assignment, quotes taken off), each through jesc into the JSON.
+	SMTP_HOST=''; SMTP_PORT=''; SMTP_TLS=''; SMTP_USER=''; SMTP_PASS=''; MAIL_TO=''
+	conf_load "$DS/notify.conf" SMTP_HOST SMTP_PORT SMTP_TLS SMTP_USER SMTP_PASS MAIL_TO
+	cf=false; [ -n "$SMTP_PASS" ] && cf=true
+	host=$(printf '%s' "$SMTP_HOST" | jesc 200); port=$(printf '%s' "$SMTP_PORT" | jesc 10)
+	tls=$(printf '%s' "$SMTP_TLS" | jesc 20); user=$(printf '%s' "$SMTP_USER" | jesc 200); mto=$(printf '%s' "$MAIL_TO" | jesc 200)
 	# «О ЧЁМ ПИСАТЬ» — поводы называет РОУТЕР (events.sh — владелец классов и файла выбора), панель лишь подписывает их
 	# словами. Роутер старше (нет верба `classes`) — поля нет вовсе: панель скажет это, а не нарисует пустой выбор.
 	cl=''

@@ -86,7 +86,13 @@ IPLIST_SITES=''
 IPLIST_MIN_LINES=10
 IPLIST_CUSTOM_MODE=''                        # only|merge|'' — кастомный локальный список (ортогонален источнику скачивания)
 IPLIST_CUSTOM_FILE="$ENODIA_STATE/iplist.custom"  # файл кастомного списка (CIDR/IP построчно), переживает ребут
-[ -f "$ENODIA_STATE/iplist.conf" ] && . "$ENODIA_STATE/iplist.conf"
+# READ, never run (conf-lib.sh): iplist.conf travels in the settings backup, and sourced, a foreign archive's line ran as root at
+# 5:00. Only these keys; no library (a partial update) — the defaults above.
+if [ -f "$ENODIA_DIR/conf-lib.sh" ]; then . "$ENODIA_DIR/conf-lib.sh"; fi
+command -v conf_load >/dev/null 2>&1 || conf_load() { return 1; }
+# IPLIST_CUSTOM_FILE is NOT read: the custom list is always our own file. A path from an archive — even one inside the state dir —
+# would put a file the backup keeps out (the TOTP secret, the panel password) into the pool and the next export (review s.153 r1–2).
+conf_load "$ENODIA_STATE/iplist.conf" IPLIST_BASE IPLIST_URL IPLIST_SITES IPLIST_MIN_LINES IPLIST_CUSTOM_MODE
 case "$IPLIST_MIN_LINES" in ''|*[!0-9]*) IPLIST_MIN_LINES=10 ;; esac   # защита от мусора в конфиге
 case "$IPLIST_CUSTOM_MODE" in only|merge) ;; *) IPLIST_CUSTOM_MODE='' ;; esac   # только эти два режима, иначе off
 [ -n "$IPLIST_CUSTOM_FILE" ] || IPLIST_CUSTOM_FILE="$ENODIA_STATE/iplist.custom"
@@ -172,6 +178,10 @@ load_set_from_files() {
 # срабатывает шаг 1 — поведение прежнее, фолбэк не трогается.
 fetch_url() {
     _u="$1"; _o="$2"
+    # ONLY a web address goes to curl (review s.153 r1): a source's url travels in the settings backup (the `lists/` registry,
+    # the legacy iplist.conf), and a value that starts with `-` is an OPTION to curl — `-K<file>` reads a config that writes
+    # anywhere (boot.sh, the target of every cron line). file:// and the rest are refused too.
+    case "$_u" in http://*|https://*) ;; *) return 1 ;; esac
     # 1) штатный путь (туннель уже несёт — обычный суточный апдейт)
     # -f/-L как в lists-lib.sh: без `--fail` страница 404/«переехали» — это код 0 и непустой файл,
     # то есть «скачалось» (дальше её спасает лишь порог IPLIST_MIN_LINES); без `--location` тело

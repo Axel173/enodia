@@ -58,6 +58,8 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # Нет ipt-lib.sh с `ipt_top` (частичное обновление) ⇒ прежнее «первым в цепочку», байт-в-байт.
 command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$_itc" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot()   { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
+command -v ct_flush_route >/dev/null 2>&1 || ct_flush_route() { ct_flush; }
 # Где лежит бинарь (store-lib.sh): без накопителя — прежний путь байт-в-байт. Шим на случай
 # установки без lib.
 if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
@@ -158,9 +160,16 @@ strip_unsupported() {
 # Разбор ОДНОГО файла стратегии: комментарии долой, всё в одну строку, снять неподдерживаемые
 # флаги. Нет файла/пусто/остались одни комментарии → пустая строка; решение о фолбэке принимает
 # вызывающий (у основной несущей и у доп-выхода цепочки фолбэка РАЗНЫЕ, см. slot_desync_args).
+# THE ALPHABET IS CHECKED HERE, at the reader (review s.153 r2): the strategy goes into a `sh -c` string of the ciadpi start, and
+# the file travels in the settings backup — a foreign archive's `x; cmd` ran as nobody on the next start. The panel already
+# refuses anything else when IT writes one (cgi-bin/action set_byedpi_args: letters, digits, blank and + , . : / = _ -); a file
+# with another character reads as no strategy at all — the caller's next fallback rung, as for a missing file. A backslash is its
+# own QUOTED pattern: inside the bracket `\ ` is an escaped blank, so a lone backslash passed where the panel refuses it, and the
+# router's ash (busybox 1.25.1, measured under qemu) matches an unquoted `*\\*` to nothing (r3).
 args_from_file() {   # $1 = путь
     [ -s "$1" ] || return 0
     _af=$(grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+    case "$_af" in *[!A-Za-z0-9\ +,.:/=_-]*|*'\'*) log "стратегия $1 с недопустимыми символами — не беру (разрешены те же, что в панели)" >&2; return 0 ;; esac
     strip_unsupported "$_af"
 }
 desync_args() {
@@ -391,7 +400,7 @@ reup_carrier() {
     ip link show "$TUN" >/dev/null 2>&1 || { log "reup: нет $TUN"; return 1; }
     owner_rule_add          # анти-петля могла слететь? переутверждаем (идемпотентно)
     apply_byedpi_routing
-    ct_flush   # сбросить залипшие маршруты (грабля NSS/conntrack)
+    ct_flush_route "$FWMARK" "$TABLE"   # the carrier restarted in place: only the flows riding table $TABLE (ct-lib.sh)
     return 0
 }
 
@@ -505,7 +514,7 @@ cmd_health() {
     if sweep_fresh; then return 0; fi
     if [ -f "$SWEEP_LOCK" ]; then
         log "health: браузер-свип брошен (lock протух) — восстанавливаю исходную стратегию"
-        sweep_restore; restart_byedpi >/dev/null 2>&1; ct_flush
+        sweep_restore; restart_byedpi >/dev/null 2>&1; ct_flush_route "$FWMARK" "$TABLE"
     fi
     # САМО-ИЗЛЕЧЕНИЕ (2026-06-18). Раньше любая смерть демона → return 1 → watchdog уводил
     # byedpi на awg (cross). Но ciadpi известно самовыключается на `accept: Invalid argument`
@@ -570,7 +579,7 @@ cmd_reload() {
     t=awg; [ -f "$TRANSPORT_FLAG" ] && t=$(cat "$TRANSPORT_FLAG")
     [ "$t" = byedpi ] || { log "reload: byedpi не активен — новые args применятся при следующем up"; return 0; }
     if restart_byedpi; then
-        ct_flush
+        ct_flush_route "$FWMARK" "$TABLE"
         log "ciadpi перезапущен (десинк: $(desync_args))"
         return 0
     fi
@@ -665,6 +674,11 @@ sweep_restart() {
     if [ -z "$SW_SLOT" ]; then restart_byedpi; return $?; fi
     cmd_slot_reload "$SW_SLOT" >/dev/null 2>&1
 }
+# Flush the TARGET's flows only — an exit's own, or those riding the main table (ct-lib.sh): every round of a sweep used to tear
+# the whole house's connections, games and calls included.
+sweep_flush() {
+    if [ -n "$SW_SLOT" ]; then ct_flush_slot "$SW_SLOT"; else ct_flush_route "$FWMARK" "$TABLE"; fi
+}
 # Восстановить исходную стратегию из бэкапа + снять флаги свипа (конец свипа / брошенный свип).
 # Пустой бэкап = исходная стратегия была АВТО (файла аргументов не было) → удаляем файл.
 sweep_restore() {
@@ -700,7 +714,7 @@ cmd_sweep_apply() {
     a=$(printf '%s' "$1" | tr '\r\n' '  ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\{1,\}/ /g')
     if [ -n "$a" ]; then printf '%s\n' "$a" > "$SW_ARGS.new" && mv "$SW_ARGS.new" "$SW_ARGS"; else rm -f "$SW_ARGS"; fi
     if sweep_restart; then
-        ct_flush
+        sweep_flush
         sweep_touch          # рестарт занял время — обновляем lock, чтобы не протух среди пробы
         log "sweep-apply: применена стратегия${SW_SLOT:+ выхода №$SW_SLOT} ($a)"
         return 0
@@ -714,10 +728,10 @@ cmd_sweep_apply() {
 # 10808 при выключенном VPN — до ребута, а `transport.sh live` его не видит (ревью ветки, круг 3). Снятие — sweep_undo (id вторым).
 sweep_end_restart() {
     if [ -n "$SW_SLOT" ]; then
-        sweep_restart >/dev/null 2>&1; ct_flush
+        sweep_restart >/dev/null 2>&1; sweep_flush
     else
         t=awg; [ -f "$TRANSPORT_FLAG" ] && t=$(cat "$TRANSPORT_FLAG")
-        if [ "$t" = byedpi ]; then restart_byedpi >/dev/null 2>&1; ct_flush; fi
+        if [ "$t" = byedpi ]; then restart_byedpi >/dev/null 2>&1; sweep_flush; fi
     fi
     return 0
 }
@@ -840,7 +854,7 @@ cmd_slot_up() {   # $1 = id ; $2 = cfg (игнор)
         return 1
     fi
     slot_apply_routing "$_id"
-    ct_flush
+    ct_flush_slot "$_id"   # only this exit's flows (ct-lib.sh)
     log "слот №$_id: byedpi-несущая $(slot_tun "$_id") в table $(slot_table "$_id") (десинк напрямую)"
     return 0
 }
@@ -851,7 +865,7 @@ cmd_slot_down() {   # $1 = id
     slot_stop_daemons "$_id"
     owner_rule_needed "$_id" || owner_rule_del   # снять анти-петлю, если не нужна ни транспорту, ни др. byedpi-слоту
     rm -f "$(slot_hev_yaml "$_id")" 2>/dev/null
-    ct_flush
+    ct_flush_slot "$_id"
     log "слот №$_id: byedpi-несущая снята"
     return 0
 }
@@ -880,7 +894,7 @@ cmd_slot_reload() {   # $1 = id
     # Успех = порт слушает И его держит НАШ новый pid (иначе см. ложно-положительный выше).
     if slot_wait_socks "$_port" "$_pid" byedpi && slot_socks_is_ours "$_port" "$_pid"; then
         # NSS/conntrack: без сброса уже установленные соединения пула так и шли бы старым десинком.
-        ct_flush
+        ct_flush_slot "$_id"
         log "слот №$_id: ciadpi перезапущен (десинк: $(slot_desync_args "$_id"))"
         return 0
     fi

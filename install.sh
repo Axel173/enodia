@@ -956,6 +956,13 @@ fi
 # (несущую default в table $ROUTE_TABLE кладёт transport-awg.sh / xray-transport.sh).
 # Отдельный awg0-генератор больше не нужен и НЕ создаётся; mark-core.sh и
 # transport-awg.sh — REQUIRED payload. Раскладка ровно как heal.sh на boot.
+# THE GUESTS' DNS RULE OF THE OLD FORM (DNAT to the tunnel's resolver — dead under encrypted DNS, an off VPN or another transport;
+# review s.152): moved to the router's dnsmasq by its owner now, at the update, not at the next reboot. Only where such a rule
+# exists — the verb lays nothing on a router that never had one. `|| true`: this script runs under `set -e`.
+if [ -f "$ENODIA_DIR/awg_setup.sh" ]; then
+    _gdm=$(sh "$ENODIA_DIR/awg_setup.sh" guest-dns migrate 2>/dev/null || true)
+    [ -n "$_gdm" ] && ok "$_gdm"
+fi
 CARRIER_UP=0
 if [ "$PANEL_ONLY" = 1 ] && [ "$KEEP_TRANSPORT" = 1 ]; then
     # Переустановка ПОВЕРХ настроенной системы (см. KEEP_TRANSPORT в секции 2). Флаг, маркировку
@@ -1091,9 +1098,14 @@ fi
 # Строку СНАЧАЛА снимаем по ИМЕНИ СКРИПТА, потом пишем заново: так же снимается и ПРЕЖНЯЯ форма
 # (прямой `$ENODIA_DIR/heal.sh`), которая после переезда кода на накопитель указывала бы в
 # пустоту. Ключ снятия — имя, а не полный путь, ровно поэтому.
+# One lock around the crontab with its other writers (cron-lib.sh: six of them read-modify-write the file, and the later write
+# dropped the earlier one's line); no library (a partial update) — no lock, as before.
+if [ -f "$ENODIA_DIR/cron-lib.sh" ]; then . "$ENODIA_DIR/cron-lib.sh"; fi
+command -v cron_hold >/dev/null 2>&1 || { cron_hold() { :; }; cron_drop() { :; }; }
 # Код 0 = строку изменили (её не было или она была другой), 1 = уже была ровно такой.
 cron_put() {
     _cp_s="$1"; _cp_t="$2"; shift 2
+    cron_hold /etc/crontabs/root
     if [ $# -gt 0 ]; then
         _cp_line="$_cp_s $CRON_RUN $_cp_t $* >/dev/null 2>&1"
     else
@@ -1107,6 +1119,7 @@ cron_put() {
     _cp_re=$(printf '%s' "$_cp_t" | sed 's/[.]/\\./g')
     sed -i -r "\\#(^|[ /])$_cp_re( |\$)#d" /etc/crontabs/root 2>/dev/null
     echo "$_cp_line" >> /etc/crontabs/root
+    cron_drop
     [ -n "$_cp_new" ]
 }
 
@@ -1241,11 +1254,13 @@ if [ -f "$ENODIA_DIR/update-lists.sh" ]; then
     rm -f "$ENODIA_DIR/update-lists.sh"
     ok "Убран легаси update-lists.sh (домены ведёт менеджер источников)"
 fi
+cron_hold /etc/crontabs/root
 if grep -qF "$ENODIA_DIR/update-lists.sh" /etc/crontabs/root; then
     sed -i "\|$ENODIA_DIR/update-lists.sh|d" /etc/crontabs/root
     /etc/init.d/cron restart 2>/dev/null || /etc/init.d/crond restart 2>/dev/null || true
     ok "Убрана legacy cron-строка re-filter"
 fi
+cron_drop
 # ОСТАТОК ОТРАБОТАВШЕГО СНИМАЛЬЩИКА. `uninstall.sh purge` перепрыгивает в /tmp (busybox дочитывает
 # скрипт по ходу и умереть под собой не может) и потому удалить себя оттуда не в состоянии — 88 КБ
 # висят в ОЗУ до ребута, а уборщик их не видит: он считает ФЛЕШ и путей из /tmp не берёт. Типовая

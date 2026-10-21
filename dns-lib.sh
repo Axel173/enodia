@@ -280,8 +280,8 @@ _dnslib_doh_all() {
 is_ipv4() { echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
 
 # conf_dns <WireGuard/AmneziaWG config> — THE RESOLVER THE CONFIG NAMES: the first value of its `DNS =` line that is an IPv4
-# address; nothing — the line is absent or names no address. THE ONLY READER of that line (the carrier, the switch, the vendored
-# setup): it used to be «the first comma part» copied into six places, and wg-quick takes SEARCH DOMAINS in the same line
+# address; nothing — the line is absent or names no address. THE ONLY READER of that line (the carrier, the switch; awg_setup.sh
+# reads it no more since s.152): it used to be «the first comma part» copied into six places, and wg-quick takes SEARCH DOMAINS in the same line
 # (`DNS = corp.local, 1.1.1.1`) — such a word went to dnsmasq as `server=corp.local`, dnsmasq refuses the line, and the house
 # has no DNS at all (the tunnel resolver is the single upstream). One reader also keeps the route honest: whoever adds
 # `<resolver>/32 dev awg0` and whoever removes it must name the same address, else the route of a public resolver stays behind

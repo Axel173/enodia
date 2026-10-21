@@ -821,7 +821,7 @@ premium_kick() {   # $1 = config name
 }
 # «НЕДОСТУПЕН» И «СНОВА РАБОТАЕТ» — ДВЕ ПОЛОВИНЫ ОДНОГО ЭПИЗОДА (пожелание тестера 02.10.2026: журнал говорил только о падении
 # выхода, и после каждого письма приходилось лезть проверять, вернулся ли он). Выходы xray/hy2/byedpi сторож переподнимает сам
-# на каждом тике, и удачный подъём знал лишь его лог. Отметка эпизода — `$SLOT_DOWN.<id>`: падение объявляем ОДИН раз на эпизод
+# (с растущей паузой, SLOT_RETRY), и удачный подъём знал лишь его лог. Отметка эпизода — `$SLOT_DOWN.<id>`: падение объявляем ОДИН раз на эпизод
 # (прежде — на каждом тике, пока выход лежит: ×N в журнале, письмо — по часовому троттлу), возврат — ТОЛЬКО у объявленного
 # падения: штатный подъём на буте и переподъём, который помог до вердикта, письма не заслуживают. Ключи — пара одного повода
 # (events.sh class_of: slot-fail-*/slot-ok-* = «сбой VPN»), иначе выключенные падения слали бы возвраты. ТРОТТЛ У ОБЕИХ — НОЛЬ:
@@ -849,14 +849,16 @@ slot_fail_event() {   # $1=id $2=cfg $3=fallback $4=причина: desync|noans
         silent)   _sfr="рукопожатие с сервером есть, а данные через него не идут"; _sfe="the handshake with the server is there, but no data passes through it" ;;
         *)        _sfr=$4; _sfe=$4 ;;
     esac
-    # ЧТО БУДЕТ ДАЛЬШЕ — по ФАКТУ поведения свипа, а не одной фразой на всех: несущие xray/hy2/byedpi он поднимает заново каждый
-    # тик, а снятый выход AmneziaWG пробует с растущей паузой (slot_awg_return) — и обещанные сроки обязаны совпадать с её
+    # ЧТО БУДЕТ ДАЛЬШЕ — по ФАКТУ поведения свипа, а не одной фразой на всех: снятый выход AmneziaWG он пробует без перепроводки
+    # (slot_awg_return), выход xray/hy2/byedpi — переподъёмом; оба с растущей паузой, и обещанные сроки обязаны совпадать с
     # SLOT_RETRY_FIRST/SLOT_RETRY_MAX.
     case "$5" in
         awg) _sfn="Роутер проверяет его сервер, не трогая остальной трафик: сперва через 2 минуты, потом всё реже — до раза в полчаса. Когда сервер ответит, выход вернётся сам, и придёт письмо «снова работает»."
              _sfne="The router checks its server without touching the rest of the traffic: first in 2 minutes, then less and less often — down to once every half hour. Once the server answers, the exit comes back by itself and a \"works again\" email follows." ;;
-        *)   _sfn="Роутер пробует поднять его заново каждые 2 минуты — когда сервер ответит, выход вернётся сам, и придёт письмо «снова работает»."
-             _sfne="The router retries every 2 minutes — once the server answers, the exit comes back by itself and a \"works again\" email follows." ;;
+        byedpi) _sfn="Роутер поднимает его заново с растущей паузой — сперва через 2 минуты, потом всё реже, до раза в полчаса; когда десинк заработает, выход вернётся сам, и придёт письмо «снова работает»."
+             _sfne="The router brings it up again with a growing pause — first in 2 minutes, then less and less often, down to once every half hour; once the desync works, the exit comes back by itself and a \"works again\" email follows." ;;
+        *)   _sfn="Роутер поднимает его заново с растущей паузой — сперва через 2 минуты, потом всё реже, до раза в полчаса; когда сервер ответит, выход вернётся сам, и придёт письмо «снова работает»."
+             _sfne="The router brings it up again with a growing pause — first in 2 minutes, then less and less often, down to once every half hour; once the server answers, the exit comes back by itself and a \"works again\" email follows." ;;
     esac
     # Несущая не встала вовсе — сервер не судили, и обещать «когда сервер ответит» нельзя: мешает то, что на роутере.
     if [ "$4" = nocarrier ]; then
@@ -952,9 +954,17 @@ SLOT_RETRY=/tmp/enodia-slot-retry
 SLOT_RETRY_FIRST=120
 SLOT_RETRY_MAX=1800
 # Пауза — «<отметка> <пауза, с> <транспорт>»: у выхода сменили транспорт — чужая пауза новому не мешает (её и снимает slot_retry_wait).
-# Ею пользуются ДВА случая: возврат снятого AmneziaWG-выхода (slot_awg_return) и выход xray/hy2/byedpi с мёртвым путём через hev
-# (slot_hevpath_down) — оба про то, что переподъём каждые 2 минуты платил бы сбросом соединений дома, ничего не меняя.
-slot_retry_arm() { echo "$(uptime_s) ${2:-$SLOT_RETRY_FIRST} ${3:-}" > "$SLOT_RETRY.$1"; }   # $1 = id ; $2 = пауза, с ; $3 = транспорт
+# Ею пользуются ТРИ случая: возврат снятого AmneziaWG-выхода (slot_awg_return), выход xray/hy2/byedpi с мёртвым путём через hev
+# (slot_hevpath_down) и он же с мёртвым сервером (снят после неудачного переподъёма, review s.106) — все про то, что переподъём
+# каждые 2 минуты платил бы сбросом соединений дома и пробой в 8 с на тик, ничего не меняя.
+# NOT IN THE CONTROL SWEEP OF AN ISP OUTAGE (WAN_BLIND, review s.152 r1 L3 / r2 A-L2): the hourly blind tick reaches the exits' sweep
+# with no uplink, and every exit fails there — a pause armed or doubled by it is about the internet, and after the uplink came back the
+# exits stayed on their fallback up to 30 min. Not armed, they are asked at the first healthy tick; a pause armed BEFORE the outage
+# (a long-dead server, a dead hev path) is kept as it was — forgetting all of them at the outage's end reset those too.
+slot_retry_arm() {   # $1 = id ; $2 = пауза, с ; $3 = транспорт
+    [ "${WAN_BLIND:-0}" = 1 ] && return 0
+    echo "$(uptime_s) ${2:-$SLOT_RETRY_FIRST} ${3:-}" > "$SLOT_RETRY.$1"
+}
 # 0 — пауза ещё идёт. Запас 30 с: тики идут через 2 минуты с дрожанием, и пауза «120» без него пропускала бы целый тик.
 slot_retry_wait() {   # $1 = id ; $2 = транспорт выхода. Разобранную паузу оставляет в _srti (её берёт slot_retry_next).
     _srt=$(cat "$SLOT_RETRY.$1" 2>/dev/null)
@@ -1099,8 +1109,8 @@ EOF
             # Просел -> ПЕРЕПОДНИМАЮ на месте идемпотентным slot-up (он же переиграет mark-core).
             # Не вышло -> гашу -> fallback. Переподнять, а не бросить выход — как reup_carrier у
             # основного byedpi (ciadpi известно самовыключается).
-            # Выход снят из-за мёртвого пути через hev (slot_hevpath_down) — до конца паузы не поднимаем: каждый подъём со сбросом
-            # соединений дома, а hev, который не вылечил перезапуск, следующий тик не вылечит тоже.
+            # Выход снят из-за мёртвого пути через hev (slot_hevpath_down) или после неудачного переподъёма — до конца паузы не
+            # поднимаем: каждый подъём со сбросом соединений дома, а hev, который не вылечил перезапуск, следующий тик не вылечит тоже.
             # Пауза — только пока несущей выхода НЕТ: выход, который за это время подняла панель (включила, сменила сервер), судим
             # сразу, иначе он до 30 минут жил бы без присмотра (ревью с.96, круг 2).
             slot_retry_wait "$sid" "$st" && ! ip link show "xtun$sid" >/dev/null 2>&1 && continue
@@ -1141,6 +1151,7 @@ EOF
             else
                 [ -f "$TRANSPORT_SH" ] && sh "$TRANSPORT_SH" slot-down "$sid" >>"$LOG" 2>&1
                 slot_fail_event "$sid" "$scfg" "$sfb" desync "$st"
+                slot_retry_next "$sid" "$st"         # the next raise after a growing pause (see SLOT_RETRY), not on every tick
             fi
             continue
         fi
@@ -1153,7 +1164,7 @@ EOF
             # случай: демон упал/socks умолк), не вышло -> гасим -> fallback-политика.
             # Перебора РЕЗЕРВОВ у слота нет by design (v1, дизайн §«Отказ слота»).
             [ -f "$TRANSPORT_SH" ] || continue
-            slot_retry_wait "$sid" "$st" && ! ip link show "xtun$sid" >/dev/null 2>&1 && continue    # снят из-за мёртвого пути через hev — ждём паузу, пока его не подняли (как у byedpi выше)
+            slot_retry_wait "$sid" "$st" && ! ip link show "xtun$sid" >/dev/null 2>&1 && continue    # снят (мёртвый путь через hev или сервер) — ждём паузу, пока его не подняли (как у byedpi выше)
             sh "$TRANSPORT_SH" slot-health "$sid" >>"$LOG" 2>&1; _rc=$?
             [ "$_rc" = 0 ] && { rm -f "$SLOT_RETRY.$sid"; slot_back_event "$sid" "$scfg"; continue; }   # выход жив
             [ "$_rc" = 2 ] && continue                  # плагин старой версии (дрейф деплоя) — судить не по чем, не трогаем
@@ -1175,6 +1186,7 @@ EOF
             else
                 sh "$TRANSPORT_SH" slot-down "$sid" >>"$LOG" 2>&1
                 slot_fail_event "$sid" "$scfg" "$sfb" noanswer "$st"
+                slot_retry_next "$sid" "$st"            # the next raise after a growing pause (see SLOT_RETRY), not on every tick
                 [ "$st" = xray ] && premium_kick "$scfg"   # an Amnezia Premium VLESS server: a new key in the background (review s.136, L1)
             fi
             continue

@@ -35,7 +35,7 @@
 # «ОГРАНИЧЕНО» = OUR DNS FILTER, not address sets (decided 08.10.2026: categories share anycast frontends — closing youtube.com by
 # address closes Google Search and Gemini on the device too; «only allowed» cannot be said by address; and dnsmasq has no
 # per-client answers). The DNS of a limited device is REDIRECTed by MAC (nat PREROUTING `ENODIA_SCHED_DNS`, at the top — above
-# the stock guest DNAT; both families) to the port of its schedule's PROFILE in `dns-filter` (component «filter», source
+# awg_setup.sh's guest DNS DNAT; both families) to the port of its schedule's PROFILE in `dns-filter` (component «filter», source
 # dev/dns-filter/): it answers «nothing there» for the chosen categories and own sites and passes the rest to dnsmasq. Category
 # data is geo.sh's (the one owner): `geo.sh want sched <keys>` on a save, READY forms by `geo.sh ready` in the tick — never a
 # fetch here. No filter binary, or it does not answer its probe after a restart ⇒ limited devices stay OPEN (fail-open, as with
@@ -732,7 +732,7 @@ sc_nplan() {
 	SC_NPLAN=$( { printf '%s\n' "$SC_FMAP" | sed 's/^/M /'; printf '%s\n' "$SC_PLAN" | sed 's/^/P /'; } |
 		awk '$1 == "M" && NF == 3 { p[$2] = $3; next } $1 == "P" && ($3 == "limited" || $3 == "safe") && ($4 in p) { print $2, p[$4] }' | sort)
 }
-sc_nat_put() {   # $1 = iptables|ip6tables — the chain refilled, the jump at the TOP of nat PREROUTING (above the stock guest DNAT);
+sc_nat_put() {   # $1 = iptables|ip6tables — the chain refilled, the jump at the TOP of nat PREROUTING (above awg_setup.sh's guest DNS DNAT);
 	# the same DNS accepted at the top of INPUT (header: stock miot_input, zones without redirects)
 	"$1" -t nat -N "$SC_NAT" 2>/dev/null || "$1" -t nat -F "$SC_NAT" 2>/dev/null || return 1
 	"$1" -N "$SC_DNSIN" 2>/dev/null || "$1" -F "$SC_DNSIN" 2>/dev/null || return 1

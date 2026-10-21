@@ -63,6 +63,10 @@ TK_TAB=$(printf '\t')
 TK_OFF="$ENODIA_STATE/.tasks-off"   # exists only in the «off» form: the plain lines we wrote (see «adopted lines»)
 
 if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
+# One lock around the crontab with its other writers (cron-lib.sh: six of them read-modify-write the file, and the later write
+# dropped the earlier one's line); no library (a partial update) — no lock, as before.
+if [ -f "$ENODIA_DIR/cron-lib.sh" ]; then . "$ENODIA_DIR/cron-lib.sh"; fi
+command -v cron_hold >/dev/null 2>&1 || { cron_hold() { :; }; cron_drop() { :; }; }
 command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
@@ -105,7 +109,7 @@ tk_rundir() {
 	[ -d "$TK_RUN" ] && [ ! -L "$TK_RUN" ]
 }
 TK_LOCKED=0; TK_TMP=""; TK_DROP=""
-tk_exit() { _xr=$?; [ "$TK_LOCKED" = 1 ] && tk_link_drop "$TK_LOCK"; [ -n "$TK_TMP" ] && rm -rf "$TK_TMP" 2>/dev/null; return "$_xr"; }
+tk_exit() { _xr=$?; [ "$TK_LOCKED" = 1 ] && tk_link_drop "$TK_LOCK"; cron_drop all; [ -n "$TK_TMP" ] && rm -rf "$TK_TMP" 2>/dev/null; return "$_xr"; }
 # tk_link_take <path> -> rc 0 = the lock is ours now, rc 1 = a live process holds it. Every lock of this file (registry, a task's
 # run, its wait place) is a SYMBOLIC LINK whose target is the holder's pid, made in one step: a lock never exists without its pid
 # (a mkdir-then-echo lock had that moment — a reader took a live lock then, or a TERM in it left a lock nobody removed; review
@@ -143,15 +147,18 @@ tk_link_drop() { [ "$(readlink "$1" 2>/dev/null)" = "$$" ] && rm -f "$1"; return
 # backup import read the code), otherwise a JSON refusal for the panel
 tk_lock() {
 	_lw=0
-	tk_rundir || { [ "${1:-}" = soft ] && return 1; jfail "не удалось создать каталог задач в памяти"; }
+	# The crontab lock FIRST (cron-lib.sh): uninstall holds it while it hands the file to `apply` — one order for all, cron then
+	# the registry. A child of that holder passes it at once.
+	cron_hold "$CRON"
+	tk_rundir || { cron_drop; [ "${1:-}" = soft ] && return 1; jfail "не удалось создать каталог задач в памяти"; }
 	until tk_link_take "$TK_LOCK"; do
 		_lw=$((_lw + 1))
-		if [ "$_lw" -gt 20 ]; then [ "${1:-}" = soft ] && return 1; jfail "задачи сейчас меняет другой запрос — повторите через минуту"; fi
+		if [ "$_lw" -gt 20 ]; then cron_drop; [ "${1:-}" = soft ] && return 1; jfail "задачи сейчас меняет другой запрос — повторите через минуту"; fi
 		sleep 1
 	done
 	TK_LOCKED=1
 }
-tk_unlock() { [ "$TK_LOCKED" = 1 ] && tk_link_drop "$TK_LOCK"; TK_LOCKED=0; return 0; }
+tk_unlock() { [ "$TK_LOCKED" = 1 ] && tk_link_drop "$TK_LOCK"; TK_LOCKED=0; cron_drop; return 0; }
 
 # ---- cron field expansion (busybox 1.25 grammar, see the header) --------------------------------------------------
 # tk_num <token> <kind> -> number (names allowed for mon/dow), rc 1 on garbage

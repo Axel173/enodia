@@ -229,10 +229,15 @@ boot_refresh() {     # $1 = каталог кода, $2 = "force" (сборка 
 # ЭТО ПЕРЕВОД, А НЕ НОВАЯ ФОРМА: владельцы формы прежние (install.sh::cron_put и
 # update-sched.sh::write_cron), здесь расписание и аргументы остаются ДОСЛОВНО — меняется
 # только цель. Своей таблицы задач у бутстрапа нет и быть не должно.
-cron_to_boot() {
+cron_to_boot() {   # $1 = the code dir sync builds from — its cron-lib.sh (the bootstrap keeps no copy: sync is the only caller)
     [ -f "$CRON" ] || return 0
     grep -q "$DATA_DIR/" "$CRON" 2>/dev/null || return 0     # прежних строк нет — тишина
-    sed -i "s#$DATA_DIR/\([A-Za-z0-9_-]*\.sh\)#$BOOT_DIR/boot.sh \1#g" "$CRON" 2>/dev/null || return 1
+    # One lock with the crontab's other writers (cron-lib.sh); no library — no lock, as before.
+    if [ -f "$1/cron-lib.sh" ]; then . "$1/cron-lib.sh"; fi
+    command -v cron_hold >/dev/null 2>&1 || { cron_hold() { :; }; cron_drop() { :; }; }
+    cron_hold "$CRON"
+    sed -i "s#$DATA_DIR/\([A-Za-z0-9_-]*\.sh\)#$BOOT_DIR/boot.sh \1#g" "$CRON" 2>/dev/null || { cron_drop; return 1; }
+    cron_drop
     /etc/init.d/cron restart >/dev/null 2>&1 || /etc/init.d/crond restart >/dev/null 2>&1 \
         || killall -HUP crond 2>/dev/null || true
     echo "boot: cron-строки переведены на бутстрап ($BOOT_DIR/boot.sh)"
@@ -686,7 +691,7 @@ case "$1" in
         # зовут установщик и обновление (apply-scripts), то есть ровно те двое, после кого
         # бутстрап на роутере уже есть. Строка, оставшаяся с прямым путём, работает — но
         # переживёт переезд кода на накопитель молча мёртвой.
-        cron_to_boot
+        cron_to_boot "$_sy"
         echo "boot: бутстрап собран в $BOOT_DIR"
         exit 0
         ;;

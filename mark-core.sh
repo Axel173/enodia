@@ -60,6 +60,9 @@ fi
 # ИЗ ПЕРЕМЕННОЙ (см. объявление выше): по литералу флеша в раскладке `full` файла нет, и
 # ожидание лока пропадало молча — правило не встаёт, а stderr у половины вызовов заглушен.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
+# The packet mark saved into the ct mark (ct-lib.sh `ct_mark_save`, its own section says why): wired below with the marks it
+# serves. No library (a partial update) — no rule, and every scoped flush falls back to the global one.
+if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 
 # --- reply-guard: НЕ метим трафик, адресованный САМОМУ роутеру --------------------
 # ГРАБЛЯ (найдено 08.07.2026 на железе тестера). Маркировка ниже бьёт по dst в mangle
@@ -270,6 +273,12 @@ for set in enodia_list iplist_set grp_vpn enodia_ip_vpn geo_vpn; do
         iptables -t mangle -A OUTPUT -m set --match-set "$set" dst -j MARK --set-mark $FWMARK
     fi
 done
+
+# The marks above, saved into each connection's ct mark — so an exit's flap flushes only its own flows (ct-lib.sh). Off with
+# the marks on unwire (the `.vpn-off` race below execs unwire — it goes there too).
+if command -v ct_mark_save >/dev/null 2>&1; then
+    if [ "$UNWIRE" = 1 ]; then ct_mark_save off; else ct_mark_save on; fi
+fi
 
 # Помеченные пакеты — по таблице $TABLE (default в неё кладёт активный транспорт).
 ip rule del fwmark $FWMARK table $TABLE 2>/dev/null || true

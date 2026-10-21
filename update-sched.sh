@@ -73,16 +73,22 @@ restart_cron() {
 		|| killall -HUP crond 2>/dev/null || true
 }
 
+# One lock around the crontab with its other writers (cron-lib.sh: six of them read-modify-write the file, and the later write
+# dropped the earlier one's line); no library (a partial update) — no lock, as before.
+if [ -f "$ENODIA_DIR/cron-lib.sh" ]; then . "$ENODIA_DIR/cron-lib.sh"; fi
+command -v cron_hold >/dev/null 2>&1 || { cron_hold() { :; }; cron_drop() { :; }; }
 # write_cron <job> <interval> — снять ЛЮБУЮ прежнюю строку задачи и записать новую по интервалу.
 write_cron() {
 	_j="$1"; _iv=$(norm_iv "$_j" "$2"); _bin=$(job_script "$_j")
 	mkdir -p /etc/crontabs 2>/dev/null; touch "$CRON" 2>/dev/null
+	cron_hold "$CRON"
 	# чистая переустановка строки: удаляем любую (любой график/набор флагов), затем добавляем нужную.
 	sed -i "\|$_bin|d" "$CRON" 2>/dev/null
 	_s=$(sched_for "$_j" "$_iv")
 	if [ -n "$_s" ]; then
 		echo "$_s $CRON_RUN $_bin $(args_for "$_j" "$_iv") >/dev/null 2>&1" >> "$CRON"
 	fi
+	cron_drop
 	restart_cron
 }
 

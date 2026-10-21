@@ -47,6 +47,8 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # Нет ipt-lib.sh с `ipt_top` (частичное обновление) ⇒ прежнее «первым в цепочку», байт-в-байт.
 command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$_itc" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot()   { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
+command -v ct_flush_route >/dev/null 2>&1 || ct_flush_route() { ct_flush; }
 # Где лежит бинарь (store-lib.sh): без накопителя — прежний путь байт-в-байт. Шим на случай
 # установки без lib.
 if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
@@ -346,7 +348,7 @@ cmd_failover() {
         proc_alive "$HEV_PID" || { start-stop-daemon -K -p "$HEV_PID" 2>/dev/null; ip link del "$TUN" 2>/dev/null; }
         if start_daemons; then
             apply_hy2_routing
-            ct_flush
+            ct_flush_route "$FWMARK" "$TABLE"   # the server changed, the transport did not: only the flows riding table $TABLE (ct-lib.sh)
             if cmd_health; then
                 log "hy2-failover: несущая восстановлена на текущем сервере ${cur:-?} — перебор не понадобился"
                 return 0
@@ -383,7 +385,7 @@ cmd_failover() {
         [ "$rc" = 2 ] && { dns_dead=1; log "hy2-failover: $name не резолвится — DNS мёртв (upstream заперт в несущей)"; }
         if [ "$rc" = 0 ] && cmd_health; then
             exclude_endpoint        # анти-петля: endpoint нового резерва мимо маркировки
-            ct_flush
+            ct_flush_route "$FWMARK" "$TABLE"
             ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" 8)
             log "hy2-failover OK: встал на $name (egress ${ip:-?})"
             if [ "$(nf_lang)" = en ]; then
@@ -582,7 +584,7 @@ cmd_slot_up() {   # $1 = id ; $2 = имя конфига
     fi
     slot_exclude_endpoint "$_id"
     slot_apply_routing "$_id"
-    ct_flush
+    ct_flush_slot "$_id"   # only this exit's flows (ct-lib.sh)
     log "слот №$_id: hy2-несущая $(slot_tun "$_id") в table $(slot_table "$_id") (конфиг $_cfg)"
     return 0
 }
@@ -597,7 +599,7 @@ cmd_slot_down() {   # $1 = id
         /etc/init.d/dnsmasq restart >/dev/null 2>&1 || killall -HUP dnsmasq 2>/dev/null
         rm -f "${DNS_RELOAD_MARK:-/tmp/enodia-dns-reload}" 2>/dev/null   # перезапустили сами — отметка снятого сида исполнена
     fi
-    ct_flush
+    ct_flush_slot "$_id"
     log "слот №$_id: hy2-несущая снята"
     return 0
 }

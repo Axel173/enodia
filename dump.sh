@@ -488,7 +488,7 @@ case "$_dhs" in *dotfb=1*)
     echo "Выбран DoT, а шифрует DoH: порт 853 текущим путём не проходил — переехал $(printf '%s\n' "$_dhs" | sed -n 's/^dotfb_age=//p') с назад, повтор DoT через $(printf '%s\n' "$_dhs" | sed -n 's/^dotfb_retry=//p') с (-1 = неизвестно)" ;;
 esac
 case "$_dhs" in *quicfb=1*)
-    echo "Выбран $(cat "$ENODIA_STATE/.doh-proto" 2>/dev/null), а шифрует $(_dho quicfb_to): QUIC текущим путём не отдавал имён — переехал $(_dho quicfb_age) с назад, повтор через $(_dho quicfb_retry) с (-1 = неизвестно)" ;;
+    echo "Выбран $(cat "$ENODIA_STATE/.doh-proto" 2>/dev/null), а шифрует $(_dho quicfb_to): QUIC текущим путём не проходит — переехал $(_dho quicfb_age) с назад, повтор через $(_dho quicfb_retry) с (-1 = неизвестно)" ;;
 esac
 ps 2>/dev/null | grep -E '[h]ttps_dns_proxy|[d]ot-proxy|[q]uic-dns-proxy' | head -4 || echo "(прокси шифрованного DNS не запущен)"
 # Живость АВТО-режима: демон бежит ≠ резолвер отвечает. Ровно этот разрыв съел вечер 09.08.2026 —

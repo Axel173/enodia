@@ -100,7 +100,7 @@ NC='\033[0m'
 mkdir -p "$DNSMASQ_DIR"
 [ ! -f "$CUSTOM_FILE" ] && {
     echo "# Пользовательские домены, идущие через AWG-туннель." > "$CUSTOM_FILE"
-    echo "# Управляется через domain.sh. Можно редактировать руками." >> "$CUSTOM_FILE"
+    echo "# Управляется через domain.sh. Руками — только строки ipset=/…/ и address=/…/: иные директивы восстановление выкидывает." >> "$CUSTOM_FILE"
     echo "" >> "$CUSTOM_FILE"
 }
 
@@ -548,6 +548,14 @@ case "$1" in
                             printf "[domain] выкинул правило, с которым dnsmasq не стартует: %s\n" "$_rd" >&2
                             continue
                         fi ;;
+                    ''|'#'*) ;;
+                    *)
+                        # Any OTHER dnsmasq directive: domain.sh never writes one, the persist travels in every settings archive,
+                        # and the live copy is root dnsmasq's own config — `server=/./<ip>` would take the house's names,
+                        # `dhcp-script=<file>` would run a file as root (review s.153 r3). Dropped and named, like a bad label.
+                        _rs_bad=$((_rs_bad + 1))
+                        printf "[domain] выкинул строку, которую domain.sh не пишет: %s=…\n" "$(printf '%s' "${_rl%%=*}" | cut -c1-40)" >&2
+                        continue ;;
                 esac
                 # Перевод имён — ПОСЛЕ отбраковки: в счёт «заменено» не должна попасть выкинутая строка.
                 case "$_rl" in
@@ -558,8 +566,8 @@ case "$1" in
             done < "$PERSIST_FILE"
             # СЧЁТНАЯ сверка перед подменой: /tmp — это ОЗУ, и оборванная запись (нет места) дала бы
             # усечённый файл, который мы бы молча положили ПОВЕРХ живых правил, да ещё и записали
-            # обратно в персист. Строк должно стать ровно «было минус выкинутые»; не сходится —
-            # ведём себя как раньше (прямая копия персиста), фильтр в этом прогоне просто не сработал.
+            # обратно в персист. Строк должно стать ровно «было минус выкинутые»; не сходится — the live file is left as it
+            # is: a raw copy of the persist would carry past the filter the very directives it drops (review s.153 r3).
             # Считаем `grep -c ''`, а не `wc -l`: у файла с /data может не быть хвостового
             # перевода строки (его правили руками, дописывал busybox), и `wc -l` тогда занижает
             # на единицу — сверка не сошлась бы ВСЕГДА, то есть фильтр молча стал бы мёртвым кодом.
@@ -571,9 +579,8 @@ case "$1" in
                 if [ "$_rs_bad" != 0 ] || [ "$_rs_mig" != 0 ]; then cp "$_rs_t" "$PERSIST_FILE" 2>/dev/null; fi
                 [ "$_rs_mig" = 0 ] || printf "[domain] имена наборов до ребрендинга заменены на текущие: %s\n" "$_rs_mig" >&2
             else
-                printf "[domain] фильтр не сошёлся по строкам (%s вместо %s) — кладу персист как есть\n" \
+                printf "[domain] фильтр не сошёлся по строкам (%s вместо %s) — живой файл не трогаю\n" \
                     "${_rs_got:-0}" "$_rs_want" >&2
-                cp "$PERSIST_FILE" "$CUSTOM_FILE" 2>/dev/null
             fi
             rm -f "$_rs_t" 2>/dev/null
             printf "[domain] правила восстановлены из персиста: %s\n" "$(grep -c '^ipset=\|^address=' "$CUSTOM_FILE" 2>/dev/null)"

@@ -36,6 +36,10 @@ clock-lib.sh
 # скриптов правил и оба CGI. На ядре 4.4 утилиты conntrack в прошивке НЕТ, и прежняя россыпь
 # `conntrack -F || true` была тихим no-op: правило стояло, эффект был только у НОВЫХ соединений.
 ct-lib.sh
+# Settings files (iplist.conf, notify.conf) are READ by the caller's keys, never sourced — they travel in backups (conf-lib.sh).
+conf-lib.sh
+# One lock around the crontab for its six read-modify-write writers (install, update-sched, boot, uninstall, tasks).
+cron-lib.sh
 # Разбор правил по портам (.port-rules): какая строка действует и в каком порядке встаёт в цепочку.
 # Читают apply-bypass.sh (ставит цепочку), devwatch.sh («что победит») и cgi-bin/data (строки панели) —
 # копии фильтра разошлись: ядро отбрасывало строку, а индикатор отвечал «в VPN». Нет файла — цепочка

@@ -61,6 +61,12 @@ fail() { printf '{"ok":false,"code":1,"msg":"%s"}\n' "$1"; exit 0; }
 # ШИМ = ПРЕЖНЕЕ поведение этого файла: либа не доехала (старая установка) — ведём себя как раньше,
 # а не падаем. Гард `[ -f ]` обязателен: провалившийся `.` в busybox ash убивает шелл на месте.
 if [ -f "$ENODIA_DIR/json-lib.sh" ]; then . "$ENODIA_DIR/json-lib.sh"; fi
+# notify.conf — read by the ONE parser of settings files (conf-lib.sh), never sourced.
+if [ -f "$ENODIA_DIR/conf-lib.sh" ]; then . "$ENODIA_DIR/conf-lib.sh"; fi
+command -v conf_load >/dev/null 2>&1 || conf_load() {   # no library: the PREVIOUS read-only sed (the panel never sourced the file)
+	[ -f "$1" ] || return 1; _cof=$1; shift
+	for _cok in "$@"; do _cov=$(sed -n "s/^$_cok=//p" "$_cof" 2>/dev/null | head -1 | tr -d "\"'\\\\"); eval "$_cok=\$_cov"; done
+}
 # Данные (адрес из конфига) — jtxt; прежняя копия либы его не знает — через jesc, как в cgi-bin/data (без шима адрес приходил пустым).
 command -v jtxt >/dev/null 2>&1 || jtxt() { jesc "$1"; }
 command -v jesc >/dev/null 2>&1 || {
@@ -1029,9 +1035,17 @@ case "$act" in
 		# Переезд был, а прокси жив (держал авто-режим) — он ещё на DoH: снять его правила и поднять под DoT.
 		# То же у ODoH: откат «DoH напрямую к цели», оставшийся в /tmp с прошлого включения, — вердикт про путь, который сейчас никто
 		# не проверял; поднимаемся с ретранслятора (ревью с.145, круг 1).
-		_odf=0; [ -f "${DOH_ODOH_FALLBACK:-/nonexistent}" ] && _odf=1
+		# _drs = the running proxy stands on a verdict now forgotten or replaced — restart it under the new one.
+		_drs=0; [ -f "${DOH_ODOH_FALLBACK:-/nonexistent}" ] && _drs=1
 		command -v doh_odoh_forget >/dev/null 2>&1 && doh_odoh_forget
-		if { command -v doh_fb_forget >/dev/null 2>&1 && doh_fb_forget; } || [ "$_odf" = 1 ]; then
+		{ command -v doh_fb_forget >/dev/null 2>&1 && doh_fb_forget; } && _drs=1
+		# DoQ/DoH3 chosen: QUIC asked on the path the rewire lays BEFORE the proxy rises on it — silent, it rises on the first live rung
+		# below (doh-lib.sh::doh_quic_preset; review s.151 r3 L3: a mute QUIC proxy cost the house its names for the ladder's fall). In
+		# BOTH forms, and BEFORE the restart below: a proxy the auto mode held on a rung in a direct mode was restarted on the forgotten
+		# DoQ first, and the house lost its names for the ask doh_apply_dns makes later (review s.152 r2 A-M1/B-L2). Asked here, a rung
+		# stands before the restart, and doh_apply_dns's own direct ask then finds it standing.
+		doh_quic_preset "$(doh_rewire_form)" && _drs=1
+		if [ "$_drs" = 1 ]; then
 			doh_running && { doh_resolver_mark del; doh_resolver_bypass del; doh_restart; }
 		fi
 		sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1   # переиграть DNS активного транспорта → локальный DoH-прокси + марка резолвера
@@ -1098,6 +1112,8 @@ case "$act" in
 		_drc() { command -v wd_tick_alive >/dev/null 2>&1 && { wd_tick_alive || heal_alive; }; }
 		_drc && fail "Роутер сейчас сам восстанавливает соединение — попробуйте через минуту"
 		doh_upstream_set && { printf '{"ok":true,"code":0,"msg":"Шифрованный DNS уже работает"}\n'; exit 0; }
+		# No QUIC pre-ask of its own (doh_quic_preset, as doh_on): this is the watchdog's rearm done now — a direct rewire asks inside
+		# doh_apply_dns anyway, and a rung the ladder found survives the pause (doh_dns_bailout keeps it).
 		# ЛОК И ПЕРЕПРОВОДКА — В ФОНОВОМ УЗЛЕ, а не в CGI (ревью ветки, круг 2): при мёртвом резолвере перепроводка идёт 30–60 с,
 		# и закрытая вкладка = SIGKILL от uhttpd, при котором trap молчит — лок оставался бы до SWITCH_STALE (30 мин), и всё это
 		# время сторож не чинил бы ничего. Узел снимает лок сам; CGI его только ждёт. Тик, успевший стартовать между сверкой и
@@ -1138,6 +1154,7 @@ case "$act" in
 			printf '{"ok":true,"code":0,"msg":"Авто-DNS в прямых режимах выключен"}\n'; exit 0
 		fi
 		rm -f "$ENODIA_STATE/.doh-auto" 2>/dev/null          # отсутствие файла = разрешено (дефолт)
+		# DoQ/DoH3 chosen: whether QUIC answers is asked by doh_apply_dns's direct path — exactly where the auto mode takes DNS.
 		sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
 		printf '{"ok":true,"code":0,"msg":"Авто-DNS в прямых режимах включён"}\n'; exit 0 ;;
 	set_doh_resolver)
@@ -1187,9 +1204,10 @@ case "$act" in
 		prev=$(doh_resolver_name); prevnid=$(cat "$ENODIA_STATE/.doh-nextdns-id" 2>/dev/null)
 		prevcu=$(cat "$ENODIA_STATE/.doh-custom-url" 2>/dev/null); prevcs=$(cat "$ENODIA_STATE/.doh-custom-sni" 2>/dev/null)
 		prevcips=$(cat "$ENODIA_STATE/.doh-custom-ips" 2>/dev/null); prevcdp=$(cat "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null)
-		# The form its rules travel in (mark into the carrier / RETURN past it) — read off the OLD resolver's anchors before they go: the
-		# new resolver's QUIC is probed the way it WILL travel (doh_wire_ok's forced form), its own anchors are laid only after. No known
-		# form (paused, no anchors) — no probe: it would ride another way than the proxy will (review s.151 r2 L2).
+		# The form the new resolver's rules WILL travel in (mark into the carrier / RETURN past it): the one the switch's own rewire lays
+		# (doh_rewire_form — transport.sh dns's dispatch), so its QUIC is probed the way it will ride. The old anchors' form was asked
+		# before (s.151): with none laid (paused after a failure) there was no probe at all, and an untunneled resolver was asked past the
+		# carrier the rewire then puts it back into (review s.151 r2 L2, r3 L4).
 		# ON A RUNG (the QUIC level moved the old resolver's proxy below) the new resolver is asked too, but its silence refuses nothing:
 		# it STAYS on that rung, the screen's «QUIC до резолвера не проходит» now said of the resolver that was asked (review s.151 r3 M1);
 		# it answers — it goes up to QUIC. Refusing there brought the old one back on QUIC its path cuts, and the ladder fell again inside
@@ -1199,44 +1217,60 @@ case "$act" in
 		case "$(doh_proto)" in doq|doh3)
 			if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
 				[ "$(doh_proto_now)" != "$(doh_proto)" ] && _qrung=1
-				_qform=$(doh_anchor_state); case "$_qform" in mark|bypass) : ;; *) _qform='' ;; esac
+				_qform=$(doh_rewire_form)
 			fi ;;
 		esac
 		doh_lv_save
-		# Teardown :443-правил СТАРОГО резолвера ДО записи нового (guard знает лишь текущий резолвер —
-		# иначе марка/RETURN прежнего IP останутся висеть в mangle OUTPUT).
-		doh_resolver_mark del; doh_resolver_bypass del
+		# put_resolver <dir> — the new resolver's files into <dir>: a snapshot for the precheck, then the state itself. Своё — тремя
+		# файлами разом: URL (DoH), имя (SNI для DoT; пусто у литерала) и якоря.
+		put_resolver() {
+			echo "$r" > "$1/.doh-resolver"
+			[ "$r" = nextdns ] && echo "$nid" > "$1/.doh-nextdns-id"
+			if [ "$r" = custom ]; then
+				echo "$cu" > "$1/.doh-custom-url"
+				echo "$cs" > "$1/.doh-custom-sni"
+				echo "$cips" > "$1/.doh-custom-ips"
+				if [ -n "$cdp" ]; then echo "$cdp" > "$1/.doh-custom-dot-port"; else rm -f "$1/.doh-custom-dot-port" 2>/dev/null; fi
+			fi
+			return 0
+		}
+		# Under DoQ/DoH3 the new resolver's QUIC handshake first, from THIS router (s.151): silent — refused before ANYTHING changes.
+		# ASKED FROM A SNAPSHOT (review s.153 r1 B3): the current `.doh-*` + the new resolver's files, read in a subshell (doh-lib reads
+		# every path at call time). The state, the old proxy and its anchors stay as they are through the precheck — the old resolver
+		# keeps answering the house (s.151 r2 L3: torn down before it, its proxy rode without anchors for the precheck's seconds), and a
+		# CGI killed in it (uhttpd, a closed tab) leaves the old state whole: no orphaned anchors under the new resolver's files.
+		# Not in_dir: its EXIT trap would replace drop_switch's.
+		_qok=1
+		if [ -n "$_qform" ]; then
+			_rsnap="/tmp/enodia-cgi-in.$$"; rm -rf "$_rsnap" 2>/dev/null
+			( umask 077; mkdir "$_rsnap" ) 2>/dev/null || fail "не удалось создать временный каталог"
+			trap 'drop_switch; rm -rf "$_rsnap"' EXIT
+			cp -p "$ENODIA_STATE"/.doh-* "$_rsnap/" 2>/dev/null
+			put_resolver "$_rsnap"
+			if ( ENODIA_STATE="$_rsnap"; doh_wire_via "$(doh_proto)" "$_qform" ); then
+				[ "$_qrung" = 1 ] && doh_lv_forget quic        # answers here: up from the old resolver's rung
+			elif [ "$_qrung" = 0 ]; then
+				_qok=0                                       # silent where QUIC passes: refused, nothing changed
+			fi                                               # silent on a rung: stays on it
+			rm -rf "$_rsnap" 2>/dev/null
+		fi
+		if [ "$_qok" = 0 ]; then
+			doh_lv_drop
+			# «возвращён custom» человеку ничего не говорит, когда прежний тоже был своим.
+			pname="$prev"; [ "$prev" = custom ] && pname="прежний адрес"
+			fail "резолвер $r не отвечает по $(doh_proto_label "$(doh_proto)") — возвращён $pname"
+		fi
 		# Вердикт «853 этим путём закрыт» был про ПРЕЖНИЙ резолвер: новый обязан сперва попробовать DoT. The QUIC rung stays (above).
 		if [ "$_qrung" = 1 ]; then doh_lv_forget dot; else command -v doh_fb_forget >/dev/null 2>&1 && doh_fb_forget; fi
-		echo "$r" > "$ENODIA_STATE/.doh-resolver"
-		[ "$r" = nextdns ] && echo "$nid" > "$ENODIA_STATE/.doh-nextdns-id"
-		# Своё — тремя файлами разом: URL (DoH), имя (SNI для DoT; пусто у литерала) и якоря.
-		# Порядок «teardown выше → запись здесь → расстановка ниже» обязателен: правила снимаются
-		# по ТЕКУЩЕМУ содержимому .doh-custom-ips, и переписать его раньше teardown значило бы
-		# оставить марку/RETURN прежних адресов висеть в mangle навсегда.
-		if [ "$r" = custom ]; then
-			echo "$cu" > "$ENODIA_STATE/.doh-custom-url"
-			echo "$cs" > "$ENODIA_STATE/.doh-custom-sni"
-			echo "$cips" > "$ENODIA_STATE/.doh-custom-ips"
-			if [ -n "$cdp" ]; then echo "$cdp" > "$ENODIA_STATE/.doh-custom-dot-port"; else rm -f "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null; fi
-		fi
+		# Teardown правил СТАРОГО резолвера ДО записи нового: правила снимаются по ТЕКУЩЕМУ содержимому файлов (.doh-custom-ips и
+		# прочих) — переписать их раньше значило бы оставить марку/RETURN прежних адресов висеть в mangle навсегда.
+		doh_resolver_mark del; doh_resolver_bypass del
+		put_resolver "$ENODIA_STATE"
 		# Под новый резолвер: DoH активен (тумблер ИЛИ авто держит DNS) → перезапустить прокси + переиграть
 		# DNS (добавит марку/RETURN :443 НОВОГО резолвера). Выключен → просто персист, применится при включении.
 		if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
-			# Under DoQ/DoH3 the new resolver's QUIC handshake first, from THIS router (s.151): silent — the old resolver back at once,
-			# without raising the proxy on a resolver that cannot answer and falling down the ladder's rungs inside the CGI.
-			_qok=1
-			if [ -n "$_qform" ]; then
-				if doh_wire_ok "$(doh_proto)" "$_qform"; then
-					[ "$_qrung" = 1 ] && doh_lv_forget quic        # answers here: up from the old resolver's rung
-				elif [ "$_qrung" = 0 ]; then
-					_qok=0                                       # silent where QUIC passes: refused, the old resolver back
-				fi                                               # silent on a rung: stays on it
-			fi
-			if [ "$_qok" = 1 ]; then
-				doh_restart
-				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-			fi
+			doh_restart
+			sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
 			# ФУНКЦИОНАЛЬНАЯ ПРОБА нового резолвера: dnsmasq уже смотрит на прокси с НОВЫМ URL — не
 			# отвечает (недостижим/заблокирован ISP/битый NextDNS-ID) ⇒ вернуть ПРЕЖНИЙ резолвер, DNS
 			# всего дома не рвём (симметрия авто-режима doh_apply_dns, только откат на резолвер, не на plain).
@@ -1247,7 +1281,7 @@ case "$act" in
 			# ПЕРВЫМ — указатель dnsmasq на прокси (у владельца, doh_upstream_set): ручной режим с 31.08 сам проверяет имена и при
 			# отказе откатывает DNS на путь плагина, и проба имён через ТОТ DNS проходит — «ок» при мёртвом новом резолвере, без
 			# возврата прежнего и с паузой 15 минут (ревью ветки fix/dot-tails, круг 2).
-			if [ "$_qok" = 0 ] || ! doh_upstream_set || ! doh_probe 4; then
+			if ! doh_upstream_set || ! doh_probe 4; then
 				doh_resolver_mark del; doh_resolver_bypass del
 				# Переезд, если он случился на попытке НОВОГО резолвера, — вердикт о нём, а не о прежнем: прежнему возвращаем ЕГО лестницу
 				# из снимка (обе ступени и сроки), а не забытую: иначе он вернулся бы на DoH с экраном «DoT не проходит», хотя его DoT
@@ -1272,8 +1306,6 @@ case "$act" in
 				# Единственный, кто знает правду, — лог демона; ловим сигнатуру mbedTLS в свежем
 				# хвосте (лог мы только что переписали рестартом, старое сюда не попадёт).
 				why=""
-				# Silent QUIC said as such — the daemon never ran on the new resolver, and the log is the old one's.
-				[ "$_qok" = 0 ] && why=" по $(doh_proto_label "$(doh_proto)")"
 				[ -z "$why" ] && grep -q 'BADCERT_CN_MISMATCH' /tmp/enodia-doh.log 2>/dev/null && \
 					why=" (сертификат резолвера не принят; у этого адреса такое бывает через раз — попробуйте протокол DoT)"
 				[ -z "$why" ] && grep -q 'BADCERT' /tmp/enodia-doh.log 2>/dev/null && \
@@ -1323,10 +1355,7 @@ case "$act" in
 				if [ "$(doh_proto_now)" != "$v" ] && { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; }; then
 					# The handshake FIRST, the way the proxy travels (review s.151 r2 M3): forgetting the rung restarts the proxy on QUIC, and a
 					# path that still cuts it cost the whole house its names for the ladder's fall — on every click. The watchdog asks so too.
-					_qf=$(doh_anchor_state)
-					case "$_qf" in mark|bypass)
-						doh_wire_ok "$v" "$_qf" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")" ;;
-					esac
+					doh_wire_via "$v" "$(doh_rewire_form)" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")"
 					if doh_lv_forget quic; then
 						doh_resolver_mark del; doh_resolver_bypass del; doh_restart
 						sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
@@ -1356,12 +1385,13 @@ case "$act" in
 		# CGI for minutes (review s.150 R3-5). Asked only when the anchors' form is known: without anchors (paused after a failure, the
 		# old protocol's program missing) the probe would ride another way than the proxy will (review s.151 r2 L2, L4) — the switch's
 		# own ladder answers then. Off — nothing travels: the choice is stored and asked on switching on, by the ladder.
+		# THE GATE IS THE INTENT, the restart's own question after the write below: «encryption on» (or the auto mode holding DNS) —
+		# doh_enabled asked here, before the write, is about the OLD protocol's program; with it missing (only «DoQ и DoH3» installed)
+		# the precheck was skipped and the proxy then rose on a silent QUIC (review s.151 r2 L4). THE FORM is the one the rewire lays
+		# (doh_rewire_form) — no anchors (paused, the old program missing) or an untunneled resolver no longer skip or misroute it.
 		case "$v" in doq|doh3)
-			if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
-				_qf=$(doh_anchor_state)
-				case "$_qf" in mark|bypass)
-					doh_wire_ok "$v" "$_qf" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")" ;;
-				esac
+			if doh_on_intent || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
+				doh_wire_via "$v" "$(doh_rewire_form)" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")"
 			fi ;;
 		esac
 		doh_resolver_mark del; doh_resolver_bypass del
@@ -1878,7 +1908,8 @@ EOF
 				# активного конфига не записалось — считаем неизвестным»): конфиги легли, а
 				# `.active` пуст, и карточка не покажет сервер активным. Свой литерал выбрасывал
 				# этот текст целиком, и человек оставался с обещанием без оговорки (ревью 8).
-				_warn=$(printf '%s' "$raw" | grep -F '[warn]' | head -1 | jesc 300)
+				# Every [warn] line, not the first only: the layout's and the warm reserve's (switch-vpn.sh stage) can both stand (review s.152).
+				_warn=$(printf '%s' "$raw" | grep -F '[warn]' | head -3 | jesc 600)
 				[ -n "$_warn" ] && _warn=" $_warn"
 				if vpn_is_off; then
 					printf '{"ok":true,"code":0,"msg":"Конфиг %s выбран. VPN сейчас выключен тумблером — включите его в шапке панели, и роутер пойдёт через этот сервер.%s"}\n' "$name" "$_warn"
@@ -2976,9 +3007,10 @@ EOF
 		# Почту настраивает сама панель (форма «Уведомления»), установщик с ПК её больше не трогает. Полнота — ВСЕ ЧЕТЫРЕ поля, что
 		# требует notify.sh: проверка одного пароля пропускала пустой логин или адрес, и notify.sh отвечал «не настроено» (код 3).
 		[ -s "$ENODIA_STATE/notify.conf" ] || fail "почта не настроена — заполните форму настройки почты и сохраните"
-		for _nk in SMTP_HOST SMTP_USER SMTP_PASS MAIL_TO; do
-			grep -q "^$_nk=." "$ENODIA_STATE/notify.conf" 2>/dev/null || fail "настройки почты неполные — нужны сервер, логин, пароль и адрес получателя"
-		done
+		SMTP_HOST=''; SMTP_USER=''; SMTP_PASS=''; MAIL_TO=''
+		conf_load "$ENODIA_STATE/notify.conf" SMTP_HOST SMTP_USER SMTP_PASS MAIL_TO   # what notify.sh reads (conf-lib.sh)
+		[ -n "$SMTP_HOST" ] && [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ] && [ -n "$MAIL_TO" ] || \
+			fail "настройки почты неполные — нужны сервер, логин, пароль и адрес получателя"
 		# Тема — в форме «КОД: …»: ровно её `notify.sh` прогоняет через router_relabel и подставляет
 		# РЕАЛЬНУЮ модель. Без двоеточия тестер с AX3600 получал письмо «BE7000 web test» — проверка
 		# почты первым делом сообщала о чужом роутере.
@@ -2986,7 +3018,7 @@ EOF
 		if [ "$code" -eq 0 ]; then
 			printf '{"ok":true,"code":0,"msg":"Письмо отправлено (250 queued) — проверьте почту и Спам"}\n'
 		elif [ "$code" -eq 3 ]; then
-			# Конфиг выше найден и строки полей непусты, а notify.sh ответил «не настроено»: после `. notify.conf` значение
+			# Конфиг выше найден и строки полей непусты, а notify.sh ответил «не настроено»: прочитанное его разбором значение
 			# всё же пусто (ручная правка вида `SMTP_USER=""`, повтор строки с пустым значением) либо разошёлся ENODIA_STATE.
 			# «SMTP отказ» тут был бы неправдой о сервере, «обновите систему» — неверным советом (ревью шага 3c-2, круг 2).
 			printf '{"ok":false,"code":3,"msg":"Письмо не ушло: настройки почты не читаются — пересохраните форму настройки почты"}\n'
@@ -2996,10 +3028,10 @@ EOF
 		fi
 		exit 0 ;;
 
-	# --- Настройка почты из панели. notify.conf СОРСИТСЯ (`. notify.conf`) → пишем
-	# БЕЗ кавычек (как десктоп), но СТРОГО валидируем поля: пароль без пробелов/шелл-
-	# метасимволов (RHS присваивания не сплитится/не глобится, но пробел/`;`/`$`/бэктик
-	# сломали бы sourcing/инъекция). Пустой пароль → сохраняем ПРЕЖНИЙ (не затираем).
+	# --- Настройка почты из панели. notify.conf READ by its keys (conf-lib.sh), never sourced; every value is written in single
+	# quotes — conf_load takes them off, and a kept password a hand edit wrote with blanks (`"abcd efgh"`) survives the next save
+	# (written bare, it was read back as its first word — review s.153 r1). Fields are still validated: none may carry a quote.
+	# Пустой пароль → сохраняем ПРЕЖНИЙ (не затираем).
 	# ⚠️ пароль идёт по LAN в открытом HTTP — фронт предупреждает.
 	write_notify_conf)
 		host=$(urldecode "$(field host)"); port=$(urldecode "$(field port)")
@@ -3016,11 +3048,12 @@ EOF
 			# Установщик с ПК почту больше не настраивает — прежний совет «задай там» вёл в никуда.
 			echo "$pass" | grep -qE '^[A-Za-z0-9._@!#%^*+=:~-]+$' || fail "пароль: только латиница, цифры и знаки ._@!#%^*+=:~- — без пробелов и кавычек"
 		else
-			pass=$(sed -n 's/^SMTP_PASS=//p' "$ENODIA_STATE/notify.conf" 2>/dev/null | head -1)
+			SMTP_PASS=''; conf_load "$ENODIA_STATE/notify.conf" SMTP_PASS; pass=$SMTP_PASS   # the old one, as notify.sh reads it
 			[ -n "$pass" ] || fail "пароль пуст и прежнего нет — введите пароль приложения"
+			case "$pass" in *"'"*) fail "прежний пароль не сохранить как есть — введите пароль приложения заново" ;; esac
 		fi
-		{ echo "# notify.conf — записан веб-панелью"; echo "SMTP_HOST=$host"; echo "SMTP_PORT=$port"; echo "SMTP_TLS=$tls";
-		  echo "SMTP_USER=$user"; echo "SMTP_PASS=$pass"; echo "MAIL_TO=$to"; } > "$ENODIA_STATE/notify.conf.new" \
+		{ echo "# notify.conf — записан веб-панелью"; echo "SMTP_HOST='$host'"; echo "SMTP_PORT='$port'"; echo "SMTP_TLS='$tls'";
+		  echo "SMTP_USER='$user'"; echo "SMTP_PASS='$pass'"; echo "MAIL_TO='$to'"; } > "$ENODIA_STATE/notify.conf.new" \
 			&& mv "$ENODIA_STATE/notify.conf.new" "$ENODIA_STATE/notify.conf" && chmod 600 "$ENODIA_STATE/notify.conf" \
 			|| { rm -f "$ENODIA_STATE/notify.conf.new"; fail "не удалось записать notify.conf"; }
 		printf '{"ok":true,"code":0,"msg":"Почта сохранена (%s) — отправьте тест-письмо"}\n' "$user"; exit 0 ;;

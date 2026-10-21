@@ -310,7 +310,8 @@ $_hrr" >/dev/null 2>&1
 
 # hev_path_check <функция маршрута плагина> — ОСНОВНАЯ несущая. 0 — путь клиентов жив (или ожил после перезапуска hev, или судить
 # сейчас не нам), 1 — нет. КОНТРАКТ: HEV_PID, HEV_LOG, TUN, start_daemons (поднимает НЕДОСТАЮЩЕЕ — живой демон протокола не трогает),
-# ct_flush, log, probe_ext_ip (ip-lib.sh); $1 — функция маршрута (default dev TUN в table 1000: TUN пересоздан, маршрут умер с ним).
+# ct_flush_route + FWMARK/TABLE (ct-lib.sh: only the flows riding the main table), log, probe_ext_ip (ip-lib.sh); $1 — функция
+# маршрута (default dev TUN в table 1000: TUN пересоздан, маршрут умер с ним).
 # Перезапуск БЕРЁТ несущую ⇒ верб health у плагина — под carrier_run (следит C116).
 hev_path_check() {   # $1 = функция маршрута плагина
     [ "${HEV_CHECK:-}" = 1 ] || return 0      # не тик сторожа (перебор, прогрев, дамп) — путь клиентов не судим
@@ -328,7 +329,7 @@ hev_path_check() {   # $1 = функция маршрута плагина
     ip link del "$TUN" 2>/dev/null
     _hpo=fail
     if start_daemons && "$1"; then
-        ct_flush
+        ct_flush_route "$FWMARK" "$TABLE"   # hev restarted in place: only the flows riding table $TABLE (ct-lib.sh)
         hev_tun_ok "$TUN" && _hpo=ok
     fi
     hev_lock_drop
@@ -367,7 +368,7 @@ slot_hev_path_check() {   # $1 = id
     _sho=fail
     if slot_hev_up "$_shid"; then
         slot_apply_routing "$_shid"
-        ct_flush
+        ct_flush_slot "$_shid"   # only this exit's flows (ct-lib.sh)
         hev_tun_ok "$_shtun" && _sho=ok
     fi
     hev_lock_drop

@@ -229,7 +229,10 @@ doh_installed() {
 	[ -x "$(doh_bin_for)" ] || return 1
 	[ "$(doh_proto_now)" != odoh ] || doh_odoh_capable
 }
-doh_enabled()   { [ "$(cat "$ENODIA_STATE/.doh-on" 2>/dev/null)" = on ] && doh_installed; }
+# doh_on_intent — the person switched encryption on («Шифровать всегда», `.doh-on`), whatever is installed. Asked alone where the
+# protocol is about to change: doh_installed is about the CURRENT protocol's program (set_doh_proto's precheck, review s.151 r2 L4).
+doh_on_intent() { [ "$(cat "$ENODIA_STATE/.doh-on" 2>/dev/null)" = on ]; }
+doh_enabled()   { doh_on_intent && doh_installed; }
 doh_upstream()  { echo "$DOH_UPSTREAM"; }
 
 # НАШ UPSTREAM dnsmasq ПИШЕТ ОДИН ВЛАДЕЛЕЦ — И ПЕРЕЗАПУСКАЕТ ДЕМОН ТОЛЬКО ПО ДЕЛУ. `/etc/init.d/dnsmasq restart`
@@ -1285,6 +1288,7 @@ DOH_BAIL_BACKOFF=${DOH_BAIL_BACKOFF:-900}
 # ОТКАТ ПРОВАЛИВШЕЙСЯ ПЕРЕПРОВОДКИ — одна ветка на все провалы doh_apply_dns (не встал, не слушает, имён нет): авто-режим
 # уходит в свой карантин, ручной — в эту паузу. `_doh_auto` — режим, названный doh_apply_dns в начале вызова.
 doh_apply_fail() {
+	doh_quic_preset_settle fail   # a provisional rung that never gave names goes (doh_quic_preset)
 	if [ "$_doh_auto" = 1 ]; then doh_auto_rollback; return 0; fi
 	doh_dns_bailout
 	# ПАУЗА — ТОЛЬКО КОГДА ВИНОВАТ РЕЗОЛВЕР, а не мёртвый WAN (ревью ветки fix/dot-tails, круг 1): провал перепроводки в провал
@@ -1840,6 +1844,81 @@ doh_lv_rescue() {
 doh_dot_rescue() { doh_lv_rescue dot; }
 doh_quic_rescue() { doh_lv_rescue quic; }
 
+# The anchor form the rewire (`transport.sh dns` → the plugin's DNS setter → doh_apply_dns) lays NOW — transport.sh::cmd_dns's own
+# dispatch: VPN switched off by hand, byedpi/zapret, no transport, awg without its route (FAILOPEN) → `direct` (bypass); awg with its
+# carrier, xray/hy2 with or WITHOUT one → `tunnel` (mark: their DNS setter is the tunnel's, a carrier-less mark falls to main — review
+# s.152 r1 L1 found doh_direct_regime guessing bypass there). Not doh_anchor_apply: the untunneled flag it honours is cleared by that
+# very rewire. A wrong guess costs only the old behaviour — doh_apply_dns forgets a rung recorded for another path.
+doh_rewire_form() {
+	if [ -f "$ENODIA_STATE/.vpn-off" ] || doh_direct_by_name; then echo bypass; return 0; fi
+	case "$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')" in
+		''|awg) if [ -n "$(carrier_iface)" ]; then echo mark; else echo bypass; fi ;;
+		*)      echo mark ;;
+	esac
+}
+# doh_wire_via <proto> <form> — does <proto>'s wire answer on the path the switch's rewire lays (<form> = doh_rewire_form, asked by
+# the caller: it reads `.transport`/`.vpn-off`, which a caller probing from a snapshot of `.doh-*` does not carry)? With the resolver
+# UNTUNNELED now (DOH_UNTUNNELED: the carrier does not reach it) the tunnel form is asked both ways, mark first — the order
+# doh_apply_dns tunnel follows (mark, then its fallback past the carrier): mark alone refused a resolver the rewire reaches (review
+# s.153 r1 B4), bypass alone asked past a carrier that is back (s.151 r3 L4).
+doh_wire_via() {
+	doh_wire_ok "$1" "$2" && return 0
+	[ "$2" = mark ] && [ -f "$DOH_UNTUNNELED" ] && doh_wire_ok "$1" bypass
+}
+# doh_quic_preset <mark|bypass> — the proxy is about to rise on the chosen DoQ/DoH3 (switching encryption on, the direct up-path of
+# doh_apply_dns): does QUIC answer on the path that rewire lays? Silent — the QUIC level stands at once on the first rung below whose wire
+# is alive on that path (the flag «<epoch> <rung>» and its path, as doh_lv_fallback writes them), so the proxy rises THERE: the house does
+# not sit on a mute QUIC proxy while the ladder falls, 20–40 s without names (review s.151 r3 L3; set_doh_proto/set_doh_resolver ask the
+# same before their switch).
+# THE RUNG IS PROVISIONAL until names go on it (review s.152 r2 B-L1): only the wire was asked, and a live 853 handshake does not prove
+# a working DoT (the project's own measurement). The marker DOH_QUIC_PRESET carries it to doh_apply_dns, which settles it
+# (doh_quic_preset_settle): names went on the rung — the journal says it (the climb back an hour later then has its pair); the ladder
+# moved further — its own line said it; the rewire ended in doh_apply_fail — the rung is dropped, so neither the journal, the panel nor
+# the dump claims «шифрует по DoT» over the plain path, and no rung pins the path for DOH_QUIC_RETRY.
+# Nothing here when a rung already stands (the ladder's verdict lives), without the QUIC program (that is «no component», not «QUIC
+# silent»), with a resolver QUIC cannot be tried with, with the uplink down by the owner's local signs (every wire would read dead and the
+# ladder asks them again anyway) — and in the mark form over a carrier seconds old: through a fresh tunnel QUIC reads dead for 5–9 s (the
+# tunnel's up-path itself never asks for that reason; the bypass form rides WAN, no carrier in it). Code 0 = stood on a rung (a running
+# proxy is the caller's to restart); 1 = nothing changed (QUIC answers, not ours to ask, or nothing alive on this path — the rewire's
+# ladder answers then).
+DOH_QUIC_PRESET="/tmp/.enodia-quic-preset"
+doh_quic_preset() {
+	case "$(doh_proto)" in doq|doh3) : ;; *) return 1 ;; esac
+	case "$1" in mark|bypass) : ;; *) return 1 ;; esac
+	[ -f "$DOH_QUIC_FALLBACK" ] && return 1
+	[ -x "$QUIC_BIN" ] && doh_quic_can "$(doh_proto)" || return 1
+	if command -v wan_up >/dev/null 2>&1 && ! wan_up; then return 1; fi
+	if [ "$1" = mark ] && [ "$(age_since "$(cat "${CARRIER_UP_STAMP:-/tmp/.enodia-carrier-up.stamp}" 2>/dev/null | tr -cd '0-9')")" -lt 60 ]; then
+		return 1
+	fi
+	doh_wire_ok "$(doh_proto)" "$1" && return 1
+	for _dqps in $(doh_lv_rungs quic); do
+		doh_wire_ok "$_dqps" "$1" || continue
+		doh_lv quic
+		{ echo "$(date +%s) $_dqps" > "$_lvf"; } 2>/dev/null || : > "$_lvf"
+		rm -f "$_lvt" "$_lvd" 2>/dev/null
+		doh_dot_path_id "$1" > "$_lvp" 2>/dev/null   # the verdict is about THIS path (DOH_DOT_PATH)
+		echo "$_dqps" > "$DOH_QUIC_PRESET" 2>/dev/null
+		return 0
+	done
+	return 1
+}
+# doh_quic_preset_settle ok|fail — the end of a rewire that may have risen on a provisional rung (doh_quic_preset). ok: names went — a
+# rung still standing WHERE THE PRESET PUT IT is journalled now (every success return asks it: the ladder that moved further changed the
+# flag and said it itself, so nothing is said twice — review s.152 r3 B-L1 found the untunnel branch silent); fail: the rewire fell
+# back (doh_apply_fail) — the rung still standing where the preset put it is dropped. The marker goes in every case.
+doh_quic_preset_settle() {
+	[ -f "$DOH_QUIC_PRESET" ] || return 0
+	_dqss=$(cat "$DOH_QUIC_PRESET" 2>/dev/null); rm -f "$DOH_QUIC_PRESET" 2>/dev/null
+	doh_lv quic
+	[ -n "$_dqss" ] && [ -f "$_lvf" ] && [ "$(awk '{print $2; exit}' "$_lvf" 2>/dev/null)" = "$_dqss" ] || return 0
+	case "$1" in
+		ok)   doh_lv_event quic fallback "$(awk '{print $NF; exit}' "$_lvp" 2>/dev/null)" "$_dqss" ;;   # «<transport> <form>», transport may be empty
+		fail) rm -f "$_lvf" "$_lvp" 2>/dev/null ;;
+	esac
+	return 0
+}
+
 # ---- ЛЕСТНИЦА ODoH: другой ретранслятор → DoH напрямую к цели → прежний путь ---------------------------------------------
 # Ретранслятор — чужой сервис, и их всего два публичных: один лёг или его режет провайдер — естественный шаг сперва ДРУГОЙ
 # ретранслятор (цель по-прежнему не видит адреса), потом — РЕШЕНИЕ ЧЕЛОВЕКА 16.10.2026: DoH напрямую к ТОЙ ЖЕ цели (шифрование
@@ -2375,6 +2454,21 @@ doh_apply_dns() {
 		doh_lv_forget quic
 		doh_running && { doh_resolver_mark del; doh_resolver_bypass del; doh_stop; }
 	fi
+	# THE DIRECT PATH ASKS QUIC BEFORE THE PROXY RISES ON IT (review s.152 r1 M1): «Отключить VPN», FAILOPEN, a switch to ByeDPI/Zapret
+	# and the auto mode come here, and on a WAN that cuts QUIC (the common Russian case) the proxy rose on DoQ, dnsmasq was pointed at it
+	# and the ladder fell with the house without names — on every off/on cycle, since the tunnel's return forgets the bypass rung. Asked
+	# BEFORE dnsmasq is pointed at the proxy (where the previous path still works — a CGI, a switch to ByeDPI — the house keeps its names
+	# during the probe; after «Отключить VPN»/FAILOPEN the old path is gone anyway); a rung found — the proxy rises there (a running one is
+	# stopped first, as above). Not over a proxy ALREADY on the chosen QUIC with its RETURN anchors standing (a repeated direct rewire:
+	# the watchdog's pointer return, a second «Отключить VPN» pass): its names are judged by the probe below as before, and one transient
+	# wire timeout must not pin a rung for DOH_QUIC_RETRY (review s.152 r2). A proxy without anchors yet (boot heal over doh-early's, a
+	# CGI that just changed the resolver) IS asked — skipping «none» would skip the new resolver's question too (review s.152 r3 A-L1);
+	# there a transient timeout costs an hour on the rung, encrypted still. The tunnel form does not ask here: this up-path runs right
+	# after a carrier raise, when QUIC reads dead for 5–9 s.
+	if [ "$1" = direct ] && ! { doh_running && [ "$(doh_proto_now)" = "$(doh_proto)" ] && [ "$(doh_anchor_state)" = bypass ]; } \
+	   && doh_quic_preset bypass; then
+		doh_running && { doh_resolver_mark del; doh_resolver_bypass del; doh_stop; }
+	fi
 	# Прокси должен РЕАЛЬНО работать, прежде чем уводить на него dnsmasq: несовместимый/битый
 	# бинарь (напр. version skew ядра 4.4 на AX3600 — libcurl<7.62) форкается и тут же падает,
 	# start-stop-daemon -b об этом не знает (вернул 0 после fork). Без проверки dnsmasq указал бы
@@ -2473,7 +2567,7 @@ doh_apply_dns() {
 			else
 				DOH_APPLY_NOTE="$_doh_qp этим путём не отдаёт имён, а $_doh_qn того же резолвера отдаёт — шифрую по $_doh_qn; сторож проверит $_doh_qp и вернётся на него сам"
 			fi
-			return 0
+			doh_quic_preset_settle ok; return 0
 		fi
 		if doh_dot_rescue; then
 			if [ "$(doh_proto_now)" = dot ]; then
@@ -2481,7 +2575,7 @@ doh_apply_dns() {
 			else
 				DOH_APPLY_NOTE="DoT этим путём не отдаёт имён, а DoH того же резолвера отдаёт — шифрую по DoH; сторож проверит DoT и вернётся на него сам"
 			fi
-			return 0
+			doh_quic_preset_settle ok; return 0
 		fi
 		# ODoH: другой ретранслятор, затем DoH напрямую к цели (doh_odoh_rescue) — тот же вопрос «порт/посредник или путь».
 		if doh_odoh_rescue; then
@@ -2490,7 +2584,7 @@ doh_apply_dns() {
 			else
 				DOH_APPLY_NOTE="ни один ретранслятор ODoH не отдаёт имён — шифрую по DoH напрямую к цели; сторож проверит ретрансляторы и вернётся на ODoH сам"
 			fi
-			return 0
+			doh_quic_preset_settle ok; return 0
 		fi
 		_doh_pb=$(doh_proto_now)
 		if [ "$1" = tunnel ] && doh_untunnel_apply && { doh_probe || doh_dot_rescue || doh_odoh_rescue || doh_quic_rescue; }; then
@@ -2526,12 +2620,14 @@ doh_apply_dns() {
 			elif [ "$_doh_pa" = doh ] && [ "$(doh_proto)" = odoh ]; then
 				DOH_APPLY_NOTE="$DOH_APPLY_NOTE; шифрую по DoH напрямую к цели, как и до увода — сторож проверит ретрансляторы на новом пути и вернётся на ODoH сам"
 			fi
-			return 0
+			doh_quic_preset_settle ok; return 0
 		fi
 		rm -f "$DOH_UNTUNNELED" 2>/dev/null
 		doh_apply_fail
 		return 1
 	fi
+	# Names went: a provisional rung the preset stood on is a verdict now — the journal says it (doh_quic_preset).
+	doh_quic_preset_settle ok
 	return 0
 }
 

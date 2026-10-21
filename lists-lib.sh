@@ -274,6 +274,10 @@ fetch_url() {  # fetch_url <url> <outfile> → 0 + непустой outfile пр
 	# пути. Списки — публичные фильтр-данные (задают лишь МАРШРУТ IP, не секреты), поэтому
 	# -k как последний шанс допустим. На BE7000/BE10000 Pro сверка проходит → -k не нужен.
 	_u="$1"; _o="$2"
+	# ONLY a web address goes to curl (review s.153 r1): a source's url travels in the settings backup (the `lists/` registry,
+	# the legacy iplist.conf), and a value that starts with `-` is an OPTION to curl — `-K<file>` reads a config that writes
+	# anywhere (boot.sh, the target of every cron line). file:// and the rest are refused too.
+	case "$_u" in http://*|https://*) ;; *) return 1 ;; esac
 	_fetch_try '' && return 0
 	_fetch_try '-k' && return 0
 	return 1
