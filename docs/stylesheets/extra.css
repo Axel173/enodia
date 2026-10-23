@@ -1,0 +1,45 @@
+/* The site wears the panel's colours (web/assets/panel.css): a light header like the panel's paper, the accent green
+   for links and buttons — so a reader who opens the panel after the site sees the same product. */
+:root > * {
+  --md-primary-fg-color: #f5f5f7;
+  --md-primary-fg-color--light: #ffffff;
+  --md-primary-fg-color--dark: #e9e9ee;
+  --md-primary-bg-color: #22221f;
+  --md-primary-bg-color--light: #5d5c57;
+  --md-accent-fg-color: #158060;
+  --md-typeset-a-color: #0f6e56;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #17171a;
+  --md-primary-fg-color--light: #202024;
+  --md-primary-fg-color--dark: #0e0e10;
+  --md-primary-bg-color: #eceadf;
+  --md-primary-bg-color--light: #b3b1a7;
+  --md-accent-fg-color: #27b98c;
+  --md-typeset-a-color: #27b98c;
+  --md-default-bg-color: #0e0e10;
+}
+/* «primary» above is the header's PAPER, so buttons take the accent instead (Material paints them in primary). */
+.md-typeset .md-button { color: var(--md-accent-fg-color); border-color: currentcolor; }
+.md-typeset .md-button--primary { background-color: var(--md-accent-fg-color); border-color: var(--md-accent-fg-color); color: #fff; }
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary { color: #0e0e10; }
+.md-typeset .md-button:focus, .md-typeset .md-button:hover { background-color: var(--md-accent-fg-color); border-color: var(--md-accent-fg-color); color: #fff; }
+[data-md-color-scheme="slate"] .md-typeset .md-button:focus, [data-md-color-scheme="slate"] .md-typeset .md-button:hover { color: #0e0e10; }
+.md-header { border-bottom: 1px solid rgba(0, 0, 0, .08); box-shadow: none; }
+[data-md-color-scheme="slate"] .md-header { border-bottom-color: rgba(255, 255, 255, .08); }
+.md-header__button.md-logo img { height: 1.6rem; }
+
+/* A panel clip: a muted loop, framed like a screen. */
+.clip { display: block; width: 100%; height: auto; border-radius: 12px; border: 1px solid rgba(0, 0, 0, .08); margin: .6em 0 1.2em; }
+[data-md-color-scheme="slate"] .clip { border-color: rgba(255, 255, 255, .1); }
+.clip-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 44.9375em) { .clip-pair { grid-template-columns: 1fr; } }
+
+/* The model cards on the home page and «Роутеры». */
+.models { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: .8rem; margin: 1em 0 1.5em; }
+.models > p { display: contents; }   /* markdown wraps the cards' links in one paragraph — the grid sees through it */
+.models a { display: block; padding: .8rem 1rem; border-radius: 12px; border: 1px solid rgba(0, 0, 0, .1); color: inherit; }
+.models a:hover { border-color: var(--md-accent-fg-color); }
+[data-md-color-scheme="slate"] .models a { border-color: rgba(255, 255, 255, .12); }
+.models strong { display: block; font-size: 1.05em; }
+.models span { font-size: .8em; opacity: .75; }

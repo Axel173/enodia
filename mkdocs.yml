@@ -1,0 +1,121 @@
+# Documentation site — https://axel173.github.io/enodia/ (built by .github/workflows/docs.yml on every push to main).
+# WHY A SITE AND NOT ONLY THE README: a repository page on github.com cannot be added to Google Search Console or
+# Yandex.Webmaster, and a new repository with few outside links is barely indexed; a Pages site can be, with a sitemap
+# and one page per question people actually search («AmneziaWG на Xiaomi BE3600», «VPN на стоковой прошивке без OpenWrt»).
+# Russian is the default language (the audience), English mirrors it: page.md + page.en.md (mkdocs-static-i18n, «suffix»).
+site_name: Enodia
+site_url: https://axel173.github.io/enodia/
+site_description: >-
+  VPN и раздельная маршрутизация для роутеров Xiaomi на стоковой прошивке (BE3600, BE6500, BE7000, BE10000, AX3600):
+  AmneziaWG, Xray/VLESS, Hysteria2, WARP, ByeDPI и Zapret, настройка в веб-панели.
+site_author: Axel173
+repo_url: https://github.com/Axel173/enodia
+repo_name: Axel173/enodia
+edit_uri: ""
+copyright: Enodia — GPL-3.0
+
+# The README, CHANGELOG and the old instruction screenshots live beside the site sources but are not pages of it.
+exclude_docs: |
+  overrides/
+  img/
+  requirements.txt
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  language: ru
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  # System fonts: Google Fonts is slow or blocked for part of the audience, and the page must not wait for it.
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Тёмная тема
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Светлая тема
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search:
+      lang: [ru, en]
+  - i18n:
+      docs_structure: suffix
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: ru
+          name: Русский
+          default: true
+          build: true
+        - locale: en
+          name: English
+          build: true
+          site_description: >-
+            VPN and split tunneling for Xiaomi routers on stock firmware (BE3600, BE6500, BE7000, BE10000, AX3600):
+            AmneziaWG, Xray/VLESS, Hysteria2, WARP, ByeDPI and Zapret, managed from a web panel.
+          nav_translations:
+            Главная: Home
+            Установка: Installation
+            Роутеры: Routers
+            Все модели: All models
+            Протоколы: Protocols
+            Возможности: Features
+            Вопросы и ответы: FAQ
+
+nav:
+  - Главная: index.md
+  - Установка: install.md
+  - Роутеры:
+      - Все модели: routers/index.md
+      - Xiaomi BE3600: routers/be3600.md
+      - Xiaomi BE6500: routers/be6500.md
+      - Xiaomi BE7000: routers/be7000.md
+      - Xiaomi BE10000: routers/be10000.md
+      - Xiaomi AX3600: routers/ax3600.md
+  - Протоколы: protocols.md
+  - Возможности: features.md
+  - Вопросы и ответы: faq.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # Cyrillic headings keep their words in the anchor (the default slugify drops non-ASCII to an empty id).
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.superfences
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Axel173/enodia
+    - icon: fontawesome/brands/telegram
+      link: https://t.me/+tfMLMVKG03FhMGYy
+  # Ownership codes for the search consoles: the site's owner pastes them here after adding the site there
+  # (Google Search Console → «HTML tag», Yandex.Webmaster → «Мета-тег»); empty = no tag.
+  google_site_verification: ""
+  yandex_verification: ""

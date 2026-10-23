@@ -9,9 +9,9 @@
 
 ### [Русский](README.md) | English
 
-Enodia is an open-source project for Xiaomi routers on stock firmware. Blocked sites go through your
-VPN server or open without a server, all other traffic goes direct. Everything is configured in a web
-panel on the router itself.
+Enodia is an open-source project for Xiaomi routers on stock firmware (BE3600, BE6500, BE7000, BE10000, AX3600),
+without OpenWrt. Blocked sites go through your VPN server (AmneziaWG, Xray, Hysteria2, WARP) or open without a server
+(ByeDPI, Zapret), all other traffic goes direct. Everything is configured in a web panel on the router itself.
 
 <img src="assets/panel-overview.jpg" alt="The Enodia web panel on a tablet and a phone: VPN status, traffic and where it goes" width="100%">
 
@@ -74,8 +74,8 @@ it takes almost 4 MB of flash), the wizard and the panel offer to turn that copy
 4. Open the panel: `http://192.168.31.1:8088` (your router's IP, port 8088). The login is `admin`, the password is the
    one you set in the wizard.
 
-No need to install Python: if it's missing, the launcher downloads it. Detailed documentation is in
-progress; questions go to [Telegram](https://t.me/+tfMLMVKG03FhMGYy).
+No need to install Python: if it's missing, the launcher downloads it. Details are on the
+[documentation site](https://axel173.github.io/enodia/en/); questions go to [Telegram](https://t.me/+tfMLMVKG03FhMGYy).
 
 ## Projects used
 

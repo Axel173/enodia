@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{#- Search-console ownership tags and the link preview. Material gives a page its title and description; the preview
+    picture is one for the whole site — the panel itself, the thing people come for. -#}
+{% block extrahead %}
+  {%- if config.extra.google_site_verification %}
+  <meta name="google-site-verification" content="{{ config.extra.google_site_verification }}">
+  {%- endif %}
+  {%- if config.extra.yandex_verification %}
+  <meta name="yandex-verification" content="{{ config.extra.yandex_verification }}">
+  {%- endif %}
+  {%- set title = (page.meta.title if page and page.meta and page.meta.title else (page.title if page and page.title else config.site_name)) %}
+  {%- set desc = (page.meta.description if page and page.meta and page.meta.description else config.site_description) %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Enodia">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ desc }}">
+  {%- if page and page.canonical_url %}
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  {%- endif %}
+  <meta property="og:image" content="{{ config.site_url }}assets/og-panel.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+{% endblock %}
