@@ -165,7 +165,9 @@ if [ "$MODE" = speed ]; then
 		( tot=0
 		  while now=$(date +%s); [ "$now" -lt "$deadline" ]; do
 			rem=$((deadline-now)); [ "$rem" -lt 1 ] && break
-			got=$(curl -s --max-time "$rem" -o /dev/null --socks5-hostname "127.0.0.1:$TPORT" \
+			# -k: the body is discarded, only its size counts — and on a build whose curl finds no issuer (AX3600: ANY https
+			# = rc=60, dns-lib.sh::curl_ca_opt) every server measured «скачивание не пошло» (s.162, measured).
+			got=$(curl -s -k --max-time "$rem" -o /dev/null --socks5-hostname "127.0.0.1:$TPORT" \
 			      -w '%{size_download}' "https://speed.cloudflare.com/__down?bytes=$CHUNK" 2>/dev/null)
 			got=${got%.*}; case "$got" in ''|*[!0-9]*) got=0 ;; esac
 			tot=$((tot+got))

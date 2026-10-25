@@ -62,6 +62,9 @@ command -v daemon_wait_port >/dev/null 2>&1 || daemon_wait_port() {
     DAEMON_WAIT_WHY=''; _dwi=0; while [ "$_dwi" -lt "$3" ]; do netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0; sleep 1; _dwi=$((_dwi+1)); done
     netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0
     DAEMON_WAIT_WHY="не появился за $3 с"; return 1; }
+# What this curl trusts — the ONE owner (dns-lib.sh::curl_ca_opt, C26). No file — the old path: the system's own trust.
+if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
+command -v curl_ca_opt >/dev/null 2>&1 || curl_ca_opt() { return 0; }
 CIADPI=$(bin_path byedpi)
 TPLUGIN="$ENODIA_DIR/transport-byedpi.sh"
 TEST_PORT=10809                               # отдельно от боевого 10808
@@ -177,7 +180,10 @@ spawn() {
 
 # одна проба домена ($1) через кандидата → пишет 1 (открылся) / 0 в файл $2.
 probe() {
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$T_TIMEOUT" --connect-timeout 4 \
+    # The certificate IS part of the verdict: a stub at the ISP's DNS answers 200/302 with its OWN one, and `-k` would read every
+    # strategy «1» there (review s.162 r1). Where curl finds no issuer (AX3600: ANY https = rc=60) every strategy read «0» — so the
+    # system bundle by its owner (run: PROBE_CA), not `-k`.
+    code=$(curl -s $PROBE_CA -o /dev/null -w '%{http_code}' --max-time "$T_TIMEOUT" --connect-timeout 4 \
         --socks5-hostname "$SOCKS:$TEST_PORT" "https://$1" 2>/dev/null)
     case "$code" in 2*|3*) echo 1 > "$2" ;; *) echo 0 > "$2" ;; esac
 }
@@ -236,6 +242,9 @@ run() {
     cats_json="{\"k\":\"$(json_escape "$TARGET")\",\"l\":\"$(json_escape "$TARGET_LABEL")\",\"n\":$total_max}"
     log "макс проб: $total_max; timeout=$T_TIMEOUT requests=$T_REQUESTS parallel=$T_PARALLEL delay=$T_DELAY"
     ensure_owner
+    # The probes' trust, asked ONCE of its owner against an address that answers (a pool domain may be the blocked one, and a
+    # silent probe caches nothing) — the probes run in subshells and inherit it.
+    PROBE_CA=$(curl_ca_opt "${IP_PROBE_TRACE:-https://1.1.1.1/cdn-cgi/trace}")
 
     TAB=$(printf '\t')
     # пресет «Авто» идёт с пустыми args = «использовать авто-набор»; для теста подставляем РЕАЛЬНЫЙ

@@ -2,6 +2,10 @@ tunnel:
   name: xtun
   mtu: 8500
   ipv4: 198.18.0.1
+  # hev 2.19+: no jumbo segments — this TUN's traffic is FORWARDED to LAN clients (hev's own guidance: jumbo is for local
+  # delivery only); TSO stays, the kernel splits by MSS. hev 2.18 skips this key (only ipv4/ipv6 mappings are read).
+  offload:
+    jumbo: false
 socks5:
   port: 10808
   address: 127.0.0.1

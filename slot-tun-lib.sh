@@ -53,6 +53,7 @@ slot_hev_yaml()   { echo "$ENODIA_STATE/hev-s$1.yaml"; }
 
 # per-slot hev.yaml: свой tun/порт/ipv4. 198.18.<id>.1 — бенчмарк-диапазон (RFC 2544), не
 # пересекается ни с LAN, ни с реальными сетями ⇒ адрес TUN слота ничего не затеняет.
+# `offload: jumbo: false` — as in the main hev.yaml (why — there): an exit's TUN carries FORWARDED traffic too.
 slot_write_hev_yaml() {   # $1 = id
     _id="$1"
     cat > "$(slot_hev_yaml "$_id")" <<YAML
@@ -60,6 +61,8 @@ tunnel:
   name: xtun$_id
   mtu: 8500
   ipv4: 198.18.$_id.1
+  offload:
+    jumbo: false
 socks5:
   port: $(slot_socks_port "$_id")
   address: 127.0.0.1
@@ -190,6 +193,10 @@ slot_remove_routing() {   # $1 = id
 #     запись в TUN). Проба такое не видит, видит лог (уровень warn — строка в нём есть). НОРМА ЗАМЕРЕНА (BE7000, hev 2.17.1,
 #     02.10.2026): живой трафик дома и 1.7 ГБ закачек за 40 с с обрывами клиентом — НОЛЬ строк. Значит, поток строк — признак
 #     беды, а не фон, и порог берём низким, но сам перезапуск не дёшев (ниже) ⇒ два окна подряд и не чаще раза в HEV_RESTART_GAP.
+#     Since hev 2.19 (s.162, read in its source) a write failing with ENOBUFS/ENOMEM is NOT logged: hev returns ERR_MEM and lwIP
+#     resends in smaller pieces — the cost of its jumbo/TSO segments, on by default. That class is invisible to THIS sign now (the
+#     dead-path probe above still sees a dead path). The «zero lines» norm holds on 2.19.3 too (BE7000 kernel 5.4, 25.10.2026:
+#     ~100 Mbit/s through a test TUN, three 15-s rounds — zero lines, as 2.18.0 beside it).
 # Зовут ТОЛЬКО после прошедшей socks-пробы: сервер жив ⇒ виноват именно hev, и лечение — перезапуск hev на месте, а не перебор
 # серверов. Каждый перезапуск — событие `hev-restart` в журнале: причина у тестера не изолирована, и совпадение срабатываний с
 # жалобами — единственный дешёвый способ её доказать.
