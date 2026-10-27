@@ -6506,8 +6506,9 @@
       }
       tokPost('/cgi-bin/action', function(tok){ return 'action=test_xray_server&token='+encodeURIComponent(tok)+'&name='+encodeURIComponent(name)+(port?('&port='+port):''); })
         .then(function(r){ var ok=!!(r&&r.ok);
-          // Порт занят другой проверкой — вердикта о СЕРВЕРЕ нет: кэш не трогаем, наверх — «без ответа».
-          if(r && r.busy){ chkPaintKey('xray', name); cb(false, c, r, true); return; }
+          // Порт занят другой проверкой — вердикта о СЕРВЕРЕ нет: кэш не трогаем, наверх — «без ответа». `nobin` — no xray on the
+          // router (an in-place swap that failed, say): no verdict about the server either (review s.166 r2).
+          if(r && (r.busy || r.nobin)){ chkPaintKey('xray', name); cb(false, c, r, true); return; }
           var rec={st:(ok?'ok':'dead'), ms:(c&&c.ms!=null?c.ms:null), method:(c&&c.method)||'', cdn:(c&&c.cdn?1:0), kind:'ping', ncmp:0};   // the ping answered: nothing «сравнить не с чем» is left of an older record (chkSet merges)
           if(!ok) rec.mbps=null;   // мёртвый — снять устаревшую скорость; рабочий — прошлую скорость сохраняем (merge)
           chkSet('xray', name, rec);
@@ -6567,7 +6568,7 @@
       if(blocked){ var bm='«'+dn+'»: адрес заблокирован провайдером — сервер отвечает через туннель'; showToast(bm,false); logLine(bm,false); if(after) after(ok, c, r, unknown); return; }
       // «Роутер не ответил» — не «сервер недоступен»: вердикта нет, и кэш его не пишет (разбор у checkOne).
       if(ok){ var m='✓ «'+dn+'» работает'+(c&&c.ms!=null?(' · '+c.ms+' мс'):'')+' · выход '+((r&&r.ip)||'?'); showToast(m,true); logLine(m,true); }
-      else { var em=unknown ? ((r && r.busy && r.msg) ? r.msg : 'роутер не ответил') : ((r&&r.msg)?r.msg:'недоступен'); showToast('✗ «'+dn+'»: '+em,false); logLine('✗ «'+dn+'»: '+em,false); }
+      else { var em=unknown ? ((r && (r.busy || r.nobin) && r.msg) ? r.msg : 'роутер не ответил') : ((r&&r.msg)?r.msg:'недоступен'); showToast('✗ «'+dn+'»: '+em,false); logLine('✗ «'+dn+'»: '+em,false); }
       if(after) after(ok, c, r, unknown);
     });
   }
@@ -6598,7 +6599,7 @@
     tokPost('/cgi-bin/action', function(tok){ return 'action=speedtest_xray_server&token='+encodeURIComponent(tok)+'&name='+encodeURIComponent(name); })
       .then(function(r){
         if(r && r.ok){ chkSet(tpt, name, {st:'ok', mbps:r.mbps, kind:'speed'}); cb(true, r.mbps, null); }   // merge: прошлый пинг сохраняем
-        else if(r && r.busy){ chkPaintKey(tpt, name); cb(false, null, r.msg||'временный порт занят другой проверкой'); }
+        else if(r && r.busy){ chkPaintKey(tpt, name); cb(false, null, r.msg||'временный порт занят другой проверкой', !!r.mem); }
         else { var msg=(r&&r.msg)||'не удалось';
           Array.prototype.forEach.call(pingSpans(tpt,name), function(s){ s.textContent='✗'; s.style.color='var(--text-warning)'; s.title='скорость: '+msg; });
           cb(false, null, msg); }
@@ -8361,7 +8362,7 @@
     "Изменить":"Change",
     "Если активный транспорт умрёт":"If the active transport dies",
     "При падении сервера":"When a server goes down",
-    "резервы не перебираются: при падении — напрямую, а с другого протокола — сперва на AmneziaWG, если он установлен":"no backups are tried: on failure traffic goes direct — from another protocol, first to AmneziaWG if it is installed",
+    "резервы не перебираются: при падении — напрямую, а тот же сервер сторож пробует снова (раз в 10–30 мин); с другого протокола — сперва на AmneziaWG, если он установлен":"no backups are tried: on failure traffic goes direct, and the watchdog retries the same server (every 10–30 min); from another protocol — first to AmneziaWG if it is installed",
     "сторож встаёт на рабочий сервер и остаётся на нём":"the watchdog moves to a working server and stays on it",
     "сторож встаёт на рабочий сервер и возвращает основной, когда тот оживёт":"the watchdog moves to a working server and brings the main one back once it recovers",
     "роутер не сообщил режим":"the router did not report the mode","Настроить":"Configure",
@@ -8719,8 +8720,9 @@
     "Выбор ещё не применён — роутер резолвит прежним. Нажмите «Применить».":"The choice is not applied yet — the router still resolves with the previous one. Press «Apply».",
     "Значение ещё не применено — нажмите «Применить».":"The value is not applied yet — press «Apply».",
     "Действует только на основной туннель AmneziaWG (awg0): у его дополнительных выходов и «доступа домой» своё значение, а у Xray, Hysteria и ByeDPI несущая другая (xtun), и её 8500 — тоже норма. Понижать до 1340 или 1300 имеет смысл, если большие страницы и загрузки «висят»; выше 1376 поднимать не стоит.":"Applies only to the main AmneziaWG tunnel (awg0): its extra exits and «home access» have their own value, and Xray, Hysteria and ByeDPI use a different carrier (xtun) whose 8500 is normal too. Lowering to 1340 or 1300 makes sense if large pages and downloads «hang»; raising above 1376 is not worth it.",
-    "На роутере мало памяти, а AmneziaWG со следующего запуска будет без потолка: со временем он займёт её почти всю, и роутер перезагрузится сам. Рекомендуем «Авто».":"The router is short on memory, and from its next start AmneziaWG will run uncapped: over time it takes almost all of it, and the router reboots on its own. We recommend «Auto».",
-    "Действует на демоны AmneziaWG — основной туннель, его дополнительные выходы и «доступ домой»; у Xray и Hysteria своего потолка нет. Понижать вручную ниже 48 МиБ не стоит: памяти освободится немного, а процессор нагрузится заметно.":"Applies to the AmneziaWG daemons — the main tunnel, its extra exits and «home access»; Xray and Hysteria have no cap of their own. Lowering it by hand below 48 MiB is not worth it: little memory is freed, while the CPU load grows noticeably.",
+    "На роутере мало памяти, а туннель со следующего запуска будет без потолка: со временем AmneziaWG, Xray и Hysteria займут её почти всю, и роутер перезагрузится сам. Рекомендуем «Авто».":"The router is short on memory, and from its next start the tunnel will run uncapped: over time AmneziaWG, Xray and Hysteria take almost all of it, and the router reboots on its own. We recommend «Auto».",
+    "Туннель со следующего запуска будет без потолка: со временем его демоны займут сотни мегабайт, и ядро начнёт их убивать — VPN будет пропадать на пару минут. Рекомендуем «Авто».":"From its next start the tunnel will run uncapped: over time its daemons take hundreds of megabytes, and the kernel starts killing them — the VPN drops for a couple of minutes. We recommend «Auto».",
+    "Действует на демоны туннеля: AmneziaWG (основной туннель, его дополнительные выходы и «доступ домой»), Xray и Hysteria — и на проверку скорости Xray. Понижать вручную ниже 48 МиБ не стоит: памяти освободится немного, а процессор нагрузится заметно.":"Applies to the tunnel's daemons: AmneziaWG (the main tunnel, its extra exits and «home access»), Xray and Hysteria — and to the Xray speed test. Lowering it by hand below 48 MiB is not worth it: little memory is freed, while the CPU load grows noticeably.",
     "заглушка только для IPv4 — по IPv6 имя по-прежнему резолвится":"a stub for IPv4 only — over IPv6 the name still resolves",
     "заглушка только для IPv6 — по IPv4 имя по-прежнему резолвится":"a stub for IPv6 only — over IPv4 the name still resolves",
     "Закрыть домен целиком — для обеих адресных семей — можно в «Блокировке» своим списком доменов.":"To close a domain completely — for both address families — use your own domain list in «Blocking».",
@@ -8814,7 +8816,7 @@
     "MTU — не косметика: замер показал разницу в двести раз между 1420 и 1376 при живом соединении. Это и есть «в приложении быстро, а на роутере ползёт».":"MTU is not cosmetic: a measurement showed a two-hundred-fold difference between 1420 and 1376 on a live connection. That is exactly «fast in the app, crawling on the router».",
     "значение задаётся в «Параметрах сети» и применяется к AmneziaWG":"the value is set in «Network settings» and applies to AmneziaWG",
     "считает роутер по своей памяти":"the router decides by its memory","своё значение в мегабайтах":"your own value in megabytes",
-    "годится только на моделях с запасом памяти":"only for models with memory to spare",
+    "демоны туннеля растут без предела — VPN может пропадать":"the tunnel's daemons grow without limit — the VPN may drop",
     "Потолок памяти туннеля, МиБ":"Tunnel memory cap, MiB","При следующем запуске туннеля":"On the next tunnel start",
     "не больше":"at most","без ограничения":"no limit","памяти на роутере":"router memory",
     "Демону туннеля память нужна тем больше, чем больше через него прошло, и сам он её не возвращает. Потолок заставляет его прибираться. Новое значение вступит в силу при следующем подъёме туннеля, а не сразу.":"The tunnel daemon needs more memory the more traffic has passed through it, and it never gives it back. The cap makes it clean up. A new value takes effect the next time the tunnel comes up, not right away.",
@@ -9216,6 +9218,7 @@
     "Ничего не меняется — включите или выключите компонент в списке.":"Nothing changes — turn a component on or off in the list.",
     "Роутер не ответил — план не посчитан. Переключите компонент ещё раз.":"The router did not answer — the plan was not calculated. Toggle the component again.",
     "План посчитать не удалось: роутер ответил не то. Если вход в панель истёк — обновите страницу.":"Could not calculate the plan: the router answered something else. If your panel sign-in expired, reload the page.",
+    "Флеш тесный: новая сборка ляжет на место прежней — на время замены (секунды) программа компонента остановится, а с ней основной канал или выход на ней. Пропадёт питание в эти секунды — компонент придётся поставить заново.":"The flash is tight: the new build takes the place of the old one — for the swap (seconds) the component's program stops, and the main channel or an exit on it with it. A power loss in those seconds — the component has to be installed again.",
     "Размер части файлов роутеру неизвестен — оценка места неполная.":"The router does not know the size of some files — the space estimate is incomplete.",
     "Снимите что-нибудь из списка ниже — план пересчитается.":"Remove something from the list below — the plan will be recalculated.",
     "Снять больше нечего: остальное несёт трафик, держит дополнительный выход или включено — причина у каждой строки в списке.":"Nothing else can be removed: the rest carries traffic, holds an extra exit or is enabled — each row in the list gives the reason.",
@@ -9251,6 +9254,7 @@
     "Что можно снять":"What can be removed",
     "Сбросить":"Reset",                             // «Применить» уже есть выше (карточка MTU)
     "Сперва всё нужное скачивается с GitHub в память роутера, потом удаления и установка: не скачалось — не меняется ничего. Активную несущую и дополнительные выходы операция не переключает.":"First everything needed is downloaded from GitHub into the router’s memory, then the removals and the installation: if anything fails to download, nothing changes. The operation does not switch the active carrier or the extra exits.",
+    "Сперва новая сборка скачивается в память роутера, потом встаёт на место прежней: программа компонента остановится на секунды и запустится уже на новой.":"First the new build is downloaded into the router's memory, then it takes the old one's place: the component's program stops for seconds and starts again on the new one.",
     "Активную несущую и дополнительные выходы операция не переключает.":"The operation does not switch the active carrier or the extra exits.",
     "Удаления идут первыми, потом установка из загруженных файлов — GitHub не нужен. Активную несущую и дополнительные выходы операция не переключает.":"Removals go first, then the installation from the uploaded files — GitHub is not needed. The operation does not switch the active carrier or the extra exits.",
     // «Что занимает место» (clean.sh json/clean). Подписи групп чистки намеренно длинные:
@@ -12056,6 +12060,8 @@
     [/^→ беру у Amnezia конфиг: «(.+)» \((AmneziaWG|VLESS)\)$/,"→ taking the config from Amnezia: «$1» ($2)"],
     [/^Взять у Amnezia новый ключ для «(.+)»\? Роутер проверит его, пока Amnezia его заводит \(до 4 мин\), и только тогда поставит на место; прежний конфиг до тех пор работает\. Не повезёт — останется прежний\.$/,"Get a new key for «$1» from Amnezia? The router checks it while Amnezia brings it into service (up to 4 min), and only then puts it in place; the old config works until then. If it does not carry, the old one stays."],
     [/^Amnezia заводит новый ключ — жду, пока он повезёт \(до (\d+) мин\); прежний конфиг на месте$/,"Amnezia is bringing the new key into service — waiting until it carries (up to $1 min); the old config is in place"],
+    // Short of memory to probe the new key (premium.sh wait_live 3, review s.166 r3): the router's own reason follows, its rules are below.
+    [/^Amnezia выдала новый ключ «(.+)» — прежний конфиг на месте, новый отложен до следующей попытки: /,"Amnezia issued a new key «$1» — the old config is in place, the new one is kept for the next try: "],
     [/^Amnezia выдала новый ключ «(.+)», но за (\d+) мин сервер на него не ответил — прежний конфиг на месте, новый отложен до следующей попытки\. Если так раз за разом — возьмите другой протокол или страну$/,"Amnezia issued a new key «$1», but the server did not answer it within $2 min — the old config is in place, the new one is kept for the next try. If this keeps happening, take another protocol or country"],
     [/^новый ключ «(.+)», взятый (\d+) мин назад, всё ещё не везёт — прежний конфиг на месте; другой ключ попрошу у Amnezia через (\d+) ч$/,"the new key «$1», taken $2 min ago, still does not carry — the old config is in place; I will ask Amnezia for another key in $3 h"],
     [/^новый конфиг «(.+)» на месте; роутер сейчас сам меняет сервер — подниму новый, когда смена закончится$/,"the new config «$1» is in place; the router is switching servers itself now — I will raise the new one when the switch is over"],
@@ -12129,6 +12135,35 @@
     [/^(\[warp\] |\[slots\] |)мест нет: заняты все (\d+) доп-выходов$/,"$1no room: all $2 extra exits are taken"],
     [/^конфиг «([^«»]*)» удалён, пока шла работа — ничего не записано$/,"the config «$1» was deleted while the work ran — nothing is written"],
     [/^\[road\] дорога уже через выход №([2-7])$/,"[road] the road already goes via exit #$1"],
+    // ПАМЯТЬ НА ЕЩЁ ОДИН GO-ДЕМОН (daemon-lib.sh::daemon_ram_room, ревью с.166 р1): отказ выхода (slots.sh) и проверки сервера
+    // (xray-test.sh). Числа — правилом; полный отказ выхода — ВЫШЕ общего куска «мало свободной памяти (…)».
+    [/^\[slots\] мало свободной памяти для ещё одного (Xray|Hysteria2) \(доступно (\d+) МБ, нужно (\d+)\) — выход не поднимаю: он уронил бы основной туннель$/,"[slots] short of free memory for one more $1 (available $2 MB, needed $3) — not raising the exit: it would take the main tunnel down"],
+    [/мало свободной памяти \(доступно (\d+) МБ, нужно (\d+)\)/g,"short of free memory (available $1 MB, needed $2)"],
+    [": ещё один xray уронил бы туннель — проверка не начата",": one more xray would take the tunnel down — the check was not started"],
+    [", идут другие проверки — повторите, когда они кончатся",", other checks are running — retry when they finish"],
+    ["идут другие проверки — повторите, когда они кончатся","other checks are running — retry when they finish"],
+    ["идёт замена программы на месте — повторите через минуту","a program is being replaced in place — retry in a minute"],
+    // ЗАМЕНА НА МЕСТЕ (packages.sh::inpl_swap, тесный флеш): строки журнала операции и отказ плана. Имя файла — в начале или в
+    // середине; хвосты-фразы — ВЫШЕ коротких токенов («основной канал» переводит общий токен ниже).
+    [/^Флеш тесный: (\S+) ставится на место прежнего, а для этого новый файл должен заранее лечь в память — её не хватило\. НИЧЕГО не тронул\.$/,"The flash is tight: $1 goes in place of the old one, and for that the new file must be in memory first — there was not enough. NOTHING was touched."],
+    [/^Флеш тесный: ставлю (\S+) на место прежнего/,"The flash is tight: putting $1 in place of the old one"],[" — на время замены останавливаю: "," — stopping for the swap: "],
+    [/^(\S+) сейчас держит: /,"$1 is held now by: "],
+    [" — их на время замены движок не останавливает; освободите место иначе — снимите другой компонент"," — the engine does not stop them for a swap; free space another way — remove another component"],
+    [/^(\S+) держит процесс без хозяина \(проверка сервера или выключенный выход\) — повторите через минуту или после перезагрузки роутера$/,"$1 is held by an ownerless process (a server check or a switched-off exit) — retry in a minute or after a router reboot"],
+    [/^(\S+) сейчас держит проверка сервера — жду, пока она кончится…$/,"$1 is held by a server check now — waiting for it to end…"],
+    [/^(\S+) сейчас запускает проверка сервера — повторите через минуту$/,"a server check is starting $1 now — retry in a minute"],
+    [/^роутер сейчас сам ведёт туннель — (\S+) не заменил, повторите через пару минут$/,"the router is driving the tunnel itself now — $1 not replaced, retry in a couple of minutes"],
+    [/^(\S+) после остановки всё ещё исполняется — прежнюю сборку не снимал, всё вернул как было; повторите после перезагрузки роутера$/,"$1 still runs after the stop — the old build was not removed, everything is back as it was; retry after a router reboot"],
+    [/^не поставил (\S+)/,"did not install $1"],
+    [" — прежняя сборка уже снята: поставьте компонент заново в «Компонентах»"," — the old build is already removed: install the component again in «Components»"],
+    [" — новая сборка не встала, вернул прежнюю: компонент работает как раньше"," — the new build did not land, the old one is back: the component works as before"],
+    [" — снова работает, на новой сборке"," — works again, on the new build"],
+    [" — поднят, но пока не отвечает: сторож проверит на своём тике"," — raised, but not responding yet: the watchdog will check it on its tick"],
+    [/(\S+) на месте не заменить: его держит /g,"$1 cannot be replaced in place: it is held by "],[" — освободите место иначе"," — free space another way"],
+    // Not now: the main carrier runs the file but carries nothing (packages.sh::inpl_units INPL_WAIT, review s.166 r2) — the whole phrase
+    // ABOVE the «основной канал» token below; the plan's form («не заменить: …») after the held one above, the run's form («не заменил»).
+    ["основной канал сейчас не везёт трафик (прямой режим сторожа или подъём туннеля) — обновите, когда туннель вернётся","the main channel carries no traffic now (the watchdog's direct mode or a tunnel coming up) — update when the tunnel is back"],
+    [/(\S+) на месте не заменить: /g,"$1 cannot be replaced in place: "],[/^(\S+) на месте не заменил: /,"$1 was not replaced in place: "],
     [/^\[road\] нет конфига «([^«»]*)»$/,"[road] no config «$1»"],
     [/^\[slots\] выход №([2-7]) служит дорогой серверу (\S+), а новый конфиг идёт к тому же серверу — его пакеты к серверу пошли бы сами в себя; выберите конфиг к другому серверу$/,"[slots] exit #$1 serves as a road to the server $2, and the new config goes to the same server — its packets to the server would go into itself; pick a config to another server"],
     [/^«(.+)»: адрес заблокирован провайдером — сервер отвечает через туннель$/,"«$1»: address blocked by the ISP — the server answers through the tunnel"],
@@ -12790,7 +12825,11 @@
     [/^устройство ([2-9])$/,"device $1"],
     ["→ проверка всех серверов (","→ checking all servers ("],
     [/^проверка (\d+)\/(\d+)$/,"check $1/$2"],
-    ["(без ответа роутера:","(no response from router:"],
+    ["(без ответа роутера:","(no response from router:"],["· без ответа роутера:","· no response from router:"],
+    ["(не проверено:","(not checked:"],["· не проверено:","· not checked:"],
+    ["(не проверено, роутеру мало памяти:","(not checked, the router is short of memory:"],
+    ["· не проверено, роутеру мало памяти:","· not checked, the router is short of memory:"],
+    ["· не измерено, роутеру мало памяти:","· not measured, the router is short of memory:"],
     ["· Xray не проверялся: движок не установлен","· Xray not checked: the engine is not installed"],
     [/^скорость (\d+)\/(\d+)$/,"speed $1/$2"],
     // Вопрос экрана выхода (шаг 3c-1): прежде он жил в меню блока выходов и по-английски оставался русским целиком.
@@ -13202,6 +13241,8 @@
     [" — на установленной сборке"," — on the installed build"],[" — всё ещё на прежней сборке"," — still on the previous build"],
     ["Перезапущено, но не отвечает: ","Restarted but not responding: "],[" — сторож проверит и починит на своём тике"," — the watchdog will check and repair it on its tick"],
     ["Перезапуск не удался: ","Restart failed: "],["Не вышло: ","Did not work: "],["Готово: ","Done: "],
+    // The in-place confirm carries «основной канал» inside — the whole phrase ABOVE that token, or the token cut it and the whole question stayed Russian (review s.166 r3).
+    ["Флеш тесный: новая сборка встанет на место прежней — программа компонента остановится на секунды и запустится уже на новой, основной канал или выход на ней на это время прервутся.","The flash is tight: the new build takes the old one's place — the component's program stops for seconds and starts again on the new one; the main channel or an exit on it is interrupted for that time."],
     ["тёплый резерв AmneziaWG","AmneziaWG warm reserve"],["основной канал","main channel"],   // «дополнительный выход №» — выше, до «выход №»
     // A whole phrase starting with «шифрованный DNS» — ABOVE that token, which would cut it in half (review s.150, round 2).
     ["шифрованный DNS работает по DoQ или DoH3 — сперва выберите в «Шифрованном DNS» другой протокол","encrypted DNS runs over DoQ or DoH3 — first choose another protocol in «Encrypted DNS»"],
@@ -13688,6 +13729,13 @@
     //   Обе половины ВЫШЕ токена «мимо VPN», иначе он съест хвост первым и фраза не совпадёт.
     ["Пустить","Let"],["мимо VPN и пробивать блокировки десинком?","past the VPN and punch through blocks with the desync?"],
     ["Мимо VPN","Bypass VPN"],["мимо VPN","bypass VPN"],["В VPN","Via VPN"],["в VPN","via VPN"],
+    // Russian takes the SINGULAR after any count ending in 1 but 11 (n%10 == 1, n%100 != 11), English only after 1: «41 домен» became «41 domain»
+    // word for word (seen in a docs clip, s.160). A count ending in 1 that is not 1 itself — the plural, ABOVE the word tokens; no
+    // `\b` next to Cyrillic (C93), the stem is closed by a lookahead.
+    [/(\d*[02-9]1)\s+домен(?![а-яё])/g,"$1 domains"],[/(\d*[02-9]1)\s+подсеть(?![а-яё])/g,"$1 subnets"],
+    [/(\d*[02-9]1)\s+правило(?![а-яё])/g,"$1 rules"],[/(\d*[02-9]1)\s+группа(?![а-яё])/g,"$1 groups"],
+    [/(\d*[02-9]1)\s+запись(?![а-яё])/g,"$1 entries"],[/(\d*[02-9]1)\s+источник(?![а-яё])/g,"$1 sources"],
+    [/(\d*[02-9]1)\s+адрес(?![а-яё])/g,"$1 addresses"],
     ["Домены","Domains"],["доменов","domains"],["домена","domains"],["домены","domains"],["домен","domain"],
     ["адресов","addresses"],["адреса","addresses"],["адрес","address"],
     // — единицы sourceMgr (длинная форма ВЫШЕ короткой; согласование англ. мн.ч. по русской форме) —
@@ -13831,6 +13879,15 @@
     // The QUIC component's name inside the engine's plan and progress lines («Ставлю DoQ и DoH3…», «Скачаем и поставим: …»), LAST:
     // whole phrases that carry it (the install line, a rollback reason) are rules above and must see it intact (review s.150, round 3).
     ["DoQ и DoH3","DoQ and DoH3"],
+    // A count and its unit share ONE node since s.166 (the «41 domain» fix). These five units have no word token (a bare node used to be a
+    // dictionary key), so the count goes with its word here, LAST: phrase rules above («ещё N устройств онлайн», «ушло N пакетов…») must
+    // see it in Russian. English takes the singular after 1 alone (`(^|\D)` — 21 and 11 are plural); no `\b` next to Cyrillic (C93) and
+    // no lookbehind (an old Safari would not parse the file at all).
+    [/(^|\D)(1)\s+устройство(?![а-яё])/g,"$1$2 device"],[/(\d+)\s+устройств[оа]?(?![а-яё])/g,"$1 devices"],
+    [/(^|\D)(1)\s+пакет(?![а-яё])/g,"$1$2 packet"],[/(\d+)\s+пакет(?:а|ов)?(?![а-яё])/g,"$1 packets"],
+    [/(^|\D)(1)\s+строка(?![а-яё])/g,"$1$2 line"],[/(\d+)\s+строк[аи]?(?![а-яё])/g,"$1 lines"],
+    [/(^|\D)(1)\s+событие(?![а-яё])/g,"$1$2 event"],[/(\d+)\s+событи[еяй](?![а-яё])/g,"$1 events"],
+    [/(^|\D)(1)\s+сервер(?![а-яё])/g,"$1$2 server"],[/(\d+)\s+сервер(?:а|ов)?(?![а-яё])/g,"$1 servers"],
   ];
   // НАШИ ИМЕНА В «…» — то, что панель САМА пишет в ёлочках: имена экранов (реестр `SCR`) и разделов (`SEC`) — из реестров, кнопки и
   // направления правил — списком ниже. Прежде переводился ЛЮБОЙ ключ словаря, и данные человека, совпавшие со словом панели, под
@@ -17506,11 +17563,19 @@
   // — testSweepAbort (ставит closeModal): новые не стартуют, in-flight дорисуются, посчитанное остаётся.
   // Общий для «Проверить все» (checkAllServers) и группы (checkGroupLive) — DRY.
   function sweepChecks(items, ports, onProgress, onFinish){
-    var free=ports.slice(), C=free.length, msOf={}, unk={};
+    var free=ports.slice(), C=free.length, msOf={}, unk={}, mem={}, told={}, again={};
     var i=0,run=0,dn=0,tot=items.length,okN=0,end=false;
-    function done(){ if(end) return; end=true; onFinish(okN, msOf, unk); }
+    items=items.slice();   // a server refused for memory goes to the end of OUR queue, not the caller's list
+    // `mem` — the router answered «short of memory» (xray-test.sh admission, `busy` + `mem`): no verdict about the server either,
+    // but it is not «the router did not answer» — the summary names it (review s.166). `told` — the router answered with another reason
+    // (a busy port, a swap in progress, no xray): no verdict, but not «no answer» either — «не проверено: N» (review s.166 r3).
+    // The first such answer turns the sweep to ONE check at a time and puts the server back once: six side by side on a tight router
+    // waited for each other past the router's minute and were refused — a share of servers never checked (review s.166 r2). The same
+    // for `queue` (the admission held by other runs the whole minute, memory not the reason — a slow start from a drive; s.166 r3).
+    function done(){ if(end) return; end=true; onFinish(okN, msOf, unk, mem, told); }
     function nx(){
       if(testSweepAbort||i>=items.length){ if(run===0) done(); return; }
+      if(run>=C) return;
       var it=items[i++], port=free.pop(); run++;
       // unknown = «спросить роутер не вышло», а не «сервер мёртв»: держим ОТДЕЛЬНО от msOf
       // (в сортировке такой сервер всё равно уезжает вниз — замера нет, — но удалять его
@@ -17518,8 +17583,10 @@
       // `blocked` — адрес заблокирован провайдером: сервер ЖИВ (ответил через туннель) — не «мёртвый» для «Удалять мёртвые»;
       // числа нет — в сортировке он внизу, как сервер без замера (ревью с.118).
       checkOne(it.tpt, it.name, port, function(ok, c, r, unknown, blocked){
-        if(ok){ okN++; msOf[it.name]=(c&&c.ms!=null?c.ms:9e8); } else if(blocked){ msOf[it.name]=9e8; } else { msOf[it.name]=null; if(unknown) unk[it.name]=1; }
-        free.push(port); run--; dn++; if(onProgress) onProgress(dn,tot,okN); nx();
+        free.push(port); run--;
+        if(!ok && r && r.busy && (r.mem || r.queue) && !again[it.name] && !testSweepAbort){ again[it.name]=1; C=1; items.push(it); nx(); return; }
+        if(ok){ okN++; msOf[it.name]=(c&&c.ms!=null?c.ms:9e8); } else if(blocked){ msOf[it.name]=9e8; } else { msOf[it.name]=null; if(unknown) unk[it.name]=1; if(r && r.busy && r.mem) mem[it.name]=1; else if(r && (r.busy || r.nobin)) told[it.name]=1; }
+        dn++; if(onProgress) onProgress(dn,tot,okN); nx();
       });
     }
     if(!tot){ done(); return; }
@@ -17672,12 +17739,12 @@
     logLine('→ проверка серверов ('+tlabel+', '+items.length+')', null);
     sweepChecks(items, [10812,10813,10814,10815,10816,10817],
       function(dn,tot){ if(btn) btnSay(btn, 'проверка '+dn+'/'+tot); },
-      function(okN, msOf, unk){
+      function(okN, msOf, unk, mem, told){
         testSweepRun=false; if(btn){ btn.disabled=false; btnSay(btn, 'Проверить все'); }
-        var nUnk=0, uu; for(uu in unk) nUnk++;
+        var nUnk=0, nMem=0, nTold=0, uu; for(uu in unk){ if(mem[uu]) nMem++; else if(told[uu]) nTold++; else nUnk++; }
         // «Не ответил РОУТЕР» называем своими словами: без этого такие серверы выглядели как
         // мёртвые (и предлагались к удалению), хотя про них ничего не известно.
-        var m='проверка: рабочих '+okN+' из '+items.length+(nUnk?(' · без ответа роутера: '+nUnk):'')+(testSweepAbort?' (прервано)':'');
+        var m='проверка: рабочих '+okN+' из '+items.length+(nUnk?(' · без ответа роутера: '+nUnk):'')+(nTold?(' · не проверено: '+nTold):'')+(nMem?(' · не проверено, роутеру мало памяти: '+nMem):'')+(testSweepAbort?' (прервано)':'');
         showToast(m, okN>0); logLine(m, okN>0);
         // Сортировка «рабочие вверх» — только для xray-карточек (внутри каждой группы). Пропуск при abort.
         if(PREFS.sort_after_test && !testSweepAbort && tab==='xray'){
@@ -17758,10 +17825,10 @@
     if(cntEl) cntEl.textContent='проверка 0/'+items.length;
     sweepChecks(items, [10812,10813,10814],
       function(dn,tot,okN){ if(cntEl) cntEl.textContent='проверка '+dn+'/'+tot+(okN?(' · рабочих '+okN):''); },
-      function(okN, msOf, unk){
+      function(okN, msOf, unk, mem, told){
         testSweepRun=false; if(cntEl) cntEl.textContent=origCnt;
-        var nUnk=0, uu; for(uu in unk) nUnk++;
-        var m='проверка группы: рабочих '+okN+' из '+items.length+(nUnk?(' · без ответа роутера: '+nUnk):'')+(testSweepAbort?' (прервано)':'');
+        var nUnk=0, nMem=0, nTold=0, uu; for(uu in unk){ if(mem[uu]) nMem++; else if(told[uu]) nTold++; else nUnk++; }
+        var m='проверка группы: рабочих '+okN+' из '+items.length+(nUnk?(' · без ответа роутера: '+nUnk):'')+(nTold?(' · не проверено: '+nTold):'')+(nMem?(' · не проверено, роутеру мало памяти: '+nMem):'')+(testSweepAbort?' (прервано)':'');
         showToast(m, okN>0); logLine(m, okN>0);
         if(sort){ var chips=[].slice.call(body.querySelectorAll(':scope > .srv2'));
           chips.sort(function(a,b){ var x=msOf[a.getAttribute('data-name')], y=msOf[b.getAttribute('data-name')]; return (x==null?Infinity:x)-(y==null?Infinity:y); });
@@ -17801,11 +17868,11 @@
   //      speed-тесты делили бы канал и врали). Жжёт реальный трафик через VPS → confirm с оценкой.
   //      names — xray-конфиги; onProgress рисует счётчик. Прерывание — закрытием модалки (speedSweepAbort).
   function speedSweep(names, onProgress, onDone){
-    var i=0, okN=0;
+    var i=0, okN=0, memN=0;
     (function nx(){
-      if(speedSweepAbort||i>=names.length){ onDone(okN, i); return; }
+      if(speedSweepAbort||i>=names.length){ onDone(okN, i, memN); return; }
       var nm=names[i++]; if(onProgress) onProgress(i, names.length);
-      speedOne(nm, function(ok){ if(ok) okN++; nx(); });
+      speedOne(nm, function(ok, _mb, _msg, mem){ if(ok) okN++; else if(mem) memN++; nx(); });
     })();
   }
   // Тест скорости всех серверов ГРУППЫ (⋮ подписки/группы). Последовательный многопоточный прогон.
@@ -17825,8 +17892,8 @@
     logLine('→ тест скорости группы ('+names.length+' серв.)', null);
     speedSweep(names,
       function(dn,tot){ if(cntEl) cntEl.textContent='скорость '+dn+'/'+tot; },
-      function(okN,done){ speedSweepRun=false; if(cntEl) cntEl.textContent=origCnt;
-        var m='скорость группы: измерено '+okN+' из '+names.length+(speedSweepAbort?' (прервано)':'');
+      function(okN,done,memN){ speedSweepRun=false; if(cntEl) cntEl.textContent=origCnt;
+        var m='скорость группы: измерено '+okN+' из '+names.length+(memN?(' · не измерено, роутеру мало памяти: '+memN):'')+(speedSweepAbort?' (прервано)':'');
         showToast(m, okN>0); logLine(m, okN>0); });
   }
   // ТЕСТ СКОРОСТИ ВСЕХ xray-серверов — один прогон на кнопку «Серверов» и экран «Проверка серверов»: вопрос о цене, флаги, журнал
@@ -17838,8 +17905,8 @@
     logLine('→ тест скорости всех ('+names.length+')', null);
     speedSweep(names,
       function(dn,tot){ prog('скорость '+dn+'/'+tot); },
-      function(okN){ speedSweepRun=false;
-        var m='скорость: измерено '+okN+' из '+names.length+(speedSweepAbort?' (прервано)':'');
+      function(okN, _dn, memN){ speedSweepRun=false;
+        var m='скорость: измерено '+okN+' из '+names.length+(memN?(' · не измерено, роутеру мало памяти: '+memN):'')+(speedSweepAbort?' (прервано)':'');
         showToast(m, okN>0); logLine(m, okN>0); done(m, okN); });
     return true;
   }
@@ -18624,22 +18691,22 @@
     if(pa.length){
       var pbn=pa.filter(function(r){ return r.dir==='block'; }).length;
       h+=lrowGo('routes:ports','открыть правила по портам всего роутера')+'<div class="grow"><div class="nm">Правила по портам всего роутера</div><div class="ds">'
-        + pa.length+' <span>'+unitF(pa.length,'правил')+'</span> · '
+        + '<span>'+pa.length+' '+unitF(pa.length,'правил')+'</span> · '
         + (w==='guest' ? (pbn ? '<span>действуют только блокировки: гостевая «мимо» сильнее</span>' : '<span>не действуют: гостевая «мимо» сильнее</span>')
                        : '<span>сильнее режима устройства, его сайтов и сети — слабее его правил по портам</span>')+'</div></div>'+CHEV+'</div>';
     }
     if(!gl) return h+'<div class="lempty" data-loading="1">Загрузка…</div>';
     if(!gl.ok) return h+'<div class="cline wr">'+rpFail(gl.fail, 'Правила всего роутера не получены')+'</div>';
     h+=lrowGo('routes','открыть правила всего роутера')+'<div class="grow"><div class="nm">Правила «мимо VPN»</div><div class="ds">'
-      + (gl.byp ? gl.byp+' <span>'+unitF(gl.byp,'правил')+'</span> · <span>сайты, адреса, группы и категории</span>' : '<span>не заданы</span>')+'</div></div>'
+      + (gl.byp ? '<span>'+gl.byp+' '+unitF(gl.byp,'правил')+'</span> · <span>сайты, адреса, группы и категории</span>' : '<span>не заданы</span>')+'</div></div>'
       + (gl.byp ? rpDir('bypass') : '')+CHEV+'</div>';
     var ds, d, vp=vpnPath(), tp=dvWhoTunnel(w) ? dvTunPath(dev, w) : '', fn=slotNum(dev.fslot);
-    if(w==='dev-bypass' && dev.keep){ ds=gl.man+' <span>'+unitF(gl.man,'правил')+'</span> · <span>действуют только добавленные вручную: сайты, адреса и группы основного туннеля</span>'+(gl.man ? dvPathTail(vp, true) : ''); d=gl.man ? dvPathChip(vp) : ''; }
+    if(w==='dev-bypass' && dev.keep){ ds='<span>'+gl.man+' '+unitF(gl.man,'правил')+'</span> · <span>действуют только добавленные вручную: сайты, адреса и группы основного туннеля</span>'+(gl.man ? dvPathTail(vp, true) : ''); d=gl.man ? dvPathChip(vp) : ''; }
     else if(dvWhoDirect(w)){ ds='<span>для этого устройства не действуют — оно идёт напрямую</span>'; d='<span class="chip">не действуют</span>'; }
     else if(tp==='slot' && slotIsDesync(fn)){ ds='<span>не действуют — весь трафик устройства идёт через десинк-выход</span>'; d='<span class="chip">не действуют</span>'; }
     else if(tp==='slot'){ ds='<span>не нужны — весь трафик устройства и так идёт через выход</span>'; d='<span class="chip">не нужны</span>'; }
     else if(dvWhoTunnel(w)){ ds=(tp==='ok' ? '<span>не нужны — весь трафик устройства и так идёт в туннель</span>' : '<span>не нужны — весь трафик устройства забран режимом целиком</span>'+dvPathTail(tp, false)); d='<span class="chip">не нужны</span>'; }
-    else { ds=gl.vpn ? gl.vpn+' <span>'+unitF(gl.vpn,'правил')+'</span> · <span>сайты, адреса, группы, категории и общий список</span>'+dvPathTail(vp, true) : '<span>не заданы</span>'; d=gl.vpn ? dvPathChip(vp) : ''; }
+    else { ds=gl.vpn ? '<span>'+gl.vpn+' '+unitF(gl.vpn,'правил')+'</span> · <span>сайты, адреса, группы, категории и общий список</span>'+dvPathTail(vp, true) : '<span>не заданы</span>'; d=gl.vpn ? dvPathChip(vp) : ''; }
     return h+lrowGo('routes','открыть правила всего роутера')+'<div class="grow"><div class="nm">Правила «в VPN»</div><div class="ds">'+ds+'</div></div>'+d+CHEV+'</div>';
   }
   // ЧТО СИЛЬНЕЕ ЧЕГО У ЭТОГО УСТРОЙСТВА — лестница ядра (`RP_LADDER`, порядок сверяет стенд с apply-bypass.sh), где на
@@ -18661,7 +18728,7 @@
     }
     function S(i, on, win, note){ if(pwin && i>=2) win=false; st.push('<div class="s'+(win ? ' win' : (on ? '' : ' off'))+'"><div><b>'+RP_LADDER[i][0]+'</b><span> — </span>'+note+'</div></div>'); }
     function sp(t){ return '<span>'+t+'</span>'; }
-    function cnt(n){ return n+' <span>'+unitF(n,'правил')+'</span>'; }
+    function cnt(n){ return '<span>'+n+' '+unitF(n,'правил')+'</span>'; }
     function blocks(a){ return a.filter(function(r){ return r.dir==='block'; }).length; }
     // Правила, чей путь — основной туннель: «в VPN» и выход без метки (свои сайты откатываются на основной — rebuild_dev; у порта
     // такой выход FAIL-OPEN, и туннель тут ни при чём).
@@ -18958,7 +19025,7 @@
     var ep=esc(c.ip)+(c.port ? (':'+c.port) : ''), k=jr ? '|d' : '';
     var h='<div class="lrow dw-r">'+((jr || c.noreply) ? '<span class="dot bad"></span>' : '')+'<div class="grow"><div class="nm"><span class="mono sens">'+ep+'</span>'
       + ((!jr && c.noreply) ? '<span class="chip wr" title="'+esc('ушло '+c.noreply+' '+unitF(c.noreply,'пакетов')+', в ответ — ничего. Адрес не отвечает по тому пути, которым его сейчас ведут (см. чип маршрута рядом).')+'">не отвечает</span>' : '')+'</div>'
-      + '<div class="ds">'+(jr ? (c.proto ? esc(c.proto)+' · ' : '')+'<span>ушло</span> '+(c.tx|0)+' <span>'+unitF(c.tx|0,'пакетов')+'</span> · <span>'+esc(fmtAge(c.ago))+'</span> · ' : '')+dwWhy(c.route, c.via, c.want, c.dsy)+'</div></div>'
+      + '<div class="ds">'+(jr ? (c.proto ? esc(c.proto)+' · ' : '')+'<span>ушло</span> '+'<span>'+(c.tx|0)+' '+unitF(c.tx|0,'пакетов')+'</span> · <span>'+esc(fmtAge(c.ago))+'</span> · ' : '')+dwWhy(c.route, c.via, c.want, c.dsy)+'</div></div>'
       + dwChip(c.route, c.via, c.dsy)+'<span class="dw-acts">';
     // Те же три состояния, что у доменов: увести в VPN / увести мимо / снять НАШЕ правило (✕ — только если оно есть; групповое
     // и общий список отсюда не снять — источник назван в строке). Журнал — только «увести»: своё правило там не спрашивается.
@@ -19873,7 +19940,7 @@
       + '<button type="button" class="btn sm rp-rm" '+a+' data-rdel="'+esc(r.kind+':'+r.val)+'"'+rpGoneAttr(r.kind+':'+r.val)+'>убрать</button></div>';
   }
   function grpDs(g){
-    return (g.domains|0)+' <span>'+unitF(g.domains|0,'доменов')+'</span> · '+(g.cidrs|0)+' <span>'+unitF(g.cidrs|0,'адресов')+'</span>';
+    return '<span>'+(g.domains|0)+' '+unitF(g.domains|0,'доменов')+'</span> · '+'<span>'+(g.cidrs|0)+' '+unitF(g.cidrs|0,'адресов')+'</span>';
   }
   // На странице раздела группа — ПРАВИЛО среди правил секции «Сайты» (макет `Rule`): «Группа «имя»», в описании — сколько доменов
   // и первые из них (по составу, который роутер отдаёт в ответе групп), адреса — числом, если есть. Точки состояния нет:
@@ -19885,11 +19952,11 @@
     if(!nd && !nc) return grpDs(g);   // пустая группа — «0 доменов · 0 адресов», как на экране групп
     if(nd>0){
       var doms=(Array.isArray(g.members) ? g.members : []).filter(function(m){ return m && ruleKindOf(String(m))==='domain'; }), more=nd-Math.min(doms.length, GRP_SITE_SHOW);
-      var s=nd+' <span>'+unitF(nd,'доменов')+'</span>';
+      var s='<span>'+nd+' '+unitF(nd,'доменов')+'</span>';
       if(doms.length) s+=' · <span>'+esc(doms.slice(0, GRP_SITE_SHOW).join(', '))+'</span>'+(more>0 ? ', <span>ещё '+more+'</span>' : '');
       p.push(s);
     }
-    if(nc>0) p.push(nc+' <span>'+unitF(nc,'адресов')+'</span>');
+    if(nc>0) p.push('<span>'+nc+' '+unitF(nc,'адресов')+'</span>');
     return p.join(' · ');
   }
   // Строка группы — одна на страницу раздела (`site`) и на экран «Группы правил»: дорога в экран ГРУППЫ, а не в общий список.
@@ -19916,7 +19983,7 @@
   }
   function rpGeoRow(it){
     var n=it.count|0, ds='<span>'+esc(geoSrcL(it))+'</span> · '
-      + ((it.ts|0)>0 ? (n+' <span>'+unitF(n, it.kind==='domain'?'доменов':'подсетей')+'</span>') : '<span>ещё не скачано</span>');
+      + ((it.ts|0)>0 ? ('<span>'+n+' '+unitF(n, it.kind==='domain'?'доменов':'подсетей')+'</span>') : '<span>ещё не скачано</span>');
     // Куда категория уходит СЕЙЧАС — общий ответ `rpDirNow` (он же у строки экрана гео): «в десинк» без Zapret в роли
     // основного протокола, выключенный выход, «весь трафик в VPN» и не везущий туннель меняют путь, а не выбор в реестре.
     var dir=rpDirNow(it.action, it.slot);
@@ -19991,7 +20058,7 @@
       var age=(sOk && (s.iplist_updated|0)>0 && (s.now|0)>0) ? fmtAge(Math.max(0, (s.now|0)-(s.iplist_updated|0))) : '';
       c+=lrowGo('sources', 'открыть источники списка')
         + '<div class="grow"><div class="nm"><span>'+SRC_CATS['tunnel-cidr'].t+'</span>'+rpBadge('cidr')+'</div>'
-        + '<div class="ds"><span>подсети, которые всегда идут в VPN</span>'+(ten?' · '+tn+' <span>'+unitF(tn,'подсетей')+'</span>':'')+(ten&&age?' · <span>обновлён</span> '+esc(age):'')+'</div></div>'
+        + '<div class="ds"><span>подсети, которые всегда идут в VPN</span>'+(ten?' · '+'<span>'+tn+' '+unitF(tn,'подсетей')+'</span>':'')+(ten&&age?' · <span>обновлён</span> '+esc(age):'')+'</div></div>'
         + (ten ? rpDirNow('vpn', 0) : '<span class="chip">выключен</span>') + CHEV + '</div>';
       if(ten) nCat++;
     } else c+='<div class="cline wr">'+rpFail(tc, 'Общий список не получен')+'</div>';
@@ -20249,7 +20316,7 @@
   }
   var WF_DRIFT={bypass:'сохранено «мимо VPN», а в ядре правило стоит иначе', force:'сохранено «в VPN», а в ядре правило стоит иначе',
                 split:'в ядре осталось правило, которого нет в сохранённых', mixed:'сохранённое правило и ядро расходятся'};
-  function wfCntHtml(n){ return n==null ? '' : ' · '+n+' <span>'+unitF(n, 'устройств')+'</span>'; }
+  function wfCntHtml(n){ return n==null ? '' : ' · '+'<span>'+n+' '+unitF(n, 'устройств')+'</span>'; }
   // Гостевая: её Wi-Fi выключен в родной панели — режим подсети хранится и встанет вместе с ней (сказать, а не промолчать).
   function wfGuestDs(g, cnt){
     var p=[];
@@ -21763,9 +21830,12 @@
         // После удаления — перерисовка показанного: разрешитель не найдёт группу и молча уступит место списку (п.19 маршрутов).
         else if(a==='del') postAction('grp_del', 'Удалить группу «'+nm+'» вместе с её правилами?', 'удаляю группу', {id:id}, rep);
         else if(a==='save'){
-          var ta=body.querySelector('.grp-mem');
+          var ta=body.querySelector('.grp-mem'), sent=ta ? ta.value : '';
+          // Accepted text is no draft: the redraw shows what the router stored (addresses only — `# …` comments dropped), not the typed
+          // text, which still differed from the old members and was kept as a draft (review s.166 r2). A refusal keeps the draft.
+          var saved=function(d){ if(d && d.ok && _grpDraft && _grpDraft.id===id) _grpDraft.orig=sent; rep(); };
           // Роутер ещё выполняет прошлое действие — сказать, а не промолчать (postAction в это окно не уходит).
-          if(!postAction('grp_members', null, 'сохраняю состав группы', {id:id, content:b64utf8(ta ? ta.value : '')}, rep)) showToast('подождите — роутер ещё выполняет прошлое действие', false);
+          if(!postAction('grp_members', null, 'сохраняю состав группы', {id:id, content:b64utf8(sent)}, saved)) showToast('подождите — роутер ещё выполняет прошлое действие', false);
         }
         return;
       }
@@ -22353,7 +22423,8 @@
       // Число — в строке со словом, и слово обязано с ним согласоваться: «~21 домен», а не «~21 доменов». Тысячи («~48k») и дроби
       // берут родительный множественного — форму единицы как есть.
       var an=/^~?(\d+)$/.exec(p.approx||''), un=unit||'записей';
-      if(p.approx) ds.push('<span class="mono">'+esc(p.approx)+'</span> <span>'+esc(an ? unitF(+an[1], un) : un)+'</span>');
+      // One node with its word: apart, English translated the word alone — «~21 domain» (review s.166 r2).
+      if(p.approx) ds.push('<span>'+esc(p.approx+' '+(an ? unitF(+an[1], un) : un))+'</span>');
       // Ключ ссылки — СВОЙ (`data-smsite`): под `data-url` она попадала в перебор соседей кнопок «Добавить» (`nwNeighbor`), и после
       // добавления фокус уходил на ссылку или в body (ревью пачки 4, круг 2).
       if(p.site) ds.push('<a class="sm-site" data-smsite="'+esc(p.url)+'" href="'+esc(p.site)+'" target="_blank" rel="noopener">страница проекта</a>');
@@ -22375,7 +22446,7 @@
     var vd = !cnt ? 'списки пусты' : cnt>b.ceil ? 'тяжело для роутера — уберите часть списков'
            : lv==='bad' ? 'у самого потолка — новые списки лучше не добавлять' : lv==='warn' ? 'заметная нагрузка на CPU и dnsmasq' : 'комфортно для роутера';
     var ck = !cnt ? '' : lv==='ok' ? ' acc' : meterChipK(pct);
-    return '<div style="margin-top:13px"><div class="row tight"><div class="grow tiny"><span>Бюджет категории</span> · '+cnt+' <span>из</span> '+b.ceil+' <span>'+unitF(b.ceil, b.unit)+'</span></div>'
+    return '<div style="margin-top:13px"><div class="row tight"><div class="grow tiny"><span>Бюджет категории</span> · '+cnt+' <span>из</span> '+'<span>'+b.ceil+' '+unitF(b.ceil, b.unit)+'</span></div>'
       + '<div class="tiny mono">'+pct+' %</div></div>'
       + '<div class="meter"><i style="width:'+pct+'%;background:'+meterColor(pct)+'"></i></div>'
       + '<div style="margin-top:11px"><span class="chip'+ck+'">'+vd+'</span></div></div>';
@@ -22757,7 +22828,7 @@
   // (`upd_age` считает роутер своими часами). Слова и числа — отдельными узлами: фраза переводится узлом целиком.
   function blkStateHtml(d, unit){
     var all=(d.sources||[]).length, n=blkSrcOn(d);
-    if(!blkOn(d)) return '<span>выключена</span>'+(all ? ' · '+all+' <span>'+unitF(all,'источника/-ов')+'</span>' : '');
+    if(!blkOn(d)) return '<span>выключена</span>'+(all ? ' · '+'<span>'+all+' '+unitF(all,'источника/-ов')+'</span>' : '');
     if(d.update_state==='RUNNING') return '<span>обновляю списки…</span>';
     if(!n) return '<span class="wr">включена, но списков нет — выберите готовый ниже</span>';
     // Включена, а цепочек в ядре нет (перезагрузка правил из веб-интерфейса Xiaomi их сносит, прерванная проверка их не
@@ -22767,7 +22838,7 @@
       return d.guard_state==='ABORTED' ? '<span class="wr">включена, но её правил сейчас нет в ядре</span>'
         : '<span class="wr">включена, но её правил сейчас нет в ядре — нажмите «Обновить», чтобы применить заново</span>';
     var c=d.count|0, ua=(typeof d.upd_age==='number') ? d.upd_age : -1;
-    return '<span>заблокировано:</span> <b>'+c+'</b> <span>'+unitF(c,unit)+'</span> · <span>источников:</span> '+n
+    return '<span>заблокировано:</span> <b>'+c+' '+unitF(c,unit)+'</b> · <span>источников:</span> '+n
       + (ua>=0 ? ' · <span>обновлено '+fmtAge(ua)+'</span>' : '');
   }
   // ИТОГ ПРОВЕРКИ СВЯЗИ после включения блокировки по адресам (lists-update.sh::guarded_enable). Причину отката называет
@@ -23335,7 +23406,7 @@
     var unit=(it.kind==='domain') ? 'доменов' : 'подсетей', n=it.count|0;
     // Счётчик и возраст — строкой описания, цена в ОЗУ — бейджем у имени: решение принимают здесь, у самих переключателей действия.
     var ds='<span>'+esc(geoSrcL(it))+'</span> · '
-      + ((it.ts>0) ? (n+' <span>'+unitF(n, unit)+'</span> · <span>обновлено</span> '+esc(fmtAge(Math.max(0,geoNow-(it.ts|0)))))
+      + ((it.ts>0) ? ('<span>'+n+' '+unitF(n, unit)+'</span> · <span>обновлено</span> '+esc(fmtAge(Math.max(0,geoNow-(it.ts|0)))))
                    : '<span>ещё не скачано</span>');   // приблизительного размера у каталога нет: geo.sh кладёт в approx «—» или пусто
     // ЦЕНА В ОЗУ — оранжевым бейджем рядом с именем (макет `BRam`), у каждой скачанной категории одинаково: оранжевый здесь значит
     // «это стоит памяти», а не «много». Оценка СВЕРХУ — коэффициент замерен на самом дорогом действии (блок — две строки address=
@@ -24131,7 +24202,7 @@
   var FO_ESC_L={cross:'Другой протокол', direct:'Сразу прямой'};
   // «Выкл» — не «сразу напрямую» для всех: с Xray, Hysteria2, ByeDPI и Zapret сторож сперва уходит на УСТАНОВЛЕННЫЙ AmneziaWG
   // (`awg_fallback_ok`), и только без него — напрямую. Макет говорит «сразу напрямую» — панель тут сознательно точнее (ревью dev233).
-  var FO_MODE_D={off:'резервы не перебираются: при падении — напрямую, а с другого протокола — сперва на AmneziaWG, если он установлен',
+  var FO_MODE_D={off:'резервы не перебираются: при падении — напрямую, а тот же сервер сторож пробует снова (раз в 10–30 мин); с другого протокола — сперва на AmneziaWG, если он установлен',
                  sticky:'сторож встаёт на рабочий сервер и остаётся на нём',
                  home:'сторож встаёт на рабочий сервер и возвращает основной, когда тот оживёт'};
   function tptOptHtml(){
@@ -25724,12 +25795,12 @@
       var g=groups[gi++], base=done;
       sweepChecks(g.items, CK_PORTS,
         function(dn){ done=base+dn; ckProgress('проверка '+done+'/'+tot); },
-        function(okN, msOf, unk){ var nU=0, u; for(u in unk) nU++; res[g.t]={ok:okN, n:g.items.length, unk:nU, msOf:msOf, unkOf:unk}; next(); });
+        function(okN, msOf, unk, mem, told){ var nU=0, nM=0, nT=0, u; for(u in unk){ if(mem[u]) nM++; else if(told && told[u]) nT++; else nU++; } res[g.t]={ok:okN, n:g.items.length, unk:nU, mem:nM, told:nT, msOf:msOf, unkOf:unk}; next(); });
     })();
     function finish(){
       testSweepRun=false;
       var okAll=0, parts=[];
-      groups.forEach(function(g){ var x=res[g.t]; if(!x) return; okAll+=x.ok; parts.push(TPT_LABEL[g.t]+' '+x.ok+'/'+x.n+(x.unk?(' (без ответа роутера: '+x.unk+')'):'')); });
+      groups.forEach(function(g){ var x=res[g.t]; if(!x) return; okAll+=x.ok; parts.push(TPT_LABEL[g.t]+' '+x.ok+'/'+x.n+(x.unk?(' (без ответа роутера: '+x.unk+')'):'')+(x.told?(' (не проверено: '+x.told+')'):'')+(x.mem?(' (не проверено, роутеру мало памяти: '+x.mem+')'):'')); });
       var m='проверка: рабочих '+okAll+' из '+tot+(testSweepAbort?' (прервано)':'')+(parts.length?(' · '+parts.join(' · ')):'')+(skipX?' · Xray не проверялся: движок не установлен':'');
       showToast(m, okAll>0); logLine(m, okAll>0);
       var aborted=testSweepAbort;
@@ -27151,22 +27222,28 @@
       + '<div style="margin-top:11px">'+noteBox('MTU — не косметика: замер показал разницу в двести раз между 1420 и 1376 при живом соединении. Это и есть «в приложении быстро, а на роутере ползёт».','warn')+'</div>'
       + '<div class="cline">Действует только на основной туннель AmneziaWG (awg0): у его дополнительных выходов и «доступа домой» своё значение, а у Xray, Hysteria и ByeDPI несущая другая (xtun), и её 8500 — тоже норма. Понижать до 1340 или 1300 имеет смысл, если большие страницы и загрузки «висят»; выше 1376 поднимать не стоит.</div></div>';
     // ПОТОЛОК ПАМЯТИ — число считает роутер (net-tune.sh memlimit-info): это то, что демон получит при следующем старте, а не
-    // то, с чем он запущен сейчас, — поэтому и подпись такая. Читают потолок только демоны AmneziaWG (awg0, awgN, awgs0) —
-    // экран обязан сказать это, иначе на Xray человек думал бы, что туннель ограничен. «Вручную» пишет значение сразу (текущее
+    // то, с чем он запущен сейчас, — поэтому и подпись такая. Since 26.10.2026 every Go daemon of the tunnel reads it — AmneziaWG
+    // (awg0, awgN, awgs0), Xray and Hysteria (main and exits, the Xray test) — and «Авто» caps every model, so «no ceiling» means
+    // «Не ограничивать»: the warning stands at ANY memory (BE7000 with 800 MB lost awg0 to the OOM killer, 22.10.2026); «reboots on
+    // its own» only below 256 MB. «Вручную» пишет значение сразу (текущее
     // или 64): режим без значения на роутере не существует, и плитка не имеет права показывать его выбранным до ответа.
     h+='<div class="card w2" id="nt-mem"><div class="wt">Потолок памяти туннеля</div><div class="opt c3">'
       + optTile('data-ntm', 'auto', gmM==='auto', 'i-shield', 'Авто', 'считает роутер по своей памяти')
       + optTile('data-ntm', 'manual', gmM==='manual', 'i-sliders', 'Вручную', 'своё значение в мегабайтах')
-      + optTile('data-ntm', 'off', gmM==='off', 'i-ban', 'Не ограничивать', 'годится только на моделях с запасом памяти')+'</div>';
+      + optTile('data-ntm', 'off', gmM==='off', 'i-ban', 'Не ограничивать', 'демоны туннеля растут без предела — VPN может пропадать')+'</div>';
     if(gmM==='manual')
       h+='<div class="lnkrow num" style="margin:11px 0 0"><input id="nt-gm" class="inp" type="number" min="16" max="512" value="'+esc(dGM)+'" aria-label="Потолок памяти туннеля, МиБ" data-nwd="nt-gm" data-nwgo="nta=gm"><button type="button" class="btn" data-nta="gm">Применить</button></div>'
         + '<div class="cline wr" id="nt-gm-dirty"'+(dGM!==ntGmCur()?'':' style="display:none"')+'>Значение ещё не применено — нажмите «Применить».</div>';
     h+='<div class="kv"><div class="grow"><div class="k">При следующем запуске туннеля</div><div class="v">'
       + (gmV>0 ? '<span>не больше</span> <b>'+gmV+' МиБ</b>' : '<span>без ограничения</span>')
       + (gmT ? ' · <span>памяти на роутере</span> <b>'+gmT+' МБ</b>' : '')+'</div></div></div>';
-    if(!(gmV>0) && gmT && gmT<256)
-      h+='<div class="cline wr">На роутере мало памяти, а AmneziaWG со следующего запуска будет без потолка: со временем он займёт её почти всю, и роутер перезагрузится сам. Рекомендуем «Авто».</div>';
-    h+='<div class="cline">Действует на демоны AmneziaWG — основной туннель, его дополнительные выходы и «доступ домой»; у Xray и Hysteria своего потолка нет. Понижать вручную ниже 48 МиБ не стоит: памяти освободится немного, а процессор нагрузится заметно.</div>'
+    // «Авто» не предупреждаем: прежний роутер (до 26.10.2026) отвечает на «Авто» нулём при памяти от 256 МБ, а совет «выберите
+    // «Авто»» под выбранной плиткой «Авто» — бессмыслица (ревью с.166).
+    if(!(gmV>0) && gmT && gmM!=='auto')
+      h+='<div class="cline wr">'+(gmT<256
+        ? 'На роутере мало памяти, а туннель со следующего запуска будет без потолка: со временем AmneziaWG, Xray и Hysteria займут её почти всю, и роутер перезагрузится сам. Рекомендуем «Авто».'
+        : 'Туннель со следующего запуска будет без потолка: со временем его демоны займут сотни мегабайт, и ядро начнёт их убивать — VPN будет пропадать на пару минут. Рекомендуем «Авто».')+'</div>';
+    h+='<div class="cline">Действует на демоны туннеля: AmneziaWG (основной туннель, его дополнительные выходы и «доступ домой»), Xray и Hysteria — и на проверку скорости Xray. Понижать вручную ниже 48 МиБ не стоит: памяти освободится немного, а процессор нагрузится заметно.</div>'
       + '<div style="margin-top:11px">'+noteBox('Демону туннеля память нужна тем больше, чем больше через него прошло, и сам он её не возвращает. Потолок заставляет его прибираться. Новое значение вступит в силу при следующем подъёме туннеля, а не сразу.','info')+'</div></div>';
     return h+'</div>';
   }
@@ -27522,7 +27599,7 @@
      клик писал всё тело заново, и фокус клавиатуры после пробела уходил в начало страницы. */
   // pkgUpd — «обновить эту связку» (id → true): второй выбор строки рядом с переключателем. Обновление = установка устаревших файлов
   // стоящей связки (разбор у packages.sh::bin_needs), в план оно уходит той же стороной «ставим».
-  var pkgData=null, pkgSel={}, pkgSelKeep=null, pkgUpd={}, pkgUpdKeep=null, pkgPlanSeq=0, pkgRunning=false, storeData=null, pkgOp=null, pkgUpPick=false, pkgSbk=null;
+  var pkgData=null, pkgSel={}, pkgSelKeep=null, pkgUpd={}, pkgUpdKeep=null, pkgPlanSeq=0, pkgPlanInpl='', pkgRunning=false, storeData=null, pkgOp=null, pkgUpPick=false, pkgSbk=null;
   // ЧТО ЭТО — одной фразой, без названий технологий (вопрос тестера: «что это и зачем оно мне»). Ключ — id связки движка;
   // незнакомая связка (движок новее панели) остаётся без фразы, а не с чужой.
   var PKG_DS={
@@ -28551,6 +28628,7 @@
     var keep=function(){ if(foc){ var n=document.getElementById('pkg-plan-now'); if(n){ try{ n.focus({preventScroll:true}); }catch(e){} } } };
     // ПОКОЛЕНИЕ — на КАЖДЫЙ пересчёт, и без запроса тоже: «Сбросить», нажатое, пока считается прежний план, иначе получало поверх
     // «Ничего не меняется» опоздавший ответ того плана — с живой кнопкой «Применить» (ревью шага 6c, круг 1).
+    pkgPlanInpl='';   // an older plan's «in place» must not reach the question for this one
     var seq=++pkgPlanSeq;
     if(pkgRunning){ el.innerHTML=pkgPlanNow(pkgIds((pkgOp||{}).rst).length ? 'Пока идёт перезапуск, план не меняется.' : 'Пока идёт установка, план не меняется.'); keep(); return; }
     var df=pkgDiff();
@@ -28569,6 +28647,9 @@
   // Строка сведения плана — та же, что у разбивки места (`diskSumRow`): одна разметка «подпись — число — почему».
   function renderPkgPlan(df, p){
     var el=document.getElementById('pkg-plan-in'); if(!el) return;
+    // «На месте» — слово РОУТЕРА (план): его же читает вопрос перед «Применить», чтобы не обещать «несущую не переключает» там,
+    // где замена остановит её на секунды (ревью с.166).
+    pkgPlanInpl=(p && typeof p.inplace==='string') ? p.inplace : '';
     var foc=(document.activeElement && document.activeElement.id==='pkg-plan-now');
     var back=function(){ if(foc){ var n=document.getElementById('pkg-plan-now'); if(n){ try{ n.focus({preventScroll:true}); }catch(e){} } } };
     if(!p || typeof p.ok!=='boolean'){ el.innerHTML=pkgPlanNow('План посчитать не удалось: роутер ответил не то. Если вход в панель истёк — обновите страницу.', true); back(); return; }
@@ -28591,6 +28672,9 @@
       h+=diskSumRow('На накопителе', (fs ? '− '+humanBytes(fs) : '')+(fs && ns ? ' · ' : '')+(ns ? '+ '+humanBytes(ns) : ''), 'свободно там '+humanBytes(Number(p.store_free_b)||0));
     // Размеры части файлов неизвестны (bin-manifest.txt не доехал) — вердикт «влезет» неполный, и сказать это обязан экран.
     if(p.unknown===true) h+=dkLine('Размер части файлов роутеру неизвестен — оценка места неполная.', true);
+    // ЗАМЕНА НА МЕСТЕ (тесный флеш): рядом со старой копией новая не помещается — роутер ставит её на место прежней, и программа
+    // компонента на время замены останавливается. Решил роутер (`inplace` — файлы), экран только говорит, ДО «Применить».
+    if(p.inplace) h+=dkLine('Флеш тесный: новая сборка ляжет на место прежней — на время замены (секунды) программа компонента остановится, а с ней основной канал или выход на ней. Пропадёт питание в эти секунды — компонент придётся поставить заново.', true);
     (p.errors||[]).forEach(function(e){ h+=dkLine(esc(e), true); });
     (p.blocked||[]).forEach(function(x){ h+=dkLine('<span>'+esc(pkgLabelOf(x.id))+'</span>: <span>снять нельзя: '+esc(x.why)+'</span>', true); });
     if(pShort>0){
@@ -28615,7 +28699,8 @@
     var can=(p.ok===true) && !pkgRunning;
     h+='<div class="acts"><div class="grow"></div><button type="button" class="btn gh" data-pka="reset">Сбросить</button>'
       + '<button type="button" class="btn pri" id="pkg-apply" data-pka="apply" data-busy="1"'+(can ? '' : ' data-na="1"')+((can && !busy) ? '' : ' disabled')+'>Применить</button></div>'
-      + dkLine(!(df.ins && df.ins.length) ? 'Активную несущую и дополнительные выходы операция не переключает.'
+      + dkLine(p.inplace ? 'Сперва новая сборка скачивается в память роутера, потом встаёт на место прежней: программа компонента остановится на секунды и запустится уже на новой.'
+             : !(df.ins && df.ins.length) ? 'Активную несущую и дополнительные выходы операция не переключает.'
              : pkgFromUp(df.ins) ? 'Удаления идут первыми, потом установка из загруженных файлов — GitHub не нужен. Активную несущую и дополнительные выходы операция не переключает.'
              : 'Сперва всё нужное скачивается с GitHub в память роутера, потом удаления и установка: не скачалось — не меняется ничего. Активную несущую и дополнительные выходы операция не переключает.');
     el.innerHTML=h;
@@ -28689,8 +28774,12 @@
     if(df.del.length) q+='Снимем с роутера: '+df.del.map(pkgLabelOf).join(', ')+'\n';
     if(put.length) q+=(pkgFromUp(put) ? 'Поставим из загруженных файлов: ' : 'Скачаем и поставим: ')+put.map(pkgLabelOf).join(', ')+'\n';
     if(up.length) q+='Обновим: '+up.map(pkgLabelOf).join(', ')+'\n';
-    q+='\nАктивную несущую и дополнительные выходы операция не переключает.';
-    if(up.length) q+='\nОбновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — кнопкой «Перезапустить» в его строке, а где её нет — перезагрузкой роутера.';
+    if(pkgPlanInpl) q+='\nФлеш тесный: новая сборка встанет на место прежней — программа компонента остановится на секунды и запустится уже на новой, основной канал или выход на ней на это время прервутся.';
+    else q+='\nАктивную несущую и дополнительные выходы операция не переключает.';
+    // The restart note is for every update whose outdated file is NOT put in place: one component swapped in place said nothing about
+    // another one updated beside its old copy (review s.166 r2).
+    var inpl=' '+pkgPlanInpl+' ', ubOf=function(id){ var u=''; ((pkgData||{}).pkgs||[]).forEach(function(p){ if(p.id===id) u=p.ub||''; }); return u; };
+    if(up.some(function(id){ var u=ubOf(id); return !u || inpl.indexOf(' '+u+' ')<0; })) q+='\nОбновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — кнопкой «Перезапустить» в его строке, а где её нет — перезагрузкой роутера.';
     if(!askConfirm(q)) return;
     pkgLaunch('pkg_apply', 'ins='+(df.ins.join(',')||'-')+'&del='+(df.del.join(',')||'-'),
       {busy:'меняю компоненты…', log:'→ компоненты: ставим ['+(df.ins.join(', ')||'—')+'], снимаем ['+(df.del.join(', ')||'—')+']',

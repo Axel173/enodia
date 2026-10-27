@@ -256,8 +256,12 @@ bin_where() {
 # Метод тот же, что у packages.sh::disk_on_store (там вопрос соседний — «куда ляжет НОВЫЙ файл»):
 # сравниваем точку монтирования с точкой БУТСТРАПА, а не с литералом `/data`, — на BE10000 `/data`
 # и `/data/usr` РАЗНЫЕ тома, и сравнение с литералом объявило бы накопителем собственный флеш.
-bin_on_store() {
-    _bos_b=$(fs_mount "$(bin_path "$1")")
+bin_on_store() { path_on_store "$(bin_path "$1")"; }
+# path_on_store <path> — does this path live on the EXTERNAL drive (0 = yes): the question behind bin_on_store, asked of any path.
+# The snapshots of lists and geo categories carry a cap that is the router FLASH's, not the list's (lists-lib.sh::snap_room): in the
+# layout `full` they live on the drive, and the cap made a 29-GB drive refuse a 10-MB snapshot (BE7000, 26.10.2026).
+path_on_store() {
+    _bos_b=$(fs_mount "$1")
     _bos_r=$(fs_mount "${ENODIA_BOOT:-/data/usr/app/enodia-boot}")
     [ -n "$_bos_b" ] && [ -n "$_bos_r" ] && [ "$_bos_b" != "$_bos_r" ]
 }

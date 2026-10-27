@@ -229,10 +229,13 @@ subs-update support switch-vpn-setup transport-awg-setup xiaomi-bypass zapret-nf
 RAM_LOGS_SLOT="xray enodia-hev enodia-hysteria enodia-byedpi hev hysteria byedpi"  # демоны с пер-слотовым инстансом (+ имена до префикса)
 RAM_SLOT_IDS="2 3 4 5 6 7"                     # диапазон номеров выходов (slots.sh)
 RAM_XTEST_PORTS="10812 10813 10814 10815 10816 10817 10818 10819"   # xray-test.sh
+# A carrier daemon's start keeps the previous run's tail beside its log as `<log>.prev` (daemon-lib.sh::daemon_log_fresh) — the
+# same RAM, so «очистить логи» sees it next to its log.
+ramlog_one() { [ -s "$1" ] && echo "$1"; [ -s "$1.prev" ] && echo "$1.prev"; return 0; }
 ramlog_targets() {
-    for _n in $RAM_LOGS; do [ -s "/tmp/$_n.log" ] && echo "/tmp/$_n.log"; done
+    for _n in $RAM_LOGS; do ramlog_one "/tmp/$_n.log"; done
     for _i in $RAM_SLOT_IDS; do
-        for _n in $RAM_LOGS_SLOT; do [ -s "/tmp/$_n-s$_i.log" ] && echo "/tmp/$_n-s$_i.log"; done
+        for _n in $RAM_LOGS_SLOT; do ramlog_one "/tmp/$_n-s$_i.log"; done
         [ -s "/tmp/xray-s$_i.access.log" ] && echo "/tmp/xray-s$_i.access.log"
     done
     for _p in $RAM_XTEST_PORTS; do

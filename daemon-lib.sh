@@ -351,3 +351,32 @@ go_quiet() {
     rm -f "$_gqf"
     return "$_gqr"
 }
+
+# THE PREVIOUS RUN'S LAST WORDS (BE6500 tester, 26.10.2026). Every carrier start truncated its daemon's log (`: > log`) so the
+# panel's «Лог:» showed this start only — and so the next raise (the watchdog's, a switch, a server test) erased the one witness of
+# why the last daemon died: on the tester's router the xray that fell at 02:24 left nothing behind by morning. The start keeps the
+# old log's tail as `<log>.prev` (bounded — it lives in RAM next to the log), then begins the log afresh. A daemon whose log is empty
+# leaves the previous `.prev` alone: a raise that died before saying anything is not a reason to forget the run before it.
+# The RAM-log registries (clean.sh `ramlog_targets`, dump.sh) know the `.prev` form; uninstall's masks cover it.
+DAEMON_LOG_PREV=${DAEMON_LOG_PREV:-60}   # lines kept from the previous run
+daemon_log_fresh() {   # $1 = log path
+    if [ -s "$1" ]; then tail -n "$DAEMON_LOG_PREV" "$1" > "$1.prev" 2>/dev/null || rm -f "$1.prev" 2>/dev/null; fi
+    : > "$1" 2>/dev/null || true
+}
+
+# ROOM FOR ONE MORE GO TUNNEL DAEMON (BE6500 tester, OOM 24.10.2026: the main xray 68 MB + a server test's own xray 39 MB + the
+# panel's CGIs on a 393-MB router, and the kernel killed the TUNNEL). A second Go daemon — a server test (xray-test.sh), a heavy
+# exit (slots.sh) — starts only while the kernel says this much is AVAILABLE and the reserve stays (the live tunnel's own growth,
+# dnsmasq, the panel). GOMEMLIMIT is no answer to it: the heap ceiling leaves out the ~18 MB of UPX-unpacked code. No /proc/meminfo
+# (or no number in it) — no guard: the old behaviour. MEMINFO — the stands' substitute (the convention of dump.sh / packages.sh).
+DAEMON_GO_NEED_KB=${DAEMON_GO_NEED_KB:-40960}         # a Go tunnel daemon at its start: 39 MB measured (a test xray, BE6500 armv7)
+DAEMON_RAM_RESERVE_KB=${DAEMON_RAM_RESERVE_KB:-49152}  # what the system keeps after it
+DAEMON_RAM_WHY=''
+daemon_ram_room() {   # $1 = KB the new daemon takes → 0 room; 1 none (DAEMON_RAM_WHY — the numbers, in words)
+    DAEMON_RAM_WHY=''
+    _drm=$(awk '/^MemAvailable:/{a=$2}/^MemFree:/{f=$2}END{printf "%.0f", (a==""?f:a)}' "${MEMINFO:-/proc/meminfo}" 2>/dev/null)
+    case "$_drm" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$_drm" -ge $(( $1 + DAEMON_RAM_RESERVE_KB )) ] && return 0
+    DAEMON_RAM_WHY="доступно $(( _drm / 1024 )) МБ, нужно $(( ($1 + DAEMON_RAM_RESERVE_KB) / 1024 ))"
+    return 1
+}

@@ -62,6 +62,7 @@ if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 # «VPN выключен вручную — несущую не берёт никто» (carrier_barred/carrier_run, разбор в daemon-lib.sh). Нет — прежний путь.
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
 command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
+command -v daemon_log_fresh >/dev/null 2>&1 || daemon_log_fresh() { : > "$1" 2>/dev/null || true; }   # the old start: the log afresh, no `.prev`
 command -v daemon_wait_port >/dev/null 2>&1 || daemon_wait_port() {
     DAEMON_WAIT_WHY=''; _dwi=0; while [ "$_dwi" -lt "$3" ]; do netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0; sleep 1; _dwi=$((_dwi+1)); done
     netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0
@@ -219,10 +220,19 @@ set_direct_dns() {
 # переоткрывает stdout/stderr УЖЕ ПОСЛЕ демонизации (внутри sh, до exec) → лог пишется;
 # exec сохраняет PID для pidfile. -x /bin/sh безопасен: дедуп у нас на proc_alive (по
 # пидфайлу), а -K в stop/restart матчит по -p, не по -x.
+# The Go heap ceiling (GOMEMLIMIT), one for every Go daemon of the tunnel: its ONLY owner is net-tune.sh (.go-memlimit; why a
+# ceiling at all — that file's header); hysteria had none until 26.10.2026. The FORM is filtered here, next to the launch
+# (net-tune.sh's reader contract): a word other than the variable would become the command and the daemon would not start.
+# Prints `env GOMEMLIMIT=<N>MiB ` or nothing — then the launch line is the old one byte for byte.
+hy2_go_cap() {
+    _hgc=$(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$')
+    [ -n "$_hgc" ] && printf 'env %s ' "$_hgc"
+    return 0
+}
 spawn_hysteria() {
-    : > "$HY2_LOG" 2>/dev/null || true
+    daemon_log_fresh "$HY2_LOG"
     seed_server_dns || return 1            # посеять server-host->IP в локальный dnsmasq; 1 = не зарезолвили
-    start-stop-daemon -S -b -m -p "$HY2_PID" -x /bin/sh -- -c "exec '$HY2' -c '$HY2_YAML' >>'$HY2_LOG' 2>&1"
+    start-stop-daemon -S -b -m -p "$HY2_PID" -x /bin/sh -- -c "exec $(hy2_go_cap)'$HY2' -c '$HY2_YAML' >>'$HY2_LOG' 2>&1"
 }
 
 # Освободить socks-порт, если его держит ЧУЖОЙ процесс. ЗАЧЕМ: hysteria и xray
@@ -547,8 +557,8 @@ slot_start_daemons() {   # $1 = id ; $2 = имя конфига
     slot_free_socks "$_id" "$(slot_hy2_pid "$_id")"
     if ! proc_alive "$(slot_hy2_pid "$_id")"; then
         log "слот №$_id: запускаю hysteria на socks :$_port (конфиг $2)…"
-        : > "$(slot_hy2_log "$_id")" 2>/dev/null || true
-        start-stop-daemon -S -b -m -p "$(slot_hy2_pid "$_id")" -x /bin/sh -- -c "exec '$HY2' -c '$(slot_conf "$_id")' >>'$(slot_hy2_log "$_id")' 2>&1"
+        daemon_log_fresh "$(slot_hy2_log "$_id")"
+        start-stop-daemon -S -b -m -p "$(slot_hy2_pid "$_id")" -x /bin/sh -- -c "exec $(hy2_go_cap)'$HY2' -c '$(slot_conf "$_id")' >>'$(slot_hy2_log "$_id")' 2>&1"
     fi
     if ! slot_wait_socks "$_port" "$(slot_hy2_pid "$_id")" hysteria 25; then
         log "слот №$_id: hysteria не слушает :$_port ($DAEMON_WAIT_WHY). Лог:"; tail -n 15 "$(slot_hy2_log "$_id")" 2>/dev/null

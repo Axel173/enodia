@@ -28,6 +28,12 @@ LISTS_RAM="${LISTS_RAM:-/tmp/enodia-lists}"
 # → почти-полный флеш = падение DNS/туннеля. Свыше кап — снимок на флеш НЕ пишем (см. snap_write).
 MAX_FLASH_CIDR="${MAX_FLASH_CIDR:-40000}"
 TAB=$(printf '\t')
+# On our drive a snapshot keeps this much free for the person's own files (the same reserve as a component's file there, packages.sh).
+SNAP_STORE_RESERVE_B=${SNAP_STORE_RESERVE_B:-16777216}
+# path_on_store/fs_free_b (store-lib.sh) — WHERE a snapshot lies decides its cap (snap_room). The library reads the store marker from
+# the state dir; ENODIA_BIN is its default, not ours. No library — the flash rule everywhere: the old behaviour.
+ENODIA_BIN=${ENODIA_BIN:-/data/usr/app/enodia-bin}
+if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
 
 # DoH-резолв для fetch_url — ЕДИНАЯ копия в dns-lib.sh (`doh_ips`): фолбэк, написанный ради обхода
 # мёртвого туннельного DNS, обязан биндиться к WAN, иначе он уходит в тот самый мёртвый туннель
@@ -107,12 +113,31 @@ snap_path()  {
 # RAM и на ребуте перекачается через iplist-update/heal.sh), печатаем подсказку в лог вызывающего.
 # RAM-снимки (adblock/ipblock — снапшот в /tmp) кап не трогает: там памяти вдоволь. DRY: единая
 # точка записи снимка вместо голого cp — тут же ловим оба сценария (флеш-кап / RAM-без-капа).
+# THE CAP IS THE FLASH'S, NOT THE LIST'S (BE7000 26.10.2026: all of Enodia on a 29-GB drive, and «Гео-категория не переживёт
+# перезагрузку» came after every rebuild — 297744 lines of an ad-block category against a cap that guards the 20-MB router flash the
+# snapshot never touched). On our drive (store-lib.sh::path_on_store) only the room counts — the snapshot and SNAP_STORE_RESERVE_B;
+# on the flash — MAX_FLASH_CIDR lines. One rule for both writers of flash snapshots (snap_write here, geo.sh snap_flash).
+snap_room() {   # $1 = destination, $2 = lines, $3 = the source file → 0: may be written; 1: not (SNAP_WHY — why, in words)
+	SNAP_WHY=""
+	if command -v path_on_store >/dev/null 2>&1 && path_on_store "${1%/*}"; then
+		_srs=$(wc -c < "$3" 2>/dev/null | tr -d ' ')
+		awk -v f="$(fs_free_b "${1%/*}")" -v s="${_srs:-0}" -v r="$SNAP_STORE_RESERVE_B" 'BEGIN { exit !(f + 0 >= s + r) }' && return 0
+		SNAP_WHY="на накопителе не хватает места"
+		return 1
+	fi
+	[ "$2" -le "$MAX_FLASH_CIDR" ] && return 0
+	SNAP_WHY="$2 строк > лимита $MAX_FLASH_CIDR"
+	return 1
+}
 snap_write() {
 	_c="$1"; _sf="$2"; _dst=$(snap_path "$_c")
 	case "$_dst" in
 		"$LISTS_DIR"/*)
 			_ln=$(grep -c '' "$_sf" 2>/dev/null); case "$_ln" in ''|*[!0-9]*) _ln=0 ;; esac
-			if [ "$_ln" -gt "$MAX_FLASH_CIDR" ]; then
+			if ! snap_room "$_dst" "$_ln" "$_sf"; then
+				# On the drive the list is not too big — the drive is full: the hint about a smaller list would send the person
+				# to cut a list that is fine.
+				case "$SNAP_WHY" in *накопител*) echo "снимок ПРОПУЩЕН: $SNAP_WHY. В RAM список работает, но не переживёт офлайн-ребут"; return 0 ;; esac
 				# Совет зависит от ВИДА списка: у CIDR-целей лечится агрегированным источником
 				# (cidr4 вместо ip4), у доменного пула агрегировать нечего — только список поменьше.
 				case "$_c" in

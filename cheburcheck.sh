@@ -83,7 +83,11 @@ cmd_run() {   # $1 = ip
     _cc=$(curl -s $_cca -o "$W/check" -w '%{http_code}' --connect-timeout 10 --max-time 25 -H 'Accept: application/json' "$API/check?target=$1" 2>/dev/null)
     [ "$_cc" = 200 ] || nodata "$1" "сервис не ответил (HTTP ${_cc:-нет связи})"
     _cid=$(jsonfilter -i "$W/check" -e '@.id' 2>/dev/null)
-    printf '%s' "$_cid" | grep -Eq '^[A-Za-z0-9_.-]{1,50}$' || nodata "$1" "сервис не вернул номер проверки"
+    # The id goes into the URL path ⇒ only a token's alphabet; its LENGTH by `${#}`, not by a regex interval: since 22.10.2026 the
+    # service answers a signed token (a JWT, 269 characters), the old `{1,50}` read a working service as «no number», and busybox
+    # caps an interval at 255 (C96).
+    case "$_cid" in ''|*[!A-Za-z0-9_.-]*) nodata "$1" "сервис не вернул номер проверки" ;; esac
+    [ "${#_cid}" -le 2048 ] || nodata "$1" "сервис не вернул номер проверки"
     _creg=$(jsonfilter -i "$W/check" -e '@.blocked' 2>/dev/null)
     case "$_creg" in true|false) ;; *) _creg=null ;; esac
     _cc=$(curl -s -N $_cca -D "$W/head" -o "$W/sse" -w '%{http_code}' --connect-timeout 10 --max-time 80 -H 'Accept: text/event-stream' "$API/probe/$_cid" 2>/dev/null)

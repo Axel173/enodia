@@ -189,10 +189,13 @@ norm_member() {
 # (валидный член = домен ИЛИ IP/CIDR).
 # ОБЩАЯ для вербов `set-members` и `new` (мастер импорта routing-правил создаёт группу вместе с
 # составом одним действием) — иначе появилась бы вторая копия правил нормализации и дедупа.
+# `#…` to the end of the line is a comment and is cut BEFORE the split: split by spaces, `# office vpn` gave the members
+# `office` and `vpn` (a one-word zone passes is_dom), `# com` took every .com, and a commented-out `# 10.0.0.0/8` came back
+# live (tester 25.10.2026). No member has a `#` in it; a URL's `#fragment` goes with the path anyway.
 store_members() {
 	_sm_f="$1"; _sm_n=0
 	: > "$_sm_f.new"
-	for _raw in $(tr ',;\r\n' '    '); do
+	for _raw in $(tr '\r' '\n' | sed 's/#.*//' | tr ',;\n' '   '); do
 		_v=$(norm_member "$_raw") || continue
 		grep -qxF "$_v" "$_sm_f.new" 2>/dev/null && continue
 		echo "$_v" >> "$_sm_f.new"

@@ -425,19 +425,24 @@ live_probe() {   # $1 = proto  $2 = config file  $3 = the config's name
     _plo=$(XRAY_TEST_SRC=$2 sh "$ENODIA_DIR/xray-test.sh" premium-standby "$PM_XT_PORT" 2>/dev/null </dev/null)
     case "$_plo" in
         *'"ok":true'*) return 0 ;;
+        # The router is short of memory for a test xray (xray-test.sh admission): waiting the whole PM_LIVE_MAX and then blaming the
+        # server repeated itself on every refresh (review s.166 r1) — the work ends in the router's words (3), and the new key Amnezia
+        # has already moved the server to is KEPT as the standby, as on a timeout: thrown away, every refresh superseded the last
+        # key and the server never came back (review s.166 r3).
+        *'"mem":true'*) LIVE_WHY=$(printf '%s' "$_plo" | sed -n 's/.*"msg":"\([^"]*\)".*/\1/p' | jline 200); return 3 ;;
         *'"busy":true'*) return 1 ;;
         *'не установлен'*|*'не найден'*|*'не удалось подготовить'*)
             LIVE_WHY=$(printf '%s' "$_plo" | sed -n 's/.*"msg":"\([^"]*\)".*/\1/p' | jline 200); return 2 ;;
     esac
     return 1
 }
-# wait_live <proto> <file> — 0: it carries; 1: it did not within PM_LIVE_MAX (by uptime: no clock trust needed). A probe that cannot
-# run here ends the work in its words.
+# wait_live <proto> <file> — 0: it carries; 1: it did not within PM_LIVE_MAX (by uptime: no clock trust needed); 3: the router is
+# short of memory to probe it now (LIVE_WHY). A probe that cannot run here at all ends the work in its words.
 wait_live() {   # $1 = proto  $2 = file  $3 = the config's name
     _pwe=$(( $(uptime_s) + PM_LIVE_MAX ))
     while :; do
         live_probe "$1" "$2" "$3"
-        case $? in 0) return 0 ;; 2) rm -f "$W/out" "$W/priv"; fail "$LIVE_WHY" ;; esac
+        case $? in 0) return 0 ;; 2) rm -f "$W/out" "$W/priv"; fail "$LIVE_WHY" ;; 3) return 3 ;; esac
         _pwn=$(uptime_s); [ "$_pwn" -lt "$_pwe" ] || return 1
         say "Amnezia заводит новый ключ — жду, пока он повезёт (до $(( (_pwe - _pwn + 59) / 60 )) мин); прежний конфиг на месте"
         sleep "$PM_LIVE_STEP"
@@ -592,7 +597,13 @@ run_pick() {   # $1 tag  $2 cc  $3 proto  [$4 refresh]  [$5 auto]
         # same as a pair that never takes our user. A pick lays its file out at once: there is no old one to keep.
         if [ "$OP" = refresh ]; then
             say "проверяю новый ключ: Amnezia заводит его до пары минут, прежний конфиг пока на месте"
-            if ! wait_live "$3" "$W/out" "$_prn"; then
+            wait_live "$3" "$W/out" "$_prn"; _pwl=$?
+            if [ "$_pwl" = 3 ]; then
+                keep_next
+                rm -f "$W/out" "$W/priv"
+                fail "Amnezia выдала новый ключ «$_prd» — прежний конфиг на месте, новый отложен до следующей попытки: $LIVE_WHY"
+            fi
+            if [ "$_pwl" != 0 ]; then
                 keep_next
                 rm -f "$W/out" "$W/priv"
                 fail "Amnezia выдала новый ключ «$_prd», но за $((PM_LIVE_MAX / 60)) мин сервер на него не ответил — прежний конфиг на месте, новый отложен до следующей попытки. Если так раз за разом — возьмите другой протокол или страну"

@@ -29,6 +29,7 @@ command -v daemon_wait_port >/dev/null 2>&1 || daemon_wait_port() {
     DAEMON_WAIT_WHY=''; _dwi=0; while [ "$_dwi" -lt "$3" ]; do netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0; sleep 1; _dwi=$((_dwi+1)); done
     netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0
     DAEMON_WAIT_WHY="не появился за $3 с"; return 1; }
+command -v daemon_ram_room >/dev/null 2>&1 || { daemon_ram_room() { return 0; }; DAEMON_GO_NEED_KB=0; }   # old library: no RAM guard
 command -v daemon_wait_gone >/dev/null 2>&1 || daemon_wait_gone() { _dwg=0; while [ -d "/proc/$1" ]; do [ "$_dwg" -ge "${2:-5}" ] && return 1; sleep 1; _dwg=$((_dwg+1)); done; return 0; }
 XRAY=$(bin_path xray)
 # Канонический IP-литерал trace (ip-lib.sh): DNS-free, отвечает и на ядре 4.4, где hostname
@@ -80,15 +81,60 @@ _lk=0
 # ждём его секунду, а не уводим. Увод мёртвого — ПЕРЕИМЕНОВАНИЕМ (атомарно: из двух одновременных уводов удаётся один), а не `rm`,
 # который снёс бы замок, только что взятый соседом (ревью пачки 2, круг 3).
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\000' ' ' 2>/dev/null < "/proc/$1/cmdline" | grep -qE "$2"; }
-lock_take() {
-	mkdir "$TLOCK" 2>/dev/null && { echo $$ > "$TLOCK/pid"; _lk=1; return 0; }
-	_lp=$(cat "$TLOCK/pid" 2>/dev/null | tr -cd '0-9')
-	[ -n "$_lp" ] || { sleep 1; _lp=$(cat "$TLOCK/pid" 2>/dev/null | tr -cd '0-9'); }
-	if [ -n "$_lp" ] && pid_runs "$_lp" 'xray-test'; then return 1; fi
-	mv "$TLOCK" "$TLOCK.stale.$$" 2>/dev/null && rm -rf "$TLOCK.stale.$$" 2>/dev/null
-	mkdir "$TLOCK" 2>/dev/null && { echo $$ > "$TLOCK/pid"; _lk=1; return 0; }
+xt_lock() {   # $1 = lock dir, $2 = who may hold it alive (regex, default a test run) → 0 taken (our pid in it); 1 held by a live run
+	mkdir "$1" 2>/dev/null && { echo $$ > "$1/pid"; return 0; }
+	_lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9')
+	[ -n "$_lp" ] || { sleep 1; _lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9'); }
+	if [ -n "$_lp" ] && pid_runs "$_lp" "${2:-xray-test}"; then return 1; fi
+	mv "$1" "$1.stale.$$" 2>/dev/null && rm -rf "$1.stale.$$" 2>/dev/null
+	mkdir "$1" 2>/dev/null && { echo $$ > "$1/pid"; return 0; }
 	return 1
 }
+lock_take() { xt_lock "$TLOCK" && _lk=1; }
+# RAM FOR ONE MORE XRAY (BE6500 tester, OOM 24.10.2026: the main xray 68 MB + a server test's own 39 MB on a 393-MB router, and the
+# kernel killed the TUNNEL; the panel checks up to six servers side by side). A test's xray is let in by RAM (daemon-lib.sh::
+# daemon_ram_room) and the admission is SERIAL: one start at a time, holding the admission until its port listens — the next asks
+# what is left AFTER this one loaded; six at once would all read the same free memory and all pass. No room while other tests run —
+# wait for them (a test lasts seconds), so a tight router checks one by one instead of falling; no room with nobody to wait for, or
+# not within XT_ADMIT_MAX — refuse as `busy`: no verdict about the SERVER (the panel and premium.sh read busy as «not now»).
+XT_ADMIT=/tmp/enodia-xray-test.admit
+XT_ADMIT_MAX=${XT_ADMIT_MAX:-60}
+_adm=0; XT_ADMIT_WHY=''; XT_ADMIT_MEM=0
+# The admission is also held by a tight-flash update swapping xray in place (packages.sh::inpl_admit): its holder is the ENGINE, and
+# read as a dead test it was taken from under the swap by a test already queued here — one that passed the swap marker before it
+# existed started xray mid-swap (review s.166 r2).
+XT_ADMIT_HOLDERS='xray-test|packages\.sh'
+# Waited for is a test whose XRAY runs (its memory comes back when it ends) — not one waiting for the admission like us: counted, the
+# waiters all waited for each other the full minute and refused «идут другие проверки» where the truth was «мало памяти» (review
+# s.166 r1).
+xt_others() {   # another run's test xray is alive → 0
+	for _xo in /tmp/enodia-xray-test.1081[2-9].pid; do
+		[ -f "$_xo" ] && [ "$_xo" != "$TPID" ] || continue
+		_xop=$(cat "$_xo" 2>/dev/null | tr -cd '0-9')
+		[ -n "$_xop" ] && pid_runs "$_xop" 'xray' && return 0
+	done
+	return 1
+}
+xt_admit() {
+	_xai=0
+	while :; do
+		if xt_lock "$XT_ADMIT" "$XT_ADMIT_HOLDERS"; then
+			_adm=1
+			daemon_ram_room "$DAEMON_GO_NEED_KB" && return 0
+			rm -rf "$XT_ADMIT" 2>/dev/null; _adm=0; XT_ADMIT_MEM=1
+			xt_others || { XT_ADMIT_WHY="мало свободной памяти ($DAEMON_RAM_WHY): ещё один xray уронил бы туннель — проверка не начата"; return 1; }
+		fi
+		# «Short of memory» (`mem`) only when memory WAS the reason: a run that never got the admission within the minute waited for
+		# other runs — the panel said «роутеру мало памяти» on a roomy router (review s.166 r2).
+		if [ "$_xai" -ge "$XT_ADMIT_MAX" ]; then
+			if [ "$XT_ADMIT_MEM" = 1 ]; then XT_ADMIT_WHY="мало свободной памяти ($DAEMON_RAM_WHY), идут другие проверки — повторите, когда они кончатся"
+			else XT_ADMIT_WHY="идут другие проверки — повторите, когда они кончатся"; fi
+			return 1
+		fi
+		sleep 1; _xai=$((_xai + 1))
+	done
+}
+xt_admit_drop() { [ "$_adm" = 1 ] && rm -rf "$XT_ADMIT" 2>/dev/null; _adm=0; return 0; }
 cleanup() {
 	[ "$_lk" = 1 ] || return 0
 	# The run's xray is GONE before the lock goes (xt_done removes it next): `kill` returns before the process dies, and a run
@@ -106,7 +152,7 @@ cleanup() {
 }
 # Замок снимаем ПОСЛЕДНИМ и только свой: чужой (держатель жив) не наш, и снять его — ровно та гонка, от которой он.
 # Сигнал — выход после уборки: ловушка busybox на сигнале без `exit` вернула бы управление в середину скрипта.
-xt_done() { cleanup; [ "$_lk" = 1 ] && rm -rf "$TLOCK" 2>/dev/null; _lk=0; return 0; }
+xt_done() { cleanup; xt_admit_drop; [ "$_lk" = 1 ] && rm -rf "$TLOCK" 2>/dev/null; _lk=0; return 0; }
 trap xt_done EXIT
 trap 'exit 1' INT TERM HUP PIPE
 
@@ -115,7 +161,15 @@ src="$ENODIA_STATE/xray-configs/$name.json"
 # A CONFIG NOT LAID OUT YET (premium.sh wait_live: a new Amnezia key is asked by the result BEFORE it replaces the file in use) — by
 # its path in the caller's environment; the name stays the run's label. The CGI cannot set it: uhttpd passes no environment.
 case "${XRAY_TEST_SRC:-}" in /*) src=$XRAY_TEST_SRC ;; esac
-[ -x "$XRAY" ] || { emit '{"ok":false,"msg":"xray не установлен на роутере"}'; exit 0; }
+# A tight-flash update is putting the new xray in place of the old (packages.sh::inpl_swap): no verdict about any server now. The swap
+# is live while its ENGINE runs — the marker carries packages.sh's pid: one left by an engine killed mid-swap (OOM on a tight model,
+# no exit trap) answered «идёт замена» to every test until a reboot (review s.166 r2).
+xt_swap_live() { _xsp=$(cut -d' ' -f1 /tmp/enodia-pkg-inplace 2>/dev/null | tr -cd '0-9'); [ -n "$_xsp" ] && pid_runs "$_xsp" 'packages\.sh'; }
+xt_swap_live && { emit '{"ok":false,"busy":true,"msg":"идёт замена программы на месте — повторите через минуту"}'; exit 0; }
+# No program — no verdict about the SERVER either (`nobin`: the panel neither caches nor counts it dead; premium.sh ends in these
+# words). The swap's failed copy leaves exactly this, and «Удалять мёртвые» deleted live servers for it (review s.166 r2).
+XT_NOBIN='{"ok":false,"nobin":true,"msg":"xray не установлен на роутере"}'
+[ -x "$XRAY" ] || { emit "$XT_NOBIN"; exit 0; }
 [ -s "$src" ]  || { emit '{"ok":false,"msg":"конфиг не найден"}'; exit 0; }
 
 lock_take || { emit "{\"ok\":false,\"busy\":true,\"msg\":\"на временном порту $TPORT идёт другая проверка — повторите, когда она кончится\"}"; exit 0; }
@@ -137,7 +191,15 @@ cleanup   # снять возможный прошлый тест (замок н
 [ -s "$TCONF" ] || { emit '{"ok":false,"msg":"не удалось подготовить тест-конфиг"}'; exit 0; }
 
 : > "$TLOG" 2>/dev/null
-start-stop-daemon -S -b -m -p "$TPID" -x /bin/sh -- -c "exec '$XRAY' run -c '$TCONF' >>'$TLOG' 2>&1"
+# The same Go heap ceiling as the working xray (owner net-tune.sh, form filtered next to the launch — its reader contract): up to
+# eight tests run side by side, and each took memory with no ceiling (26.10.2026).
+_tgc=$(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$')
+# `mem` — the refusal is about the router's MEMORY, not a busy port: the panel counts it apart, premium.sh stops waiting on it.
+# `queue` — not memory: other runs held the admission the whole minute; the panel checks such a server again, one at a time (s.166 r3).
+xt_admit || { _xm=',"queue":true'; [ "$XT_ADMIT_MEM" = 1 ] && _xm=',"mem":true'; emit "{\"ok\":false,\"busy\":true$_xm,\"msg\":\"$XT_ADMIT_WHY\"}"; exit 0; }
+# A swap that started while this run waited for the admission has ended (it held the admission) — on the new build, or with none.
+[ -x "$XRAY" ] || { emit "$XT_NOBIN"; exit 0; }
+start-stop-daemon -S -b -m -p "$TPID" -x /bin/sh -- -c "exec ${_tgc:+env $_tgc }'$XRAY' run -c '$TCONF' >>'$TLOG' 2>&1"
 
 # Ждём тестовый socks, ПОКА ЖИВ ПРОЦЕСС (daemon-lib.sh). Прежний фиксированный срок делал
 # ровно ту ошибку, ради которой библиотека и заведена: на накопителе бинарь читается дольше,
@@ -148,6 +210,7 @@ if ! daemon_wait_port "$TPID" xray 8 127.0.0.1 "$TPORT"; then
 	emit "{\"ok\":false,\"msg\":\"xray не поднялся с этим конфигом: ${err:-$DAEMON_WAIT_WHY}\"}"
 	exit 0
 fi
+xt_admit_drop   # loaded and listening: the next test asks the memory left after this one
 
 # SPEED-режим: качаем известный размер через socks конфига (сервер тянет файл из CDN → мерим
 # ПРОПУСКНУЮ способность выхода). speed.cloudflare.com/__down?bytes=N отдаёт ровно N байт (HTTPS,

@@ -376,11 +376,14 @@ if ! command -v set_sync >/dev/null 2>&1; then
 fi
 # Снимок агрегата на ФЛЕШ с капом (аномально большой — не раздуваем 20-МБ флеш; маршрутизация
 # живёт в ipset/dnsmasq RAM и перекачается на буте). Мелкие страны/сервисы влезают.
+# The flash cap is the flash's (lists-lib.sh::snap_room): on our drive only its room counts. An older lists-lib without it — the
+# old rule, line for line.
+command -v snap_room >/dev/null 2>&1 || snap_room() { SNAP_WHY="$2 строк > лимита $MAX_FLASH_CIDR"; [ "$2" -le "$MAX_FLASH_CIDR" ]; }
 snap_flash() {
 	_dst="$1"; _src="$2"
 	_ln=$(grep -c '' "$_src" 2>/dev/null); case "$_ln" in ''|*[!0-9]*) _ln=0 ;; esac
-	if [ "$_ln" -gt "$MAX_FLASH_CIDR" ]; then
-		echo "снимок гео на флеш пропущен: $_ln строк > лимита $MAX_FLASH_CIDR (маршрут в RAM работает, офлайн-ребут не переживёт)"
+	if ! snap_room "$_dst" "$_ln" "$_src"; then
+		echo "снимок гео пропущен: $SNAP_WHY (маршрут в RAM работает, офлайн-ребут не переживёт)"
 		# …и ТОЛЬКО `echo` тут мало. Пересборка почти всегда идёт ФОНОМ (`start-stop-daemon -b` в
 		# heal.sh 5.13 и в цепочке импорта), а `-b` заворачивает stdout в /dev/null — то есть
 		# единственное предупреждение о том, что после ребута категории не будет ~10 минут,
@@ -389,10 +392,14 @@ snap_flash() {
 		# заведён как «то, что случилось в фоне, а человек обязан увидеть»; свой лог гео не
 		# заводим (это четвёртый реестр логов: RAM_LOGS, DUMP_LOGS и дамп). Схлопывание повторов
 		# — сутки: пересборка бежит на каждом буте и по расписанию.
+		case "$SNAP_WHY" in
+			*накопител*) _gsw="На накопителе не хватает места для снимка категорий ($_ln строк)" ;;
+			*)           _gsw="Категория слишком велика для снимка на флеш ($_ln строк при лимите $MAX_FLASH_CIDR)" ;;
+		esac
 		if [ -f "$ENODIA_DIR/events.sh" ]; then
 			sh "$ENODIA_DIR/events.sh" add geo-snap-skip 86400 \
 				"Гео-категория не переживёт перезагрузку" \
-				"Категория слишком велика для снимка на флеш ($_ln строк при лимите $MAX_FLASH_CIDR). Сейчас она работает, но после перезагрузки роутера начнёт действовать не сразу — сперва её нужно будет заново скачать (несколько минут). Уменьшить ожидание можно, отключив самые крупные категории." >/dev/null 2>&1
+				"$_gsw. Сейчас она работает, но после перезагрузки роутера начнёт действовать не сразу — сперва её нужно будет заново скачать (несколько минут). Уменьшить ожидание можно, отключив самые крупные категории." >/dev/null 2>&1
 		fi
 		rm -f "$_dst" 2>/dev/null; return 0
 	fi
@@ -776,7 +783,10 @@ _wanted_pass() {
 			# the total of the OTHER snapshots + this one, and the volume's reserve — over either: RAM only, said like a big key
 			_wtot=$(for _wq in "$WSNAP"/*.gz; do [ -f "$_wq" ] && [ "$_wq" != "$WSNAP/$_wf.gz" ] && wc -c < "$_wq"; done | awk '{ t += $1 } END { print t + 0 }')
 			_wfree=$(command -v fs_free_b >/dev/null 2>&1 && fs_free_b "$WSNAP")
-			if [ "$_wsz" -gt "$WSNAP_MAX" ] || [ $(( _wtot + _wsz )) -gt "$WSNAP_TOTAL" ] || { [ -n "$_wfree" ] && [ "$_wfree" -gt 0 ] && [ "$_wfree" -lt $(( _wsz + WSNAP_RESERVE )) ]; }; then
+			# The per-file and total caps guard the router's 20-MB flash; on our drive (path_on_store) only its room counts.
+			_wcap=1; command -v path_on_store >/dev/null 2>&1 && path_on_store "$WSNAP" && _wcap=0
+			if { [ "$_wcap" = 1 ] && { [ "$_wsz" -gt "$WSNAP_MAX" ] || [ $(( _wtot + _wsz )) -gt "$WSNAP_TOTAL" ]; }; } \
+			   || { [ -n "$_wfree" ] && [ "$_wfree" -gt 0 ] && [ "$_wfree" -lt $(( _wsz + WSNAP_RESERVE )) ]; }; then
 				rm -f "$RAM/.wsnap.$$" "$WSNAP/$_wf.gz"
 				if [ -f "$ENODIA_DIR/events.sh" ]; then
 					sh "$ENODIA_DIR/events.sh" add geo-want-snap-skip 86400 \

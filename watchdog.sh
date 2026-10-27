@@ -174,6 +174,7 @@ FAILOVER_MODE_FILE="$ENODIA_STATE/.failover-mode"   # off|sticky|home; нет ф
 FAILOVER_HOME_FILE="$ENODIA_STATE/.failover-home"   # имя «основного» конфига для home
 FAILOVER_ESCALATE_FILE="$ENODIA_STATE/.failover-escalate"  # cross|direct; нет файла → cross
 FAILOVER_STAMP=/tmp/enodia-failover.stamp         # троттл повторного перебора в FAILOPEN
+OFF_RETRY_SETTLE=${OFF_RETRY_SETTLE:-$CARRIER_GRACE}   # the same retry's second probe waits for the carrier's warm-up this long (s); stands: 0
 FO_MODE_SEEN=/tmp/enodia-failover.mode-seen       # режим резервирования, при котором копилась пауза (см. fo_mode_note)
 FAILBACK_STAMP=/tmp/enodia-failback.stamp         # троттл попыток возврата на home
 FAILOVER_RETRY=${FAILOVER_RETRY:-600}          # БАЗОВАЯ пауза (сек) между переборами в FAILOPEN; дальше — бэкофф (fo_retry)
@@ -1634,6 +1635,26 @@ External IP now: ${ip:-unknown}."
     fi
 }
 
+# «VPN ВОССТАНОВЛЕН» — ONE EVENT FOR BOTH SIDES. Until 26.10.2026 only the AmneziaWG branch wrote it: a tunnel (Xray, Hysteria2,
+# ByeDPI) back from direct mode turned NORMAL in silence, and the BE6500 tester's notification centre showed falls without a single
+# return. One text; the first line says WHAT confirmed the return ($1 ru, $2 en), the second what came back ($3/$4; default — the
+# VPN routing and DNS through the tunnel, which a carrier that does not mark has none of).
+vpn_restored_event() {   # $1 подтверждение (ru), $2 (en), [$3 что вернулось (ru), $4 (en)]
+    ip=$(ext_ip)
+    if [ "$NF_LANG" = en ]; then
+        notify_ev "vpn-restored" 0 "BE7000: the VPN is back" \
+"$2
+${4:-VPN routing and DNS through the tunnel are restored.}
+External IP: ${ip:-unknown}."
+    else
+        notify_ev "vpn-restored" 0 "BE7000: VPN восстановлен" \
+"$1
+${3:-Вернул VPN-роутинг и DNS через туннель.}
+Внешний IP: ${ip:-неизвестен}."
+    fi
+    vpn_ok_mailed   # эпизод аварии закрыт письмом: следующее падение — снова письмо
+}
+
 # ВЫБРАН ТРАНСПОРТ, КОТОРОГО НА РОУТЕРЕ НЕТ. Повод общий у обеих веток ниже (tunnel и awg), потому
 # и текст ОДИН: для человека разница между «Xray» и «AmneziaWG» здесь только в имени, а вопрос тот
 # же — бэкап настроек переносит выбор сервера и правила, но не программы. Ключ тоже общий: два
@@ -2233,6 +2254,60 @@ health_back() { fo_backoff_reset; wan_out_clear; vpn_ok_quiet; }
 # ПОЧЕМУ ЭТО НЕ ДЕРЁТСЯ С РУЧНЫМ ПОДЪЁМОМ: зовём только из состояния FAILED, а КАЖДЫЙ плагин на
 # up/down чистит xstate (grep `enodia-watchdog.xstate` — все пять) ⇒ после ручного switch/heal мы
 # видим HEALTHY и даём несущей нормально пройти лестницу. Новый плагин обязан делать так же.
+# «ВЫКЛ» WITHOUT AmneziaWG: THE SAME SERVER AGAIN (user 26.10.2026). Mode «Выкл» means «no other server, no other protocol» — not
+# «never again»: with AmneziaWG absent the tick downed the tunnel after two empty egress probes and never raised it, and a BE6500
+# tester sat 11.5 h direct until an update happened to raise the same server — which carried at once. The direct mode is the WATCHDOG's (FAILOPEN + FAILED, our own
+# safety, not the person's toggle: `.vpn-off` is never read or written here — a carrier verb refuses under it, C116, and off_bail
+# undoes our raise). Pause — the ladder's (fo_retry, cap TUNNEL_RETRY_MAX: 10 → 20 → 30 min), stamp — FAILOVER_STAMP, the first
+# from the fall. Carries ⇒ the carrier stays, and NORMAL + «VPN восстановлен» are written by the healthy branch of the next tick (one
+# owner of the transition, as the fallback's rollback above); does not ⇒ down again, the pause grows.
+off_retry_same() {
+    _ors=$(fo_retry); [ "$_ors" -gt "$TUNNEL_RETRY_MAX" ] && _ors=$TUNNEL_RETRY_MAX
+    _orl=$(( _ors - $(stamp_age "$FAILOVER_STAMP") ))
+    if [ "$_orl" -gt 0 ]; then
+        log "$TRANSPORT режим=off: прямой режим (тот же сервер — снова через $(( (_orl + 59) / 60 )) мин)"
+        return 0
+    fi
+    wd_switch_take "повтор того же сервера $TRANSPORT"
+    date +%s > "$FAILOVER_STAMP"
+    log "$TRANSPORT режим=off: пробую тот же сервер снова"
+    sh "$TRANSPORT_SH" up "$TRANSPORT" >>"$LOG" 2>&1
+    _orup=$(cat "$CARRIER_UP_STAMP" 2>/dev/null)
+    off_bail "повтора того же сервера $TRANSPORT"
+    # The switching lock is HELD from the raise to the verdict, the probes judge under it (HEALTH_OWN_LOCK — ByeDPI keeps its hands off
+    # under a foreign lock). Dropped for the probe (review s.166 r1), it could not be taken back while «Компоненты» held its empty lock
+    # for an apply: the tick left its own dead raise up — the route, the tunnel's DNS, an empty verdict (review s.166 r3).
+    if HEALTH_OWN_LOCK=1 HEV_CHECK=1 sh "$TRANSPORT_SH" health "$TRANSPORT" >>"$LOG" 2>&1; then
+        wd_switch_drop
+        log "$TRANSPORT режим=off: тот же сервер снова везёт — остаюсь на нём"
+        return 0
+    fi
+    # A failed probe of a carrier seconds old is no verdict yet (CARRIER_GRACE — a live xray failed a probe 19 s after its start,
+    # measured): asked once more when the grace is over, in this tick, before the carrier goes down and the pause grows (review s.166 r2).
+    _org=$(stamp_age "$CARRIER_UP_STAMP")
+    if [ "$_org" -lt "$OFF_RETRY_SETTLE" ]; then
+        sleep $((OFF_RETRY_SETTLE - _org))   # fixed-wait: the carrier's warm-up grace (the healthy branch waits it out the same way), not a start
+        off_bail "повтора того же сервера $TRANSPORT"
+        if HEALTH_OWN_LOCK=1 HEV_CHECK=1 sh "$TRANSPORT_SH" health "$TRANSPORT" >>"$LOG" 2>&1; then
+            wd_switch_drop
+            log "$TRANSPORT режим=off: тот же сервер снова везёт (после прогрева) — остаюсь на нём"
+            return 0
+        fi
+    fi
+    # Still under our lock: a carrier raised after ours anyway (its up-mark moved — a raise that takes no switching lock) is not ours
+    # to take down (review s.166 r1).
+    if [ "$(cat "$CARRIER_UP_STAMP" 2>/dev/null)" != "$_orup" ]; then
+        log "$TRANSPORT режим=off: пока шла проверка, несущую поднял кто-то другой — не снимаю"
+        wd_switch_drop; return 0
+    fi
+    sh "$TRANSPORT_SH" down "$TRANSPORT" >>"$LOG" 2>&1
+    wd_switch_drop
+    echo FAILED > "$XSTATE"
+    fo_backoff_bump "$TUNNEL_RETRY_MAX"
+    log "$TRANSPORT режим=off: тот же сервер не везёт → прямой режим"
+    return 0
+}
+
 ensure_direct_mode() {
     _edev=$(carrier_route_dev)
     [ -n "$_edev" ] || return 0    # table 1000 пуста → прямой режим НАСТОЯЩИЙ, тишина
@@ -2469,11 +2544,11 @@ tick_lock_stuck() {
 #             Экран «Резервирование» говорит ТОЛЬКО по этому полю; новое значение = строка в белом списке
 #             cgi-bin/status и текст в панели (стенд сверяет, что верб не печатает неизвестного им)
 #             В ПРЯМОМ РЕЖИМЕ (standing=direct) поле отвечает на свой вопрос — «выйдет ли роутер из него САМ»:
-#             пусто — выйдет (awg0 подхватит сторож, туннель — лестница по троттлу, при «Выкл» — фолбэк на установленный awg, а не
-#             везшую в эту загрузку несущую тик поднимает первым подъёмом в любом режиме),
-#             `mode` — НЕ выйдет: туннель при режиме «Выкл» и без AmneziaWG (конфига или программы) ветка тика снимает и больше не поднимает
-#             (терминальная ветка «режим off, awg не установлен»; письмо того же тика зовёт в панель). Без поля
-#             экран обещал «сторож вернёт VPN сам» там, где тик не вернёт никогда (ревью пачки 5, круг 2)
+#             пусто — выйдет (awg0 подхватит сторож, туннель — лестница по троттлу, при «Выкл» — фолбэк на установленный awg, а
+#             без него тот же сервер снова по той же лестнице (off_retry_same, с 26.10.2026), не везшую в эту загрузку несущую тик
+#             поднимает первым подъёмом в любом режиме),
+#             `noprog` — НЕ выйдет: программы активного протокола нет (ниже). До 26.10.2026 здесь был и `mode` («Выкл» без
+#             AmneziaWG тик снимал и больше не поднимал); значение осталось за возвратом СЕРВЕРА выше
 #   home_why  ПОЧЕМУ НЕ ВЕРНЁТСЯ ДОМАШНИЙ ПРОТОКОЛ, когда обещан возврат СЕРВЕРА (иначе пусто):
 #             значения те же, что у back_why при back=none. Отдельное поле, потому что при обещанном
 #             возврате `back_why` отвечает на ДРУГОЙ вопрос — что мешает попытке прямо сейчас
@@ -2636,16 +2711,8 @@ fo_standing() {
             fi
         fi
     fi
-    # Выйдет ли туннель из прямого режима САМ — те же гейты, что у тика: при режиме «Выкл» лестницу он не крутит
-    # (`[ "$mode" != off ]` у ветки повтора), а фолбэк на awg есть, только пока AmneziaWG есть — конфиг И программа (`awg_fallback_ok`).
-    # …И ВЕТКА ПЕРВОГО ПОДЪЁМА стоит в тике РАНЬШЕ развилки по режиму: несущую, которая в эту загрузку ещё не везла
-    # (`carrier_seen`), тик поднимает сам в ЛЮБОМ режиме, пока не исчерпал попыток (`carrier_tries`) — так прямой режим
-    # «компонента нет» кончается сам, когда компонент поставили (подтверждающий круг ревью пачки 5).
-    # Ничего из этого ⇒ терминальная ветка: несущая снята и сама не поднимется — так и говорим (`mode`).
-    if [ "$_fs_s" = direct ] && [ "$_fs_t" != awg ] && [ "$_fs_m" = off ] && ! awg_fallback_ok \
-       && { carrier_seen "$_fs_t" || [ "$(carrier_tries "$_fs_t")" -ge "$CARRIER_UP_TRIES" ]; }; then
-        _fs_why=mode
-    fi
+    # Выйдет ли туннель из прямого режима САМ: при режиме «Выкл» — да, всегда (фолбэк на установленный AmneziaWG, без него — тот же
+    # сервер снова, off_retry_same; до 26.10.2026 здесь стояла терминальная ветка `mode`). Остаётся один тупик — программы нет (ниже).
     # …И ПРОГРАММЫ АКТИВНОГО ТУННЕЛЯ НЕТ ВОВСЕ. У тика этот гейт стоит СРАЗУ за проваленной пробой — раньше ветки первого подъёма,
     # развилки по режиму и фолбэка (`carrier_installed "$TRANSPORT"` → FAILED и выход), поэтому он и перебивает `mode`: из прямого
     # режима тик сам не выйдет, пока компонент не поставят, а «вернёт сам» было обещанием, которого никто не выполнит (хвост (2)
@@ -2921,6 +2988,15 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
         # Счётчик попыток подъёма сбрасываем тут же: он про НЕЗАВЕРШЁННЫЙ СТАРТ, а старт
         # завершился — иначе первое же падение через неделю аптайма пришло бы с исчерпанным
         # счётчиком и «второй шанс» достался бы не тому случаю.
+        # A RETURN, not a first raise: direct mode was ours (FAILOPEN) AND this carrier already carried in this boot — asked BEFORE the
+        # mark below. At boot the watchdog writes FAILOPEN while heal raises the carrier; that first raise is no recovery, and «VPN
+        # восстановлен» on every boot would describe a failure that never was (the AmneziaWG branch tells the same apart by its
+        # first-up mark).
+        # …OR a fall was TOLD and its episode is open (failopen_mail → VPN_DOWN_EP; closed by «VPN восстановлен» itself): a server dead
+        # since boot never carried, and its return — by the «Выкл» retry or by the plugin's own revival in this very probe (ByeDPI,
+        # AX3600 27.10.2026) — came without the event after the fall's mail (review s.166 r2, hardware walk s.167).
+        _xback=0
+        if [ "$(cat "$STATE" 2>/dev/null)" = FAILOPEN ] && { carrier_seen "$TRANSPORT" || [ -f "$VPN_DOWN_EP" ]; }; then _xback=1; fi
         carrier_seen_mark "$TRANSPORT"; carrier_tries_reset "$TRANSPORT"
         if [ "$xcur" != "HEALTHY" ]; then echo HEALTHY > "$XSTATE"; episode_reset; log "$TRANSPORT health: ок"; fi
         doh_follow_carrier ok       # несущая везёт ⇒ резолвер можно вернуть в туннель
@@ -2945,6 +3021,14 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
             # сторожит отдельная ветка split_rules_wiped ниже.
             uses_marking "$TRANSPORT" && restore_marking
             echo NORMAL > "$STATE"
+            if [ "$_xback" = 1 ]; then
+                if uses_marking "$TRANSPORT"; then
+                    vpn_restored_event "$TLABEL снова везёт трафик (проверка здоровья прошла)." "$TLABEL carries traffic again (the health check passed)."
+                else
+                    vpn_restored_event "$TLABEL снова везёт трафик (проверка здоровья прошла)." "$TLABEL carries traffic again (the health check passed)." \
+                        "Обход блокировок снова работает." "Unblocking works again."
+                fi
+            fi
         fi
         # Rule-heal: health прошёл (несущая xtun жива), но fw3-reload мог снести FORWARD/сплит —
         # переиграть правила, иначе клиент молча идёт мимо туннеля. [[boot-race-fw3-reload-wipes-rules]]
@@ -3191,12 +3275,17 @@ To turn $TLABEL back on: panel :8088 -> the VPN card."
                     _fb_ten="The watchdog retries by itself (every 10–30 min); to bring $TLABEL back now: panel :8088 -> the VPN card."
                 else
                     _fb_ru="AmneziaWG не установлен или не настроен"; _fb_en="AmneziaWG is not installed or not set up"
-                    _fb_tru="Снова поднять $TLABEL: панель :8088 -> карточка VPN."
-                    _fb_ten="To bring $TLABEL back up: panel :8088 -> the VPN card."
+                    _fb_tru="Сторож будет пробовать тот же сервер снова (не чаще раза в 10–30 мин); вернуть $TLABEL сразу: панель :8088 -> карточка VPN."
+                    _fb_ten="The watchdog retries the same server by itself (every 10–30 min); to bring $TLABEL back now: panel :8088 -> the VPN card."
                     log "$TRANSPORT режим=off, AmneziaWG не установлен (нет конфига или программы) → прямой режим (fail-open)"
                 fi
                 sh "$TRANSPORT_SH" down "$TRANSPORT" >>"$LOG" 2>&1
                 echo FAILED > "$XSTATE"
+                # Nowhere to fall back to ⇒ this direct mode lasts until the same-server retry (off_retry_same) carries: its first
+                # pause counts from the fall (the base 10 min, as the ladder's), and the state says FAILOPEN as the sticky ladder's
+                # does — the healthy branch's return (NORMAL, the marking rule, «VPN восстановлен») keys on it. Without it the
+                # return was silent and STATE never left NORMAL (BE6500 tester, 26.10.2026).
+                if [ "$_fb_why" = absent ]; then date +%s > "$FAILOVER_STAMP"; echo FAILOPEN > "$STATE"; fi
                 ip=$(ext_ip)
                 if [ "$NF_LANG" = en ]; then
                     failopen_mail "BE7000: $TLABEL went down -> direct mode" \
@@ -3223,6 +3312,9 @@ $_fb_tru"
                 # Без FAILED следующий тик читал «здоров» → SUSPECT → повтор без паузы и второе письмо (ревью dev233, круг 3).
                 ensure_direct_mode "$TRANSPORT"
                 echo FAILED > "$XSTATE"
+                # Nowhere to fall back to — the same server again, on the ladder (with AmneziaWG the retry is the `switch awg` above:
+                # its rollback raises this tunnel too and asks it).
+                if [ "$_fb_why" = absent ]; then off_retry_same; fi
             fi
         fi
         finish
@@ -3888,19 +3980,7 @@ elif awg_hs_alive "$age"; then
             dns_upstream_put "$VPN_DNS"
         fi
         echo "NORMAL" > "$STATE"; episode_reset   # эпизод аварии закрыт
-        ip=$(ext_ip)
-        if [ "$NF_LANG" = en ]; then
-            notify_ev "vpn-restored" 0 "BE7000: the VPN is back" \
-"The VPS answers again (last handshake ${age} s ago).
-VPN routing and DNS through the tunnel are restored.
-External IP: ${ip:-unknown}."
-        else
-        notify_ev "vpn-restored" 0 "BE7000: VPN восстановлен" \
-"VPS снова отвечает (последний handshake ${age} сек назад).
-Вернул VPN-роутинг и DNS через туннель.
-Внешний IP: ${ip:-неизвестен}."
-        fi
-        vpn_ok_mailed   # эпизод аварии закрыт письмом: следующее падение — снова письмо
+        vpn_restored_event "VPS снова отвечает (последний handshake ${age} сек назад)." "The VPS answers again (last handshake ${age} s ago)."
     else
         # Rule-heal: awg жив (handshake свежий) + NORMAL, но fw3-reload мог снести FORWARD/сплит
         # (mipctld-guard вернул бы лишь маркировку, не FORWARD несущей) → переиграть правила.

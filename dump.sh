@@ -969,13 +969,16 @@ sec "ЛОКИ / СТЕЙТ В /tmp"
 # enodia-dns-reload — снят сид сервера несущей (dns-lib.sh::seed_host_clear), и следующий DNS-сеттер обязан ПЕРЕЗАПУСТИТЬ
 # dnsmasq даже при том же upstream (HUP `address=` не перечитывает). Висит — значит сеттер после снятия не звали: имя сервера
 # ещё может отдаваться прежним адресом.
+# enodia-pkg-inplace (+ the admission enodia-xray-test.admit) — a tight-flash update is swapping a program in place (packages.sh::
+# inpl_swap; inside — the engine's pid and the file): server checks answer «идёт замена» while that engine lives. A marker whose pid
+# is dead is no swap — the line shows which one it is.
 for l in enodia-heal.lock enodia-heal.reason enodia-heal.skipped enodia-heal-kick.tries enodia-heal-kick.stamp \
          enodia-heal-kick.said enodia-heal-kick.mailed enodia-heal-kick.cfg enodia-switching.lock enodia-watchdog.lock enodia-watchdog.pid \
          enodia-watchdog.state enodia-watchdog.xstate enodia-failover.stamp enodia-failover.backoff \
          enodia-failover-episode enodia-awg0.seen enodia-awg0.firstup \
          enodia-domwarm.stamp enodia-proto-install.lock enodia-byedpi-sweep.lock \
          enodia-subs-update.lock enodia-gh-update.lock enodia-pkg-install.lock enodia-uninstall.mode \
-         enodia-wanout.valve enodia-wanout.event enodia-wanout.sweep enodia-dns-reload \
+         enodia-wanout.valve enodia-wanout.event enodia-wanout.sweep enodia-dns-reload enodia-pkg-inplace enodia-xray-test.admit \
          .enodia-carrier-up.stamp .enodia-support-active; do
     if [ -e "/tmp/$l" ]; then
         # mkdir-ЛОК — КАТАЛОГ, и `cat` по нему пуст: держатель лежит внутри, в `<lock>/pid`
@@ -1236,18 +1239,28 @@ sec "ЛОГИ /tmp (хвосты по 40 строк)"
 # Отсутствующие файлы не печатаем вовсе (кроме «классики» ниже) — иначе полдампа = «(нет)».
 # Само объявление DUMP_LOGS живёт ВЫШЕ main: тот же список — фолбэк режима archive на роутере,
 # где clean.sh (владелец перечня) ещё не залит, а внутри функции он бы туда не достался.
+# The previous run of a carrier daemon (daemon-lib.sh::daemon_log_fresh) is asked on its own: why it died is exactly what a dump is
+# taken for, and a restarted daemon that says nothing leaves its fresh log EMPTY — the `.prev` behind it was skipped (review s.166 r2).
 for lg in $DUMP_LOGS; do
-    [ -s "/tmp/$lg.log" ] || continue
-    sub "$lg.log"
-    tail -40 "/tmp/$lg.log" 2>/dev/null
+    if [ -s "/tmp/$lg.log" ]; then
+        sub "$lg.log"
+        tail -40 "/tmp/$lg.log" 2>/dev/null
+    fi
+    [ -s "/tmp/$lg.log.prev" ] || continue
+    sub "$lg.log.prev (прошлый запуск)"
+    tail -40 "/tmp/$lg.log.prev" 2>/dev/null
 done
 # Пер-слотовые (у доп-выхода СВОЙ инстанс демона и свой лог) — их не было вовсе. Names = clean.sh RAM_LOGS_SLOT (the
 # owners' slot_*_log): hev/hysteria/byedpi carry the `enodia-` prefix, and the bare names found only xray (review s.106).
 for i in 2 3 4 5 6 7; do
     for lg in xray enodia-hev enodia-hysteria enodia-byedpi; do
-        [ -s "/tmp/$lg-s$i.log" ] || continue
-        sub "$lg-s$i.log (доп-выход №$i)"
-        tail -25 "/tmp/$lg-s$i.log" 2>/dev/null
+        if [ -s "/tmp/$lg-s$i.log" ]; then
+            sub "$lg-s$i.log (доп-выход №$i)"
+            tail -25 "/tmp/$lg-s$i.log" 2>/dev/null
+        fi
+        [ -s "/tmp/$lg-s$i.log.prev" ] || continue
+        sub "$lg-s$i.log.prev (доп-выход №$i, прошлый запуск)"
+        tail -25 "/tmp/$lg-s$i.log.prev" 2>/dev/null
     done
 done
 

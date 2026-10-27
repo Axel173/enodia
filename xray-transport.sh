@@ -60,6 +60,7 @@ command -v lbl_commit_out >/dev/null 2>&1 || lbl_commit_out() { _lcf=$1; shift; 
 # «VPN выключен вручную — несущую не берёт никто» (carrier_barred/carrier_run, разбор в daemon-lib.sh). Нет — прежний путь.
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
 command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
+command -v daemon_log_fresh >/dev/null 2>&1 || daemon_log_fresh() { : > "$1" 2>/dev/null || true; }   # the old start: the log afresh, no `.prev`
 command -v daemon_wait_port >/dev/null 2>&1 || daemon_wait_port() {
     DAEMON_WAIT_WHY=''; _dwi=0; while [ "$_dwi" -lt "$3" ]; do netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0; sleep 1; _dwi=$((_dwi+1)); done
     netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0
@@ -342,11 +343,21 @@ cmd_access_purge() {
 # переоткрывает stdout/stderr УЖЕ ПОСЛЕ демонизации (внутри sh, до exec) → лог пишется; exec
 # сохраняет PID для pidfile. -x /bin/sh безопасен: дедуп на proc_alive (по пидфайлу), а -K в
 # stop/restart матчит по -p, не по -x.
+# The Go heap ceiling (GOMEMLIMIT), one for every Go daemon of the tunnel: its ONLY owner is net-tune.sh (.go-memlimit; why a
+# ceiling at all — that file's header). xray had none until 26.10.2026 (a 384-MB BE6500 was reported at 93–99% RAM with it —
+# what ate it, not measured). The FORM is
+# filtered here, next to the launch (net-tune.sh's reader contract): a word other than the variable would become the command and
+# the daemon would not start at all. Prints `env GOMEMLIMIT=<N>MiB ` or nothing — then the launch line is the old one byte for byte.
+xray_go_cap() {
+    _xgc=$(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$')
+    [ -n "$_xgc" ] && printf 'env %s ' "$_xgc"
+    return 0
+}
 spawn_xray() {
-    : > "$XRAY_LOG" 2>/dev/null || true
+    daemon_log_fresh "$XRAY_LOG"
     access_off "$XRAY_JSON"                # старый конфиг мог нести /tmp/xray-access.log
     seed_server_dns || return 1            # посеять server-host->IP в локальный dnsmasq; 1 = не зарезолвили
-    start-stop-daemon -S -b -m -p "$XRAY_PID" -x /bin/sh -- -c "exec '$XRAY' run -c '$XRAY_JSON' >>'$XRAY_LOG' 2>&1"
+    start-stop-daemon -S -b -m -p "$XRAY_PID" -x /bin/sh -- -c "exec $(xray_go_cap)'$XRAY' run -c '$XRAY_JSON' >>'$XRAY_LOG' 2>&1"
 }
 
 # Освободить socks-порт, если его держит ЧУЖОЙ процесс. ЗАЧЕМ: xray и hysteria
@@ -739,8 +750,8 @@ slot_start_daemons() {   # $1 = id ; $2 = имя конфига
     slot_free_socks "$_id" "$(slot_xray_pid "$_id")"
     if ! proc_alive "$(slot_xray_pid "$_id")"; then
         log "слот №$_id: запускаю xray на socks :$_port (конфиг $2)…"
-        : > "$(slot_xray_log "$_id")" 2>/dev/null || true
-        start-stop-daemon -S -b -m -p "$(slot_xray_pid "$_id")" -x /bin/sh -- -c "exec '$XRAY' run -c '$(slot_conf "$_id")' >>'$(slot_xray_log "$_id")' 2>&1"
+        daemon_log_fresh "$(slot_xray_log "$_id")"
+        start-stop-daemon -S -b -m -p "$(slot_xray_pid "$_id")" -x /bin/sh -- -c "exec $(xray_go_cap)'$XRAY' run -c '$(slot_conf "$_id")' >>'$(slot_xray_log "$_id")' 2>&1"
     fi
     if ! slot_wait_socks "$_port" "$(slot_xray_pid "$_id")" xray; then
         log "слот №$_id: xray не слушает :$_port ($DAEMON_WAIT_WHY). Лог:"; tail -n 15 "$(slot_xray_log "$_id")" 2>/dev/null

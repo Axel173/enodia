@@ -664,6 +664,162 @@ cmd_list_json() {
     printf ']}\n'
 }
 
+# --- ЗАМЕНА НА МЕСТЕ (тесный флеш; plan_calc → P_INPLACE) ----------------------------------------------------------------
+# WHO RUNS THIS FILE — set, not printed (a `$(…)` would lose the counts in its subshell): INPL_U — the units the swap stops and brings
+# back (the main carrier, AmneziaWG's warm reserve, the exits; rst_unit's names); INPL_HOLD — other owners' labels (home access,
+# encrypted DNS, Zapret, the panel's HTTPS…: the swap does not stop them — plan_calc refuses before «Применить»); INPL_ODD — throwaway
+# or ownerless processes (a server test's xray ends by itself; a switched-off exit's daemon — with a reboot). INPL_WAIT — not now: the
+# main carrier runs it but carries nothing (rst_can — FAILOPEN or a tunnel coming up): brought back by `up` it would put the route
+# into the server the watchdog has just given up on, behind its back (review s.166 r2 — cmd_restart refuses the same). INPL_PIDS —
+# the stopped units' processes, waited for after the stop.
+# The exe link is read by `ls -l` (daemon-lib.sh::exe_deleted reads it the same way; no `readlink` on every busybox).
+inpl_units() {   # $1 = bin name
+    INPL_U=""; INPL_HOLD=""; INPL_ODD=0; INPL_WAIT=""; INPL_PIDS=""
+    _ipath=$(bin_path "$1"); _it=$(sh "$ENODIA_DIR/transport.sh" active 2>/dev/null)
+    for _ipid in $(ls -l "$RST_PROC"/[0-9]*/exe 2>/dev/null | awk -v p="$_ipath" '$NF == p && $(NF-1) == "->" { x = $(NF-2); sub(/\/exe$/, "", x); sub(/^.*\//, "", x); print x }'); do
+        _iun=$(rst_unit "$_ipid" "$1" "$_it")
+        if [ "$_iun" = main ] && ! rst_can main; then
+            INPL_WAIT="основной канал сейчас не везёт трафик (прямой режим сторожа или подъём туннеля) — обновите, когда туннель вернётся"; continue
+        fi
+        case "$_iun" in
+            main|warm-awg|slot[2-7]) INPL_PIDS="$INPL_PIDS $_ipid"; case " $INPL_U " in *" $_iun "*) ;; *) INPL_U="$INPL_U${INPL_U:+ }$_iun" ;; esac ;;
+            orphan|'') INPL_ODD=$((INPL_ODD + 1)) ;;
+            *) _iul=$(rst_label "$_iun"); case ", $INPL_HOLD, " in *", $_iul, "*) ;; *) INPL_HOLD="$INPL_HOLD${INPL_HOLD:+, }$_iul" ;; esac ;;
+        esac
+    done
+    return 0
+}
+# STOP — so that NOTHING keeps the file open: AmneziaWG's `down` only takes the route away and leaves awg0 running as a warm reserve
+# (transport-awg.sh::cmd_down), so the main AmneziaWG also goes `cold`, and the warm reserve itself is put out and re-warmed after
+# (review s.166 r1: the old copy stayed open, UBIFS freed nothing, and the new copy failed with the old one already gone).
+inpl_stop() {   # $1 = unit, $2 = the active transport
+    case "$1" in
+        main)      sh "$ENODIA_DIR/transport.sh" down "$2"; [ "$2" = awg ] && sh "$ENODIA_DIR/transport.sh" cold awg ;;
+        warm-awg)  sh "$ENODIA_DIR/transport.sh" cold awg ;;
+        slot[2-7]) sh "$ENODIA_DIR/transport.sh" slot-down "${1#slot}" ;;
+    esac >> "$RST_OWNER_LOG" 2>&1
+}
+inpl_start() {   # $1 = unit, $2 = the active transport
+    case "$1" in
+        main)      sh "$ENODIA_DIR/transport.sh" up "$2" ;;
+        warm-awg)  sh "$ENODIA_DIR/transport.sh" rewarm awg ;;
+        slot[2-7]) sh "$ENODIA_DIR/transport.sh" slot-up "${1#slot}" ;;
+    esac >> "$RST_OWNER_LOG" 2>&1
+}
+# Server tests are kept out for the swap: their admission (xray-test.sh) is held by us, and the marker makes a test that comes now
+# answer `busy` — between the old copy's removal and the new one «xray не установлен» read as a dead server, and «Удалять мёртвые»
+# deleted it (review s.166 r1). Both go away with the swap, or at the engine's exit (pkg_exit).
+INPL_ADM=/tmp/enodia-xray-test.admit
+INPL_MARK=/tmp/enodia-pkg-inplace
+INPL_MINE=0
+INPL_OLD_PFX=/tmp/enodia-inpl-old
+INPL_OLD=""   # the old build kept in RAM during the swap (inpl_swap); dropped here, so the engine's exit (pkg_exit) drops it too
+inpl_release() {
+    if [ "$INPL_MINE" = 1 ]; then rm -rf "$INPL_ADM" 2>/dev/null; rm -f "$INPL_MARK" 2>/dev/null; fi; INPL_MINE=0
+    if [ -n "$INPL_OLD" ]; then rm -f "$INPL_OLD" 2>/dev/null; fi; INPL_OLD=""
+    return 0
+}
+inpl_admit() {   # → 0 the tests' admission is ours (a live test holds it while its xray starts — seconds)
+    _iaw=0
+    while :; do
+        # The marker carries OUR pid (xray-test.sh::xt_swap_live): one left by an engine killed mid-swap is no swap (review s.166 r2).
+        if mkdir "$INPL_ADM" 2>/dev/null; then echo $$ > "$INPL_ADM/pid"; INPL_MINE=1; echo "$$ $1" > "$INPL_MARK"; return 0; fi
+        _iap=$(cat "$INPL_ADM/pid" 2>/dev/null | tr -cd '0-9')
+        if [ -n "$_iap" ] && ! pid_runs "$_iap" 'xray-test'; then
+            mv "$INPL_ADM" "$INPL_ADM.stale.$$" 2>/dev/null && rm -rf "$INPL_ADM.stale.$$" 2>/dev/null; continue
+        fi
+        [ "$_iaw" -ge 60 ] && return 1
+        sleep 1; _iaw=$((_iaw + 1))
+    done
+}
+# THE SWAP. UBIFS frees a deleted file only when the last process holding it exits — so its daemons stop first, and the swap is ours
+# alone: the switching lock WITH OUR PID once no watchdog tick and no heal run drives the carrier (switch_hold — apply's own empty
+# lock does not wait for them), the tests' admission held. Before the old copy goes, the file is asked again: anything still running
+# it — everything comes back and the swap is refused. Then `sync` (UBIFS shows freed space after it), the new copy from RAM through
+# the same checked path (fetch-bin: the manifest's sum, ELF), the units back. A power loss inside the window leaves the component
+# absent: the watchdog keeps the house direct, «Компоненты» puts it back.
+inpl_swap() {   # $1 = bin name, $2 = its place on the flash → 0 the new build in place
+    # Apply's lock is an EMPTY file taken without waiting for a tick or heal — trade it for ours, with our pid, after them.
+    if [ "$SWMINE" = 1 ] && [ -z "$(cat "$SWLOCK" 2>/dev/null | tr -d ' \r\n')" ]; then rm -f "$SWLOCK" 2>/dev/null; SWMINE=0; fi
+    if [ "$SWMINE" != 1 ]; then
+        SWITCH_LOCK=$SWLOCK
+        if ! switch_hold "$SWLOCK" "$RST_HOLD_WAIT" "$RST_HOLD_GAP"; then
+            I_WHY="роутер сейчас сам ведёт туннель — $1 не заменил, повторите через пару минут"; log "$I_WHY"; return 1
+        fi
+        SWMINE=1
+    fi
+    if ! inpl_admit "$1"; then
+        I_WHY="$1 сейчас запускает проверка сервера — повторите через минуту"; log "$I_WHY"; return 1
+    fi
+    # A throwaway process ends by itself in seconds (a test that started before we held the admission) — wait for it, a minute at
+    # most; one that does not end is not ours to stop.
+    _isw=0
+    while :; do
+        inpl_units "$1"
+        if [ -n "$INPL_HOLD" ]; then
+            I_WHY="$1 сейчас держит: $INPL_HOLD — их на время замены движок не останавливает; освободите место иначе — снимите другой компонент"
+            log "$I_WHY"; inpl_release; return 1
+        fi
+        if [ -n "$INPL_WAIT" ]; then I_WHY="$1 на месте не заменил: $INPL_WAIT"; log "$I_WHY"; inpl_release; return 1; fi
+        [ "$INPL_ODD" = 0 ] && break
+        if [ "$_isw" -ge 60 ]; then
+            I_WHY="$1 держит процесс без хозяина (проверка сервера или выключенный выход) — повторите через минуту или после перезагрузки роутера"
+            log "$I_WHY"; inpl_release; return 1
+        fi
+        [ "$_isw" = 0 ] && log "$1 сейчас держит проверка сервера — жду, пока она кончится…"
+        sleep 2; _isw=$((_isw + 2))
+    done
+    # No transport flag (a legacy install) = the implied AmneziaWG, as rst_comp reads it: an empty name stopped nothing, and the swap
+    # always refused after bouncing the tunnel (review s.166 r3).
+    _isu=$INPL_U; _isp=$INPL_PIDS; _ist=$(sh "$ENODIA_DIR/transport.sh" active 2>/dev/null); _ist=${_ist:-awg}
+    _isl=""; for u in $_isu; do _isl="$_isl${_isl:+, }$(rst_label "$u")"; done
+    log "Флеш тесный: ставлю $1 на место прежнего${_isl:+ — на время замены останавливаю: $_isl}"
+    for u in $_isu; do inpl_stop "$u" "$_ist"; done
+    # The plugins stop by `start-stop-daemon -K`, which returns BEFORE the process dies: a daemon still exiting was counted as an
+    # ownerless process — a refusal and the units restarted for nothing (review s.166 r2).
+    for _ip in $_isp; do daemon_wait_gone "$_ip" 5 || true; done
+    # A short-lived holder at this moment (`awg show`, a WARP or Premium `try` probe — the tests' admission does not gate them) is
+    # waited for a few seconds, not taken for a refusal after the tunnel was already bounced (review s.166 r3).
+    _isg=0
+    while :; do
+        inpl_units "$1"
+        if [ -n "$INPL_U$INPL_HOLD$INPL_WAIT" ] || [ "$INPL_ODD" = 0 ] || [ "$_isg" -ge 10 ]; then break; fi
+        sleep 1; _isg=$((_isg + 1))
+    done
+    if [ -n "$INPL_U$INPL_HOLD$INPL_WAIT" ] || [ "$INPL_ODD" != 0 ]; then
+        for u in $_isu; do inpl_start "$u" "$_ist"; done
+        I_WHY="$1 после остановки всё ещё исполняется — прежнюю сборку не снимал, всё вернул как было; повторите после перезагрузки роутера"
+        log "$I_WHY"; inpl_release; return 1
+    fi
+    # The OLD build goes to RAM first — its daemons are stopped, their memory is free: a new copy that does not land (ENOSPC while UBIFS
+    # still holds the old inode, a staged copy failing its sum, no GitHub) puts it back instead of leaving the component absent (review
+    # s.166 r3). No room even for that — the old path: a failure leaves the component to be installed again.
+    INPL_OLD=$INPL_OLD_PFX.$1
+    if ! { cp "$2" "$INPL_OLD" 2>/dev/null && [ "$(md5sum < "$2")" = "$(md5sum < "$INPL_OLD")" ]; }; then rm -f "$INPL_OLD" 2>/dev/null; INPL_OLD=""; fi
+    rm -f "$2"; sync 2>/dev/null
+    _isr=0
+    if ! sh "$GH" fetch-bin "$1" "$2" >> "$LOG" 2>&1; then
+        _fw=$(grep '^\[fetch-bin\] FAIL: ' "$LOG" 2>/dev/null | tail -n 1 | sed 's/^\[fetch-bin\] FAIL: //')
+        if [ -n "$INPL_OLD" ] && cp "$INPL_OLD" "$2" 2>/dev/null && [ "$(md5sum < "$2")" = "$(md5sum < "$INPL_OLD")" ] && chmod 755 "$2"; then
+            I_WHY="${_fw:-не поставил $1} — новая сборка не встала, вернул прежнюю: компонент работает как раньше"
+        else
+            [ -n "$INPL_OLD" ] && rm -f "$2" 2>/dev/null   # a half-written copy is no program
+            I_WHY="${_fw:-не поставил $1} — прежняя сборка уже снята: поставьте компонент заново в «Компонентах»"
+        fi
+        log "$I_WHY"; _isr=1
+    fi
+    # Back up — on the new build, or (copy failed) the owner refuses and the watchdog keeps the house direct; asked of the owner, not
+    # assumed: the screen shows what came back.
+    for u in $_isu; do
+        inpl_start "$u" "$_ist"
+        [ "$_isr" = 0 ] && { if rst_works "$u"; then log "  $(rst_label "$u") — снова работает, на новой сборке"; else log "  $(rst_label "$u") — поднят, но пока не отвечает: сторож проверит на своём тике"; fi; }
+    done
+    # The tests' admission goes only now: freed before the daemons were back, a queued test measured the free memory with the main xray
+    # still stopped, passed, and started its own xray beside the restarting one — the BE6500 OOM of 24.10 (review s.166 r3).
+    inpl_release
+    return $_isr
+}
+
 # --- ПЛАН ------------------------------------------------------------------------------
 # Считает вердикт БЕЗ побочных эффектов: «останется = свободно + Σснимаемое − Σставимое».
 # Заполняет P_* для cmd_apply, чтобы арифметика жила в ОДНОМ месте (иначе кнопка и сама
@@ -735,6 +891,34 @@ plan_calc() {       # $1 = ставим, $2 = снимаем
         P_OK=0
         P_SHORT=$((RESERVE_B - P_LEFT))
     fi
+    # IN PLACE ON A TIGHT FLASH (BE6500 tester, 26.10.2026: an Xray update of 8.05 MB with 2.2 MB free — «short 8.4 MB» for ever,
+    # because the plan counted the new copy BESIDE the old one, freed 0; AX3600 the same with 9.7 MB free). Only when the plan does
+    # not fit as is: a file it UPDATES that already lies on the router's flash may take the old one's place — the old bytes count as
+    # freed (P_INPLACE; do_install → inpl_swap: its daemons stop for the copy and come back on the new build). A roomy flash keeps
+    # today's path byte for byte: the new copy beside the old, nothing stopped.
+    P_INPLACE=""
+    if [ "$P_SHORT" -gt 0 ] && [ -z "$P_ERR" ] && [ -z "$P_BLOCK" ]; then
+        _pib=0; _pih=""
+        for b in $P_FILES; do
+            [ "$(bin_dest "$b")" = "$ENODIA_BIN/$b" ] && [ "$(bin_path "$b")" = "$ENODIA_BIN/$b" ] && [ -f "$ENODIA_BIN/$b" ] || continue
+            # Zapret installs through its own owner (do_install → zapret.sh install update), which fetches BESIDE the old copy: counted
+            # as freed, its old bytes undercounted the peak (review s.166 r2).
+            case " $(pkg_own zapret) " in *" $b "*) continue ;; esac
+            _n=$(stat -c%s "$ENODIA_BIN/$b" 2>/dev/null); case "$_n" in ''|*[!0-9]*) continue ;; esac
+            # A file held by an owner the swap does not stop, or not swappable now (INPL_WAIT), goes BESIDE its old copy as on a roomy
+            # flash. Its reason is said BEFORE «Применить» (review s.166 r1) — but only when the plan does not fit without it: as an error
+            # always, it refused a plan that another file's swap made fit, after the screen had offered it as ok (review s.166 r2).
+            inpl_units "$b"
+            if [ -n "$INPL_HOLD" ]; then _pih="$_pih $b на месте не заменить: его держит $INPL_HOLD — освободите место иначе"; continue; fi
+            if [ -n "$INPL_WAIT" ]; then _pih="$_pih $b на месте не заменить: $INPL_WAIT"; continue; fi
+            P_INPLACE="$P_INPLACE $b"; _pib=$((_pib + _n))
+        done
+        if [ -n "$P_INPLACE" ] && [ $((P_LEFT + _pib)) -ge "$RESERVE_B" ]; then
+            P_FREED=$((P_FREED + _pib)); P_LEFT=$((P_LEFT + _pib)); P_TAKES=$((P_NEED - P_FREED)); P_SHORT=0; P_OK=1
+        else
+            P_INPLACE=""; P_ERR="$P_ERR$_pih"
+        fi
+    fi
     # Вторая сторона: место на накопителе. Спрашиваем ТОЛЬКО когда туда что-то поедет — иначе
     # это лишний df на роутере без флешки (а таких большинство).
     P_SFREE=0; P_SLEFT=0
@@ -762,6 +946,8 @@ cmd_plan() {
         "$([ "$P_OK" = 1 ] && echo true || echo false)" "$P_FREE" "$P_NEED" "$P_FREED" "$P_LEFT" "$RESERVE_B" \
         "$P_SHORT" "$(disk_mount)" \
         "$([ "$P_UNK" = 1 ] && echo true || echo false)" "$P_UPD"
+    # inplace — the files that go in place of the old copy (tight flash; plan_calc): the screen warns that their programs stop
+    printf ',"inplace":"%s"' "$(printf '%s' "$P_INPLACE" | sed 's/^ *//')"
     printf ',"store":%s,"need_store_b":%s,"freed_store_b":%s,"store_free_b":%s' \
         "$(store_ready && echo true || echo false)" "$P_NEED_ST" "$P_FREED_ST" "$P_SFREE"
     printf ',"errors":['
@@ -896,7 +1082,9 @@ do_install() {      # $1 = связка
         mkdir -p "${_dst%/*}" 2>/dev/null
         # ПРИЧИНУ отказа называет fetch-bin (его последняя строка FAIL: код GitHub, обрыв, целостность); её и поднимаем в итог —
         # строки прогресса идут раз в 2 с, и на медленном канале хвост журнала вытеснил бы её вовсе (ревью шага 6c, круг 1).
-        if ! sh "$GH" fetch-bin "$b" "$_dst" >> "$LOG" 2>&1; then
+        if in_list "$b" "$P_INPLACE"; then
+            inpl_swap "$b" "$_dst" || return 1
+        elif ! sh "$GH" fetch-bin "$b" "$_dst" >> "$LOG" 2>&1; then
             _fw=$(grep '^\[fetch-bin\] FAIL: ' "$LOG" 2>/dev/null | tail -n 1 | sed 's/^\[fetch-bin\] FAIL: //')
             log "не скачал $b"; I_WHY=${I_WHY:-${_fw:-"не скачал $b"}}; return 1
         fi
@@ -1013,6 +1201,15 @@ cmd_apply() {
             log "Всё нужное скачано — меняю набор."
         fi
     fi
+    # IN PLACE NEEDS THE NEW COPY IN RAM: the old one goes first, and a download that failed after that would leave the component
+    # absent — so an in-place file must be in memory before anything changes (prefetched, or uploaded from the computer).
+    for b in $P_INPLACE; do
+        if ! { [ "$PF_ON" = 1 ] && in_list "$b" "$PF_LIST"; } && ! in_list "$b" "$_stg"; then
+            set_state FAIL
+            log "Флеш тесный: $b ставится на место прежнего, а для этого новый файл должен заранее лечь в память — её не хватило. НИЧЕГО не тронул."
+            return 1
+        fi
+    done
     I_WHY=""
     for p in $P_DEL; do
         if ! do_remove "$p" "$P_DEL"; then
@@ -1124,6 +1321,7 @@ case "$1" in
                # снятиям без лока (HUP при обрыве SSH у CLI-запуска). EXIT-ловушка busybox на сигнале сама не срабатывает — отсюда
                # `exit 1` в сигнальной: он и зовёт уборку.
                pkg_exit() {
+                   inpl_release
                    [ -f "$GH" ] && sh "$GH" bin-unprefetch >/dev/null 2>&1
                    rm -rf "$LOCK" 2>/dev/null; [ "$SWMINE" = 1 ] && rm -f "$SWLOCK" 2>/dev/null
                    return 0

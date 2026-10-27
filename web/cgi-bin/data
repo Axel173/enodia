@@ -1061,7 +1061,7 @@ emit_prefs() {
 	# Логика — в net-tune.sh (единый владелец IPv6), тут только сурфейсим факт. Нет скрипта → false.
 	u6=false
 	[ -f "$D/net-tune.sh" ] && [ "$(sh "$D/net-tune.sh" detect 2>/dev/null | grep '^uplink=' | cut -d= -f2)" = 1 ] && u6=true
-	# Потолок кучи демонов AmneziaWG (.go-memlimit). Своей арифметики у панели нет: режим,
+	# The heap ceiling of the tunnel's Go daemons — AmneziaWG, Xray, Hysteria (.go-memlimit). Своей арифметики у панели нет: режим,
 	# ДЕЙСТВУЮЩЕЕ значение и объём ОЗУ считает net-tune.sh — он единственный владелец правила
 	# (иначе экран и реальный запуск демона разошлись бы). value=0 значит «потолок не ставится».
 	gm_mode=auto; gm_val=0; gm_tot=0

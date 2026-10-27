@@ -608,9 +608,11 @@ norm_domain() { printf '%s' "$1" | sed 's|^https\?://||; s|/.*$||; s/^\*\.//; s/
 # пересборка сета + `conntrack -F`) и стоит он ЧЕТЫРЕ секунды — замерено на BE7000. Пачка из 30
 # доменов прежним путём = две минуты синхронного CGI, тридцать обрывов DNS у ВСЕЙ сети и таймаут
 # запроса; человек видит «сбой», а роутер в это время всё ещё молотит.
+# Both bulk readers cut `#…` to the end of the line BEFORE the split (as groups.sh store_members): a list file or URL carries
+# comments, and split by spaces `# see example.com` added example.com, a commented-out `# 10.0.0.0/8` went past the VPN.
 bulk_domains() {
 	_bt="/tmp/enodia-bulk-dom.$$"
-	tr ',; \t\r' '\n\n\n\n\n' > "$_bt"
+	tr '\r' '\n' | sed 's/#.*//' | tr ',; \t' '\n\n\n\n' > "$_bt"
 	_n=$(sh "$ENODIA_DIR/domain.sh" add-many < "$_bt" 2>/dev/null | tail -1)
 	case "$_n" in
 		''|*[!0-9]*)
@@ -629,7 +631,7 @@ bulk_domains() {
 # Пакетное «мимо VPN» из stdin — через apply-bypass.sh add-dst (персист + boot-replay).
 bulk_dsts() {
 	_n=0
-	for _c in $(tr ',;\r\n' '    '); do
+	for _c in $(tr '\r' '\n' | sed 's/#.*//' | tr ',;\n' '   '); do
 		echo "$_c" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$' || continue
 		sh "$ENODIA_DIR/apply-bypass.sh" add-dst "$_c" >/dev/null 2>&1 && _n=$((_n + 1))
 	done
@@ -925,7 +927,8 @@ case "$act" in
 	# whitelist (в shell не уходит ничего, кроме прошедшего regex имени файла конфига).
 	test_xray_server)
 		[ -f "$ENODIA_DIR/xray-test.sh" ] || fail "xray-test.sh не установлен (обновите панель)"
-		[ -x "$(bin_path xray)" ]  || fail "xray не установлен"
+		# No xray (or a tight-flash update swapping it in place) — xray-test.sh answers: `nobin`/`busy`, no verdict about the server. A
+		# plain `fail` here read as a dead server, and «Удалять мёртвые» deleted it (review s.166 r2).
 		name=$(urldecode "$(field name)")
 		# Форма имени — та же, что у чтения и удаления (`^[A-Za-z0-9_.-]+$`): прежний потолок 80 знаков отвечал «плохое имя» на
 		# экране конфига с длинным именем, и панель писала мёртвым живой сервер (ревью пачки 2, круг 2). Длину держит ФС.
@@ -942,7 +945,6 @@ case "$act" in
 	# действие по кнопке, не часть «проверить все». Многопоточно (streams/dur, скрипт капит).
 	speedtest_xray_server)
 		[ -f "$ENODIA_DIR/xray-test.sh" ] || fail "xray-test.sh не установлен (обновите панель)"
-		[ -x "$(bin_path xray)" ]  || fail "xray не установлен"
 		name=$(urldecode "$(field name)")
 		echo "$name" | grep -qE '^[A-Za-z0-9._-]+$' || fail "плохое имя конфига"
 		[ -f "$ENODIA_STATE/xray-configs/$name.json" ] || fail "конфиг не найден"

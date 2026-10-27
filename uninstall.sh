@@ -190,7 +190,7 @@ GUEST_DNS_DEL="from 192.168.33.0/24 to 192.168.33.1 dport 53 table main pref 100
 # Исключение ровно одно и названо в C72 — четыре пути логов xray: они лежат ВНУТРИ
 # пользовательских конфигов на /data, и переименование там было бы миграцией хранилища.
 RAM_GLOBS="/tmp/enodia-* /tmp/.enodia-*
-/tmp/xray.log* /tmp/xray-access.log /tmp/xray-s*.log /tmp/xray-test.*.log"
+/tmp/xray.log* /tmp/xray-access.log /tmp/xray-s*.log* /tmp/xray-test.*.log"
 # Метка НАШИХ строк в /etc/hosts (dns-lib.sh::seed_hosts_put). Третья копия ответа для server-host
 # появилась позже этого файла, и снимать её обязаны МЫ: Go-демоны читают hosts ДО резолвера, то
 # есть пережившая удаление строка прибивает домен к нашему старому адресу для ВСЕГО роутера.

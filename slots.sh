@@ -77,6 +77,8 @@ command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$ENODIA_BIN/$1"
 # Своей арифметики 10830+id тут не держим: это была третья копия. Библиотека — только функции,
 # исполняемого кода в ней нет, поэтому source безопасен и вне плагинов.
 if [ -f "$ENODIA_DIR/slot-tun-lib.sh" ]; then . "$ENODIA_DIR/slot-tun-lib.sh"; fi
+# daemon_ram_room — «is there room for one more Go daemon» (slot_ram_guard). No library — no guard: the old behaviour.
+if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 command -v slot_socks_port >/dev/null 2>&1 || slot_socks_port() { echo $((10830 + $1)); }
 if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
 command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
@@ -658,6 +660,18 @@ slot_key_guard() {
     return 1
 }
 
+# A HEAVY EXIT (Xray, Hysteria2) is a second Go daemon beside the main tunnel, and on a 393-MB router the second one took the tunnel
+# down with it (BE6500 tester, OOM 24.10.2026). Created or switched on only while there is room (daemon-lib.sh::daemon_ram_room);
+# AmneziaWG, ByeDPI and Zapret are light and pass. The person's action is asked, not the watchdog's re-raise of a running exit.
+slot_ram_guard() {   # $1 = transport
+    case "$1" in xray|hy2) ;; *) return 0 ;; esac
+    command -v daemon_ram_room >/dev/null 2>&1 || return 0
+    daemon_ram_room "$DAEMON_GO_NEED_KB" && return 0
+    if [ "$1" = xray ]; then _srg=Xray; else _srg=Hysteria2; fi
+    echo "[slots] мало свободной памяти для ещё одного $_srg ($DAEMON_RAM_WHY) — выход не поднимаю: он уронил бы основной туннель"
+    return 1
+}
+
 # A ROAD exit (road.sh: a server's packets ride it) somebody rides can't be disabled, deleted or moved to another transport, and
 # can't take a config that rides a road itself (a road is one step): the rider would be left on a cut road — a server that
 # silently goes direct to its blocked address. Refusal in words with the riders named; the panel's door leads to them.
@@ -693,6 +707,7 @@ cmd_add() {
     # выхода (live): из двух выходов на одном ключе встаёт первый.
     slots_lock_take || { echo "[slots] реестр занят другой операцией — повторите"; return 1; }
     slot_key_guard "$t" "$cfg" new || { slots_lock_drop; return 1; }
+    slot_ram_guard "$t" || { slots_lock_drop; return 1; }
     id=$(slot_free_id) || { slots_lock_drop; echo "$SLOTS_FULL"; return 1; }
     _slots_write "$id" "$(b64e "$name")" "$t" "$cfg" "$fb" on || { slots_lock_drop; echo "$SLOTS_NOWRITE"; return 1; }
     slots_lock_drop
@@ -768,6 +783,11 @@ cmd_set() {
     case "$field" in transport|config) slot_key_guard "$old_t" "$old_cfg" "$id" || return 1 ;; esac
     # Road exit: only AmneziaWG carries a road, and its config must go direct itself (road.sh, one step).
     [ "$field" = transport ] && [ "$old_t" != awg ] && { slot_road_guard "$id" "меняйте транспорт" || return 1; }
+    # A heavy daemon replacing a light one on an exit that runs (AmneziaWG → Xray) is a second Go daemon now: asked as add/enable are;
+    # heavy → heavy frees its own memory first (review s.166 r1).
+    if [ "$field" = transport ] && [ "$old_en" = on ]; then
+        case "$(echo "$line" | cut -f3)" in xray|hy2) ;; *) slot_ram_guard "$old_t" || return 1 ;; esac
+    fi
     if [ "$field" = config ] && [ -f "$ENODIA_DIR/road.sh" ] && [ -n "$(sh "$ENODIA_DIR/road.sh" get awg "$old_cfg" 2>/dev/null)" ]; then
         slot_road_guard "$id" "ставьте ему конфиг, который сам едет по дороге" || return 1
     fi
@@ -910,6 +930,8 @@ cmd_toggle() {
         # — та же точка назначения, что add/set, и отказывает той же причиной, не трогая реестр.
         _tl=$(slot_line "$id")
         slot_key_guard "$(printf '%s' "$_tl" | cut -f3)" "$(printf '%s' "$_tl" | cut -f4)" "$id" || return 1
+        # Already on (a second tab): its daemon runs and is counted in the memory already — no second admission.
+        if [ "$(printf '%s' "$_tl" | cut -f6)" != on ]; then slot_ram_guard "$(printf '%s' "$_tl" | cut -f3)" || return 1; fi
         # Порядок: сперва пишем on (диспетч slot-up в плагин ТРЕБУЕТ включённый слот —
         # _slot_dispatch читает поле en), затем ввод в строй. Запись не прошла (реестр занят) —
         # НЕ активируем: диспетч всё равно увидел бы off, а мы отрапортовали бы «включён».

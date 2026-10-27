@@ -84,6 +84,7 @@ if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 # «VPN выключен вручную — несущую не берёт никто» (carrier_barred/carrier_run, разбор в daemon-lib.sh). Нет — прежний путь.
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
 command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
+command -v daemon_log_fresh >/dev/null 2>&1 || daemon_log_fresh() { : > "$1" 2>/dev/null || true; }   # the old start: the log afresh, no `.prev`
 command -v daemon_wait_port >/dev/null 2>&1 || daemon_wait_port() {
     DAEMON_WAIT_WHY=''; _dwi=0; while [ "$_dwi" -lt "$3" ]; do netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0; sleep 1; _dwi=$((_dwi+1)); done
     netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0
@@ -235,7 +236,7 @@ free_foreign_socks() {
 # stdio ПОСЛЕ демонизации (-b уводит в /dev/null) → виден лог при сбое. -c nobody = egress под
 # uid 65534 (его ловит owner-RETURN). -x /bin/sh безопасен: дедуп на proc_alive (по пидфайлу).
 spawn_byedpi() {
-    : > "$CIADPI_LOG" 2>/dev/null || true
+    daemon_log_fresh "$CIADPI_LOG"
     chmod 666 "$CIADPI_LOG" 2>/dev/null || true   # nobody должен дописывать
     args=$(desync_args)
     start-stop-daemon -S -b -c nobody -m -p "$CIADPI_PID" -x /bin/sh -- -c "exec '$CIADPI' -i $SOCKS_ADDR -p $SOCKS_PORT $args >>'$CIADPI_LOG' 2>&1"
@@ -813,7 +814,7 @@ owner_rule_needed() {   # $1 = exclude slot id (опц.); код 0 = ещё ну
 # Запуск ciadpi слота под nobody (egress ловит ОБЩИЙ owner-RETURN). Свой порт/pid/log. Зеркало spawn_byedpi.
 slot_spawn_ciadpi() {   # $1 = id
     _id="$1"; _port=$(slot_socks_port "$_id"); _log=$(slot_ciadpi_log "$_id")
-    : > "$_log" 2>/dev/null || true
+    daemon_log_fresh "$_log"
     chmod 666 "$_log" 2>/dev/null || true          # nobody должен дописывать
     _a=$(slot_desync_args "$_id")
     start-stop-daemon -S -b -c nobody -m -p "$(slot_ciadpi_pid "$_id")" -x /bin/sh -- -c "exec '$CIADPI' -i $SOCKS_ADDR -p $_port $_a >>'$_log' 2>&1"

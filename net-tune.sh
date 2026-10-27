@@ -7,13 +7,17 @@
 #                ТОЛЬКО awg0: у xray/hy2/byedpi несущая = xtun (tun2socks, MTU 8500 — это его норма,
 #                трогать НЕЛЬЗЯ). Применяем к awg0, даже если он сейчас не активная несущая (вступит
 #                в силу, когда AmneziaWG станет несущей; awg0 существует всегда после установки).
-#   .go-memlimit = потолок кучи Go (GOMEMLIMIT) для демонов AmneziaWG. auto|off|<МиБ 16..512>;
+#   .go-memlimit = the Go heap ceiling (GOMEMLIMIT) for EVERY Go daemon of the tunnel: amneziawg-go (awg0,
+#                exits awgN, «доступ домой» awgs0), xray (main, exits, the xray-test.sh test) and hysteria
+#                (main, exits) — since 26.10.2026, AmneziaWG only before. auto|off|<MiB 16..512>;
 #                нет файла = auto. ЗАЧЕМ: amneziawg-go (форк wireguard-go) держит пул пакетных
 #                буферов БЕЗ ПОТОЛКА — в апстриме `PreallocatedBuffersPerPool = 0` с авторским
 #                «allow for infinite memory growth», буфер = MaxSegmentSize 64 КБ. Куча растёт по
 #                объёму прошедшего трафика и ядру НЕ возвращается: замерено 80 МБ пика на 2.25 ГБ
-#                при 200 Мбит/с и ровно столько же в покое (стенд local/awg-ram-lab/). На BE7000
-#                это незаметно, а BE3600 со 176 МБ уходил в ребут КАЖДЫЙ ЧАС.
+#                при 200 Мбит/с и ровно столько же в покое (стенд local/awg-ram-lab/). BE3600 со
+#                176 МБ уходил в ребут КАЖДЫЙ ЧАС. And BE7000 (800 MB) is NOT spared: 22.10.2026 the
+#                kernel OOM-killed awg0 twice in five minutes (237 and 205 MB). xray and hysteria have
+#                the same runtime: a heap taken under load goes back to the kernel slowly.
 #                GOMEMLIMIT — мягкий потолок: агрессивный GC включается лишь на подходе к нему,
 #                поэтому ДО потолка он не стоит НИЧЕГО (замер: 64 МиБ → пик 80→37 МБ при ×1.0 CPU).
 #                Колено между 64 и 48 МиБ; ниже 48 — обрыв в ×6..8 CPU ради единиц мегабайт.
@@ -45,9 +49,10 @@ ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 
 # memlimit_value — ЕДИНСТВЕННЫЙ владелец числа «сколько МиБ разрешить куче демона». Печатает
-# число или НИЧЕГО (= не ставить потолок вовсе). Копий этого правила не заводить: читателей
-# трое (awg_setup.sh awg0, transport-awg.sh слоты awgN, vpn-server.sh awgs0), и разъехавшиеся
-# копии дали бы роутер, где одна несущая зажата, а вторая нет.
+# число или НИЧЕГО (= не ставить потолок вовсе). Копий этого правила не заводить: the readers are
+# awg_setup.sh (awg0), transport-awg.sh (exits awgN, the probe), vpn-server.sh (awgs0),
+# xray-transport.sh and transport-hy2.sh (main + exits), xray-test.sh; разъехавшиеся копии
+# дали бы роутер, где одна несущая зажата, а вторая нет.
 memlimit_value() {
 	v=$(cat "$ENODIA_STATE/.go-memlimit" 2>/dev/null | tr -cd 'a-z0-9')
 	case "$v" in
@@ -58,15 +63,16 @@ memlimit_value() {
 			{ [ "$v" -ge 16 ] && [ "$v" -le 512 ]; } 2>/dev/null && echo "$v"
 			return 0 ;;
 	esac
-	# auto (деф.) — по объёму ОЗУ. Порог 256 МБ отделяет тесные модели (BE3600 = 176 МБ) от
-	# просторных (BE7000 — 800+). На просторных НЕ ставим ничего: правило проекта — тумблер
-	# opt-in обязан оставлять прежнее поведение БАЙТ В БАЙТ там, где проблемы нет.
-	# AX3600 в «тесные» НЕ входит, хотя раньше был записан сюда: замерено на железе 14.08.2026 —
-	# `MemTotal` 402472 кБ (393 МБ), то есть ВЫШЕ порога, и лимит ему не назначается (`mode=auto`,
-	# `memlimit-env` пуст). Модель — не признак; судим по /proc/meminfo, и здесь он это подтвердил.
+	# auto (default) — a ceiling on EVERY model, the number by RAM size (/proc/meminfo; the model is no sign).
+	# Until 26.10.2026 auto set nothing at ≥ 256 MB («no problem there») — refuted on BE7000 22.10.2026 (header).
+	#   < 512 MB (BE3600 176, BE6500 384, AX3600 393) — 64 MiB: measured free (×1.0 CPU, peak 80→37 MB, local/awg-ram-lab/);
+	#     the knee is between 64 and 48, below it ×6..8 CPU;
+	#   ≥ 512 MB (BE7000 804, BE10000) — 128 MiB: set by hand on BE7000 since 22.10 — 4 days without one OOM, peak awg0
+	#     92 MB, the road awg4 68 MB (the ceiling was not reached: it is there for a burst).
+	# The ceiling is SOFT: live data above it is not cut (only more GC), so auto never goes below 64 whatever the RAM.
 	t=$(awk '/^MemTotal:/{print $2+0}' /proc/meminfo 2>/dev/null)
 	case "$t" in ''|*[!0-9]*) return 0 ;; esac
-	[ "$t" -lt 262144 ] 2>/dev/null && echo 64
+	if [ "$t" -lt 524288 ] 2>/dev/null; then echo 64; else echo 128; fi
 	return 0
 }
 
@@ -78,7 +84,7 @@ memlimit_env() {
 }
 
 # Для панели: режим, действующее значение и объём ОЗУ роутера — чтобы экран мог объяснить,
-# ПОЧЕМУ здесь стоит именно это (и почему на BE7000 честно «не ограничивать»).
+# ПОЧЕМУ здесь стоит именно это.
 memlimit_info() {
 	v=$(cat "$ENODIA_STATE/.go-memlimit" 2>/dev/null | tr -cd 'a-z0-9')
 	case "$v" in
