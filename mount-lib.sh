@@ -104,11 +104,29 @@ store_of_mount() {
     return 1
 }
 
+# WHICH BLOCK DEVICE IS AN EXTERNAL DRIVE — THE ONLY ANSWER (this file, usb-offload.sh and boot.sh's hotplug ask it; C147). By
+# NAME, because that is all /proc/partitions and /proc/mounts give: `sd*` (USB) and `nvme*` (an M.2 slot — BE10000 Pro, where the
+# stock mounts it itself at /mnt/nvme-<id>). Until 30.10.2026 every site matched `sd*` only, and `${n%%[0-9]*}` read the disk of
+# `nvme0n1p1` as `nvme` ⇒ the panel said «Накопителя нет» over a mounted 1-TB SSD. A WHITE list: NEVER `mmcblk*` — on eMMC routers
+# that is the router's own firmware storage, and a probe there mounts system partitions.
+ext_is_part() { case "$1" in sd[a-z][0-9]|sd[a-z][0-9][0-9]|nvme[0-9]n[0-9]p[0-9]|nvme[0-9]n[0-9]p[0-9][0-9]) return 0 ;; esac; return 1; }
+ext_is_disk() { case "$1" in sd[a-z]|nvme[0-9]n[0-9]) return 0 ;; esac; return 1; }
+# The disk a name belongs to — into EXT_DISK, not stdout: callers ask it per line of /proc/mounts (`$(…)` = a fork each). An NVMe
+# partition is `<disk>p<N>` (nvme0n1p1 → nvme0n1), a SCSI one `<disk><N>` (sdb2 → sdb); a disk is its own.
+ext_disk_of() {
+    case "$1" in
+        nvme[0-9]n[0-9]p*) EXT_DISK=${1%p*} ;;
+        sd[a-z][0-9]*)     EXT_DISK=${1%%[0-9]*} ;;
+        *)                 EXT_DISK=$1 ;;
+    esac
+}
+
 # Уже смонтированное хранилище (обошли /proc/mounts). Стоковый automount отрабатывает раньше нас
 # в большинстве загрузок — тогда своей точки не заводим вовсе.
 find_mounted_store() {
     while read -r _d _m _t _rest; do
-        case "$_d" in /dev/sd*) ;; *) continue ;; esac
+        case "$_d" in /dev/*) ;; *) continue ;; esac
+        ext_is_part "${_d#/dev/}" || ext_is_disk "${_d#/dev/}" || continue
         unesc_mount "$_m"
         _s=$(store_of_mount "$MNT_UNESC")
         [ -n "$_s" ] && { printf '%s' "$_s"; return 0; }
@@ -123,14 +141,14 @@ find_mounted_store() {
 # двойной монтаж, что был на событии диска (GPT-разметка: sdb1 — служебный EFI/MSR, данные — на sdb2; ревью, круг 1).
 mount_candidates() {
     while read -r _maj _min _blk _name; do
-        case "$_name" in sd[a-z][0-9]*) ;; *) continue ;; esac
+        ext_is_part "$_name" || continue
         [ -z "$ENODIA_ONLY_DEV" ] || [ "$_name" = "$ENODIA_ONLY_DEV" ] || continue
         [ -b "/dev/$_name" ] || continue
         grep -q "^/dev/$_name " "$MOUNTS" && continue
         printf '/dev/%s\n' "$_name"
     done < "$PARTS"
     while read -r _maj _min _blk _name; do
-        case "$_name" in sd[a-z]) ;; *) continue ;; esac
+        ext_is_disk "$_name" || continue
         [ -z "$ENODIA_ONLY_DEV" ] || [ "$_name" = "$ENODIA_ONLY_DEV" ] || continue
         [ -b "/dev/$_name" ] || continue
         grep -q "^/dev/$_name " "$MOUNTS" && continue
@@ -142,7 +160,9 @@ mount_candidates() {
 # (boot.sh::cmd_hotplug): событие ДИСКА, у которого есть разделы, — не его, работа ждёт события раздела.
 dev_has_parts() {
     while read -r _dhp_maj _dhp_min _dhp_blk _dhp_name; do
-        case "$_dhp_name" in "$1"[0-9]*) return 0 ;; esac
+        ext_is_part "$_dhp_name" || continue
+        ext_disk_of "$_dhp_name"
+        [ "$EXT_DISK" = "$1" ] && return 0
     done < "$PARTS"
     return 1
 }

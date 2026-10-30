@@ -559,6 +559,10 @@ clampint() {
 sub_host_public() { return 1; }
 sub_names_keep_other() { _snf="${2:-$ENODIA_STATE/.sub-names}"; [ -f "$_snf" ] && grep -v "^sub-$1-" "$_snf"; return 0; }
 sub_info_drop() { return 0; }   # без библиотеки счётчиков нет вовсе — и снимать нечего
+# The client a subscription presents itself as (`.sub-client`): without the library nothing is saved (fail-closed: a HWID or a
+# custom line written past the owner's checks would go out as a request header), and nothing to drop.
+sub_client_put() { return 1; }
+sub_client_drop() { return 0; }
 if [ -f "$ENODIA_DIR/subs-lib.sh" ]; then . "$ENODIA_DIR/subs-lib.sh"; fi
 
 # КТО ВЛАДЕЛ АДРЕСОМ В МОМЕНТ ЗАВЕДЕНИЯ ПРАВИЛА. Все правила проекта ключуются по IPv4, а адрес
@@ -2398,8 +2402,54 @@ EOF
 		_oldu=$([ -f "$ENODIA_STATE/.subs" ] && grep "^$tag$TAB" "$ENODIA_STATE/.subs" 2>/dev/null | head -1 | cut -d"$TAB" -f2)
 		case "$_oldu" in vpn://*) fail "это имя у подписки Amnezia Premium — назовите подписку иначе" ;; esac
 		[ "$_oldu" = "$url" ] || sub_info_drop "$tag"
+		# «ПРЕДСТАВЛЯТЬСЯ КАК» ИЗ ФОРМЫ — до первой закачки: провайдер, пускающий только Happ, отказал бы ей, и подписка не добавилась
+		# бы вовсе. Поле есть — клиент пишется (Happ — сразу с HWID, сделанным роутером: Remnawave без него при лимите устройств
+		# отвечает 404); поля нет (другой клиент панели, повторная запись) — прежний клиент подписки не трогаем. Строку проверяем
+		# ДО записи реестра: отказ после неё оставил бы подписку без клиента, с которым её добавляли.
+		scl=$(field client); sua=$(urldecode "$(field ua)")
+		case "$scl" in ''|enodia|happ|v2rayng) : ;; custom) sub_ua_ok "$sua" || fail "строка User-Agent: латиница, цифры и знаки, до 200 символов" ;; *) fail "неизвестное приложение" ;; esac
 		subs_put "$tag" "$url" "$label" || fail "не удалось сохранить подписку — нет места?"
-		printf '{"ok":true,"code":0,"msg":"подписка сохранена"}\n'; exit 0 ;;
+		# A HWID IS A DEVICE SLOT AT THE PROVIDER: a repeated save of the same tag (the panel re-imports a label it already has into
+		# that tag) keeps the HWID the line holds, a pasted one too — a new one would take another slot, and at the limit Remnawave
+		# answers 404 (review s.171 r1). A NEW tag starts clean: a line left behind by a removal that died halfway or by a backup
+		# import would give it another provider's app and HWID.
+		_scw=
+		[ -n "$_oldu" ] || sub_client_drop "$tag"
+		if [ -n "$scl" ]; then
+			SUB_CL_HWON=0; SUB_CL_HWID=; SUB_CL_HWSRC=gen
+			if [ -n "$_oldu" ] && command -v sub_client_read >/dev/null 2>&1; then sub_client_read "$tag"; fi
+			shw=${SUB_CL_HWID:--}; shs=$SUB_CL_HWSRC; shon=$SUB_CL_HWON
+			if [ "$scl" = happ ]; then shon=1; [ "$shw" = - ] && { shw=$(sub_hwid_new); shs=gen; }; fi
+			# The registry line is written: a refusal here is a warning beside «saved», not a failure — the subscription exists, and
+			# the panel goes on to download it and show it (its card is where the app is set again).
+			sub_client_put "$tag" "$scl" "$sua" "$shon" "$shw" "$shs" || _scw="подписка сохранена, а приложение — нет: повторите на карточке подписки"
+		fi
+		printf '{"ok":true,"code":0,"msg":"подписка сохранена"%s}\n' "${_scw:+,\"warn\":\"$_scw\"}"; exit 0 ;;
+	# sub_client: КАК ПОДПИСКА ПРЕДСТАВЛЯЕТСЯ ПРОВАЙДЕРУ — приложение (его User-Agent) и идентификатор устройства (x-hwid). Хозяин
+	# формата и проверок — subs-lib.sh (sub_client_put); здесь только решение «какой HWID»: прежний (keep), новый сделанный роутером
+	# (new) или вставленный человеком (own). Включили HWID, а его нет — делаем: «отправлять» без значения роутер не примет.
+	# У Amnezia Premium своего приложения нет: её роутер спрашивает как AmneziaVPN (premium.sh), и эта настройка к ней не относится.
+	sub_client)
+		tag=$(field tag)
+		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
+		TAB=$(printf '\t')
+		_scu=$([ -f "$ENODIA_STATE/.subs" ] && grep "^$tag$TAB" "$ENODIA_STATE/.subs" 2>/dev/null | head -1 | cut -d"$TAB" -f2)
+		[ -n "$_scu" ] || fail "подписка не найдена"
+		case "$_scu" in vpn://*) fail "у подписки Amnezia Premium приложение своё — роутер представляется AmneziaVPN" ;; esac
+		command -v sub_client_read >/dev/null 2>&1 || fail "subs-lib.sh не установлен или старый (обновите скрипты роутера)"
+		scl=$(field client); sua=$(urldecode "$(field ua)"); shon=$(field hwon); sdo=$(field hwid_do); shv=$(urldecode "$(field hwid)")
+		case "$scl" in enodia|happ|v2rayng|custom) : ;; *) fail "неизвестное приложение" ;; esac
+		[ "$scl" != custom ] || sub_ua_ok "$sua" || fail "строка User-Agent: латиница, цифры и знаки, до 200 символов"
+		case "$shon" in 1) : ;; *) shon=0 ;; esac
+		sub_client_read "$tag"
+		shw=$SUB_CL_HWID; shs=$SUB_CL_HWSRC
+		case "$sdo" in
+			new) shw=$(sub_hwid_new); shs=gen ;;
+			own) sub_hwid_ok "$shv" || fail "HWID: латиница, цифры и знаки . _ : + / = -, от 4 до 128 символов"; shw=$shv; shs=own ;;
+		esac
+		[ "$shon" = 1 ] && [ -z "$shw" ] && { shw=$(sub_hwid_new); shs=gen; }
+		sub_client_put "$tag" "$scl" "$sua" "$shon" "${shw:--}" "$shs" || fail "не удалось сохранить — нет места?"
+		printf '{"ok":true,"code":0,"msg":"сохранено"}\n'; exit 0 ;;
 	# rename_sub: сменить ТОЛЬКО отображаемое имя (label) подписки. tag и конфиги sub-<tag>-*
 	# не трогаем (tag = внутренний ключ, фиксирован; переименование меняет лишь показ).
 	rename_sub)
@@ -2452,7 +2502,10 @@ EOF
 		# был ТРЕТЬЕЙ копией закачки, и уже разошёлся с оригиналом: без проверки КАЖДОГО редиректа
 		# и без потолка на распаковку gzip.
 		tmp="/tmp/enodia-sub.$$"
-		sub_fetch "$url" "$tmp" || { rm -f "$tmp"; fail "подписка недоступна или пустая"; }
+		# …as the subscription's own app (subs-lib.sh sub_fetch_tag): a Happ-only provider refused the default client here, with no
+		# word of why (review s.171 r3). An older library without it — the plain request, as before.
+		if command -v sub_fetch_tag >/dev/null 2>&1; then sub_fetch_tag "$tag" "$url" "$tmp"; else sub_fetch "$url" "$tmp"; fi \
+			|| { rm -f "$tmp"; fail "подписка недоступна или пустая"; }
 		data=$(base64 < "$tmp" | tr -d '\r\n'); rm -f "$tmp"
 		printf '{"ok":true,"code":0,"data":"%s"}\n' "$data"; exit 0 ;;
 	remove_sub)
@@ -2499,6 +2552,7 @@ EOF
 		# …и счётчики провайдера (.sub-info, владелец — subs-lib.sh): строка ключуется ТЕГОМ, а
 		# теги люди заводят повторно — осиротевшая запись отдала бы новой подписке чужой остаток.
 		sub_info_drop "$tag"
+		sub_client_drop "$tag"   # …and its client: a tag set up again must not inherit the HWID (another provider's device)
 		if [ -n "$kept" ]; then
 			printf '{"ok":true,"code":0,"msg":"подписка удалена. Оставлены как свои конфиги — они заняты (активный сервер или выход): %s"}\n' "$kept"
 		else
@@ -3187,11 +3241,13 @@ EOF
 	store_enable|store_disable|store_forget)
 		[ -f "$ENODIA_DIR/usb-offload.sh" ] || fail "usb-offload.sh не установлен (обновите скрипты с GitHub)"
 		# Устройство приходит с фронта только у enable (выбор из списка воткнутого) и уходит
-		# АРГУМЕНТОМ в sh ⇒ жёсткий whitelist: только /dev/sdXN, ничего другого.
+		# АРГУМЕНТОМ в sh ⇒ жёсткий whitelist: только /dev/sdXN и /dev/nvmeXnYpZ, ничего другого.
+		# ext-dev: the trust boundary keeps its own form — the same set as mount-lib.sh::ext_is_part/ext_is_disk (C147 compares).
 		sdev=$(urldecode "$(field dev)")
 		case "$sdev" in
 			"") : ;;
 			/dev/sd[a-z]|/dev/sd[a-z][0-9]|/dev/sd[a-z][0-9][0-9]) : ;;
+			/dev/nvme[0-9]n[0-9]|/dev/nvme[0-9]n[0-9]p[0-9]|/dev/nvme[0-9]n[0-9]p[0-9][0-9]) : ;;
 			*) fail "неизвестное устройство" ;;
 		esac
 		# forget — выход из «включён, но не найден» (накопитель потерян насовсем): маркер снимается без
@@ -3220,9 +3276,11 @@ EOF
 		smd=$(field mode)
 		case "$smd" in data|bins|full) : ;; *) fail "неизвестный режим" ;; esac
 		sdev=$(urldecode "$(field dev)")
+		# ext-dev: the same set as store_enable above and mount-lib.sh's owner (C147 compares).
 		case "$sdev" in
 			"") : ;;
 			/dev/sd[a-z]|/dev/sd[a-z][0-9]|/dev/sd[a-z][0-9][0-9]) : ;;
+			/dev/nvme[0-9]n[0-9]|/dev/nvme[0-9]n[0-9]p[0-9]|/dev/nvme[0-9]n[0-9]p[0-9][0-9]) : ;;
 			*) fail "неизвестное устройство" ;;
 		esac
 		# Уже идёт? Судим по ЖИВОМУ процессу: pid-файл лежит в /tmp и переживает убитый движок,

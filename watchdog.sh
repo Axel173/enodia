@@ -1564,19 +1564,22 @@ notify_ev() {   # $1 ключ, $2 throttle_sec, $3 тема, $4 текст
 # аптайм (up_age): ребут начинает эпизоды заново, а скачок часов их не задевает.
 VPN_DOWN_EP=/tmp/enodia-vpn-down.episode
 VPN_OK_SINCE=/tmp/enodia-vpn-ok.since
+# A «Выкл» move to AmneziaWG made inside a TOLD fall, before AmneziaWG had its first handshake: its «VPN восстановлен» is owed, and
+# AmneziaWG's own branch pays it (or, if AmneziaWG never carried, tells its fall as a new one — review s.171 r3).
+VPN_BACK_PENDING=/tmp/enodia-vpn-back.pending
 FAILOPEN_STABLE=${FAILOPEN_STABLE:-1800}
 FAILOPEN_REMIND=${FAILOPEN_REMIND:-86400}
 failopen_mail() {   # $1 тема, $2 текст
     _fog=0; [ -f "$VPN_DOWN_EP" ] && _fog=$FAILOPEN_REMIND
-    rm -f "$VPN_OK_SINCE"; : > "$VPN_DOWN_EP"
+    rm -f "$VPN_OK_SINCE" "$VPN_BACK_PENDING"; : > "$VPN_DOWN_EP"
     notify_ev "vpn-failopen" "$_fog" "$1" "$2"
 }
-vpn_ok_mailed() { rm -f "$VPN_DOWN_EP" "$VPN_OK_SINCE"; }
+vpn_ok_mailed() { rm -f "$VPN_DOWN_EP" "$VPN_OK_SINCE" "$VPN_BACK_PENDING"; }
 vpn_ok_quiet() {
     [ -f "$VPN_DOWN_EP" ] || return 0
     _vos=$(cat "$VPN_OK_SINCE" 2>/dev/null)
     case "$_vos" in ''|*[!0-9]*) uptime_s > "$VPN_OK_SINCE"; return 0 ;; esac
-    [ "$(up_age "$_vos")" -ge "$FAILOPEN_STABLE" ] && rm -f "$VPN_DOWN_EP" "$VPN_OK_SINCE"
+    [ "$(up_age "$_vos")" -ge "$FAILOPEN_STABLE" ] && rm -f "$VPN_DOWN_EP" "$VPN_OK_SINCE" "$VPN_BACK_PENDING"
     return 0
 }
 
@@ -1653,6 +1656,17 @@ ${3:-Вернул VPN-роутинг и DNS через туннель.}
 Внешний IP: ${ip:-неизвестен}."
     fi
     vpn_ok_mailed   # эпизод аварии закрыт письмом: следующее падение — снова письмо
+}
+# …AND A MOVE THAT ENDS A TOLD FALL SAYS IT TOO. The cross branches and the AmneziaWG reserve sweep write NORMAL themselves, so the
+# next tick's healthy branch reads NORMAL and stays silent: a fall told by «VPN упал» got no «VPN восстановлен», and its episode
+# closed quietly after FAILOPEN_STABLE (AX3600 30.10.2026: vpn-failopen 23:24, a cross to AmneziaWG 23:34 — the journal said
+# nothing). Only with the episode OPEN: a move at the first failure told no fall — its own event (cross-switch, failover-ok) is the word.
+# A healthy tick since (VPN_OK_SINCE — the quiet return counting to FAILOPEN_STABLE) means that fall is already back: a new failure
+# a move ends at its first tick told nothing, and its own event is the word (review s.171 r1).
+told_fall_back() {   # $1 what carries now (ru), $2 (en)
+    [ -f "$VPN_DOWN_EP" ] || return 0
+    [ -f "$VPN_OK_SINCE" ] && return 0
+    vpn_restored_event "Сторож перешёл на $1 — трафик снова идёт через VPN." "The watchdog moved to $2 — traffic goes through the VPN again."
 }
 
 # ВЫБРАН ТРАНСПОРТ, КОТОРОГО НА РОУТЕРЕ НЕТ. Повод общий у обеих веток ниже (tunnel и awg), потому
@@ -2377,6 +2391,7 @@ To go back to AmneziaWG: panel :8088 -> the VPN card."
 Внешний IP: ${ip:-неизвестен}.
 Вернуться на AmneziaWG: панель :8088 -> карточка VPN."
         fi
+        told_fall_back "$olbl" "$olbl"   # after the move's own word: the journal reads «left», then «back»
         return 0
     fi
     off_bail "перебора резервов $other"
@@ -2426,6 +2441,7 @@ run_failover() {
         off_bail "перебора серверов AmneziaWG"
         echo "NORMAL" > "$STATE"
         log "failover: встали на резерв ($(cat "$ACTIVE_NAME" 2>/dev/null))"
+        told_fall_back "резервный сервер AmneziaWG $(cat "$ACTIVE_NAME" 2>/dev/null)" "the AmneziaWG backup server $(cat "$ACTIVE_NAME" 2>/dev/null)"
         return 0
     else
         off_bail "перебора серверов AmneziaWG"
@@ -2982,7 +2998,14 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
     # вернулись» (cross, возврат домой, откат на прежний): тот же health проверяет кандидатов перебора и прогрев, и залипший путь
     # там стоил бы перезапуска hev и сброса соединений на каждом конфиге. А проверка ПЕРЕХОДА без пути (ревью с.93, круг 3) читала
     # транспорт с мёртвым hev «вернувшимся»: возврат домой → через тик снова «упал» → cross — пара писем каждые 20 минут.
-    if HEV_CHECK=1 sh "$TRANSPORT_SH" health "$TRANSPORT" >>"$LOG" 2>&1; then
+    # HEALTH_REVIVE=1 — a plugin may raise its own dead carrier in place (ByeDPI's ciadpi self-shutdown), but NOT in the direct mode
+    # this watchdog took itself (FAILOPEN + FAILED): the carrier is down on purpose, and the revival blinked `default dev xtun` back
+    # into table 1000 until ensure_direct_mode took it down — every tick, with a conntrack flush (AX3600, 27.10.2026). The way back
+    # from there is the ladder's own retry on its pause (failover / the «Выкл» retry), not this probe. FAILED alone says it: every
+    # writer of it in this branch took the carrier down itself, and «Выкл» with AmneziaWG failing to come up keeps STATE NORMAL there
+    # — the revival blinked once after the told fall, or brought the carrier back with no «VPN восстановлен» (review s.171 r1).
+    _xrv=1; if [ "$xcur" = FAILED ]; then _xrv=; fi
+    if HEALTH_REVIVE=$_xrv HEV_CHECK=1 sh "$TRANSPORT_SH" health "$TRANSPORT" >>"$LOG" 2>&1; then
         # ВИДЕЛИ СВОИМИ ГЛАЗАМИ: несущая этого транспорта в эту загрузку везёт. Дальше провал
         # health читается как ПАДЕНИЕ, а не как «её ещё не поднимали» (см. carrier_seen).
         # Счётчик попыток подъёма сбрасываем тут же: он про НЕЗАВЕРШЁННЫЙ СТАРТ, а старт
@@ -2993,8 +3016,8 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
         # восстановлен» on every boot would describe a failure that never was (the AmneziaWG branch tells the same apart by its
         # first-up mark).
         # …OR a fall was TOLD and its episode is open (failopen_mail → VPN_DOWN_EP; closed by «VPN восстановлен» itself): a server dead
-        # since boot never carried, and its return — by the «Выкл» retry or by the plugin's own revival in this very probe (ByeDPI,
-        # AX3600 27.10.2026) — came without the event after the fall's mail (review s.166 r2, hardware walk s.167).
+        # since boot never carried, and its return — by the «Выкл» retry, the ladder's failover or a revival by this very probe outside
+        # our own direct mode (ByeDPI, AX3600 27.10.2026) — came without the event after the fall's mail (review s.166 r2, walk s.167).
         _xback=0
         if [ "$(cat "$STATE" 2>/dev/null)" = FAILOPEN ] && { carrier_seen "$TRANSPORT" || [ -f "$VPN_DOWN_EP" ]; }; then _xback=1; fi
         carrier_seen_mark "$TRANSPORT"; carrier_tries_reset "$TRANSPORT"
@@ -3263,6 +3286,17 @@ To turn $TLABEL back on: panel :8088 -> the VPN card."
 Внешний IP сейчас: ${ip:-неизвестен}.
 Снова включить $TLABEL: панель :8088 -> карточка VPN."
             fi
+            # MOVED — the state says so, as every other move's does: from the next tick AmneziaWG's own branch judges it. A FAILOPEN
+            # left by a refused retry (its rollback raised the tunnel, ensure_direct_mode took it down) read «VPS ожил» there — a
+            # second «восстановлен», a re-raise and a flush; and in «Выкл» that branch never calls safety-off from FAILOPEN, so a
+            # dead AmneziaWG kept the house's DNS on it (review s.171 r2).
+            echo NORMAL > "$STATE"
+            # The retry out of a TOLD fall («AmneziaWG не поднялся» — direct mode) lands here too: «left», then «back» (r1) — only
+            # once AmneziaWG carries (its health: a handshake), as the cross branches ask their target. Its first handshake may come
+            # after this check: then the return is OWED (VPN_BACK_PENDING), and AmneziaWG's branch says it on the tick that sees the
+            # handshake — before its quiet count would close the told fall in silence (review s.171 r3).
+            if HEV_CHECK=1 sh "$TRANSPORT_SH" health awg >>"$LOG" 2>&1; then told_fall_back "AmneziaWG" "AmneziaWG"
+            elif [ -f "$VPN_DOWN_EP" ] && [ ! -f "$VPN_OK_SINCE" ]; then : > "$VPN_BACK_PENDING"; fi
         else
             # Возвращаться на awg НЕКУДА (не установлен/не настроен) или он не поднялся → прямой режим. Уведомляем ОДИН
             # раз (на переходе xcur!=FAILED): .transport остаётся прежним, иначе ветка крутила бы down+письмо каждый тик.
@@ -3362,17 +3396,20 @@ $_fb_tru"
             # Несущая $other поднята; здоровье — через контракт плагина. Жив → остаёмся.
             echo "NORMAL" > "$STATE"; echo HEALTHY > "$XSTATE"
             log "cross: $other жив — остаёмся на нём"
+            told_fall_back "$(transport_label "$other")" "$(transport_label "$other")"
         elif [ "$_xsw" = 1 ] && [ "$other" = "awg" ] && [ -f "$SWITCH_VPN" ] && { _xsvf=1; sh "$SWITCH_VPN" failover >>"$LOG" 2>&1; }; then
             # awg: текущий default-конфиг мёртв → перебор awg-резервов (единый бэкенд switch-vpn;
             # do_failover здесь НЕзачем — он пропустил бы рабочий default по имени).
             off_bail "перебора серверов AmneziaWG"
             echo "NORMAL" > "$STATE"; echo HEALTHY > "$XSTATE"
             log "cross: текущий awg мёртв → встали на awg-резерв"
+            told_fall_back "резервный сервер AmneziaWG $(cat "$ACTIVE_NAME" 2>/dev/null)" "the AmneziaWG backup server $(cat "$ACTIVE_NAME" 2>/dev/null)"
         elif [ "$_xsw" = 1 ] && [ "$other" != "awg" ] && sh "$TRANSPORT_SH" failover "$other" >>"$LOG" 2>&1; then
             # tunnel-цель (hy2/…): перебор её собственных резервов
             off_bail "перебора резервов $other"
             echo "NORMAL" > "$STATE"; echo HEALTHY > "$XSTATE"
             log "cross: перебор резервов $other — встали"
+            told_fall_back "$(transport_label "$other")" "$(transport_label "$other")"
         else
             off_bail "перебора резервов $other"
             echo "FAILOPEN" > "$STATE"; echo FAILED > "$XSTATE"
@@ -3865,6 +3902,9 @@ back up; once it answers, the VPN returns by itself and a second email arrives."
     nbk=$(count_backups)
     if [ "$cur" != "FAILOPEN" ]; then
         # --- переход: VPS только что умер --- (новый эпизод аварии)
+        # …and after a «Выкл» move that never carried (VPN_BACK_PENDING) it IS a new fall: the move already mailed «вернулись на
+        # AmneziaWG», so the told episode closes here and this fall's mail goes out whole, not as a journal-only reminder (r3).
+        if [ -f "$VPN_BACK_PENDING" ]; then rm -f "$VPN_BACK_PENDING" "$VPN_DOWN_EP"; fi
         episode_reset; episode_add awg; date +%s > "$FAILOVER_STAMP"
         if [ "$mode" != "off" ] && [ "$nbk" -ge 1 ] && [ -f "$SWITCH_VPN" ]; then
             # есть awg-резервы → перебор (письма шлёт switch-vpn); awg-пул исчерпан →
@@ -3935,6 +3975,10 @@ elif awg_hs_alive "$age"; then
     # Туннель здоров ⇒ прошлый reup-троттл своё отработал: снимаем штамп, чтобы СЛЕДУЮЩАЯ авария
     # снова получила попытку «починить на месте», а не упёрлась в остаток получасового окна.
     rm -f "$REUP_STAMP" "$ROAD_FO" 2>/dev/null
+    # The return a «Выкл» move owes (VPN_BACK_PENDING — its told fall, AmneziaWG without a handshake at the move): said now, BEFORE
+    # health_back starts the quiet count that would close that episode in silence (review s.171 r3). From FAILOPEN the branches below
+    # say their own word.
+    if [ -f "$VPN_BACK_PENDING" ]; then rm -f "$VPN_BACK_PENDING"; [ "$cur" = NORMAL ] && told_fall_back "AmneziaWG" "AmneziaWG"; fi
     health_back   # бэкофф перебора, «интернета нет» и (продержавшись) «прямой режим» закрыты: handshake свежий ⇒ аплинк жив
     doh_follow_carrier ok       # awg0 везёт ⇒ резолвер можно вернуть в туннель
     if [ "$cur" = "FAILOPEN" ] && [ -f "$AWG0_FIRSTUP" ]; then
@@ -3977,6 +4021,7 @@ elif awg_hs_alive "$age"; then
             case "$VPN_DNS" in *[!0-9.]*) VPN_DNS="" ;; esac
             [ -z "$VPN_DNS" ] && VPN_DNS=172.29.172.254
             ip route replace "$VPN_DNS/32" dev awg0 2>/dev/null
+            # doh-skip: the old layout without the carrier plugin predates «Шифрованный DNS» — nothing there to ask (C146)
             dns_upstream_put "$VPN_DNS"
         fi
         echo "NORMAL" > "$STATE"; episode_reset   # эпизод аварии закрыт

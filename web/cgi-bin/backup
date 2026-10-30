@@ -53,6 +53,8 @@ fi
 # нам не подконтрольно. Кавычка в `.transport` без экранирования ломала бы JSON ответа, и панель
 # показала бы «импорт не удался» поверх удавшегося импорта.
 if [ -f "$ENODIA_DIR/json-lib.sh" ]; then . "$ENODIA_DIR/json-lib.sh"; fi
+# «A file replaced whole or not at all» — its one owner (the import filters `.sub-client` in place; without it the file goes whole).
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi
 command -v jesc >/dev/null 2>&1 || {
 	jtrim() { cat; }
 	jesc() { tr -d '\033\r' | sed 's/\[[0-9;]*m//g' | tr '\n\t' '  ' | cut -c1-"$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -181,7 +183,9 @@ SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                            
 # premium/ = Amnezia Premium (premium.sh): `.installation` — the router's identity at Amnezia (ONE place of the subscription for any
 # number of countries) and the last answer about each subscription. With the configs: a restore keeps the router's place instead of
 # taking a second one (its key is in `.subs`, a secret too).
-SECRETS="awg.conf amnezia_for_awg.conf awg0.conf notify.conf xray.json hysteria.yaml .active .xray-active .hy2-active .transport .subs .sub-names .cfg-names .cfg-via .warp-reg .sub-picks configs xray-configs hy2-configs server panel-cert.pem panel-key.pem premium"
+# .sub-client = how each subscription presents itself to its provider (subs-lib.sh): the app and its HWID — a device identity the
+# provider counts (a restore keeps the router's place instead of taking another slot), so a secret, next to `.subs`.
+SECRETS="awg.conf amnezia_for_awg.conf awg0.conf notify.conf xray.json hysteria.yaml .active .xray-active .hy2-active .transport .subs .sub-names .sub-client .cfg-names .cfg-via .warp-reg .sub-picks configs xray-configs hy2-configs server panel-cert.pem panel-key.pem premium"
 
 if [ "$REQUEST_METHOD" = "POST" ]; then
 	echo "Content-Type: application/json; charset=utf-8"
@@ -308,6 +312,9 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	# Копируем ТОЛЬКО известные имена (из кода). Файл -> заменяем; каталог -> вливаем содержимое.
 	restored=0
+	# The router's registry (tag⇥link) BEFORE the archive lays its own: `.sub-client` after the loop keeps the lines of the
+	# subscriptions an older archive brings back unchanged.
+	if [ -f "$ENODIA_STATE/.subs" ]; then cut -f1,2 "$ENODIA_STATE/.subs" > "$tmp/.subs-was" 2>/dev/null; else : > "$tmp/.subs-was"; fi
 	# a FULL backup (any secret in it) carries a task's variables when the task has any: there, a task without them has none
 	_tfull=0; for _sf in $SECRETS; do [ -e "$tmp/$_sf" ] && { _tfull=1; break; }; done
 	for f in $SETTINGS $SECRETS; do
@@ -383,6 +390,19 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 		sh "$ENODIA_DIR/warp.sh" import "$tmp/.warp-reg" >/dev/null 2>&1 && [ -f "$tmp/.warp-reg" ] && restored=$((restored+1))
 		chmod 600 "$ENODIA_STATE/.warp-reg" 2>/dev/null
 	fi
+	# .sub-client BELONGS TO .subs. An archive that brings the registry without it (made before the app setting, s.170): a tag it
+	# gives to another link, or does not bring at all, loses its line — it would be fetched as that app with another provider's HWID
+	# (review s.171 r1); a subscription it brings back with the SAME link keeps it — the line holds that provider's device slot, and a
+	# new HWID would take another (r2). Filtered whole or not at all; a failed filter drops the file (never the unfiltered lines).
+	if [ -e "$tmp/.subs" ] && [ ! -e "$tmp/.sub-client" ] && [ -f "$ENODIA_STATE/.sub-client" ]; then
+		# an empty first file reads as «every line of the second is in the first» — here that means «keep nothing», which is right
+		cut -f1,2 "$tmp/.subs" > "$tmp/.subs-now" 2>/dev/null
+		awk -F'\t' 'NR == FNR { n[$0] = 1; next } ($0 in n) && $1 != "" { print $1 }' "$tmp/.subs-now" "$tmp/.subs-was" > "$tmp/.sub-keep" 2>/dev/null
+		if command -v lbl_commit_out >/dev/null 2>&1; then
+			( umask 077; lbl_commit_out "$ENODIA_STATE/.sub-client" awk -F'\t' 'NR == FNR { k[$1] = 1; next } ($1 in k)' "$tmp/.sub-keep" "$ENODIA_STATE/.sub-client" ) 2>/dev/null \
+				|| rm -f "$ENODIA_STATE/.sub-client"
+		else rm -f "$ENODIA_STATE/.sub-client"; fi
+	fi
 	rm -rf "$tmp"
 	if [ "$restored" -eq 0 ]; then
 		# Отвергнутая пара — тоже причина: «не наш бэкап» про архив, где кроме неё ничего нет, звучал бы как «файл не тот».
@@ -394,6 +414,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# переигрываем, но НЕ здесь: их место — сразу за ядром маркировки (порядок heal.sh 5 → 5.5),
 	# и гейт «выбран ли транспорт вообще» у них общий с ядром — см. цепочку ниже.
 	chmod 600 "$ENODIA_STATE"/*.conf "$ENODIA_STATE"/xray.json "$ENODIA_STATE"/hysteria.yaml 2>/dev/null
+	chmod 600 "$ENODIA_STATE"/.subs "$ENODIA_STATE"/.sub-client 2>/dev/null   # links and HWIDs: `cp -p` took the archive's modes (review s.171 r2)
 	chmod 600 "$ENODIA_STATE"/configs/* "$ENODIA_STATE"/xray-configs/* "$ENODIA_STATE"/hy2-configs/* 2>/dev/null
 	# Ключи «доступа домой» (server/) — распакованы правами архива; выставляем свои.
 	# Флаг server/.on намеренно НЕ восстанавливается — исключение НАЗВАНО в цикле копирования выше

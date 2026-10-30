@@ -211,13 +211,16 @@ dns_direct_rules() {   # $1 = add|del
         done
     done
 }
+# The direct upstream of `down` — through «Шифрованный DNS» when it is on, as every DNS setter (C146): the bare put here resolved
+# a fall into direct mode in the clear until the watchdog's DoH guard pointed dnsmasq back (AX3600, 30.10.2026).
 set_dnsmasq_direct() {
+    doh_apply_dns direct && return 0
     dns_upstream_put "$DNS1" "$DNS2"
 }
 set_direct_dns() {
     doh_apply_dns direct && return 0    # DoH ВКЛ/авто → резолв через локальный прокси (резолвер :443 мимо марки); иначе → ниже
     dns_direct_rules add
-    set_dnsmasq_direct
+    dns_upstream_put "$DNS1" "$DNS2"    # not set_dnsmasq_direct: DoH is asked once — a second ask would run the auto mode's probe again
 }
 
 # ---- демоны -----------------------------------------------------------------
@@ -401,6 +404,12 @@ reup_carrier() {
     ip link show "$TUN" >/dev/null 2>&1 || { log "reup: нет $TUN"; return 1; }
     owner_rule_add          # анти-петля могла слететь? переутверждаем (идемпотентно)
     apply_byedpi_routing
+    # …and DNS past the marking — the part `down` took: its RETURN rules, unless dnsmasq is on the DoH proxy (as `up` lays them). A
+    # carrier raised here after `down` (the retry out of the watchdog's direct mode) came back without them, and with DoH off
+    # dnsmasq's upstream rode the marking into ciadpi — the probe by IP passed, the house resolved nothing (review s.171 r1). The
+    # upstream itself `down` already wrote; re-arming DoH here ran the whole apply with its probes on every revival (r2).
+    # Idempotent: the rules by -C. No DoH library — no proxy to be on.
+    if ! command -v doh_upstream_set >/dev/null 2>&1 || ! doh_upstream_set; then dns_direct_rules add; fi
     ct_flush_route "$FWMARK" "$TABLE"   # the carrier restarted in place: only the flows riding table $TABLE (ct-lib.sh)
     return 0
 }
@@ -452,7 +461,7 @@ cmd_down() {
     # (флаг переписывает оркестратор ПОСЛЕ), поэтому спрашиваем ТОЛЬКО про выходы.
     bd_any_byedpi_slot || owner_rule_del
     dns_direct_rules del    # снять наши DNS-RETURN (следующий транспорт поставит свой DNS)
-    set_dnsmasq_direct      # dnsmasq на прямой резолвер — fail-open до подъёма следующего транспорта
+    set_dnsmasq_direct      # dnsmasq на прямой резолвер (через DoH, если он включён) — fail-open до подъёма следующего транспорта
     rm -f /tmp/enodia-watchdog.xstate /tmp/enodia-failover-episode 2>/dev/null
     ct_flush
     log "ByeDPI-несущая снята (релинквиш) -> прямой режим (fail-open). Следующий транспорт ставит оркестратор."
@@ -515,14 +524,21 @@ cmd_health() {
     if sweep_fresh; then return 0; fi
     if [ -f "$SWEEP_LOCK" ]; then
         log "health: браузер-свип брошен (lock протух) — восстанавливаю исходную стратегию"
-        sweep_restore; restart_byedpi >/dev/null 2>&1; ct_flush_route "$FWMARK" "$TABLE"
+        # A dead ciadpi is not restarted here: the revival below starts it with the restored strategy, and only on the tick's ask.
+        sweep_restore
+        if proc_alive "$CIADPI_PID"; then restart_byedpi >/dev/null 2>&1; ct_flush_route "$FWMARK" "$TABLE"; fi
     fi
     # САМО-ИЗЛЕЧЕНИЕ (2026-06-18). Раньше любая смерть демона → return 1 → watchdog уводил
     # byedpi на awg (cross). Но ciadpi известно самовыключается на `accept: Invalid argument`
     # — это локальный процесс, его надо ПЕРЕПОДНЯТЬ, а не бросать выбранный пользователем
     # транспорт. Если что-то из несущей просело — переподнимаем НА МЕСТЕ и только при неудаче
     # сообщаем «нездоров» (watchdog тогда уже законно эскалирует cross/прямой).
+    # ONLY ON THE TICK'S ASK (HEALTH_REVIVE=1, as HEV_CHECK for the hev path): a carrier the watchdog took down itself (its own
+    # direct mode, FAILOPEN + FAILED) has dead daemons too, and the revival put `default dev xtun` back into table 1000 on every
+    # tick until ensure_direct_mode took it down again — a blink with a conntrack flush each 2 min (AX3600, 27.10.2026). The dump
+    # and the boot verdict ask the same verb and must change nothing. Unasked, a dead carrier is just «нездоров».
     if ! proc_alive "$CIADPI_PID" || ! proc_alive "$HEV_PID" || ! ip link show "$TUN" >/dev/null 2>&1; then
+        if [ "${HEALTH_REVIVE:-}" != 1 ]; then log "health: несущая byedpi снята или просела (ciadpi/hev/tun) — переподнимает только сторож"; return 1; fi
         log "health: несущая byedpi просела (ciadpi/hev/tun) — переподнимаю на месте"
         reup_carrier || { log "health: переподнять byedpi не удалось — отдаю эскалацию оркестратору"; return 1; }
     fi
@@ -548,8 +564,8 @@ cmd_health() {
 # «Failover» для ЛОКАЛЬНОГО десинка ≠ перебор VPS-серверов (их нет). Демон ciadpi мог
 # самовыключиться (`accept: Invalid argument`) — правильная реакция watchdog'а НЕ «увести
 # byedpi на awg», а ПЕРЕПОДНЯТЬ десинк на месте. Поэтому failover пробует reup_carrier и
-# возвращает 0 при успехе → watchdog остаётся на byedpi (а не делает cross на VPS). Только
-# если переподнять реально не вышло (бинарь пропал/порт занят навсегда) → 1 → cross/прямой.
+# возвращает 0, когда поднятое ВЕЗЁТ → watchdog остаётся на byedpi (а не делает cross на VPS).
+# Не поднялось или поднялось, но наружу не форвардит → 1 → cross/прямой.
 # (Перебор десинк-ПРЕСЕТОВ при стойком провале — возможная доработка позже.)
 cmd_failover() {
     t=awg; [ -f "$TRANSPORT_FLAG" ] && t=$(cat "$TRANSPORT_FLAG")
@@ -565,8 +581,17 @@ cmd_failover() {
         log "byedpi-failover: путь клиентов через hev мёртв и перезапуск hev не помог → эскалация на оркестраторе (cross/прямой)"; return 1; fi
     log "byedpi-failover: переподнимаю локальный десинк на месте (без ухода на VPS/awg)…"
     if reup_carrier; then
-        log "byedpi-failover: ciadpi/hev снова подняты — остаёмся на byedpi"
-        return 0
+        # …AND JUDGED BY THE RESULT, by the criterion health uses (bd_egress_ok). Live daemons forwarding nothing (ciadpi's way out
+        # cut, a strategy that kills every handshake) passed as «подняты»: the watchdog wrote HEALTHY, the next ticks read «нездоров»
+        # again — a re-assert with a flush of the carrier's flows every 4 min, and the ladder never reached cross or direct mode
+        # (AX3600, 30.10.2026). The self-shutdown this verb is for passes: a revived ciadpi forwards at once. A refusal leaves the
+        # carrier up — the watchdog's escalation takes it down (`down` / ensure_direct_mode, or `switch` on cross).
+        if bd_egress_ok "--socks5 $SOCKS_ADDR:$SOCKS_PORT"; then
+            log "byedpi-failover: ciadpi/hev снова подняты и форвардят наружу — остаёмся на byedpi"
+            return 0
+        fi
+        log "byedpi-failover: ciadpi/hev подняты, но наружу не форвардят → эскалация на оркестраторе (cross/прямой)"
+        return 1
     fi
     log "byedpi-failover: переподнять не удалось → эскалация на оркестраторе (cross/прямой)"
     return 1
@@ -937,7 +962,7 @@ sweep_undo() { if [ -n "$2" ]; then cmd_slot_down "$2"; else cmd_down; fi; }
 case "$1" in
     # Вербы, которые ПОДНИМАЮТ ciadpi/hev, — через carrier_run (daemon-lib.sh): при выключенном вручную VPN отказ, а выключение,
     # пришедшее по ходу, отпускает поднятое. `health` тоже здесь: он не только проба — просевшую несущую он ПЕРЕПОДНИМАЕТ на месте
-    # (reup_carrier), и диагностика (dump.sh) при выключенном VPN поднимала бы ByeDPI обратно.
+    # (reup_carrier; only on the watchdog tick's ask, HEALTH_REVIVE=1), and a tick under the flag must not bring ByeDPI back.
     up)       carrier_run cmd_down cmd_up ;;
     down)     cmd_down ;;
     cold)     : ;;                        # тёплого резерва нет: демонов гасит сам `down` (stop_daemons)

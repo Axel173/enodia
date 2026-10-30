@@ -445,8 +445,12 @@ fi
 # ==================== 7. ТЕСТ КОНКРЕТНЫХ САЙТОВ ====================
 if [ "$1" = "test" ]; then
     header "Проверка популярных сайтов"
+    # The first address of the answer — dns-lib.sh::ns_ips, the one parser of busybox nslookup's output: the own `grep -A1 | $NF`
+    # took a NAME on busybox 1.25 («Address 1: IP name») and depended on the line layout that busybox 1.36 changed.
+    if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
+    command -v ns_ips >/dev/null 2>&1 || ns_ips() { :; }
     for domain in youtube.com chatgpt.com claude.ai instagram.com discord.com github.com; do
-        ip_first=$(nslookup "$domain" 127.0.0.1 2>/dev/null | grep -A1 'Name:' | tail -1 | awk '{print $NF}')
+        ip_first=$(ns_ips "$domain" 2>/dev/null | head -n 1)
         if [ -n "$ip_first" ]; then
             in_awg=0; in_ipl=0
             ipset test "$ENODIA_LIST_NAME" "$ip_first" 2>/dev/null && in_awg=1

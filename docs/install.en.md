@@ -38,8 +38,8 @@ go through the VPN, and turn on the protocols you need under «Components» — 
 
 !!! note "If the flash is short of space"
     Some firmware keeps a backup copy of its own settings (on the BE6500 almost 4 MB of flash). The wizard and the
-    panel offer to turn that copy off and name how much space it frees first. Protocols can also live on a USB stick —
-    if the router has a USB port.
+    panel offer to turn that copy off and name how much space it frees first. Protocols can also live on a USB stick
+    or an SSD in an M.2 slot — if the router has one.
 
 ## Updating
 

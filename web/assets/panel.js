@@ -1345,7 +1345,7 @@
   // ФОКУС ПЕРЕЖИВАЕТ ПЕРЕРИСОВКУ ЭКРАНА. Экран после действия рисуется заново целиком, и фокус клавиатуры уходил в body:
   // нажал пробелом тумблер выхода — и следующий Tab начинается с начала страницы (тот же класс, что лечили у ленты в
   // шаге 2 и у плиток «Транспорта»). Примету узла берём ДО перерисовки, возвращаем фокус на узел с той же приметой.
-  var FOCUS_ATTRS=['data-xa','data-fb','data-fo','data-xk','data-sa','data-si','data-va','data-pa','data-pm','data-ck','data-ap','data-cact','data-rdel','data-rb','data-rdon','data-rst','data-rstg','data-rstale','data-ga','data-gd','data-gs','data-tab','data-t','data-dvm','data-dvs','data-dvos','data-dvps','data-dvt','data-dvod','data-dvpp','data-dvpd','data-dvpr','data-dwd','data-dwc','data-dwa','data-dwr','data-dwx','data-dws','data-dwg','data-dwgd','data-dva','data-gact','data-gsrc','data-gtab','data-rna','data-rns','data-rnd','data-rnx','data-rnpr','data-rnc','data-ris','data-ric','data-rix','data-rit','data-dnsp','data-dnsa','data-ntm','data-nta','data-dha','data-dhd','data-wfa','data-wfo','data-blka','data-lsi','data-dk','data-dkm','data-dkc','data-pkg','data-pka','data-pku','data-pkrs','data-upd','data-sia','data-sup','data-sud','data-unm','data-una','data-hk','data-paa','data-tfa','data-pvt','data-pvl','data-sid','data-nfa','data-eva','data-evs','data-ala','data-sv','data-sc-lmode','data-scact','data-scov','data-sccat','data-scd','data-sc-base','data-sc-ws','data-scwdel','data-scdel','data-scgdel','data-scgadd','data-sctpl','data-wpk','data-wpm','id'];
+  var FOCUS_ATTRS=['data-xa','data-fb','data-fo','data-xk','data-sa','data-scla','data-scl','data-si','data-va','data-pa','data-pm','data-ck','data-ap','data-cact','data-rdel','data-rb','data-rdon','data-rst','data-rstg','data-rstale','data-ga','data-gd','data-gs','data-tab','data-t','data-dvm','data-dvs','data-dvos','data-dvps','data-dvt','data-dvod','data-dvpp','data-dvpd','data-dvpr','data-dwd','data-dwc','data-dwa','data-dwr','data-dwx','data-dws','data-dwg','data-dwgd','data-dva','data-gact','data-gsrc','data-gtab','data-rna','data-rns','data-rnd','data-rnx','data-rnpr','data-rnc','data-ris','data-ric','data-rix','data-rit','data-dnsp','data-dnsa','data-ntm','data-nta','data-dha','data-dhd','data-wfa','data-wfo','data-blka','data-lsi','data-dk','data-dkm','data-dkc','data-pkg','data-pka','data-pku','data-pkrs','data-upd','data-sia','data-sup','data-sud','data-unm','data-una','data-hk','data-paa','data-tfa','data-pvt','data-pvl','data-sid','data-nfa','data-eva','data-evs','data-ala','data-sv','data-sc-lmode','data-scact','data-scov','data-sccat','data-scd','data-sc-base','data-sc-ws','data-scwdel','data-scdel','data-scgdel','data-scgadd','data-sctpl','data-wpk','data-wpm','id'];
   // …and of a TEXT field its caret, selection and inner scroll: a field built from markup comes back with the caret at 0, and text
   // typed after a background repaint glued onto the start (`newsite.comroblox.com` — the schedule's own sites; review s.113, r.5)
   function focusMark(){
@@ -9285,7 +9285,7 @@
     "Роутер не ответил про накопитель. Это не значит, что накопителя нет: откройте экран ещё раз.":"The router did not answer about the drive. That does not mean there is no drive: open the screen again.",
     "Работать с накопителем роутер не умеет — обновите скрипты роутера.":"The router cannot work with a drive — update the router scripts.",
     "Сменить накопитель, не вернув всё на роутер, нельзя: сперва «Только тяжёлые протоколы» ниже, потом «Вернуть на роутер».":"You cannot swap the drive without moving everything back to the router: first «Heavy protocols only» below, then «Move back to the router».",
-    "Накопителя нет. Если у роутера есть USB-порт, воткните в него накопитель — тяжёлые протоколы (Xray, Hysteria2 и десинк) можно будет держать на нём, и флеш роутера освободится.":"No drive. If the router has a USB port, plug a drive into it — the heavy protocols (Xray, Hysteria2 and desync) can then live on it, and the router flash frees up.",
+    "Накопителя нет. Если у роутера есть USB-порт или слот M.2, подключите к нему накопитель — тяжёлые протоколы (Xray, Hysteria2 и десинк) можно будет держать на нём, и флеш роутера освободится.":"No drive. If the router has a USB port or an M.2 slot, connect a drive to it — the heavy protocols (Xray, Hysteria2 and desync) can then live on it, and the router flash frees up.",
     "это ваши файлы, мы их не трогаем":"these are your files, we do not touch them",
     "Каждый файл переезжает с проверкой: копия, контрольная сумма и пробный запуск — и только потом удаление оригинала.":"Every file moves with checks: a copy, a checksum and a trial run — and only then is the original deleted.",
     "Раскладку не сменить, пока накопитель не найден: переезд в обе стороны требует живого накопителя.":"The layout cannot change while the drive is missing: a move in either direction needs a live drive.",
@@ -10049,6 +10049,24 @@
     "имена сохранены":"names saved",
     "подписка переименована":"subscription renamed","подписка сохранена":"subscription saved",
     "подписка удалена":"subscription deleted",
+    // How a subscription presents itself to its provider (the card of a subscription, «Представляться как» of the add form).
+    "Как роутер представляется провайдеру":"How the router presents itself to the provider","Приложение":"App","Своё":"Custom",
+    "Представляться как":"Present itself as","Отправлять идентификатор устройства (HWID)":"Send the device ID (HWID)",
+    "сделан роутером":"made by the router","ваш":"yours","нет — включите, и роутер сделает свой":"none — turn it on and the router makes its own",
+    "Вставить свой":"Paste your own","Сделать новый":"Make a new one","Сохранить и обновить":"Save and update",
+    "ваш — сохраните":"yours — save it","новый — роутер сделает его при сохранении":"a new one — the router makes it on saving",
+    "HWID из настроек приложения на телефоне:":"The HWID from the app's settings on the phone:",
+    "Новый HWID провайдер посчитает новым устройством: прежнее место останется занятым, пока его не удалят в кабинете провайдера. Сделать новый?":"The provider will count a new HWID as a new device: the old place stays taken until it is removed in the provider's account. Make a new one?",
+    "Некоторые провайдеры отдают подписку только определённому приложению и считают устройства. Выберите то приложение, которое провайдер пускает: роутер будет скачивать подписку от его имени. С HWID провайдер посчитает роутер одним устройством; вставьте HWID из настроек приложения на телефоне — и роутер займёт его место.":"Some providers give a subscription only to a particular app and count devices. Pick the app the provider admits: the router will download the subscription on its behalf. With a HWID the provider counts the router as one device; paste the HWID from the app's settings on your phone, and the router takes its place.",
+    "Провайдер пускает только определённое приложение — выберите его: подписка скачается от его имени. С Happ роутер сразу отправит и свой идентификатор устройства (HWID); заменить его на HWID из приложения на телефоне можно на карточке подписки.":"The provider admits only a particular app? Pick it: the subscription downloads on its behalf. With Happ the router also sends its own device ID (HWID) right away; it can be replaced with the HWID from the phone's app on the subscription's card.",
+    "Роутер не сообщил, как эта подписка представляется провайдеру. Откройте экран заново; не поможет — обновите скрипты роутера.":"The router did not say how this subscription presents itself to the provider. Open the screen again; if that does not help, update the router's scripts.",
+    "сбой":"failure","не удалось сохранить — нет места?":"could not save — out of space?",
+    "сохранено":"saved","неизвестное приложение":"unknown app",
+    "строка User-Agent: латиница, цифры и знаки, до 200 символов":"User-Agent string: Latin letters, digits and signs, up to 200 characters",
+    "HWID: латиница, цифры и знаки . _ : + / = -, от 4 до 128 символов":"HWID: Latin letters, digits and the signs . _ : + / = -, 4 to 128 characters",
+    "у подписки Amnezia Premium приложение своё — роутер представляется AmneziaVPN":"an Amnezia Premium subscription has its own app — the router presents itself as AmneziaVPN",
+    "подписка сохранена, а приложение — нет: повторите на карточке подписки":"the subscription is saved, the app is not: repeat on the subscription's card",
+    "subs-lib.sh не установлен или старый (обновите скрипты роутера)":"subs-lib.sh is not installed or is old (update the router's scripts)",
     "сейчас идёт обновление подписок — удалите подписку через минуту":"subscriptions are being updated right now — delete the subscription in a minute",
     "не удалось удалить подписку":"could not delete the subscription",
     "раздельный резолв рунета включён":"split Runet resolving enabled",
@@ -11982,6 +12000,15 @@
   // буквы внутри слов). i18nStr применяет их подряд и, если в итоге остаётся кириллица, ВОЗВРАЩАЕТ
   // оригинал (не показываем ru/en-мешанину).
   var I18N_RULES=[
+    // The router's words about a subscription's app (cgi-bin/action save_sub / sub_client) — inside «подписка «…»: …» of the journal and
+    // «подписка: …» of a toast, where no exact key reaches them (review s.171 r1). First: a word rule further down cut them in half.
+    ["подписка сохранена, а приложение — нет: повторите на карточке подписки","the subscription is saved, the app is not: repeat on the subscription's card"],
+    ["у подписки Amnezia Premium приложение своё — роутер представляется AmneziaVPN","an Amnezia Premium subscription has its own app — the router presents itself as AmneziaVPN"],
+    ["строка User-Agent: латиница, цифры и знаки, до 200 символов","User-Agent string: Latin letters, digits and signs, up to 200 characters"],
+    ["HWID: латиница, цифры и знаки . _ : + / = -, от 4 до 128 символов","HWID: Latin letters, digits and the signs . _ : + / = -, 4 to 128 characters"],
+    ["subs-lib.sh не установлен или старый (обновите скрипты роутера)","subs-lib.sh is not installed or is old (update the router's scripts)"],
+    ["не удалось сохранить — нет места?","could not save — out of space?"],["неизвестное приложение","unknown app"],
+    ["»: подписка не найдена","»: subscription not found"],["»: плохая метка подписки","»: bad subscription label"],
     // Review s.147: the kernel package owner's, zapret's, apply-bypass's and the orchestrator's refusals — FIRST in the list:
     // a whole phrase goes before generic word rules («уже выполняется», «не готов»), which would cut it in half.
     // r3: the frame lines around those refusals — «включить Zapret» and «Отключить VPN» answer with the WHOLE script output, and one
@@ -12843,7 +12870,7 @@
     ["→ подписка «","→ subscription «"],["подписка «","subscription «"],["»: скачиваю","»: downloading"],
     ["»: серверов","»: servers"],[", пропущено нераспознанных",", unrecognised skipped"],
     ["(пропущено нераспознанных","(unrecognised skipped"],["» удалена","» deleted"],
-    ["»: ссылка изменена","»: link changed"],["↳ подписка:","↳ subscription:"],["подписка:","subscription:"],
+    ["»: ссылка изменена","»: link changed"],["»: приложение сохранено","»: app saved"],["»: сбой","»: failure"],["↳ подписка:","↳ subscription:"],["подписка:","subscription:"],
     // загрузка файлов конфигов
     ["→ загружаю","→ uploading"],[": неизвестное расширение",": unknown extension"],
     [": пустое имя файла",": empty file name"],
@@ -14343,7 +14370,8 @@
     for(i=2;i<100;i++){ if(free(stem+'-'+i)) return stem+'-'+i; }
     return '';
   }
-  function importSub(url, label, done){
+  // `cl` — the form's «Представляться как» ({client, ua}); a key of Amnezia Premium has its own app (premium.sh) and ignores it.
+  function importSub(url, label, done, cl){
     if(busy) return;
     url=(url||'').trim().replace(/^["']|["']$/g,''); label=(label||'').trim();
     // AN AMNEZIA PREMIUM KEY goes into the same field (the user's decision 14.10.2026): no servers in it — the router asks Amnezia
@@ -14351,13 +14379,13 @@
     if(url.indexOf('vpn://')===0){
       amneziaPremiumKey(url).then(function(k){
         if(!k){ var nk='это не ключ подписки Amnezia Premium — готовый конфиг vpn:// добавьте в «Серверах» на вкладке AmneziaWG'; logLine('подписка: '+nk, false); showToast(nk, false); if(done) done(false); return; }
-        subSave(url, label, true, done, k.name || 'Amnezia Premium');
+        subSave(url, label, true, done, k.name || 'Amnezia Premium', cl);
       });
       return;
     }
     if(!/^https?:\/\//.test(url)){ logLine('подписка: нужен URL http(s)://', false); showToast('подписка: нужен URL', false); if(done)done(false); return; }
     if(!label){ logLine('подписка: задайте метку', false); showToast('подписка: задайте метку', false); if(done)done(false); return; }
-    subSave(url, label, false, done);
+    subSave(url, label, false, done, null, cl);
   }
   // subSave — the registry line of a new subscription: a FREE tag first (the router knows which), then the owner's action — a link
   // (save_sub, then its servers fetched) or an Amnezia Premium key (save_premium: the router asks Amnezia in the background, and the
@@ -14365,7 +14393,7 @@
   // A Premium key's name, when none is typed — Amnezia's, numbered past the names taken («Amnezia Premium 2»): two lines of one name
   // could not be told apart in any list.
   function subLabelFree(base, subs){ var n=1, l=base; while((subs||[]).some(function(s){ return s && s.label===l; })) l=base+' '+(++n); return l; }
-  function subSave(url, label, prem, done, defLabel){
+  function subSave(url, label, prem, done, defLabel, cl){
     if(busy) return;
     setBusy(true,'сохраняю подписку…');
     var np=navMark();
@@ -14380,9 +14408,19 @@
         if(!tag) throw new Error('слишком много подписок с похожей меткой — задайте другую');
         if(subs && tag!==subTag(label)) logLine('подписка «'+label+'»: метка занята другой подпиской — беру тег '+tag, null);
         var pj=prem ? premJobId() : '';
-        return subPost(prem ? {action:'save_premium', tag:tag, key:url, label:label, job:pj} : {action:'save_sub', tag:tag, url:url, label:label}).then(function(d){
+        // The client goes with the line only when it is not the default: no `.sub-client` line = the request as before, and a
+        // repeated import of the same subscription keeps the app it was set to on its card.
+        var sp={action:'save_sub', tag:tag, url:url, label:label};
+        if(cl && cl.client && cl.client!=='enodia'){ sp.client=cl.client; if(cl.client==='custom') sp.ua=cl.ua||''; }
+        return subPost(prem ? {action:'save_premium', tag:tag, key:url, label:label, job:pj} : sp).then(function(d){
           if(!d || !d.ok) throw new Error((d&&d.msg)||'не удалось сохранить подписку');
+          // Saved, with a part the router could not take (the app of «Представляться как»): said, and the subscription goes on to its
+          // download and the list — it exists (review s.171 r1: a throw here left it off the screen). The toast comes AFTER the
+          // download's own: its busy toast replaced it at once (r2); the journal has it from the start.
+          if(d.warn) logLine('подписка «'+label+'»: '+d.warn, false);
           if(prem){
+            // A key of Amnezia Premium presents itself as AmneziaVPN whatever the form picked — said, not dropped in silence (r2).
+            if(cl && cl.client && cl.client!=='enodia') logLine('подписка «'+label+'»: у подписки Amnezia Premium приложение своё — роутер представляется AmneziaVPN', null);
             _pmOwn=pj;
             logLine(d.msg||'подписка сохранена', true); showToast(d.msg||'подписка сохранена', true);
             setBusy(false); if(done) done(true);
@@ -14392,7 +14430,7 @@
             if(navHere(np)) subScrOpen(tag);
             return;
           }
-          syncSubServers(tag, label, done);
+          syncSubServers(tag, label, d.warn ? function(ok){ showToast(d.warn, false); if(done) done(ok); } : done);
         });
       }).catch(function(e){
         logLine('подписка: '+(e.message||'ошибка'), false); showToast('подписка: '+(e.message||'ошибка'), false);
@@ -14441,7 +14479,10 @@
     var b=document.getElementById('modal-body'); if(!b || !screenAlive(b)) return true;
     var a=document.activeElement;
     if(a && a!==b && b.contains(a) && (a.tagName==='TEXTAREA' || (a.tagName==='INPUT' && !/^(checkbox|radio|button|submit|file|range)$/.test(a.getAttribute('type')||'text')))) return false;
-    return !Array.prototype.some.call(b.querySelectorAll('.sub-url,.sub-label,.lnk-in'), function(i){ return String(i.value||'').trim()!==''; });
+    // …and the add form's «Представляться как»: an app picked (a redraw put it back to Enodia, and the subscription went out as that)
+    // and a typed custom line are a draft too (review s.171 r2).
+    var ac=b.querySelector('#sub-add-cl .seg.on'); if(ac && ac.getAttribute('data-scl')!=='enodia') return false;
+    return !Array.prototype.some.call(b.querySelectorAll('.sub-url,.sub-label,.sub-ua,.lnk-in'), function(i){ return String(i.value||'').trim()!==''; });
   }
   function listWhenQuiet(fn, n){ n=n|0; if(listQuiet()) fn(); else if(n<80) setTimeout(function(){ listWhenQuiet(fn, n+1); }, 1500); }
   // Прежний путь «по одной из браузера»: последовательно + quiet, чтобы окно не мигало.
@@ -15668,7 +15709,14 @@
     // строку и малая «Импорт»). Пример в поле — как у макета: адрес и метка латиницей, перевода им не нужно.
     return '<label class="dsfld" style="margin-top:0">Ссылка<input class="inp sub-url" type="text" placeholder="https://example.net/sub/xxxx" spellcheck="false" autocomplete="off" autocapitalize="off"></label>'
       + '<label class="dsfld">Метка<input class="inp sub-label" type="text" placeholder="liberty" spellcheck="false" autocomplete="off"></label>'
-      + '<div class="acts"><span class="grow"></span><button type="button" class="btn pri sub-import">Добавить</button></div>';
+      // «Представляться как» (mockup cn-subs, 30.10.2026) — before the first download: a provider admitting only Happ would refuse it, and
+      // the subscription would not be added at all. «Своё» opens its line here; the HWID and the rest — on the subscription's card.
+      + '<div class="dsfld">Представляться как'+subClientSeg('sub-add-cl', 'enodia', 'Представляться как')+'</div>'
+      + '<label class="dsfld" id="sub-add-ua" hidden>User-Agent<input class="inp sub-ua" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" maxlength="200" translate="no"></label>'
+      + '<div class="acts"><span class="grow"></span><button type="button" class="btn pri sub-import">Добавить</button></div>'
+      // What the form really does (review s.171 r1): «Своё» takes its line right here, and Happ sends the router's own HWID with the very
+      // first download (a Happ-only panel with a device limit answers 404 without one) — a phone's HWID replaces it on the card.
+      + '<div class="cline">Провайдер пускает только определённое приложение — выберите его: подписка скачается от его имени. С Happ роутер сразу отправит и свой идентификатор устройства (HWID); заменить его на HWID из приложения на телефоне можно на карточке подписки.</div>';
   }
   // РЯД ИНСТРУМЕНТОВ вкладки Xray (макет: поиск, «Обновить все», «Скорость всех», «Сортировать» — над списком, во всю строку).
   // Поиск и «Обновить все» — про подписки, их нет без подписок; скорость и сортировка — про серверы, их нет без серверов.
@@ -16136,11 +16184,12 @@
           return;
         }
       });
-      var imp=body.querySelector('.sub-import');
+      var imp=body.querySelector('.sub-import'), addCl='enodia', addUa=body.querySelector('#sub-add-ua');
+      wireSeg(body.querySelector('#sub-add-cl'), 'data-scl', function(v){ addCl=v; if(addUa){ addUa.hidden=(v!=='custom'); if(v==='custom'){ var ui=addUa.querySelector('input'); if(ui) ui.focus(); } } });
       if(imp) imp.addEventListener('click', function(){
         if(busy) return;
-        var u=body.querySelector('.sub-url'), l=body.querySelector('.sub-label');
-        importSub(u?u.value:'', l?l.value:'');
+        var u=body.querySelector('.sub-url'), l=body.querySelector('.sub-label'), ua=body.querySelector('.sub-ua');
+        importSub(u?u.value:'', l?l.value:'', null, {client:addCl, ua:(ua ? ua.value.trim() : '')});
       });
       focusBack(body, fsig);
     }, function(){ if(screenAlive(body)) oops(body,'не удалось получить список подписок'); });
@@ -16156,6 +16205,7 @@
     if(rep) tag=navSplit(_navKey).a;
     tag=String(tag==null?'':tag);
     if(!subTagOk(tag)){ if(!rep) openSubs(); return; }
+    if(!rep) _sclDraft=null;   // a fresh open of the screen starts from the router's word (the app card's draft lives across redraws only)
     var g=++_navGen;
     _navPend=true;
     // Отказ сети и ответ не той формы (`{need_login}` с кодом 200, `{error}` старого CGI) — один исход: подписки мы не узнали.
@@ -16212,6 +16262,12 @@
       // сетке ВВЕРХ справа, рядом с этой (замер на BE7000): опасное действие оказывалось первым, что видно на экране.
       +   '<span class="grow"></span><button type="button" class="btn sm bad" data-sa="del">Удалить подписку</button>'
       + '</div><div class="cline">'+SUBS_NOTE+'</div></div>';
+    // How it presents itself to its provider — right under the head, as in the mockup. The router's word (`subclient` of /cgi-bin/list);
+    // a router older than the card gives none — the default client, the same request it has always sent.
+    // No word (`null` — an older router, its verb failed) — no editable card: a guessed default saved would overwrite the real setting.
+    var scc=l.subclient, scl=(scc && scc.presets && scc.presets.enodia && scc.subs && scc.subs[tag]) || null, spre=(scc && scc.presets) || {};
+    var sdr=(scl && _sclDraft && _sclDraft.tag===tag) ? _sclDraft : null;
+    h+=scl ? subClientCard(scl, spre, sdr) : subClientNone();
     // Карточка сама — группа (`.sub-acc`, развёрнута всегда): заголовок с данными (`.ct`), число — в `.sub-cnt` (его пишут прогоны).
     h+='<div class="card wfull sub-acc open" data-tag="'+esc(tag)+'">'
       + '<div class="ct">Серверы подписки <span class="sub dotb sub-cnt">'+n+' серв.</span><span class="sp"></span>'
@@ -16230,6 +16286,7 @@
       + '</div>';
     body.innerHTML=h+'</div>';
     wireSrvCards(body, l, navIfShown('cn-sub', subScrOpen));
+    if(scl) subClientWire(body, tag, label, scl, spre, sdr);
     hydrateChecks(body);   // запомненные пинг и скорость серверов (.srv-checks на роутере)
     focusBack(body, fsig);
     body.addEventListener('click', function(ev){
@@ -17946,6 +18003,115 @@
       showToast('ссылка обновлена', true); logLine('подписка «'+(label||tag)+'»: ссылка изменена', true);
       if(askConfirm('Ссылка сохранена. Перетянуть серверы с новой ссылки сейчас?')) refreshSub(tag, label);
     }).catch(function(){ setBusy(false); showToast('сбой сохранения ссылки', false); });
+  }
+  // ---- HOW A SUBSCRIPTION PRESENTS ITSELF TO ITS PROVIDER (mockup cn-sub / cn-subs, 30.10.2026; router — subs-lib.sh `.sub-client`) ----
+  // Panels like Remnawave give a subscription only to «their» apps — by the User-Agent — and count devices by `x-hwid`. Per subscription.
+  // The presets' strings are the ROUTER's (`subclient.presets` of /cgi-bin/list): a router update follows an app's new version with no
+  // panel change. The HWID reaches the panel MASKED (a credential, as the link is) and never goes back: «keep the one it has» is the
+  // router's own decision (`hwid_do=keep`). Forms of a custom line and a pasted HWID — the router checks them and says what is wrong.
+  var SUB_CLIENTS=[['enodia','Enodia'],['happ','Happ'],['v2rayng','v2rayNG'],['custom','Своё']];
+  // A named group, as the schedule's bars: a screen reader heard «Enodia, button, pressed» with no word of what it picks.
+  function subClientSeg(id, cur, name){
+    return '<div class="segbar sm" id="'+id+'" role="group" aria-label="'+esc(name)+'">'+SUB_CLIENTS.map(function(c){
+      return '<div class="seg'+(c[0]===cur?' on':'')+'" data-scl="'+c[0]+'"'+(c[0]==='custom'?'':' translate="no"')+'>'+c[1]+'</div>'; }).join('')+'</div>';
+  }
+  function subClientUa(cl, pre, own){ return cl==='custom' ? (own||'') : ((pre||{})[cl]||''); }
+  // A quarter of a pasted HWID at most at each end (four at most) — the router masks its own the same way (subs-update.sh client-json);
+  // a short one (4..8) showed whole (review s.171 r1).
+  function subHwMask(v){ var n=v.length, k=Math.min(4, Math.floor(n/4)); return v.slice(0,k)+'…'+v.slice(n-k); }
+  // The word — its own node: the translation takes a node's text whole, and « · сделан роутером» is no entry.
+  function subClientHw(hw, src){ return hw ? '<span class="mono" translate="no">'+esc(hw)+'</span> · <span>'+(src==='own'?'ваш':'сделан роутером')+'</span>' : 'нет — включите, и роутер сделает свой'; }
+  // The HWID line: the router's word, or what is waiting for «Сохранить» (a pasted one, a new one ordered).
+  function subClientHwLine(sc, pend){
+    if(pend.act==='own') return '<span class="mono" translate="no">'+esc(subHwMask(pend.hwid))+'</span> · <span>ваш — сохраните</span>';
+    if(pend.act==='new') return 'новый — роутер сделает его при сохранении';
+    return subClientHw(sc.hw, sc.src);
+  }
+  // A DRAFT OF THE CARD OUTLIVES A REDRAW of the same subscription's screen — the end of its own update, a server switch: the app
+  // picked, a typed line, the switch and a pasted HWID went back to the router's word mid-edit, and a later «Сохранить» saved that
+  // (review s.171 r1). A fresh open of the screen starts from the router's word (subScrOpen drops it), and so does a save it took.
+  var _sclDraft=null;
+  // The router did not say how the subscription presents itself (an older router, or its verb failed — no memory for its run): no card
+  // to edit. A default guessed here and saved would overwrite the real setting — the panel acts only on what the router told it.
+  function subClientNone(){
+    return '<div class="card w2" id="sub-cl-none"><div class="wt">Как роутер представляется провайдеру</div>'
+      + '<div class="cline">Роутер не сообщил, как эта подписка представляется провайдеру. Откройте экран заново; не поможет — обновите скрипты роутера.</div></div>';
+  }
+  function subClientCard(sc, pre, dr){
+    var cl=dr ? dr.cl : sc.cl, uav=dr ? dr.ua : subClientUa(sc.cl, pre, sc.ua), hwon=dr ? dr.hwon : sc.hwon, pend=dr ? dr.pend : {act:'keep', hwid:''};
+    return '<div class="card w2" id="sub-cl"><div class="wt">Как роутер представляется провайдеру</div>'
+      + '<div class="dsfld" style="margin-top:0">Приложение'+subClientSeg('sub-cl-seg', cl, 'Приложение')+'</div>'
+      + '<label class="dsfld">User-Agent<input class="inp" id="sub-cl-ua" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" maxlength="200" translate="no" value="'+esc(uav)+'"'+(cl==='custom'?'':' readonly')+'></label>'
+      + '<div class="kv swrow"><div class="grow"><div class="k">Отправлять идентификатор устройства (HWID)</div><div class="v" id="sub-cl-hw">'+subClientHwLine(sc, pend)+'</div></div>'
+      +   '<label class="sw"><input type="checkbox" id="sub-cl-hwon" aria-label="Отправлять идентификатор устройства (HWID)"'+(hwon?' checked':'')+'><i></i></label></div>'
+      + '<div class="acts"><button type="button" class="btn sm gh" data-scla="own">Вставить свой</button><button type="button" class="btn sm gh" data-scla="new">Сделать новый</button>'
+      +   '<span class="grow"></span><button type="button" class="btn sm pri" data-scla="save">Сохранить и обновить</button></div>'
+      + '<div style="margin-top:11px">'+noteBox('Некоторые провайдеры отдают подписку только определённому приложению и считают устройства. Выберите то приложение, которое провайдер пускает: роутер будет скачивать подписку от его имени. С HWID провайдер посчитает роутер одним устройством; вставьте HWID из настроек приложения на телефоне — и роутер займёт его место.','info')+'</div></div>';
+  }
+  function subClientWire(body, tag, label, sc, pre, dr){
+    var card=body.querySelector('#sub-cl'); if(!card) return;
+    var cl=dr ? dr.cl : sc.cl, ua=card.querySelector('#sub-cl-ua'), hwv=card.querySelector('#sub-cl-hw'), on=card.querySelector('#sub-cl-hwon'), pend=dr ? dr.pend : {act:'keep', hwid:''};
+    function keep(){ _sclDraft={tag:tag, cl:cl, ua:ua ? ua.value : '', hwon:!!(on && on.checked), pend:pend}; }
+    wireSeg(card.querySelector('#sub-cl-seg'), 'data-scl', function(v){
+      // The app already picked: a second click changes nothing — it reset a typed line and turned the HWID back on (review s.171 r3).
+      if(v===cl){ if(v==='custom' && ua) ua.focus(); return; }
+      cl=v;
+      if(ua){
+        ua.readOnly=(v!=='custom');
+        ua.value=subClientUa(v, pre, (v==='custom' && sc.cl==='custom') ? sc.ua : '');
+        if(v==='custom') ua.focus();
+      }
+      // Happ — with the HWID on, as the add form's Happ (cgi-bin/action save_sub): a Happ-only panel with a device limit answers 404
+      // without one, and the card is the one way to fix a subscription added before (review s.171 r2). The switch can still go off.
+      if(v==='happ' && on) on.checked=true;
+      keep();
+    });
+    if(ua) ua.addEventListener('input', keep);
+    if(on) on.addEventListener('change', keep);
+    card.addEventListener('click', function(ev){
+      for(var el=ev.target; el && el!==card; el=el.parentNode){
+        var a=el.getAttribute && el.getAttribute('data-scla'); if(!a) continue;
+        if(a==='own'){
+          var v=askPrompt('HWID из настроек приложения на телефоне:', ''); if(v==null) return; v=v.trim(); if(!v) return;
+          pend={act:'own', hwid:v}; on.checked=true; hwv.innerHTML=subClientHwLine(sc, pend); keep();
+        } else if(a==='new'){
+          if(!askConfirm('Новый HWID провайдер посчитает новым устройством: прежнее место останется занятым, пока его не удалят в кабинете провайдера. Сделать новый?')) return;
+          pend={act:'new', hwid:''}; on.checked=true; hwv.innerHTML=subClientHwLine(sc, pend); keep();
+        } else if(a==='save'){
+          // WHAT WAS SENT is what the router took: edits made while it answered stay a draft, and a second paste is not shown as saved
+          // (review s.171 r2). The line says the router's word until the update's redraw brings its own: a pasted HWID — its mask,
+          // a new one or one the router makes for a switch turned on — «сохранено»; nothing is waiting any more.
+          var s0={cl:cl, ua:ua ? ua.value.trim() : '', hwon:on.checked, pend:pend};
+          subClientSave(tag, label, s0.cl, s0.ua, s0.hwon, s0.pend, function(){
+            // …and it acts on the SHARED state, not on this card: the screen may have been redrawn from the draft or left for another
+            // subscription while the router answered (review s.171 r3). The waiting HWID waits no more — in place, since the draft
+            // and a card redrawn from it hold that very object; the draft goes only if it is this subscription's and unchanged.
+            var act=s0.pend.act, hw=s0.pend.hwid; s0.pend.act='keep'; s0.pend.hwid='';
+            var dr=_sclDraft;
+            if(dr && dr.tag===tag && dr.cl===s0.cl && String(dr.ua||'').trim()===s0.ua && dr.hwon===s0.hwon && dr.pend===s0.pend) _sclDraft=null;
+            // This card's line, while it is shown and waits for nothing newer: what the router now keeps.
+            if(screenAlive(card) && pend===s0.pend){
+              if(act==='own') hwv.innerHTML=subClientHw(subHwMask(hw), 'own');
+              else if(act==='new' || (s0.hwon && !sc.hw)) hwv.textContent='сохранено';
+            }
+          });
+        }
+        return;
+      }
+    });
+  }
+  // Save, then the subscription's own update (the same path as «Обновить серверы»): a provider that refused the old client answers now.
+  // `took` — the card's own word after the router took it (the line, the draft — the card knows what changed since the click).
+  function subClientSave(tag, label, cl, ua, hwon, pend, took){
+    if(busy) return;
+    setBusy(true,'сохраняю…');
+    subPost({action:'sub_client', tag:tag, client:cl, ua:(cl==='custom' ? ua : ''), hwon:(hwon ? '1' : '0'), hwid_do:pend.act, hwid:pend.hwid}).then(function(d){
+      setBusy(false);
+      if(!d || !d.ok){ var m=(d&&d.msg)||'сбой'; showToast(m, false); logLine('подписка «'+(label||tag)+'»: '+m, false); return; }
+      if(took) took();
+      logLine('подписка «'+(label||tag)+'»: приложение сохранено', true);
+      refreshSub(tag, label);
+    }).catch(function(){ setBusy(false); showToast('сбой', false); });
   }
   // Активация сервера (клик по карточке/строке). Общий путь для .srv (awg/hy2) и .srv2 (карточки).
   // canAct — из canActivate(grp): БИНАРЬ есть. Отсутствие секрет-конфига активации не мешает —
@@ -27965,7 +28131,7 @@
     }
     var cands=storeCands();
     if(!cands.length)
-      return h+dkLine('Накопителя нет. Если у роутера есть USB-порт, воткните в него накопитель — тяжёлые протоколы (Xray, Hysteria2 и десинк) можно будет держать на нём, и флеш роутера освободится.')+'</div>';
+      return h+dkLine('Накопителя нет. Если у роутера есть USB-порт или слот M.2, подключите к нему накопитель — тяжёлые протоколы (Xray, Hysteria2 и десинк) можно будет держать на нём, и флеш роутера освободится.')+'</div>';
     h+=noteBox('Роутер видит подключённый накопитель. Тяжёлые протоколы (Xray, Hysteria2 и десинк) можно держать на нём — на флеше освободится место, и они перестанут конкурировать друг с другом.','info');
     h+=dkCandRows(cands);
     return h+'<div style="margin-top:11px">'+noteBox('Каждый файл переезжает с проверкой: копия, контрольная сумма и пробный запуск — и только потом удаление оригинала.','info')+'</div></div>';

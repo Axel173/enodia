@@ -1295,6 +1295,8 @@
      как только карточка была шире «подпись + 560 px» («Новый пароль», «Сервер SMTP», «Домен», подтверждение удаления — на ПК;
      сверка 26.09.2026). */
   .dsfld{display:block;margin-top:10px;font-size:12px;color:var(--ink3)}
+  /* `hidden` loses to the author's display:block above (index.html, #scr-sec): the add form's «Своё» line showed under every app */
+  .dsfld[hidden]{display:none}
   .dsfld>input,.dsfld>select,.dsfld>textarea{display:block;margin-top:5px}
   /* Шаг 5a («Сеть»): выбор резолвера — рядом с кнопкой, как поле ссылки (`.lnkrow>input`), а не во всю ширину с кнопкой под ним. */
   .lnkrow>select{flex:1 1 auto;min-width:0}

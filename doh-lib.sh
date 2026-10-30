@@ -1329,12 +1329,15 @@ doh_rearm_due() {
 # и AX3600 16.10.2026; «Name or service not known» — uclibc/glibc) = апстрим ответил; «Try again» (SERVFAIL, молчащий апстрим) и
 # обрыв по сроку — нет. Адрес на выдуманное имя — тоже ответ апстрима (подстановка), КРОМЕ заглушки 0.0.0.0/:: — её отдаёт сам
 # dnsmasq по `address=` блок-списка, не спросив никого.
+# musl 1.2.5 (busybox 1.36.1 — BE10000 Pro RP04, the new 6.6-kernel Xiaomi builds) prints the same NXDOMAIN as «Name has no usable
+# address» (its EAI_NODATA text): unknown here, EVERY probe read «резолвер не ответил» over a working proxy, and «Шифровать всегда»
+# never stayed on (21 refusals in the tester's journal, 29.10.2026). SERVFAIL there is still «Try again» (measured: dnssec-failed.org).
 doh_probe() {
 	_pn=${1:-2}; _pi=0
 	while [ "$_pi" -lt "$_pn" ]; do
 		_pi=$((_pi+1))
 		_po=$(timeout -t 4 nslookup "$(doh_probe_name)" 2>&1); _prc=$?
-		case "$_po" in *'Name does not resolve'*|*'Name or service not known'*|*NXDOMAIN*) return 0 ;; esac
+		case "$_po" in *'Name does not resolve'*|*'Name or service not known'*|*'Name has no usable address'*|*NXDOMAIN*) return 0 ;; esac
 		# Адреса ответа — строки ПОСЛЕ «Name:» (выше — адрес самого сервера, 127.0.0.1).
 		[ "$_prc" = 0 ] && printf '%s\n' "$_po" | awk '/^Name:/ { n = 1; next } n && /^Address/ && $NF != "0.0.0.0" && $NF != "::" { f = 1 } END { exit !f }' && return 0
 		[ "$_pi" -lt "$_pn" ] && sleep 2

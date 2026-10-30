@@ -518,20 +518,24 @@ cmd_detect() {
     # панель по этому списку предлагает выбор («перенести на какой?») — две строки на один
     # носитель читались бы как два накопителя. Разделы у mount_candidates идут первыми, поэтому
     # к моменту разбора sdX список их дисков уже полон.
+    # «Is it a drive» and «whose disk» — mount-lib.sh's answer (ext_is_*/ext_disk_of): an NVMe partition's disk is not its name
+    # cut at the first digit (nvme0n1p1 → «nvme»).
     _seen=""
     while read -r _d _m _t _rest; do
-        case "$_d" in /dev/sd*) ;; *) continue ;; esac
-        _o=no; [ -n "$(store_of_mount "$_m")" ] && _o=yes
+        case "$_d" in /dev/*) ;; *) continue ;; esac
         _n=${_d#/dev/}
-        case "$_n" in sd[a-z][0-9]*) _seen="$_seen ${_n%%[0-9]*}" ;; esac
+        ext_is_part "$_n" || ext_is_disk "$_n" || continue
+        _o=no; [ -n "$(store_of_mount "$_m")" ] && _o=yes
+        ext_is_part "$_n" && { ext_disk_of "$_n"; _seen="$_seen $EXT_DISK"; }
         printf '%s\t%s\t%s\t%s\n' "$_d" "$_t" "$_m" "$_o"
     done < "$MOUNTS"
     for _dev in $(mount_candidates); do
         _n=${_dev#/dev/}
-        case "$_n" in
-            sd[a-z]) case " $_seen " in *" $_n "*) continue ;; esac ;;
-            *)       _seen="$_seen ${_n%%[0-9]*}" ;;
-        esac
+        if ext_is_disk "$_n"; then
+            case " $_seen " in *" $_n "*) continue ;; esac
+        else
+            ext_disk_of "$_n"; _seen="$_seen $EXT_DISK"
+        fi
         printf '%s\t?\t-\t?\n' "$_dev"
     done
 }
@@ -730,18 +734,19 @@ prepare_store() {   # $1 = /dev/sdX1 | точка монтирования | п�
         # единственную воткнутую флешку «несколькими» и требовал указать её руками.
         _n=0; _disks=""; _cand=""
         while read -r _d _m _t _rest; do
-            case "$_d" in /dev/sd*) ;; *) continue ;; esac
-            _dsk=${_d#/dev/}; _dsk=${_dsk%%[0-9]*}
+            case "$_d" in /dev/*) ;; *) continue ;; esac
+            ext_is_part "${_d#/dev/}" || ext_is_disk "${_d#/dev/}" || continue
+            ext_disk_of "${_d#/dev/}"; _dsk=$EXT_DISK
             case " $_disks " in *" $_dsk "*) ;; *) _disks="$_disks $_dsk"; _n=$((_n+1)) ;; esac
             [ -z "$_mp" ] && _mp="$_m"     # смонтированное предпочтительнее: второй монтаж того же не нужен
         done < "$MOUNTS"
         for _dev in $(mount_candidates); do
-            _dsk=${_dev#/dev/}; _dsk=${_dsk%%[0-9]*}
+            ext_disk_of "${_dev#/dev/}"; _dsk=$EXT_DISK
             case " $_disks " in *" $_dsk "*) ;; *) _disks="$_disks $_dsk"; _n=$((_n+1)) ;; esac
             [ -z "$_cand" ] && _cand="$_dev"
         done
         if [ "$_n" = 0 ]; then
-            echo "накопитель не найден: воткните флешку в USB-порт роутера" >&2; return 1
+            echo "накопитель не найден: воткните флешку в USB-порт роутера или SSD в слот M.2, если он есть" >&2; return 1
         fi
         if [ "$_n" -gt 1 ]; then
             echo "накопителей несколько — укажите нужный явно (usb-offload.sh enable /dev/sdX1):" >&2

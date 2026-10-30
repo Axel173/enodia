@@ -42,7 +42,7 @@ from collections import namedtuple
 
 # Версия PC-стороны проекта. Держится В СИНХРОНЕ с `version` в pyproject.toml и requirements.txt
 # (копии сознательные — uv-путь и pip-путь; разъезд ловит C35). См. CHANGELOG.md.
-PROJECT_VERSION = "1.3.3"
+PROJECT_VERSION = "1.3.4"
 
 # --- Зависимость paramiko (in-process SSH) — с авто-доустановкой ---
 # paramiko ОБЯЗАТЕЛЕН (in-process SSH). Если его нет — НЕ падаем молча с кодом 1: на
@@ -4244,7 +4244,9 @@ def wizard_store_mode(app, mode, dev):
     # Форму устройства проверяем ЗДЕСЬ, хотя её же проверяет CGI панели: значение приезжает из
     # браузера и уходит АРГУМЕНТОМ в шелл роутера. Гард на границе доверия обязан стоять у
     # каждой границы — это не дубль правила, а его применение (у CGI своя граница, у нас своя).
-    if dev and not re.match(r"^/dev/sd[a-z][0-9]{0,2}$", dev):
+    # ext-dev: the same set as the router's mount-lib.sh::ext_is_part/ext_is_disk — USB `sd*` and M.2 `nvme*`, never `mmcblk*`
+    # (the router's own eMMC); C147 compares the two.
+    if dev and not re.match(r"^/dev/(sd[a-z][0-9]{0,2}|nvme[0-9]n[0-9](p[0-9]{1,2})?)$", dev):
         return {"ok": False, "error": L("неизвестное устройство", "unknown device")}
     cd = app.code_dir()
     # Путь уезжает в шелл роутера внутри одинарных кавычек — пробел в нём законен (точка

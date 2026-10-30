@@ -392,13 +392,16 @@ dns_direct_rules() {   # $1 = add|del
         done
     done
 }
+# The direct upstream of `down` — through «Шифрованный DNS» when it is on, as every DNS setter (C146; the same bare put in ByeDPI's
+# `down` resolved a fall into direct mode in the clear, AX3600 30.10.2026).
 set_dnsmasq_direct() {
+    doh_apply_dns direct && return 0
     dns_upstream_put "$DNS1" "$DNS2"
 }
 set_direct_dns() {
     doh_apply_dns direct && return 0    # DoH ВКЛ/авто → резолв через локальный прокси (резолвер :443 мимо марки); иначе → ниже
     dns_direct_rules add
-    set_dnsmasq_direct
+    dns_upstream_put "$DNS1" "$DNS2"    # not set_dnsmasq_direct: DoH is asked once — a second ask would run the auto mode's probe again
 }
 
 # ---- iptables-правила (идемпотентно) ----------------------------------------
@@ -695,7 +698,7 @@ cmd_t_up() {
 cmd_t_down() {
     cmd_off || return 1      # Keep intent and DNS if the platform owner refused removal.
     dns_direct_rules del    # снять наши DNS-RETURN (следующий транспорт поставит свой DNS)
-    set_dnsmasq_direct      # dnsmasq на прямой резолвер — fail-open до подъёма следующего транспорта
+    set_dnsmasq_direct      # dnsmasq на прямой резолвер (через DoH, если он включён) — fail-open до подъёма следующего транспорта
     rm -f /tmp/enodia-watchdog.xstate /tmp/enodia-failover-episode 2>/dev/null
     log "Zapret-несущая снята (релинквиш) → прямой режим. Следующий транспорт ставит оркестратор."
 }

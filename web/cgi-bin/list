@@ -234,6 +234,13 @@ printf '"awg":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"held":{%s},"gen
 printf '"xray":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},' "${xr_active:-?}" "$(is_ready xray)" "$(bin_present xray)" "$(list_dir "$DS/xray-configs" json)" "$(meta_xray)"
 printf '"hy2":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},'  "${hy_active:-?}" "$(is_ready hy2)"  "$(bin_present hy2)"  "$(list_dir "$DS/hy2-configs" yaml)" "$(meta_hy2)"
 printf '"subs":[%s],' "$(subs_list)"
+# How each subscription presents itself to its provider (User-Agent, HWID MASKED) — its owner answers (subs-update.sh client-json,
+# `.sub-client` of subs-lib.sh). No answer of its form (an older router, a verb that failed — no memory for its run dir, a fork) is
+# `null`, not an empty object: the empty one read as «no client lines», and the card offered the default client over a saved Happ —
+# a save from it would overwrite the real setting (review s.171 r1).
+_scj=$([ -f "$D/subs-update.sh" ] && sh "$D/subs-update.sh" client-json 2>/dev/null)
+case "$_scj" in '{"presets":'*'}') : ;; *) _scj=null ;; esac
+printf '"subclient":%s,' "$_scj"
 # Настоящие имена конфигов, добавленных руками (cfg-names.sh, ключ «вид/файл»): разбор — у владельца, один запуск на список.
 printf '"cfgnames":{%s},' "$([ -f "$D/cfg-names.sh" ] && sh "$D/cfg-names.sh" json 2>/dev/null)"
 # Дороги к серверам (road.sh: «вид/файл» → номер выхода-дороги) — тот же приём: разбор у владельца, один запуск на список.

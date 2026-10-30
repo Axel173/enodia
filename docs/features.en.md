@@ -31,7 +31,9 @@ example your own WARP.
 
 Xray, Hysteria2 and AmneziaWG servers are added from one subscription link (3x-ui included) and updated on a
 schedule. An **Amnezia Premium** key goes in the same place: the router takes the configs of the countries you pick by
-itself. The panel hands any saved server back — as a link, a QR code or a file.
+itself. The panel hands any saved server back — as a link, a QR code or a file. If a provider gives the subscription
+only to a particular app (Happ, for example) and counts devices, the router presents itself as that app and sends its
+own device ID (HWID) — set per subscription.
 
 ## Watchdog
 
@@ -69,4 +71,4 @@ For today, the week, the month and the year: through the tunnel and direct, by e
 - Your own scheduled tasks: a script, a file or a command — on a cron schedule, at boot or by a button.
 - A backup of all settings and their restore.
 - Updates from GitHub as a signed package.
-- Protocols or the whole system on a USB stick, if the router has a USB port.
+- Protocols or the whole system on a USB stick or an SSD in an M.2 slot, if the router has one.

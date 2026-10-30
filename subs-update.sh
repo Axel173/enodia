@@ -32,6 +32,7 @@
 #                    «sub-<tag>-». The `.subs` line is left without its link (no run lays the configs out again meanwhile).
 #   fetch <tag>    — тело подписки в base64 (используется CGI: одна копия закачки).
 #   list           — что в реестре (tag, метка, сколько конфигов сейчас).
+#   client-json    — how each subscription presents itself to its provider (User-Agent, HWID masked) — for cgi-bin/list.
 #   parse <ссылка> — конфиг из ОДНОЙ ссылки в stdout, ничего не записывая: роутерный канон
 #                    разбора ссылок (xray + hy2 + AmneziaWG/WireGuard), его же сверяют стенды паритета с panel.js.
 #   name <ссылка>  — the name this link gives its server (remark, container description, config comment); read-only.
@@ -107,6 +108,8 @@ fi
 # а при точечной заливке (обновили один скрипт из двух) он есть, и функции в нём нет. Без этой
 # строки каждый прогон писал бы «sub_info_put: not found» в лог прямо человеку под нос.
 command -v sub_info_put >/dev/null 2>&1 || sub_info_put() { return 0; }
+# The client a subscription presents itself as (subs-lib.sh::sub_fetch_tag) — the same case: an older library downloads as before.
+command -v sub_fetch_tag >/dev/null 2>&1 || sub_fetch_tag() { sub_fetch "$2" "$3"; }
 # Сводка прогона для панели (subs-lib.sh::sub_sum_cut) — тот же случай: без функции третье поле `.subs-last` осталось бы
 # ПУСТЫМ, и сводка пропала бы с экрана «Подписки». Шим — прежняя обрезка по байту: обрыв посреди слова, но строка будет.
 command -v sub_sum_cut >/dev/null 2>&1 || sub_sum_cut() { tr -d '\t\r\n' | cut -c1-"$1"; }
@@ -1489,7 +1492,7 @@ update_one() {
 	sub_host_public "$_url" || { say "подписка «$_lab»: ссылка ведёт на приватный адрес — отказ (SSRF)"; return 1; }
 	say "подписка «$_lab» ($_t): скачиваю"
 	SUB_FETCH_VIA=""
-	if ! sub_fetch "$_url" "$TMPD/body"; then
+	if ! sub_fetch_tag "$_t" "$_url" "$TMPD/body"; then
 		say "  недоступна или пустая"
 		SUMMARY="$SUMMARY«$_lab»: не скачалась. "
 		FAILED=$((FAILED+1))
@@ -1623,6 +1626,28 @@ cmd_update() {
 	return 0
 }
 
+# client-json — how each registry subscription presents itself to its provider (subs-lib.sh, `.sub-client`), for cgi-bin/list:
+# {"presets":{"enodia":"…","happ":"…","v2rayng":"…"},"subs":{"<tag>":{"cl":"happ","ua":"","hwon":1,"hw":"7f3a…c91e","src":"gen"}}}.
+# The HWID goes out MASKED: the panel shows WHICH one, never the value — a credential, as the link is, and the link never reaches
+# the panel either. A custom line is the person's own and goes as is (escaped). The preset strings come from their one owner.
+cmd_client_json() {
+	command -v sub_client_read >/dev/null 2>&1 || { printf '{"presets":{},"subs":{}}'; return 0; }
+	_cjo=""
+	for _cjt in $(sub_tags); do
+		case "$_cjt" in ''|*[!a-z0-9-]*) continue ;; esac
+		sub_client_read "$_cjt"
+		_cjh=""
+		# A quarter of the value at most at each end (four at most): a short pasted HWID (4..16) showed whole or half (review s.171 r1);
+		# the panel masks a pasted one the same way (subHwMask).
+		[ -n "$SUB_CL_HWID" ] && _cjh="$(printf '%s' "$SUB_CL_HWID" | awk '{ n = length($0); k = int(n / 4); if (k > 4) k = 4; print substr($0, 1, k) "…" substr($0, n - k + 1) }')"
+		_cju=$(printf '%s' "$SUB_CL_UA" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		_cjo="$_cjo${_cjo:+,}\"$_cjt\":{\"cl\":\"$SUB_CL\",\"ua\":\"$_cju\",\"hwon\":$SUB_CL_HWON,\"hw\":\"$_cjh\",\"src\":\"$SUB_CL_HWSRC\"}"
+	done
+	printf '{"presets":{"enodia":"%s","happ":"%s","v2rayng":"%s"},"subs":{%s}}' \
+		"$(sub_client_ua enodia | sed 's/\\/\\\\/g; s/"/\\"/g')" "$(sub_client_ua happ | sed 's/\\/\\\\/g; s/"/\\"/g')" \
+		"$(sub_client_ua v2rayng | sed 's/\\/\\\\/g; s/"/\\"/g')" "$_cjo"
+}
+
 cmd_fetch() {
 	_t="$1"
 	case "$_t" in ''|*[!a-z0-9-]*) echo "плохая метка подписки" >&2; return 1 ;; esac
@@ -1637,7 +1662,7 @@ cmd_fetch() {
 	# импорту, пока cron обновляет соседнюю подписку. Цена — гонка в единственном исходе: если
 	# запись cron'а придётся ровно в окно между нашим чтением файла и mv, потеряется ОТМЕТКА
 	# одной подписки (не файл: mv атомарен), и её вернёт ближайшее обновление.
-	if ! sub_fetch "$_url" "$TMPD/body"; then
+	if ! sub_fetch_tag "$_t" "$_url" "$TMPD/body"; then
 		sub_info_put "$_t" fail
 		echo "подписка недоступна или пустая" >&2; return 1
 	fi
@@ -1923,6 +1948,7 @@ case "$1" in
 		exit $rc ;;
 	fetch) cmd_fetch "$2" ;;
 	list)  cmd_list ;;
+	client-json) cmd_client_json ;;
 	parse) cmd_parse "$2" ;;
 	name)  cmd_name "$2" ;;
 	vpn-json) cmd_vpn_json "$2" "$3" ;;

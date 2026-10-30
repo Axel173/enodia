@@ -78,7 +78,8 @@ BOOT_ID=/proc/sys/kernel/random/boot_id
 INIT_SCRIPT=/etc/init.d/enodia-early
 INIT_LINK=/etc/rc.d/S20enodia-early
 INIT_TAG='# enodia early v1 — ранний подъём шифрованного DNS (кладёт boot.sh)'
-HOOK_TAG='# enodia hotplug v1 — кладётся boot.sh на каждом прогоне (/etc/hotplug.d = ramfs)'
+# v2 (30.10.2026): the body lets `nvme*` through too — a NEW tag, else hook_ensure keeps v1 where /etc survives a reboot (AX3600, BE3600).
+HOOK_TAG='# enodia hotplug v2 — кладётся boot.sh на каждом прогоне (/etc/hotplug.d = ramfs)'
 # ИЗ ЧЕГО СОСТОИТ БУТСТРАП — список ровно один, здесь. Он же используется и при сборке
 # (`sync` из install.sh), и при самообновлении: два списка разъехались бы, и на роутере
 # оказалась бы половина бутстрапа — то есть запускатель, который не умеет искать накопитель.
@@ -397,7 +398,8 @@ hook_ensure() {
         echo '#!/bin/sh'
         echo "$HOOK_TAG"
         echo '[ "$ACTION" = add ] || exit 0'
-        echo 'case "$DEVNAME" in sd*) ;; *) exit 0 ;; esac'
+        # ext-dev: a cheap prefilter by family only — the verdict on the exact name is mount-lib.sh's (ext_is_part/ext_is_disk).
+        echo 'case "$DEVNAME" in sd*|nvme*) ;; *) exit 0 ;; esac'
         echo "$BOOT_DIR/boot.sh hotplug >/dev/null 2>&1"
     } > "$HOOK.new" 2>/dev/null || return 1
     chmod +x "$HOOK.new" 2>/dev/null

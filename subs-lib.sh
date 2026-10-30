@@ -180,6 +180,72 @@ sub_info_drop() {
 	return 0
 }
 
+# --- HOW THE ROUTER PRESENTS ITSELF TO A PROVIDER: `$ENODIA_STATE/.sub-client` ---------------------------------------
+# Lines «tag⇥client⇥ua⇥hwon⇥hwid⇥hwsrc» (⇥=TAB; an empty field is written `-`: busybox `read` folds consecutive TABs and the
+# fields after an empty one would shift). Panels like Remnawave give a subscription only to «their» apps — by the User-Agent —
+# and count devices by `x-hwid` (device limit on ⇒ a request without it is refused, 404). The router sent every provider the same
+# «enodia-panel/1.0», and such a subscription did not download at all (a provider admitting only Happ — the chat, 28.10.2026).
+# PER SUBSCRIPTION: one provider wants Happ, another nothing.
+#   client — enodia | happ | v2rayng | custom; the presets' strings live in ONE place, sub_client_ua (an update can follow an
+#            app's new version for everyone); `ua` — custom's own line only;
+#   hwon   — send `x-hwid` (1/0); hwid — the value, KEPT when switched off: a new one each time would take another of the
+#            provider's device slots; hwsrc — gen (made by the router) | own (pasted from an app: the router takes its slot).
+# The HWID identifies a device to the provider — the same kind of secret as the link: 600, the dump hides it, the backup carries
+# it in its secret part. No line ⇒ enodia without a HWID — the request as before, byte for byte.
+SUB_UA_DEFAULT='enodia-panel/1.0'
+sub_client_ua() {   # $1 client, $2 custom's own line → the User-Agent to send
+	case "$1" in
+		happ)    printf '%s' 'Happ/3.0' ;;
+		v2rayng) printf '%s' 'v2rayNG/1.10.6' ;;
+		custom)  printf '%s' "$2" ;;
+		*)       printf '%s' "$SUB_UA_DEFAULT" ;;
+	esac
+}
+# A custom User-Agent and a pasted HWID come from the panel and go out as a request header: printable ASCII only (a CR/LF
+# would inject a header of its own, a TAB would break the TSV), bounded.
+sub_ua_ok()   { case "$1" in ''|-|*[!\ -~]*) return 1 ;; esac; [ "${#1}" -le 200 ]; }
+sub_hwid_ok() { case "$1" in ''|-|*[!A-Za-z0-9._:+/=-]*) return 1 ;; esac; [ "${#1}" -ge 4 ] && [ "${#1}" -le 128 ]; }
+# A router-made HWID: 32 hex of the kernel's uuid (none — pid and epoch).
+sub_hwid_new() {
+	_shn=$(tr -d '\n-' < /proc/sys/kernel/random/uuid 2>/dev/null)
+	sub_hwid_ok "$_shn" || _shn=$(printf '%08x%08x' "$$" "$(date +%s 2>/dev/null)")
+	printf '%s' "$_shn"
+}
+# sub_client_read <tag> → SUB_CL SUB_CL_UA SUB_CL_HWON SUB_CL_HWID SUB_CL_HWSRC (defaults: no line, or a field that fails its form).
+sub_client_read() {
+	SUB_CL=enodia; SUB_CL_UA=''; SUB_CL_HWON=0; SUB_CL_HWID=''; SUB_CL_HWSRC=gen
+	[ -f "$SUBS_STATE/.sub-client" ] || return 0
+	while IFS="$SUBS_TAB" read -r _sck _scc _scu _sch _sci _scs || [ -n "$_sck" ]; do
+		[ "$_sck" = "$1" ] || continue
+		case "$_scc" in enodia|happ|v2rayng|custom) SUB_CL=$_scc ;; esac
+		sub_ua_ok "$_scu" && SUB_CL_UA=$_scu
+		[ "$SUB_CL" = custom ] && [ -z "$SUB_CL_UA" ] && SUB_CL=enodia   # a custom client without its line is no client
+		sub_hwid_ok "$_sci" && SUB_CL_HWID=$_sci
+		[ "$_sch" = 1 ] && [ -n "$SUB_CL_HWID" ] && SUB_CL_HWON=1
+		[ "$_scs" = own ] && SUB_CL_HWSRC=own
+	done < "$SUBS_STATE/.sub-client"
+	return 0
+}
+# sub_client_put <tag> <client> <ua> <hwon> <hwid> <hwsrc> — the panel's word checked HERE (each field by its form); 1 = refused.
+sub_client_put() {
+	case "$1" in ''|*[!a-z0-9-]*) return 1 ;; esac
+	case "$2" in enodia|happ|v2rayng|custom) : ;; *) return 1 ;; esac
+	_scu=-; if [ "$2" = custom ]; then sub_ua_ok "$3" || return 1; _scu=$3; fi
+	_sci=-; if [ -n "$5" ] && [ "$5" != - ]; then sub_hwid_ok "$5" || return 1; _sci=$5; fi
+	_sch=0; [ "$4" = 1 ] && _sch=1
+	[ "$_sch" = 1 ] && [ "$_sci" = - ] && return 1   # «send a HWID» with none
+	_scs=gen; [ "$6" = own ] && _scs=own
+	( umask 077; lbl_commit_out "$SUBS_STATE/.sub-client" lbl_without "$SUBS_STATE/.sub-client" "^$1$SUBS_TAB" \
+		"$1$SUBS_TAB$2$SUBS_TAB$_scu$SUBS_TAB$_sch$SUBS_TAB$_sci$SUBS_TAB$_scs" ) 2>/dev/null
+}
+# sub_client_drop <tag> — the subscription is removed: its line goes too (a tag set up again later must not inherit the HWID).
+sub_client_drop() {
+	case "$1" in ''|*[!a-z0-9-]*) return 1 ;; esac
+	[ -f "$SUBS_STATE/.sub-client" ] || return 0
+	( umask 077; lbl_commit_out "$SUBS_STATE/.sub-client" lbl_grep -v "^$1$SUBS_TAB" "$SUBS_STATE/.sub-client" ) 2>/dev/null
+	return 0
+}
+
 # sub_get_once <url> <файл> [доп. опции curl] — одна попытка со следованием редиректам ВРУЧНУЮ.
 # Почему не `-L --max-redirs 3`: короткая цепочка от подмены не защищает НИСКОЛЬКО — гард
 # sub_host_public проверяет только ИСХОДНУЮ ссылку, а ОДНОГО хопа `Location: http://127.0.0.1:8088/…`
@@ -196,7 +262,7 @@ sub_get_once() {
 		# заголовком того ответа, чьё тело мы взяли (см. sub_userinfo_read). Снимает файл
 		# ВЫЗЫВАТЕЛЬ (sub_fetch) — он же и единственный, кто его читает.
 		rm -f "$_go" "$_go.hdr" 2>/dev/null
-		_loc=$(curl -s --max-time 25 --max-filesize "$SUB_MAXSIZE" -A "enodia-panel/1.0" \
+		_loc=$(curl -s --max-time 25 --max-filesize "$SUB_MAXSIZE" -A "$SUB_UA_DEFAULT" \
 			"$@" -D "$_go.hdr" -o "$_go" -w '%{redirect_url}' "$_gu" 2>/dev/null)
 		[ -n "$_loc" ] || break
 		_gu="$_loc"; _hop=$((_hop+1))
@@ -257,6 +323,16 @@ sub_fetch() {
 		rm -f "$_o.gz" 2>/dev/null
 	fi
 	[ -s "$_o" ]
+}
+
+# sub_fetch_tag <tag> <url> <файл> — sub_fetch AS THIS SUBSCRIPTION'S CLIENT: its User-Agent (a later `-A` wins over
+# sub_get_once's default) and, when on, its `x-hwid`. Every download of a registry subscription goes here (subs-update.sh); the bulk
+# list import and Amnezia's API are no registry subscriptions and keep plain sub_fetch.
+sub_fetch_tag() {
+	sub_client_read "$1"
+	_sft_ua=$(sub_client_ua "$SUB_CL" "$SUB_CL_UA")
+	if [ "$SUB_CL_HWON" = 1 ]; then sub_fetch "$2" "$3" -A "$_sft_ua" -H "x-hwid: $SUB_CL_HWID"
+	else sub_fetch "$2" "$3" -A "$_sft_ua"; fi
 }
 
 # sub_tags — все теги реестра (по одному в строке).

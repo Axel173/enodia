@@ -367,8 +367,9 @@ if [ -f "$ENODIA_DIR/transport.sh" ]; then
     # Причину плагин пишет в СВОЙ лог (он ниже в дампе), на stdout не печатает ничего — поэтому
     # вердикт печатаем сами по коду возврата. Срез самой несущей дают плагинные `status` ниже.
     sub "transport.sh health (жива ли несущая активного транспорта)"
-    # VPN выключен человеком — несущей НЕТ по его воле, и проба её не зовётся вовсе: у ByeDPI `health` переподнимает ciadpi и при
-    # флаге отказывает (daemon-lib.sh::carrier_run), а «НЕ ОК» читалось бы как поломка (ревью ветки, круг 3).
+    # VPN выключен человеком — несущей НЕТ по его воле, и проба её не зовётся вовсе: `health` у плагинов несущих при флаге
+    # отказывает (daemon-lib.sh::carrier_run), а «НЕ ОК» читалось бы как поломка (ревью ветки, круг 3). The dump never asks a revival
+    # (no HEALTH_REVIVE): a dead ByeDPI carrier is reported, not raised.
     _rc=0
     if [ -f "$ENODIA_STATE/.vpn-off" ]; then _rc=off
     else sh "$ENODIA_DIR/transport.sh" health >/dev/null 2>&1 || _rc=$?; fi
@@ -761,6 +762,9 @@ sub "ДОМЕННЫЕ ПРАВИЛА: заявлено в dnsmasq → лежит
 # будет непустым, и без колонки «было» разбор ушёл бы по ложному следу.
 _dtmp=/tmp/enodia-dump-dom.$$
 : > "$_dtmp"
+# ns_ips below is dns-lib.sh's; sourced again further down for the DoH lines — the library's top level is idempotent (`${VAR:-…}`).
+if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
+command -v ns_ips >/dev/null 2>&1 || ns_ips() { :; }   # an older install without the library: «—», never a guessed address
 for _dmf in /etc/dnsmasq.d/enodia-custom.conf /etc/dnsmasq.d/enodia-domains.conf \
             /etc/dnsmasq.d/[0-9][0-9]-*.conf /tmp/dnsmasq.d/[0-9][0-9]-*.conf; do
     [ -f "$_dmf" ] || continue
@@ -779,8 +783,9 @@ if [ -s "$_dtmp" ]; then
         _d1=${_doms%%/*}; _s1=${_sets%%,*}
         _was=$(ipset list -t "$_s1" 2>/dev/null | grep 'Number of entries' | awk '{print $NF}')
         [ -n "$_was" ] || _was="нет набора"
-        # Первый адрес берём ПОСЛЕ строки Name: — до неё busybox печатает адрес САМОГО резолвера.
-        _ip=$(nslookup "$_d1" 2>/dev/null | awk '/^Name:/{f=1} f&&/^Address /{print $3; exit}')
+        # The first address of the ANSWER — dns-lib.sh::ns_ips, the one parser of busybox nslookup's output: the own `/^Address /`
+        # here missed busybox 1.36's «Address: IP» (BE10000 Pro, musl 1.2.5) and called every live domain «НЕ РЕЗОЛВИТСЯ».
+        _ip=$(ns_ips "$_d1" 2>/dev/null | head -n 1)
         _now=$(ipset list -t "$_s1" 2>/dev/null | grep 'Number of entries' | awk '{print $NF}')
         [ -n "$_now" ] || _now="-"
         if [ -n "$_ip" ] && ipset test "$_s1" "$_ip" >/dev/null 2>&1; then _v="В НАБОРЕ ✔"
@@ -911,6 +916,9 @@ showmeta "$ENODIA_STATE/amnezia_for_awg.conf"
 showmeta "$ENODIA_STATE/notify.conf"
 showmeta "$ENODIA_STATE/.subs"
 showmeta "$ENODIA_STATE/.sub-names"
+showmeta "$ENODIA_STATE/.sub-client"  # how each subscription presents itself to its provider (subs-lib.sh): the HWID is a secret
+# …its app per subscription, never the HWID («why does the provider refuse the subscription» — it admits one app only).
+[ -s "$ENODIA_STATE/.sub-client" ] && awk -F'\t' '$1 ~ /^[a-z0-9-]+$/ && $2 ~ /^[a-z0-9]+$/ { print "sub-client: " $1 " → " $2 ", HWID " ($4 == "1" ? "on (" $6 ")" : "off") }' "$ENODIA_STATE/.sub-client" 2>/dev/null
 showmeta "$ENODIA_STATE/.cfg-names"   # свои имена конфигов (cfg-names.sh): в бэкапе — с конфигами; содержимое — имена человека
 showmeta "$ENODIA_STATE/.cfg-via"     # дороги к серверам (road.sh): конфиг → номер выхода-дороги
 showmeta "$ENODIA_STATE/.sub-picks"
