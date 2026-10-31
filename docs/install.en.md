@@ -46,6 +46,10 @@ go through the VPN, and turn on the protocols you need under «Components» — 
 Updates come to the panel: a new version is downloaded from GitHub as a **signed package** and installed with one
 button. The router checks the signature itself — it will not install someone else's package.
 
+The update shows its progress by stages: the download, the checks, a snapshot for a rollback, the file swap, applying
+the settings. You can close the page — the update runs on the router. The new version puts the routing rules in
+itself; no router reboot is needed.
+
 ## Removing
 
 Run the setup wizard again and choose «Remove from the router». There are two options:

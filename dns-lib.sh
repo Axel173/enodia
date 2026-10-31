@@ -493,6 +493,56 @@ seed_host_dns() {   # $1 = host ; $2 = seed-файл
     _dnslib_log "локальный DNS: $_sh_host → $_sh_ip (демон резолвит имя сам; конфиг по имени не трогаем)"
     return 0
 }
+# ---- EVERY FILE THE RUNNING dnsmasq READS — one owner -----------------------------------------------------------------
+# Asked by doh-lib.sh::doh_dhcp_script_set («is a dhcp-script set») and lan-dns.sh («what DNS does DHCP hand out»). From where
+# the daemon reads, not one guessed file: the live process's argv (`-C`/`--conf-file`; read whole via `tr` — grep over
+# /proc/*/cmdline sees only argv[0], C115, and busybox `ps w` cuts its line at 131 characters), the OpenWrt rendering
+# (/var/etc/dnsmasq.conf*) and /etc/dnsmasq.conf even without a process, their `conf-file=`, then every `conf-dir=` of those —
+# both of ours (/etc/dnsmasq.d, /tmp/dnsmasq.d) only when the files name none: added unconditionally, a file the daemon's own
+# filter skips was read anyway and told as live (review s.175). A conf-dir's filters are honoured as dnsmasq does — `*.ext`
+# includes, `.ext` excludes — and ~-backups skipped (measured BE7000 29.09.2026: argv `-C /var/etc/dnsmasq.conf.cfg01411c`,
+# inside `conf-file=/etc/dnsmasq.conf` and `conf-dir=/tmp/dnsmasq.d`). One path a line, existing regular files, each once.
+# OUR BULK SNIPPETS — adblock, the desync domain pool, the geo lists: hundreds of thousands of `address=`/`ipset=` lines and nothing
+# else. A reader asking dnsmasq's config for anything else skips them (lists-lib.sh's upstream list, lan-dns.sh's DHCP options —
+# both run on every show of a screen, and a busybox grep alone over such a file takes seconds). ONE list — two copies drift.
+dns_bulk_snippet() { case "${1##*/}" in 06-adblock.conf|07-zapret-dom.conf|1[0-9]-geo*.conf) return 0 ;; esac; return 1; }
+
+_dcf_keep() {   # $1 file, $2 the conf-dir argument after the directory
+	_dck_in=0; _dck_hit=0; _dck_r="$2,"
+	while [ -n "$_dck_r" ]; do
+		_dck_e=${_dck_r%%,*}; _dck_r=${_dck_r#*,}
+		case "$_dck_e" in
+			'') ;;
+			\**) _dck_in=1; case "$1" in *"${_dck_e#\*}") _dck_hit=1 ;; esac ;;
+			*) case "$1" in *"$_dck_e") return 1 ;; esac ;;
+		esac
+	done
+	[ "$_dck_in" = 0 ] || [ "$_dck_hit" = 1 ]
+}
+dnsmasq_conf_files() {
+	_dcf_m=''
+	for _dcf_p in $(pidof dnsmasq 2>/dev/null); do
+		_dcf_m="$_dcf_m $(tr '\0' '\n' 2>/dev/null < "/proc/$_dcf_p/cmdline" | awk 'c { print; c = 0; next } $0 == "-C" || $0 == "--conf-file" { c = 1; next } /^--conf-file=/ { sub(/^--conf-file=/, ""); print; next } /^-C./ { print substr($0, 3) }')"
+	done
+	for _dcf_f in /var/etc/dnsmasq.conf*; do _dcf_m="$_dcf_m $_dcf_f"; done
+	_dcf_m="$_dcf_m /etc/dnsmasq.conf"
+	# $_dcf_m unquoted on purpose: a list of paths (dnsmasq's paths carry no spaces).
+	_dcf_m="$_dcf_m $(cat $_dcf_m 2>/dev/null | sed -n 's/^[[:space:]]*conf-file=//p')"
+	_dcf_ds=$(cat $_dcf_m 2>/dev/null | sed -n 's/^[[:space:]]*conf-dir=//p')
+	[ -n "$_dcf_ds" ] || _dcf_ds=$(printf '%s\n' /etc/dnsmasq.d /tmp/dnsmasq.d)
+	{
+		for _dcf_f in $_dcf_m; do echo "$_dcf_f"; done
+		printf '%s\n' "$_dcf_ds" | while IFS= read -r _dcf_d; do
+			_dcf_r=''
+			case "$_dcf_d" in *,*) _dcf_r=${_dcf_d#*,}; _dcf_d=${_dcf_d%%,*} ;; esac
+			for _dcf_f in "$_dcf_d"/*; do
+				case "$_dcf_f" in *~) continue ;; esac
+				_dcf_keep "$_dcf_f" "$_dcf_r" && echo "$_dcf_f"
+			done
+		done
+	} | while IFS= read -r _dcf_f; do [ -f "$_dcf_f" ] && echo "$_dcf_f"; done | awk '!seen[$0]++'
+}
+
 # Лог библиотеки: если вызывающий определил свой log() (все плагины транспортов — да), пишем
 # его префиксом; иначе просто на stdout. Не заводим здесь собственный формат — сообщения о
 # севе исторически шли в лог плагина, и диагностика их там ищет.

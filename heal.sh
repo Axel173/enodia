@@ -57,6 +57,10 @@ if [ -f "$ENODIA_DIR/router-lib.sh" ]; then . "$ENODIA_DIR/router-lib.sh"; fi
 command -v lan_if >/dev/null 2>&1 || lan_if() { echo br-lan; }   # lan-lit: шим без router-lib.sh
 command -v probe_ext_ip >/dev/null 2>&1 || probe_ext_ip() { curl -s $1 --max-time "${2:-7}" https://api.ipify.org 2>/dev/null; }
 
+# The update's progress for the «Обновление» screen: a replay inside an update says which step runs now (prog-lib.sh owns the
+# file; outside a run the panel started — boot, «Включить VPN», a backup import — every writer is a no-op).
+if [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; fi
+command -v prog_now >/dev/null 2>&1 || { prog_now() { :; }; prog_sub() { :; }; }
 # Возраст отметки времени (clock-lib.sh). Здесь по нему решается «поднялся ли VPN после загрузки»,
 # то есть уйдёт ли письмо boot-ok или boot-fail. Часы на буте заведомо КРИВЫЕ (RTC нет, стоковый ntp
 # в это окно ещё не прошёл) ⇒ голая разность «now - hs» тут врёт по определению. Шим = прежнее.
@@ -496,6 +500,7 @@ grep -q '^conf-dir=/etc/dnsmasq.d' /etc/dnsmasq.conf || \
 # Сама копия персист→/etc живёт в domain.sh (верб `restore`) — ОДИН владелец на всех потребителей.
 # Строка стояла здесь, и это значило «восстановление бывает только на буте, под локом 1×/boot»:
 # импорт бэкапа клал персист, живой файл не трогал, и панель показывала пустой список правил.
+prog_now domains
 if [ -f ./domain.sh ]; then
     echo "--- custom domains: восстановление из персиста (.enodia-custom.conf) ---"
     sh ./domain.sh restore || true
@@ -547,6 +552,7 @@ ipset list -n 2>/dev/null | grep -qx enodia_list || \
 # 4. CIDR от iplist (создаёт ipset iplist_set + mangle PREROUTING)
 # В replay пропускаем ТОЛЬКО когда набор уже наполнен: перекачка ~3500 CIDR — минуты и трафик,
 # а на буте она обязательна (ipset живёт в RAM). Пустой набор = маршрутизации нет ⇒ наполняем.
+prog_now lists
 _ipl_n=$(ipset list iplist_set 2>/dev/null | grep -c '^[0-9]' || true)
 case "$_ipl_n" in ''|*[!0-9]*) _ipl_n=0 ;; esac
 if [ "$REPLAY" = 1 ] && [ "$_ipl_n" -gt 0 ]; then
@@ -559,6 +565,7 @@ fi
 # + ip rule fwmark -> table $TABLE. Несущую (default в table $TABLE) + FORWARD/MASQ/DNS
 # кладёт АКТИВНЫЙ транспорт ниже (секция 5.6). Фолбэки: старый split-route.sh
 # (делает ядро+awg-несущую), затем inline-ядро.
+prog_now mark
 echo "--- mark-core (ядро: маркировка + ip rule) ---"
 if skip_vpn; then
     # Установка «только панель»: транспорта нет, метить некуда. Ставить ядро всё равно —
@@ -593,6 +600,7 @@ fi
 # reply-guard в mangle ДАЖЕ на пустом персисте, и на чистом роутере это единственные наши следы
 # в ядре (замерено на AX3600 15.08.2026). Появится транспорт — heal/repair позовут apply как
 # раньше, персист от этого не страдает (он на /data).
+prog_now bypass
 if skip_vpn; then
     echo "$(why_skip) — вырезы «мимо VPN» не переигрываю (нечего и не от чего)"
 elif [ -f ./apply-bypass.sh ]; then
@@ -604,6 +612,7 @@ fi
 # каждый через свой плагин (единый контракт up). awg0 уже поднят выше (секция 1) как
 # несущая (для awg) или тёплый резерв (для xray). $active_t прочитан в начале файла
 # (флаг переживает ребут; нет файла => awg).
+prog_now carrier
 echo "--- active transport: $active_t ---"
 # Несущую активного транспорта поднимает ОРКЕСТРАТОР (transport.sh up <name>) — единая
 # точка, через неё же подключатся будущие транспорты (hysteria2…) без правок heal.
@@ -622,7 +631,12 @@ if [ "$active_ready" = 0 ] && [ "$active_t" != awg ] && ! skip_vpn && [ -f ./tra
     echo "транспорт $active_t: программа появилась, пока heal бежал (накопитель примонтировался) — поднимаю"
     active_ready=1
 fi
-if skip_vpn; then
+# ПРЯМОЙ РЕЖИМ СТОРОЖА ПРИ ОБНОВЛЕНИИ (install.sh 5c зовёт нас с ENODIA_NO_CARRIER=1, когда сторож в FAILOPEN): несущую не
+# поднимаем — она вернула бы маршрут в table 1000 и DNS в мёртвый туннель, а сторож, который это снимает, ждёт лок установщика
+# весь переигрыш (ревью с.175, круг 3). Её вернёт сам сторож, когда сервер оживёт. Только в replay: бутовый прогон признака не знает.
+if [ "$REPLAY" = 1 ] && [ "${ENODIA_NO_CARRIER:-}" = 1 ]; then
+    echo "сторож в прямом режиме (сервер не отвечал) — несущую не поднимаю: её вернёт сторож, когда сервер оживёт"
+elif skip_vpn; then
     if [ "$vpn_off" = 1 ]; then
         echo "VPN выключен человеком — несущую не поднимаю (включить: тумблер в панели :8088)"
     else
@@ -684,6 +698,7 @@ if [ -f ./lists-update.sh ]; then
         # «интернет жив, когда VPS нет») и блокировка рекламы оставались ПУСТЫМИ до планового
         # обновления, а у zapret-* это неделя. Следит C69.
         [ -f "$ENODIA_STATE/lists/$bc/.enabled" ] || continue
+        prog_sub lists now
         # Сперва МГНОВЕННЫЙ офлайн-reapply из снимка: у пулов десинка (zapret-cidr по IP, zapret-dom
         # свои домены) снимок на ФЛЕШЕ, и пул обязан подниматься без сети (весь смысл zapret —
         # «интернет жив, когда VPS нет»). Для adblock/ipblock снимок в ОЗУ и после ребута его нет →
@@ -693,14 +708,21 @@ if [ -f ./lists-update.sh ]; then
         # `3>&-` ОБЯЗАТЕЛЕН: в режиме `replay` fd 3 — это stdout ВЫЗЫВАТЕЛЯ (см. `exec 3>&1`), а
         # `-b` подменяет демону только 0/1/2. Унеси демон нашу трубу — и вызыватель, читающий нас
         # подстановкой, ждал бы EOF до конца перекачки (замерено на железе 09.09.2026).
-        start-stop-daemon -S -b -m -p "/tmp/enodia-lists-$bc.pid" \
+        # ENODIA_UPD_PROG= — the download outlives the update that started it: its writers must not speak into the finished run
+        # (prog-lib.sh::prog_on; review s.175). ENODIA_SWITCH_HOLDER= — nor is it the work of a switching-lock holder: under the update's
+        # step 5b (its lock) the watchdog would count the download as the holder alive and not reap a killed installer's lock for
+        # the whole download (daemon-lib.sh::switch_work_alive; review s.175 r2). The same for the geo fetch below — it ends in slots-up.
+        ENODIA_UPD_PROG= ENODIA_SWITCH_HOLDER= start-stop-daemon -S -b -m -p "/tmp/enodia-lists-$bc.pid" \
             -x /bin/sh -- "$ENODIA_DIR/lists-update.sh" update "$bc" 3>&-
     done
+    # «Списки ✓» = put back from their snapshot and their download started (it runs on in the background, its own screen tells).
+    prog_sub lists ok
 fi
 
 # 5.9. Статические DNS-hosts (оверрайд домен→IP). Живой conf /tmp/dnsmasq.d/08-dns-hosts.conf в
 # ОЗУ стирается на ребуте; персист $ENODIA_STATE/.dns-hosts на /data — переживает. Пересобираем conf +
 # reload ТОЛЬКО если оверрайды есть (иначе лишний рестарт dnsmasq на буте не нужен). Офлайн-безопасно.
+prog_now dns
 if [ -f ./dns-hosts.sh ] && [ -s "$ENODIA_STATE/.dns-hosts" ]; then
     echo "--- DNS-hosts: переигрываю оверрайды ---"
     sh ./dns-hosts.sh apply >/dev/null 2>&1
@@ -730,7 +752,9 @@ fi
 # в сеть не ходит (домены-члены раскладывает dnsmasq по мере резолва).
 if [ -f ./groups.sh ] && [ -s "$ENODIA_STATE/groups/groups.tsv" ]; then
     echo "--- groups: переигрываю группы правил ---"
+    prog_sub groups now
     sh ./groups.sh apply 2>&1 | tail -1
+    prog_sub groups ok
 fi
 
 # 5.13. Гео-категории (geo.sh: страны/сервисы → в VPN / мимо VPN, CIDR из фетча). Снимок агрегата
@@ -739,7 +763,9 @@ fi
 # сети → отдельно ФОНОМ (сеть уже поднята выше). reapply офлайн-безопасен; без гео в реестре — no-op.
 if [ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ]; then
     echo "--- geo: офлайн-восстановление гео-категорий из снимка ---"
+    prog_sub geo now
     sh "$ENODIA_DIR/geo.sh" reapply 2>&1 | tail -1
+    prog_sub geo ok
     # Пидфайл ОБЩИЙ с цепочкой импорта (`cgi-bin/backup`) — сознательно: второй фетч гео роутеру
     # не нужен. Спрашиваем ПИДФАЙЛ заранее и сами говорим по-человечески, а вывод демонизатора
     # глушим: при совпадении heal печатал в лог сырое «/bin/sh is already running» и голый pid —
@@ -753,7 +779,7 @@ if [ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ]; then
         echo "--- geo: фоновая перекачка гео-источников ---"
         # `3>&-` — по той же причине, что у списков выше: фоновому демону наш fd 3 (stdout
         # вызывателя в режиме replay) не нужен, а унесённая труба вешает вызывателя.
-        start-stop-daemon -S -b -m -p /tmp/enodia-geo-update.pid \
+        ENODIA_UPD_PROG= ENODIA_SWITCH_HOLDER= start-stop-daemon -S -b -m -p /tmp/enodia-geo-update.pid \
             -x /bin/sh -- "$ENODIA_DIR/geo.sh" update >/dev/null 2>&1 3>&-
     fi
 fi
@@ -786,6 +812,7 @@ fi
 # Гард по -f и запуск через `sh`, а не `-x` + прямой вызов: снятый бит (дрейф деплоя, ручная
 # копия, чужой архиватор) давал ТИХИЙ пропуск секции — «доступ домой» не поднимался после
 # КАЖДОГО ребута, а панель показывала «включён». Класс Б5-9; сторож на `-f` переведён в батче 6.
+prog_now home
 if [ -f ./vpn-server.sh ] && [ -f "$ENODIA_STATE/server/.on" ]; then
     echo "--- vpn-server: доступ домой (несущая awgs0 + правила) ---"
     sh ./vpn-server.sh up || echo "    [!] доступ домой не поднялся"
@@ -797,6 +824,7 @@ fi
 # фолбэк) или demon не встал. Идемпотентно: без .doh-on/бинаря doh_start сам no-op. Гейт doh_want
 # покрывает и АВТО-режим прямых транспортов (стамп в /tmp ставит doh_apply_dns из up-пути секции
 # 5.6, т.е. к этому моменту он уже есть). [[doh-direct-modes-backlog]]
+prog_now doh
 if doh_want 2>/dev/null && ! doh_running 2>/dev/null; then
     echo "--- DoH: поднимаю https_dns_proxy (включён/авто, но не запущен) ---"
     # Функция ЗАСОРСЕНА, то есть демон родится в НАШЕМ процессе и унесёт наши дескрипторы:
@@ -830,6 +858,7 @@ fi
 # домен «мимо VPN» ехал В ТУННЕЛЬ (и наоборот) до первого резолва КЛИЕНТА, а тот с DoH/длинным
 # кэшем может не случиться очень долго. Теперь — после транспорта, групп, гео и DoH: upstream
 # гарантированно чей-то живой. Пауза — демон успевает начать слушать :53 после последнего рестарта.
+prog_now warm
 if [ -f ./domain.sh ]; then
     echo "--- domains: прогрев правил (после подъёма транспорта) ---"
     # Вывод БОЛЬШЕ НЕ глушим: прогрев научился отличать «адрес лёг в набор» от «резолв есть, а в
@@ -862,6 +891,7 @@ fi
 # Гард на адрес br-lan ОБЯЗАТЕЛЕН: LISTEN web-ui.sh берёт из br-lan, а без адреса падает на
 # литерал 192.168.31.1, и uhttpd занял бы ЧУЖОЙ адрес НАВСЕГДА — при живом pid start не
 # перепривязывается, а лечит только TLS и WAN-правило. Нет адреса ⇒ молчим, cron подхватит.
+prog_now panel
 if [ -f ./web-ui.sh ] && ip -4 addr show "$(lan_if)" 2>/dev/null | grep -q 'inet '; then
     echo "--- панель: второй заход (TLS + доступ снаружи; сама панель уже поднята в 0b) ---"
     sh ./web-ui.sh start 2>&1 3>&- || true
@@ -872,6 +902,7 @@ fi
 # has no @reboot — so the boot-time tasks start HERE, LAST: the user's script must find the network, DNS and VPN already up, and
 # it must not hold heal (each one in its own background with its own delay; a hanging script is the runner's timeout's business).
 # Not in replay: the router did not reboot. Not under «VPN off»: tasks are not VPN, the human's schedule keeps running.
+prog_now tasks
 if [ -f "$ENODIA_DIR/tasks.sh" ] && [ -d "$ENODIA_STATE/tasks" ]; then
     echo "--- задачи: расписание из настроек ---"
     sh "$ENODIA_DIR/tasks.sh" apply 2>&1 3>&- || true

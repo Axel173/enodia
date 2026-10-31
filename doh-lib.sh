@@ -1614,23 +1614,20 @@ doh_names_ok() {
 # кладут и ключом в командной строке, и в `conf-file=`, и в сниппет `conf-dir=` — там SIGHUP звал бы его по всем арендам.
 # Порядок: argv живого процесса (`-6`/`--dhcp-script` прямо в нём; `-C`/`--conf-file` — какой файл он читает), затем
 # `conf-file=`/`conf-dir=` из этих файлов (замер BE7000 29.09.2026: argv `-C /var/etc/dnsmasq.conf.cfg01411c`, в нём
-# `conf-file=/etc/dnsmasq.conf` и `conf-dir=/tmp/dnsmasq.d`) и оба наших conf-dir. argv читаем ЦЕЛИКОМ через `tr`:
-# grep по /proc/*/cmdline видит только argv[0] (C115). Процесса нет — смотрим прежние файлы: вреда от лишней проверки нет.
-# Код 0 = скрипт задан (кэш не трогаем); 1 = не задан.
+# `conf-file=/etc/dnsmasq.conf` и `conf-dir=/tmp/dnsmasq.d`); our two conf-dirs only when the files name none, with the
+# daemon's own filters — the file list has one owner since s.175, dns-lib.sh::dnsmasq_conf_files. argv читаем ЦЕЛИКОМ через
+# `tr`: grep по /proc/*/cmdline видит только argv[0] (C115). Код 0 = скрипт задан (кэш не трогаем); 1 = не задан.
 doh_dhcp_script_set() {
-	_dds_f=''
 	for _dds_p in $(pidof dnsmasq 2>/dev/null); do
-		_dds_a=$(tr '\0' '\n' 2>/dev/null < "/proc/$_dds_p/cmdline")
-		printf '%s\n' "$_dds_a" | grep -qE '^(-6|--dhcp-script|--dhcp-luascript)' && return 0
-		_dds_f="$_dds_f $(printf '%s\n' "$_dds_a" | awk 'c {print; c=0; next} $0=="-C" || $0=="--conf-file" {c=1; next} /^--conf-file=/ {sub(/^--conf-file=/, ""); print; next} /^-C./ {print substr($0, 3)}')"
+		tr '\0' '\n' 2>/dev/null < "/proc/$_dds_p/cmdline" | grep -qE '^(-6|--dhcp-script|--dhcp-luascript)' && return 0
 	done
-	_dds_f="$_dds_f /var/etc/dnsmasq.conf* /etc/dnsmasq.conf"
-	# $_dds_f — без кавычек намеренно: список путей (и маска прежних файлов), пробелов в путях dnsmasq нет.
-	_dds_f="$_dds_f $(cat $_dds_f 2>/dev/null | sed -n 's/^[[:space:]]*conf-file=//p')"
-	for _dds_d in /etc/dnsmasq.d /tmp/dnsmasq.d $(cat $_dds_f 2>/dev/null | sed -n 's/^[[:space:]]*conf-dir=\([^,]*\).*/\1/p'); do
-		_dds_f="$_dds_f $_dds_d/*"
-	done
-	cat $_dds_f 2>/dev/null | grep -qE '^[[:space:]]*dhcp-(lua)?script'
+	# The files — the one owner of «what dnsmasq reads» (dns-lib.sh::dnsmasq_conf_files; lan-dns.sh asks it too). A library
+	# older than the function (a partial update) — the previous guess, the rendering and /etc/dnsmasq.conf.
+	if command -v dnsmasq_conf_files >/dev/null 2>&1; then
+		dnsmasq_conf_files | while IFS= read -r _dds_f; do cat "$_dds_f"; done 2>/dev/null | grep -qE '^[[:space:]]*dhcp-(lua)?script'
+	else
+		cat /var/etc/dnsmasq.conf* /etc/dnsmasq.conf 2>/dev/null | grep -qE '^[[:space:]]*dhcp-(lua)?script'
+	fi
 }
 
 # ПРИЗНАК БЕДЫ У DoT — без пробы имён, то есть без сброса кэша у здорового DoT на каждой сверке: TLS к 853 этим путём

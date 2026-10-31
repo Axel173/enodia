@@ -42,7 +42,9 @@ server is added by a `hysteria2://` link or a subscription.
 
 Cloudflare's free WARP. The router registers by itself — one button, the key is created on the router and never
 leaves it. WARP serves as a separate exit or as a **«road» to your server**: if your ISP blocked the VPS address,
-traffic to it goes through WARP. If the ISP starts cutting WARP's port, the watchdog picks another one by itself.
+traffic to it goes through WARP. If the ISP cuts WARP, the router looks for what it lets through: other ports, another
+first-packet masking (QUIC, DNS, STUN), other Cloudflare addresses — and avoids the Moscow point, which filters traffic.
+If the ISP starts cutting what was picked, the watchdog picks again by itself.
 
 ## ByeDPI { #byedpi }
 

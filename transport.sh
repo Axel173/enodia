@@ -651,12 +651,30 @@ cmd_slot_age() {
 # Поднять несущие ВСЕХ включённых слотов (boot/heal, зовёт heal.sh 5.13b). Ф0: плагины
 # слоты не умеют — каждый слот сообщит и останется на fallback; mark-core переигрываем один
 # раз в конце (он же донесёт марки слот-сетов, созданных groups/geo ПОСЛЕ up-пути несущей).
+# Inside an update (heal.sh replay under the panel's run) the exits are the re-apply's slowest step — each one waits for its
+# server's handshake — so the screen is told «N of M» and which exit rises now, by number and name (prog-lib.sh). The library is
+# loaded only then: this verb runs on every boot and every «Включить VPN», where it would be parsed for nothing.
 cmd_slots_up() {
     [ -f "$SLOTS_SH" ] || return 0
     sids=$(sh "$SLOTS_SH" list-enabled 2>/dev/null | cut -f1)
     [ -n "$sids" ] || return 0
-    for sid in $sids; do _slot_dispatch slot-up "$sid"; done
+    if [ "${ENODIA_UPD_PROG:-}" = 1 ] && [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; fi
+    command -v prog_sub >/dev/null 2>&1 || { prog_sub() { :; }; prog_now() { :; }; }
+    # The count only inside an update: outside it nobody reads it, and this verb runs on every boot, rule repair and group save.
+    _sum=0; _sun=0; _suk=0
+    if [ "${ENODIA_UPD_PROG:-}" = 1 ]; then for sid in $sids; do _sum=$((_sum + 1)); done; fi
+    prog_sub exits now 0 "$_sum"
+    for sid in $sids; do
+        # The exit's name is base64 in the registry (Cyrillic, spaces, emoji): decoded for the screen only — and only inside an
+        # update, the argument is worked out before the writer could say «not now» — a broken one is just not named.
+        if [ "${ENODIA_UPD_PROG:-}" = 1 ]; then prog_now exit "$sid" "$(sh "$SLOTS_SH" show "$sid" 2>/dev/null | cut -f2 | base64 -d 2>/dev/null)"; fi
+        _slot_dispatch slot-up "$sid" && _suk=$((_suk + 1))
+        _sun=$((_sun + 1)); prog_sub exits now "$_sun" "$_sum"
+    done
     apply_marking
+    # Done means «each was asked», and the count says how many rose: an exit whose server is down is the watchdog's to bring back,
+    # not a failed update — the screen shows «выходы 3 из 4».
+    prog_sub exits ok "$_suk" "$_sum"
     return 0
 }
 

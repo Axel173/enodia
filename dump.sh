@@ -692,6 +692,11 @@ for _dd in /etc/dnsmasq.d /tmp/dnsmasq.d; do
 done
 sub "00-upstream.conf (форвард upstream в туннель)"
 showf /etc/dnsmasq.d/00-upstream.conf
+# Who skips all of the above: a network whose DHCP hands out a foreign DNS, devices asking a resolver directly (the owner —
+# lan-dns.sh; the same facts as the DNS screen's «DNS у устройств»). «Why is a domain rule dead / Zapret silent for one device»
+# starts here: a Dom.ru tester's every device asked 1.1.1.1, handed out by the stock DHCP fields (30.10.2026).
+sub "мимо DNS роутера (lan-dns.sh scan: dhcp=сеть⇥адреса⇥откуда⇥адрес роутера рядом 0|1 · dev=ip⇥резолвер⇥порт⇥записей⇥раздал DHCP его сети 0|1)"
+if [ -f "$ENODIA_DIR/lan-dns.sh" ]; then sh "$ENODIA_DIR/lan-dns.sh" scan 2>/dev/null || echo "(scan не отработал)"; else echo "(lan-dns.sh нет)"; fi
 # ТРЕТЬЯ копия ответа для server-host (dns-lib.sh::seed_hosts_put). Её отсутствие означает, что
 # несущая ПО ИМЕНИ не встанет при мёртвом DNS, а лишняя/устаревшая строка прибивает имя к чужому
 # адресу сильнее любого сида: Go-демоны (xray, hysteria) читают hosts ДО резолвера.

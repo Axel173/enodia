@@ -73,6 +73,9 @@ if ! command -v ct_flush >/dev/null 2>&1; then
     ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
     ct_flush_src()  { [ -n "$1" ] && conntrack -D --src "$1" >/dev/null 2>&1; return 0; }
 fi
+# «Is this the router's OWN address» (ip-lib.sh::ip_is_self) — cmd_src_wire refuses one. Shim = the old behaviour.
+if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
+command -v ip_is_self >/dev/null 2>&1 || ip_is_self() { return 1; }
 # Где лежит бинарь (store-lib.sh): без накопителя — прежний путь байт-в-байт. Шим на случай
 # установки без lib.
 if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
@@ -150,6 +153,8 @@ SWEEP_BAK="$ENODIA_STATE/.zapret-args.sweepbak"     # бэкап исходно�
 SWEEP_TTL=150                                       # свежесть lock (сек)
 # connbytes: первые 8 пакетов соединения в оригинальном направлении (= рукопожатие). Ловит ДО
 # offload-акселерации потока → десинк работает при ВКЛЮЧЁННОМ ускорителе (грабля/находка спайка).
+# Not on every ECM: BE7000's takes a WIRED client's flow before the ClientHello — nfq-platform.sh holds it (ecm-hold), its delay
+# covering twice this window (C148).
 CB="-m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:8"
 
 # ДЕФОЛТ-СТРАТЕГИЯ — самые НАДЁЖНЫЕ на этом ISP комбо из железо-спайков (БЕЗ опций, которых могло
@@ -472,6 +477,12 @@ nfq_installed() {
 }
 # `prepare` rebuilds a lost cache itself when the intent is there (nfq-platform.sh km_prepare).
 nfq_prepare() { nfq_supported && nfq_installed && nfq_platform prepare; }
+# Every queue a brick wires is followed by this: where vendor ECM takes a wired client's flow before its ClientHello (BE7000), the
+# platform holds the first packets of every flow on the slow path; it gives that back at `release`, by the fact of no queue of ours.
+# AFTER the rule (the platform's race note). A refusal keeps the wiring — Wi-Fi clients get their desync — and stays SILENT here:
+# callers show the engine's LAST line as the cause of a later refusal (apply-bypass), and this one would name the wrong cause. The
+# watchdog's `ecm-sync` raises it on its next tick and logs that; `zapret.sh status` shows the knob.
+nfq_ecm_hold() { nfq_platform ecm-hold >/dev/null 2>&1 || :; }
 nfq_supported() {
     if [ -f "$NFQ_PLATFORM" ] && sh "$NFQ_PLATFORM" supported >/dev/null 2>&1; then return 0; fi
     [ -f "$NFQ_CAP" ] && { [ "$(cat "$NFQ_CAP" 2>/dev/null)" = 1 ]; return $?; }
@@ -517,10 +528,17 @@ nfq_set_rules() {   # <set> <add|del>
         zt_chain_ensure
         iptables -t mangle -C "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT 2>/dev/null || \
             iptables -t mangle -A "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT
+        # The insert's answer is the brick's: a queue that did not go in (the xtables lock's wait ran out) fails the caller. Those
+        # that roll back (cmd_slot_up, cmd_t_up — the ACCEPT alone takes the set past the tunnel with nothing to desync it) do; the
+        # others (rewire, failover) keep the half that went in — so the hold comes either way, and a rollback's release gives it
+        # back by the fact.
+        _nsr=0
         for proto in tcp udp; do
             iptables -t mangle -C POSTROUTING -p $proto --dport 443 -m set --match-set "$_ns" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null || \
-                iptables -t mangle -I POSTROUTING 1 -p $proto --dport 443 -m set --match-set "$_ns" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass
+                iptables -t mangle -I POSTROUTING 1 -p $proto --dport 443 -m set --match-set "$_ns" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass || _nsr=1
         done
+        nfq_ecm_hold
+        [ "$_nsr" = 0 ]
     fi
 }
 # ---- ДЕСИНК ПО ИСТОЧНИКУ («устройство целиком в десинк») ----------------------
@@ -539,6 +557,7 @@ nfq_set_rules() {   # <set> <add|del>
 # ГРАНИЦА ЧЕСТНО. Десинкуется рукопожатие 443 (TCP+QUIC), как и у всех прочих потребителей: connbytes
 # 1:8 ловит ClientHello до offload-акселерации. «Целиком» здесь = «весь трафик устройства идёт
 # напрямую, а его TLS/QUIC-рукопожатия проходят через nfqws», а не «каждый его пакет через nfqws».
+# «Before acceleration» is not true of every ECM: BE7000's takes a WIRED client's flow before its ClientHello — nfq_ecm_hold.
 nfq_src_rules() {   # <ip> <add|del>
     _si="$1"
     nfq_platform wire-src "$_si" "$2" || return 1
@@ -554,6 +573,7 @@ nfq_src_rules() {   # <ip> <add|del>
                     return 1
                 }
         done
+        nfq_ecm_hold
     fi
 }
 # Правила ТРАНСПОРТА (весь дом через десинк) — на ВСЕ пулы сразу (категории + CIDR + свои домены,
@@ -828,6 +848,9 @@ zt_source_run() (
 cmd_src_wire() {   # <ip>
     _sip=$(printf '%s' "$1" | tr -d ' \r\n')
     echo "$_sip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || { log "src-wire: нужен IPv4"; return 1; }
+    # The router's own address is no device: `-s <own>` in POSTROUTING would queue ALL the router's own TLS into nfqws (an address
+    # imported from the backup of the router this one sits behind, AX3600 30.10.2026). Refused here, the one writer of the rule.
+    ip_is_self "$_sip" && { log "src-wire: $_sip — адрес самого роутера, а не устройства в сети"; return 1; }
     [ -x "$NFQWS" ] || { log "src-wire: НЕТ бинаря $NFQWS — поставьте Zapret в «Роутер → Компоненты»"; return 1; }
     # Третий потребитель того же nfqws (устройство «целиком в десинк») — и ему бинаря так же мало.
     # ONE line with the cause: apply-bypass shows the engine's LAST line, and a second «ничего не меняю» line hid the reason.
@@ -1015,6 +1038,8 @@ cmd_status() {
     iptables -t mangle -S OUTPUT 2>/dev/null | grep "$MARK" || echo "  OUTPUT RETURN (анти-петля): нет"
     echo "--- offload (info; глушить НЕ нужно) ---"
     echo "  ecm stop ipv4/ipv6 = $(cat /sys/kernel/debug/ecm/front_end_ipv4_stop 2>/dev/null)/$(cat /sys/kernel/debug/ecm/front_end_ipv6_stop 2>/dev/null)"
+    _ze=$(nfq_platform ecm 2>/dev/null)
+    [ -z "$_ze" ] || echo "  ecm accel_delay_pkts = $_ze (проводным клиентам ClientHello виден только при задержке)"
 }
 
 # presets — курированная библиотека стратегий nfqws (label|args). Портированы из

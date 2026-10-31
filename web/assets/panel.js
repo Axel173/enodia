@@ -8862,6 +8862,28 @@
     "Само, когда туннеля нет":"By itself when there is no tunnel",
     "десинк, VPN выключен или упал; при сбое само вернёт обычный DNS":"desync, VPN off or down; on failure it returns to plain DNS by itself",
     "Российские сайты напрямую":"Russian sites directly",
+    // «DNS у устройств» on the encrypted DNS screen (dnsLanHtml)
+    "DNS у устройств":"Devices and DNS",
+    "Роутер раздаёт чужой DNS":"The router hands out another DNS",
+    "все сети":"all networks",
+    "Устройства с DNS «автоматически» получают эти адреса и спрашивают их напрямую, мимо роутера.":"Devices set to get DNS automatically receive these addresses and ask them directly, past the router.",
+    "Уберите их в настройках Xiaomi: «Настройки» → «Настройки локальной сети» → «DHCP-сервер», поля DNS1 и DNS2 оставьте пустыми.":"Remove them in the Xiaomi settings: «Settings» → «LAN settings» → «DHCP server», leave DNS1 and DNS2 empty.",
+    "Они заданы опцией 6 в dhcp_option настроек DHCP роутера (/etc/config/dhcp) — уберите её.":"They are set by option 6 in dhcp_option of the router's DHCP settings (/etc/config/dhcp) — remove it.",
+    "Они заданы строкой dhcp-option в файле":"They are set by a dhcp-option line in the file",
+    "Новый DNS устройства получат, когда переподключатся к сети.":"Devices get the new DNS when they reconnect to the network.",
+    "Настройки Xiaomi":"Xiaomi settings",
+    "Спрашивают мимо роутера":"Asking past the router",
+    "DoT, зашифрованный":"DoT, encrypted","обычный DNS, открытым":"plain DNS, in the clear",
+    "от роутера":"from the router",
+    "Роутер раздаёт и чужой DNS":"The router also hands out another DNS",
+    "Вместе с адресом роутера устройства получают и эти, и часть запросов уходит на них — мимо роутера.":"Together with the router's address devices get these too, and part of their queries goes to them — past the router.",
+    "Без пометки «от роутера» — адрес прописан на самом устройстве, его меняет программа или устройство ещё держит старую раздачу роутера: переподключите его к сети, а если не поможет — поставьте на нём получение DNS автоматически.":"Without the «from the router» mark the address is set on the device itself, an app changes it, or the device still holds the router's old hand-out: reconnect it to the network, and if that does not help, set DNS to automatic on it.",
+    "Такие запросы идут мимо шифрованного DNS, правил по доменам, блокировки рекламы и своих имён роутера.":"Such queries skip the router's encrypted DNS, domain rules, ad blocking and own names.",
+    "Такие запросы идут мимо шифрованного DNS, правил по доменам, блокировки рекламы и своих имён роутера. Если они уходят мимо VPN, провайдер может подменить ответ — и тогда не поможет ни VPN по доменам, ни Zapret.":"Such queries skip the router's encrypted DNS, domain rules, ad blocking and own names. If they leave past the VPN, the ISP can substitute the answer — and then neither the VPN by domains nor Zapret helps.",
+    "Все устройства, которые сейчас обращаются к DNS, спрашивают роутер.":"Every device asking DNS right now asks the router.",
+    "Соединения устройств роутеру не видны — проверить, кто спрашивает мимо, нельзя.":"The router cannot see the devices' connections — who asks past it cannot be checked.",
+    "Видно обычный DNS и DoT за последние полминуты. DNS через HTTPS в браузере или приложении от обычного трафика не отличить.":"Plain DNS and DoT of the last half minute are seen. DNS over HTTPS in a browser or an app cannot be told from ordinary traffic.",
+    "Не все устройства спрашивают роутер — подробности ниже, в «DNS у устройств».":"Not every device asks the router — details below, in «Devices and DNS».",
     ".ru, .рф, .su — у российского резолвера, мимо туннеля":".ru, .su and Cyrillic .rf — from a Russian resolver, past the tunnel",
     "При включённом шифровании имена .ru, .рф и .su всё равно уходят открытыми — к российскому резолверу, мимо прокси: правило зоны сильнее общего.":"With encryption on, .ru, .su and Cyrillic .rf names still go out in the clear — to the Russian resolver, past the proxy: the zone rule beats the general one.",
     "Протокол и резолвер":"Protocol and resolver","через посредника · порт 443":"through an intermediary · port 443",
@@ -9442,6 +9464,11 @@
     "GitHub не ответил — проверьте интернет и повторите.":"GitHub did not answer — check the internet and try again.",
     "Установить обновление":"Install the update","Источник:":"Source:","ветка или тег":"branch or tag",
     "Код приезжает одним пакетом. Роутер ставит его, только если сошлась подпись автора — ключом, которого на GitHub нет, так что подменить релиз не поможет и взлом аккаунта, — и пакет совпал с подписанным описанием. Перед заменой снимается снимок для отката, а сбой посреди замены возвращает его сам.":"The code arrives as a single package. The router installs it only if the author's signature matches — made with a key that never touches GitHub, so even a hijacked account cannot swap the release — and the package matches the signed description. A rollback snapshot is taken before the replacement, and a failure halfway through restores it by itself.",
+    "Обновление запущено — его ход виден этапами. Страницу можно закрыть: обновление идёт на роутере.":"The update has started — its progress is shown by stages. You can close the page: the update runs on the router.","Скачать пакет":"Download the package","Проверить подпись и пакет":"Check the signature and the package","Проверить снимок":"Check the snapshot","Снимок для отката":"Snapshot for a rollback","Снимок текущего набора":"Snapshot of the current set","Заменить файлы":"Replace the files","Вернуть файлы":"Bring the files back","Применить настройки заново":"Apply the settings again","правила":"rules","списки":"lists","группы":"groups","выходы":"exits","настройки":"settings","готовлю установку":"preparing the install","ставлю правила маршрутизации":"putting the routing rules in","доменные правила":"domain rules","маркировка":"marking","вырезы «мимо VPN»":"«past the VPN» carve-outs","несущая":"the carrier","«доступ домой»":"«home access»","шифрованный DNS":"encrypted DNS","прогрев доменов":"warming up the domains","панель":"the panel","задачи":"tasks","автозапуск и cron":"autostart and cron","проверка установки":"checking the install","оборвано: перезагрузка роутера или нехватка памяти":"cut off: a router reboot or a lack of memory","спрашиваю GitHub описание релиза":"asking GitHub for the release description","пакет релиза с GitHub":"the release package from GitHub","снимок открыт, набор проверен":"the snapshot is open, the set is checked","открываю снимок и проверяю набор":"opening the snapshot and checking the set","подпись автора и суммы файлов сошлись":"the author's signature and the file sums match","подпись автора, затем сумма каждого файла":"the author's signature, then the sum of every file","текущий набор — в память, на случай сбоя посреди возврата":"the current set — into memory, in case of a failure mid-way","текущие файлы — на случай отката":"the current files — for a rollback","выпавших из пакета снято:":"dropped from the package and removed:","файлы кода и панели":"the code and panel files","правила маршрутизации · группы · гео · списки · выходы — без перезагрузки роутера":"routing rules · groups · geo · lists · exits — without a router reboot","выход №":"exit #","сейчас":"now","этап":"stage","страницу можно закрыть — обновление идёт на роутере":"you can close the page — the update runs on the router","страницу можно закрыть — откат идёт на роутере":"you can close the page — the rollback runs on the router","заняло":"took","мин":"min","Этапы":"Stages","Правила маршрутизации не встали — причина в этапе «Применить настройки заново». Поставьте их кнопкой «Починить правила» или перезагрузкой роутера.":"The routing rules did not go in — the reason is under the «Apply the settings again» stage. Put them in with «Repair rules» or a router reboot.",
+    "жду рукопожатия с сервером":"waiting for the server's handshake","файл — если что-то пойдёт не так, откат вернёт их":"file — if something goes wrong, a rollback brings it back","файла — если что-то пойдёт не так, откат вернёт их":"files — if something goes wrong, a rollback brings them back","файлов — если что-то пойдёт не так, откат вернёт их":"files — if something goes wrong, a rollback brings them back","файл — в памяти до конца отката":"file — in memory until the rollback ends","файла — в памяти до конца отката":"files — in memory until the rollback ends","файлов — в памяти до конца отката":"files — in memory until the rollback ends",
+    // Причины шагов «Применить настройки заново» — слова install.sh (5b/5c), показываются как есть.
+    "идёт смена транспорта — правила не переставлены; поставьте их кнопкой «Починить правила», когда она кончится":"a transport switch is in progress — the rules were not put in again; put them in with «Repair rules» when it ends",
+    "настройки не переиграны: шла смена транспорта или переигрыш не смог — перезагрузите роутер":"the settings were not replayed: a transport switch was in progress or the replay failed — reboot the router",
     "Идёт обновление":"Update in progress","Последнее обновление":"Last update","Обновляю…":"Updating…",
     "Идёт откат":"Rollback in progress","Откатываю к снимку…":"Rolling back to the snapshot…",
     "Скрипты и панель возвращаются из последнего снимка. Когда кончится — обновите страницу, чтобы панель совпала с роутером.":"The scripts and the panel are coming back from the latest snapshot. When it finishes, reload the page so the panel matches the router.",
@@ -10216,6 +10243,14 @@
     "адрес не из вашей сети":"address not from your network",
     "Этот адрес не принадлежит ни одной сети роутера — правило на нём не сработает. Обычно приезжает с бэкапом другого роутера":"This address does not belong to any of the router networks — a rule on it will never fire. Usually it arrives with a backup from another router",
     "Этот адрес не из сетей вашего роутера":"This address is not from your router networks",
+    "адрес самого роутера":"the router's own address",
+    "Это адрес самого роутера — правила устройства не применяются.":"This is the router's own address — device rules do not apply.",
+    "Сохранённый режим":"Stored mode",
+    "Удалить правило режима":"Remove the stored mode rule",
+    "сохранённые правила — на этом адресе не действуют":"stored rules — inactive at this address",
+    "Это адрес самого роутера, а не устройства в сети — правило на нём роутер не применяет. Обычно приезжает с бэкапом роутера, за которым стоит этот":"This is the router's own address, not a device on the network — the router does not apply a rule on it. Usually it arrives with a backup of the router this one sits behind",
+    "Это адрес самого роутера":"This is the router's own address",
+    "Роутер не применяет правило на своём адресе: «мимо VPN» или «в десинк» на нём забрали бы весь его собственный трафик, а других устройств за этим адресом нет. Обычно так выглядят настройки из бэкапа роутера, за которым стоит этот: там это был адрес клиента. Удалите правило.":"The router does not apply a rule on its own address: «bypass VPN» or «into desync» there would take all of its own traffic, and no other device stands behind this address. That is what settings from a backup of the router this one sits behind usually look like: there it was a client address. Delete the rule.",
     "правила от другого устройства":"rules from another device",
     "Правила заводили, когда этим адресом владело другое устройство":"The rules were set up while this address belonged to another device",
     "старая аренда":"old lease",
@@ -11713,7 +11748,7 @@
     "Сразу подключить через него":"Connect through it right away",
     "никого, только получить":"nobody, just get it",
     "нужен AmneziaWG — поставьте его в «Компонентах»":"AmneziaWG is needed — install it in «Components»",
-    "Роутер зарегистрируется у Cloudflare, найдёт порт, который провайдер не режет, сохранит конфиг «WARP» (следующий — «WARP-2») и создаст выход без групп; выбранный сервер поедет через него. Обычно до 30 секунд.":"The router registers at Cloudflare, finds a port your ISP doesn't cut, saves the «WARP» config (the next one — «WARP-2») and creates an exit without groups; the chosen server rides it. Usually up to 30 seconds.",
+    "Роутер зарегистрируется у Cloudflare, найдёт адрес и порт, которые провайдер не режет, сохранит конфиг «WARP» (следующий — «WARP-2») и создаст выход без групп; выбранный сервер поедет через него. Обычно до 30 секунд, если провайдер мешает — до трёх минут.":"The router registers at Cloudflare, finds an address and port your ISP doesn't cut, saves the «WARP» config (the next one — «WARP-2») and creates an exit without groups; the chosen server rides it. Usually up to 30 seconds, up to three minutes if your ISP interferes.",
     // ─── Several WARPs, the record of a registration, a WARP for another device (10.10.2026) ───
     "Получить ещё один":"Get one more",
     "получен этим роутером":"obtained by this router",
@@ -11721,11 +11756,14 @@
     "Сервер Cloudflare":"Cloudflare server",
     "порт подобран":"port picked",
     "Провайдер режет":"The ISP cuts",
-    "при подборе не прошли порты":"at the pick these ports did not pass:",
-    "первый же проверенный порт прошёл":"the very first port checked passed",
+    "на выбранном сервере с этой маскировкой при подборе не прошли порты":"on the chosen server with this masking these ports did not pass at the pick:",
+    "на выбранном сервере с этой маскировкой первый же проверенный порт прошёл":"on the chosen server with this masking the very first port checked passed",
     "Точка Cloudflare при подборе":"Cloudflare's point at the pick",
     "нет — провайдер может оборвать поток после рукопожатия":"none — the ISP may cut the flow after the handshake",
     "собрана роутером":"built by the router",
+    "собрана роутером прежней версии — её заменит «Подобрать порт заново»":"built by an older version of the router — «Pick the port again» replaces it",
+    "Обновить маскировку роутера":"Update the router's masking",
+    "проба прервалась — повторите через минуту":"the probe was cut short — try again in a minute",
     "ваша":"yours",
     "есть в конфиге":"present in the config",
     "Подобрать порт заново":"Pick the port again",
@@ -11782,9 +11820,9 @@
     "имена WARP … WARP-9 заняты — удалите ненужный конфиг":"the names WARP … WARP-9 are taken — delete a config you don't need",
     "[warp] имена WARP … WARP-9 заняты — удалите ненужный конфиг":"[warp] the names WARP … WARP-9 are taken — delete a config you don't need",
     "[warp] другая работа с WARP уже идёт — дождитесь её":"[warp] another WARP job is already running — wait for it",
-    "[warp] подбираю порт — до двух минут":"[warp] picking the port — up to two minutes",
+    "[warp] подбираю порт — до трёх минут":"[warp] picking the port — up to three minutes",
     "[warp] получаю WARP заново — обычно до 30 секунд":"[warp] getting WARP anew — usually up to 30 seconds",
-    "[warp] проверяю маскировку — до 20 секунд":"[warp] checking the masking — up to 20 seconds",
+    "[warp] проверяю маскировку — до минуты":"[warp] checking the masking — up to a minute",
     "[warp] получаю WARP для устройства — обычно до 30 секунд":"[warp] getting WARP for a device — usually up to 30 seconds",
     // — AMNEZIA PREMIUM (14.10.2026): the screen's own words and the router's (premium.sh, subs-update.sh put/unput). Lines with a
     //   name, a country or a number are rules (I18N_RULES, its first block). —
@@ -11889,7 +11927,7 @@
     "маскировка — только теги <b 0x…>, <r N>, <rc N>, <rd N>, <c>, <t> подряд":"the masking is tags only — <b 0x…>, <r N>, <rc N>, <rd N>, <c>, <t> in a row",
     "неверные данные маскировки":"invalid masking data",
     "Маскировка первого пакета":"First-packet masking",
-    "роутер собирает её сам: начало соединения выглядит как QUIC, а содержимое случайное и новое при каждом подключении — шаблона, который можно выучить, нет":"the router builds it itself: the start of the connection looks like QUIC, and the content is random and new on every connection — there is no template to learn",
+    "роутер собирает её сам: соединение начинается настоящим QUIC-запросом к www.apple.com, случайная часть новая при каждом подключении; если провайдер режет и его — роутер пробует запросы DNS и STUN":"the router builds it itself: the connection starts with a real QUIC request to www.apple.com, its random part new on every connection; if your ISP cuts that too, the router tries DNS and STUN requests",
     "выхода на нём нет":"no exit on it",
     "никого":"nobody",
     "Что это":"What it is",
@@ -12000,6 +12038,8 @@
   // буквы внутри слов). i18nStr применяет их подряд и, если в итоге остаётся кириллица, ВОЗВРАЩАЕТ
   // оригинал (не показываем ru/en-мешанину).
   var I18N_RULES=[
+    // An own-address rule is refused by the engine; keep its address intact in the English toast.
+    [/^([0-9.]+(?:\/32)?) — адрес самого роутера, а не устройства в сети: правило на нём не ставлю$/,"$1 — this is the router's own address, not a network device: no rule was added"],
     // The router's words about a subscription's app (cgi-bin/action save_sub / sub_client) — inside «подписка «…»: …» of the journal and
     // «подписка: …» of a toast, where no exact key reaches them (review s.171 r1). First: a word rule further down cut them in half.
     ["подписка сохранена, а приложение — нет: повторите на карточке подписки","the subscription is saved, the app is not: repeat on the subscription's card"],
@@ -12140,6 +12180,9 @@
     [/^(\d+) — потолок дороги: туннелю внутри неё нужно на 80 меньше\. Ручной MTU в «Параметрах сети» выше потолка не поднимется$/,"$1 — the road's ceiling: the tunnel inside it needs 80 less. A manual MTU in «Network settings» won't go above the ceiling"],
     [/^(.+) — адрес заблокирован$/,"$1 — address blocked"],
     [/^ищу порт, который провайдер не режет: (\d+) \((\d+) из (\d+)\)$/,"looking for a port the ISP doesn't cut: $1 ($2 of $3)"],
+    [/^пробую другую маскировку \((QUIC|DNS|STUN)\): порт (\d+) \((\d+) из (\d+)\)$/,"trying another masking ($1): port $2 ($3 of $4)"],
+    [/^пробую другую маскировку \(прежняя\): порт (\d+) \((\d+) из (\d+)\)$/,"trying another masking (the old one): port $1 ($2 of $3)"],
+    [/^ищу другой адрес WARP: ([^ ]+) \((\d+) из (\d+)\)$/,"looking for another WARP address: $1 ($2 of $3)"],
     [/^сохраняю конфиг \(порт (\d+)\)$/,"saving the config (port $1)"],
     [/^прокладываю дорогу для (\S+)$/,"laying the road for $1"],
     [/^WARP получен: выход №([2-7]), (\S+) едет через него$/,"WARP received: exit #$1, $2 rides it"],
@@ -12151,6 +12194,17 @@
     [/^конфиг «([^«»]*)» сохранён, а выход не создался: (.*)$/,function(m, a, b){ var t=i18nStr('[slots] '+b); return "the config «"+a+"» is saved, but the exit wasn't created: "+(t!=='[slots] '+b ? t.replace(/^\[slots\] /, '') : b); }],
     [/^Cloudflare отклонил регистрацию \(HTTP (\d+)\): он сменил порядок — нужна новая версия панели$/,"Cloudflare refused the registration (HTTP $1): it changed the procedure — a new panel version is needed"],
     [/^Cloudflare выдал WARP, но провайдер режет его на всех портах \(([0-9, ]+)\) — конфиг не сохранён$/,"Cloudflare issued WARP, but your ISP cuts it on every port ($1) — the config isn't saved"],
+    [/^Cloudflare выдал WARP, но провайдер не пропускает к нему ни одного пакета \(проверено адресов: (\d+)\) — конфиг не сохранён$/,"Cloudflare issued WARP, but your ISP lets no packet through to it (addresses checked: $1) — the config isn't saved"],
+    [/^Cloudflare выдал WARP, но провайдер не пропускает к нему ни одного пакета \(проверено адресов: (\d+)\) — конфиг «([^«»]*)» не изменён$/,"Cloudflare issued WARP, but your ISP lets no packet through to it (addresses checked: $1) — the config «$2» is not changed"],
+    [/^Cloudflare выдал WARP, но провайдер не пропускает к нему ни одного пакета \(проверено адресов: (\d+)\) — конфиг не собран$/,"Cloudflare issued WARP, but your ISP lets no packet through to it (addresses checked: $1) — no config was built"],
+    [/^роутер не смог спросить сервер конфига \(([^()]*)\): нужен адрес IPv4 — конфиг «([^«»]*)» не изменён$/,"the router could not ask the config's server ($1): an IPv4 address is needed — the config «$2» is not changed"],
+    [/^роутер не смог спросить сервер конфига \(([^()]*)\): его имя не разрешилось, повторите позже — конфиг «([^«»]*)» не изменён$/,"the router could not ask the config's server ($1): its name did not resolve, try again later — the config «$2» is not changed"],
+    [/^Cloudflare выдал WARP, но роутер не смог спросить сервер конфига \(([^()]*)\): нужен адрес IPv4 — конфиг «([^«»]*)» не изменён$/,"Cloudflare issued WARP, but the router could not ask the config's server ($1): an IPv4 address is needed — the config «$2» is not changed"],
+    [/^Cloudflare выдал WARP, но роутер не смог спросить сервер конфига \(([^()]*)\): его имя не разрешилось, повторите позже — конфиг «([^«»]*)» не изменён$/,"Cloudflare issued WARP, but the router could not ask the config's server ($1): its name did not resolve, try again later — the config «$2» is not changed"],
+    [/^Cloudflare выдал WARP, но роутер не смог спросить сервер конфига \(([^()]*)\): нужен адрес IPv4 — конфиг не сохранён$/,"Cloudflare issued WARP, but the router could not ask the config's server ($1): an IPv4 address is needed — the config isn't saved"],
+    [/^Cloudflare выдал WARP, но роутер не смог спросить сервер конфига \(([^()]*)\): его имя не разрешилось, повторите позже — конфиг не сохранён$/,"Cloudflare issued WARP, but the router could not ask the config's server ($1): its name did not resolve, try again later — the config isn't saved"],
+    [/^Cloudflare выдал WARP, но роутер не смог спросить сервер конфига \(([^()]*)\): нужен адрес IPv4 — конфиг не собран$/,"Cloudflare issued WARP, but the router could not ask the config's server ($1): an IPv4 address is needed — no config was built"],
+    [/^Cloudflare выдал WARP, но роутер не смог спросить сервер конфига \(([^()]*)\): его имя не разрешилось, повторите позже — конфиг не собран$/,"Cloudflare issued WARP, but the router could not ask the config's server ($1): its name did not resolve, try again later — no config was built"],
     [/^\[warp\] WARP этого роутера уже есть \(конфиг «([^«»]*)»\) — сперва удалите его$/,"[warp] this router's WARP already exists (config «$1») — delete it first"],
     [/^\[warp\] нет конфига «([^«»]*)»$/,"[warp] no config «$1»"],
     [/^\[road\] выхода №([2-7]) нет$/,"[road] there is no exit #$1"],
@@ -12217,20 +12271,36 @@
     [/^сервис не ответил \(HTTP ([^()]*)\)$/,"the service did not answer (HTTP $1)"],
     ["HTTP нет связи","HTTP no connection"],
     [/^создаю выход «([^«»]*)»$/,"creating the «$1» exit"],
-    [/^Подобрать порт для «([^«»]*)» заново\? Роутер проверит порты пробным ключом — до двух минут, работающий выход это не трогает\. Конфиг изменится, только если его порт больше не проходит: тогда выход перезапустится\.$/,"Pick the port for «$1» again? The router checks the ports with a trial key — up to two minutes, the working exit is not touched. The config changes only if its port no longer passes: then the exit restarts."],
+    [/^Подобрать порт для «([^«»]*)» заново\? Роутер проверит порты, а если нужно — другие адреса и маскировки, пробным ключом — до трёх минут, работающий выход это не трогает\. Конфиг изменится, только если его порт больше не проходит, идёт через московский узел Cloudflare или в конфиге прежняя маскировка роутера: тогда выход перезапустится\.$/,"Pick the port for «$1» again? The router checks the ports — and other addresses and maskings if needed — with a trial key, up to three minutes; the working exit is not touched. The config changes only if its port no longer passes, goes through Cloudflare's Moscow point, or the config has the router's old masking: then the exit restarts."],
     [/^Получить «([^«»]*)» заново\? Ключ станет новым, прежний перестанет работать — у всех, кто пользовался этим конфигом, и в бэкапе, снятом раньше\. Выход перезапустится, дороги через него останутся\.$/,"Get «$1» anew? The key becomes new, the old one stops working — for everyone who used this config, and in a backup taken earlier. The exit restarts, the roads through it stay."],
     [/^спрашиваю WARP с этой маскировкой \(порт (\d+)\)$/,"asking WARP with this masking (port $1)"],
     [/^порт (\d+) по-прежнему проходит — конфиг «([^«»]*)» не менялся$/,"port $1 still passes — the config «$2» was not changed"],
     [/^порт (\d+) по-прежнему проходит — конфиг «([^«»]*)» не менялся; выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"port $1 still passes — the config «$2» was not changed; exit $3 did not come up — open it in «Additional exits»"],
     [/^«([^«»]*)»: порт (\d+) провайдер режет — теперь (\d+)$/,"«$1»: the ISP cuts port $2 — now $3"],
+    [/^«([^«»]*)»: адрес ([^ ]+) не подошёл — теперь ([^ ;]+)$/,"«$1»: address $2 did not work — now $3"],
+    [/^«([^«»]*)»: прежний адрес шёл через московский узел Cloudflare — теперь ([^ ;]+)$/,"«$1»: the old address went through Cloudflare's Moscow point — now $2"],
+    [/^«([^«»]*)»: маскировку провайдер режет — роутер собрал новую \((QUIC|DNS|STUN)\), порт (\d+)$/,"«$1»: the ISP cuts the masking — the router built a new one ($2), port $3"],
+    [/^провайдер не пропускает к WARP ни одного пакета \(проверено адресов: (\d+)\) — конфиг не изменён$/,"the ISP lets no packet through to WARP (addresses checked: $1) — the config is not changed"],
     [/^«([^«»]*)»: порт (\d+) провайдер режет — теперь (\d+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: the ISP cuts port $2 — now $3; exit $4 did not come up — open it in «Additional exits»"],
+    [/^«([^«»]*)»: адрес ([^ ]+) не подошёл — теперь ([^ ;]+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: address $2 did not work — now $3; exit $4 did not come up — open it in «Additional exits»"],
+    [/^«([^«»]*)»: прежний адрес шёл через московский узел Cloudflare — теперь ([^ ;]+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: the old address went through Cloudflare's Moscow point — now $2; exit $3 did not come up — open it in «Additional exits»"],
+    [/^«([^«»]*)»: маскировку провайдер режет — роутер собрал новую \((QUIC|DNS|STUN)\), порт (\d+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: the ISP cuts the masking — the router built a new one ($2), port $3; exit $4 did not come up — open it in «Additional exits»"],
+    [/^провайдер не пропускает к WARP ни одного пакета \(проверено адресов: (\d+)\) — конфиг не изменён; выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"the ISP lets no packet through to WARP (addresses checked: $1) — the config is not changed; exit $2 did not come up — open it in «Additional exits»"],
     [/^«([^«»]*)» получен заново: ключ новый, порт (\d+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1» obtained anew: a new key, port $2; exit $3 did not come up — open it in «Additional exits»"],
     [/^«([^«»]*)»: маскировка собрана роутером — WARP с ней отвечает; выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: the masking is built by the router — WARP answers with it; exit $2 did not come up — open it in «Additional exits»"],
     [/^«([^«»]*)»: маскировка ваша — WARP с ней отвечает; выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: the masking is yours — WARP answers with it; exit $2 did not come up — open it in «Additional exits»"],
-    // …the exits' numbers of the four rules above came through as the router wrote them («№2, №5»): English writes «#».
-    [/ exit ((?:№[2-7](?:, )?)+) did not come up — /,function(m, a){ return ' exit '+a.replace(/№/g, '#')+' did not come up — '; }],
     [/^провайдер режет WARP на всех портах \(([0-9, ]*)\) — конфиг не изменён$/,"the ISP cuts WARP on every port ($1) — the config is not changed"],
     [/^провайдер режет WARP на всех портах \(([0-9, ]*)\) — конфиг не изменён; выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"the ISP cuts WARP on every port ($1) — the config is not changed; exit $2 did not come up — open it in «Additional exits»"],
+    [/^«([^«»]*)»: прежняя маскировка роутера заменена новой \(QUIC\), порт (\d+)$/,"«$1»: the router's old masking was replaced with a new one (QUIC), port $2"],
+    [/^«([^«»]*)»: прежняя маскировка роутера заменена новой \(QUIC\), порт (\d+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: the router's old masking was replaced with a new one (QUIC), port $2; exit $3 did not come up — open it in «Additional exits»"],
+    [/^«([^«»]*)»: порт (\d+) шёл через московский узел Cloudflare — теперь (\d+)$/,"«$1»: port $2 went through Cloudflare's Moscow point — now $3"],
+    [/^«([^«»]*)»: порт (\d+) шёл через московский узел Cloudflare — теперь (\d+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«$1»: port $2 went through Cloudflare's Moscow point — now $3; exit $4 did not come up — open it in «Additional exits»"],
+    [/^роутер не смог спросить сервер конфига \(([^()]*)\): нужен адрес IPv4 — конфиг не изменён$/,"the router could not ask the config's server ($1): an IPv4 address is needed — the config is not changed"],
+    [/^роутер не смог спросить сервер конфига \(([^()]*)\): его имя не разрешилось, повторите позже — конфиг не изменён$/,"the router could not ask the config's server ($1): its name did not resolve, try again later — the config is not changed"],
+    [/^роутер не смог спросить сервер конфига \(([^()]*)\): нужен адрес IPv4 — конфиг не изменён; выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"the router could not ask the config's server ($1): an IPv4 address is needed — the config is not changed; exit $2 did not come up — open it in «Additional exits»"],
+    [/^роутер не смог спросить сервер конфига \(([^()]*)\): его имя не разрешилось, повторите позже — конфиг не изменён; выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"the router could not ask the config's server ($1): its name did not resolve, try again later — the config is not changed; exit $2 did not come up — open it in «Additional exits»"],
+    // …the exits' numbers of the four rules above came through as the router wrote them («№2, №5»): English writes «#».
+    [/ exit ((?:№[2-7](?:, )?)+) did not come up — /,function(m, a){ return ' exit '+a.replace(/№/g, '#')+' did not come up — '; }],
     [/^«([^«»]*)» получен заново: ключ новый, порт (\d+)$/,"«$1» obtained anew: a new key, port $2"],
     [/^Cloudflare выдал WARP, но провайдер режет его на всех портах \(([0-9, ]*)\) — конфиг «([^«»]*)» не изменён$/,"Cloudflare issued WARP, but the ISP cuts it on every port ($1) — the config «$2» is not changed"],
     [/^Cloudflare выдал WARP, но провайдер режет его на всех портах \(([0-9, ]*)\) — конфиг не собран$/,"Cloudflare issued WARP, but the ISP cuts it on every port ($1) — no config was built"],
@@ -12550,6 +12620,9 @@
     ["AmneziaWG выбран транспортом, но его бинарей на роутере нет.","AmneziaWG is the chosen transport, but its binaries are not on the router."],
     ["Установите компонент «AmneziaWG» в панели: «Компоненты» — heal тут не поможет.","Install the «AmneziaWG» component in the panel: «Components» — heal will not help here."],
     ["awg0 не поднят — сначала запустите heal.sh:","awg0 is not up — run heal.sh first:"],
+    // …и без двоеточия: шаг правил обновления показывает первую строку отказа repair без хвостового «:» (install.sh 5b) — ПОСЛЕ
+    // строки с ним, чтобы та, где двоеточие есть, переводилась целиком.
+    ["awg0 не поднят — сначала запустите heal.sh","awg0 is not up — run heal.sh first"],
     ["транспорт не настроен — ядро маркировки и несущую пропускаю","no transport configured — skipping the marking core and the carrier"],
     ["транспорт не настроен — вырезы «мимо VPN» не переигрываю","no transport configured — not replaying the «bypass VPN» exclusions"],
     // Починка при выключенном VPN возвращает правила НЕ про VPN (хвост 10 ревью dev233); итог и отказ несущей — своими строками.
@@ -13211,6 +13284,9 @@
     [/(ГБ|МБ|КБ|Б) ОЗУ/g,"$1 RAM"],
     [/освобождено (\d[\d.,]*\s*(?:ГБ|МБ|КБ|Б)) на флеше/g,"freed $1 on flash"],
     [/освобождено (\d[\d.,]*\s*(?:ГБ|МБ|КБ|Б)) на накопителе/g,"freed $1 on the drive"],   // раскладка «всё на накопителе»: мусор и снимки — на томе кода
+    // Скорость скачивания в байтах крупнее КБ (ход обновления: пакет 1,4 МБ за секунду — «1.37 МБ/с»): без этого голая единица (правило ниже, «[/МБ/g»)
+    // давала «MB/с», и кириллический хвост возвращал узел целиком по-русски (ревью с.175, круг 2).
+    [/(\d[\d.,]*)\s*ТБ\/с/g,"$1 TB/s"],[/(\d[\d.,]*)\s*ГБ\/с/g,"$1 GB/s"],[/(\d[\d.,]*)\s*МБ\/с/g,"$1 MB/s"],
     [/МБ/g,"MB"],   // мегабайты «свободно/нужно» — даже когда число = «?» (df не отдал цифру)
     ["Сейчас: активный=","Now: active="],[", альты=[",", alts=["],["[нет]","[none]"],
     [", awg-бинарь=да",", awg binary=yes"],[", awg-бинарь=нет",", awg binary=no"],
@@ -13398,6 +13474,7 @@
     [/релиз (\S+) \(код (\d+)\): подпись сошлась, качаю (\S+) \((\d+) байт\)/,"release $1 (code $2): the signature matches, downloading $3 ($4 bytes)"],
     [/пакет не скачался: /,"the package did not download: "],
     [/пакет пришёл не того размера \((\d+) байт вместо (\d+)\)/,"the package arrived with the wrong size ($1 bytes instead of $2)"],
+    [/^repair кончился с кодом (\d+)$/,"repair ended with code $1"],
     ["sha256 пакета не совпал с подписанным описанием","the package sha256 does not match the signed description"],
     ["архив пакета не читается","the package archive cannot be read"],
     ["в пакете есть не только обычные файлы — не ставим","the package holds more than regular files — not installing"],
@@ -17661,6 +17738,10 @@
   //      5 мин недопустимо. Полный вердикт выхода (ловит CDN-фронт/битый ключ) остаётся за кнопкой
   //      «Проверить все». Проба мёртвого сервера удешевлена (негативный кэш в cgi-bin/ping) → фон не давит роутер.
   var apTimer=null, apTimerMin=0, bgSweepRun=false, apLastSweep=0;
+  // ПОКА ИДЁТ ОБНОВЛЕНИЕ, ФОН МОЛЧИТ (с.174): пинги пулом в четыре держали все места CGI веб-сервера, и клик «Установить обновление»
+  // ~1,5 минуты ждал за ними в очереди; а посреди переигрыша настроек (выходы поднимаются заново) замер записал бы в кэш «не отвечает»
+  // живым серверам. До этой отметки (мс) обход не начинается; её ставит опрос экрана «Обновление».
+  var updBusyTill=0;
   function apStop(){ if(apTimer){ clearInterval(apTimer); apTimer=null; } apTimerMin=0; }
   // Перезапуск — только при СМЕНЕ интервала: экран «Проверка серверов» зовёт это на каждом открытии, и сброс таймера каждым
   // заходом отодвигал бы очередной фоновый обход без конца.
@@ -17678,6 +17759,7 @@
     if(bgSweepRun || testSweepRun || speedSweepRun || busy) return;   // уже идёт проверка — пропуск
     autoPingSweep();
   }
+  function updQuiet(){ return Date.now()<updBusyTill; }
   // Один ping-only замер (без теста выхода) → запись в кэш. mbps НЕ трогаем (merge сохранит прошлую
   // скорость). Для xray это пинг эндпоинта (доступность+латентность), не полный egress-вердикт.
   function bgPingOne(tpt, name, cb){
@@ -17693,7 +17775,7 @@
   // Фоновый обход всех серверов (awg+xray+hy2) ping-only, пул 4 в ширину. Уступает ручной проверке
   // (testSweepRun/speedSweepRun) — если та стартовала, сворачиваемся. Обновляет кэш → hydrate/repaint.
   function autoPingSweep(){
-    if(bgSweepRun || testSweepRun || speedSweepRun || busy) return;
+    if(bgSweepRun || testSweepRun || speedSweepRun || busy || updQuiet()) return;
     bgSweepRun=true; apLastSweep=Date.now();
     fetchJson('/cgi-bin/list').then(function(d){
       var items=[];
@@ -17701,10 +17783,15 @@
       ((d&&d.xray&&d.xray.servers)||[]).forEach(function(n){ items.push({tpt:'xray',name:n}); });
       ((d&&d.hy2&&d.hy2.servers)||[]).forEach(function(n){ items.push({tpt:'hy2',name:n}); });
       if(!items.length){ bgSweepRun=false; return; }
-      var i=0, active=0, POOL=4;
-      function done(){ bgSweepRun=false; balancerConsider(d); }   // кэш пингов только что обновлён — самое время решать
+      var i=0, active=0, POOL=4, stopped=false;
+      // A folded sweep ends silently: its last ping must neither clear the flag of the sweep after it nor let the balancer switch a
+      // server while an update runs — the switch takes the switching lock install.sh's rules step waits for (review s.177).
+      function done(){ if(stopped) return; bgSweepRun=false; if(!updQuiet()) balancerConsider(d); }   // кэш пингов только что обновлён — самое время решать
+      // Свёрнутый обход — свёрнут НАВСЕГДА: пинги, ещё летящие в нём, иначе по ответу звали бы pump и продолжали его рядом со
+      // следующим обходом (отказ запуска обновления снимает тишину через секунду — ревью с.175, круг 3).
       function pump(){
-        if(testSweepRun||speedSweepRun){ bgSweepRun=false; return; }   // уступаем ручной проверке
+        if(stopped) return;
+        if(testSweepRun||speedSweepRun||updQuiet()){ stopped=true; bgSweepRun=false; return; }   // уступаем ручной проверке и обновлению
         while(active<POOL && i<items.length){ var it=items[i++]; active++;
           bgPingOne(it.tpt, it.name, function(){ active--; if(i>=items.length && active===0) done(); else pump(); }); }
         if(i>=items.length && active===0) done();
@@ -18197,7 +18284,7 @@
   // именованные, затем по имени и адресу (тот же порядок, что в списке устройств). Две копии сортировки
   // разошлись бы, и «первое устройство» в двух формах значило бы разное.
   function devPickSort(list){
-    return list.slice().sort(function(a,b){
+    return list.filter(function(dev){ return !dev.self; }).sort(function(a,b){
       var dd=(b.online?1:0)-(a.online?1:0); if(dd) return dd;
       var an=devNamed(a), bn=devNamed(b); if(an&&!bn) return -1; if(bn&&!an) return 1;
       return (an||a.ip).localeCompare(bn||b.ip);
@@ -18220,6 +18307,9 @@
     // Адрес чужой сети — первым: остальные бейджи про то, ЧЬЁ правило, а этот про то, что оно
     // не сработает вовсе. Приезжает с импортом бэкапа, снятого на другом роутере.
     if(dev.foreign)    h+=devBadge('адрес не из вашей сети','var(--text-warning)','Этот адрес не принадлежит ни одной сети роутера — правило на нём не сработает. Обычно приезжает с бэкапом другого роутера');
+    // The router's OWN address (data `self`): no device stands behind it, and the router does not apply a rule there
+    // (apply-bypass.sh::src_not_self). Same place in the row as «не из вашей сети» — both say «this rule does nothing».
+    if(dev.self)       h+=devBadge('адрес самого роутера','var(--text-warning)','Это адрес самого роутера, а не устройства в сети — правило на нём роутер не применяет. Обычно приезжает с бэкапом роутера, за которым стоит этот');
     if(dev.owner_lost) h+=devBadge('правила от другого устройства','var(--text-warning)','Правила заводили, когда этим адресом владело другое устройство');
     if(dev.stale)      h+=devBadge('старая аренда','var(--text-tertiary)','Устройство переподключилось и получило другой адрес — эта запись доживает срок аренды');
     // Адрес НЕ выдавал роутер: он прописан на самом устройстве, и в списке такая строка живёт
@@ -18244,6 +18334,13 @@
   function devForeignHtml(dev, nPorts, nDst){
     if(!dev.foreign || !devHasRules(dev, nPorts, nDst)) return '';
     return noteBox('<b>Этот адрес не из сетей вашего роутера</b><br><span>Правило на нём не сработает: такого адреса в ваших сетях нет. Обычно так выглядят настройки, приехавшие с бэкапом ДРУГОГО роутера — там локальная сеть была другой. Заведите правило заново на нужное устройство из списка, а это удалите.</span>','warn');
+  }
+  // THE ROUTER'S OWN ADDRESS. A rule here came with the backup of the router this one sits behind (there the address was a
+  // client — this router itself). Applied, «мимо VPN» or «в десинк» would take ALL the router's own traffic, so the engine
+  // refuses it and the line sits idle in the store; the person must know why and remove it. Same gate as the note above.
+  function devSelfHtml(dev, nPorts, nDst){
+    if(!dev.self || !devHasRules(dev, nPorts, nDst)) return '';
+    return noteBox('<b>Это адрес самого роутера</b><br><span>Роутер не применяет правило на своём адресе: «мимо VPN» или «в десинк» на нём забрали бы весь его собственный трафик, а других устройств за этим адресом нет. Обычно так выглядят настройки из бэкапа роутера, за которым стоит этот: там это был адрес клиента. Удалите правило.</span>','warn');
   }
   // ПРАВИЛА ОСТАЛИСЬ НА АДРЕСЕ, А УСТРОЙСТВО УШЛО. Показываем только там, где правила реально
   // есть: у пустой записи предупреждать не о чем, а пугать ни за что — худший вид честности.
@@ -18491,6 +18588,8 @@
   // VPN_FORCE, где устройство стоит раньше интерфейса, гостевой подсети и общего «весь трафик в VPN» (rebuild_force). '' —
   // целиком не ловит никто; '?' — решает режим сети, а он не получен (у гостевой — сразу: её «мимо» сильнее всего).
   function dvWho(dev, net){
+    // Keep the stored mode for management, but never infer a LAN client's route from a router-owned address.
+    if(dev.self) return 'self';
     var m=dev.mode, g=!!(net && net.guest), im=net ? (g ? net.imode : net.mode) : null;
     // Гостевая «мимо» известна из секции сетей и сильнее всего — неизвестный интерфейс её не отменяет.
     if(g && net.mode==='bypass') return 'guest';
@@ -18571,7 +18670,7 @@
   }
   function dvRest(dev, net, ready, ports){
     var r=dvRestMode(dev, net, ready), w=dvWho(dev, net);
-    if(w==='?' || !ports) return r;
+    if(w==='self' || w==='?' || !ports) return r;
     var g=(w==='guest'), pa=dvPortAll(ports, dev.ip, g);
     if(pa.tcp && pa.udp){
       if(pa.tcp.r.dir!==pa.udp.r.dir) return {h:'<span>Весь TCP и UDP разбирают правила по портам «все порты»: у TCP и UDP пути разные.</span>', d:''};
@@ -18584,6 +18683,7 @@
   }
   function dvRestMode(dev, net, ready){
     var w=dvWho(dev, net), ss=(net && net.ssid) ? ' «<span class="sens">'+esc(net.ssid)+'</span>»' : '';
+    if(w==='self') return {h:'<span>Это адрес самого роутера — правила устройства не применяются.</span>', d:''};
     if(w==='?') return {h:'<span>Режим сети не получен — куда идёт остальной трафик, сказать нельзя.</span>', d:''};
     // Десинк устройства стоит ПО ИСТОЧНИКУ в POSTROUTING (zapret.sh src-wire): маршрут гостевой ему не помеха.
     if(w==='guest' && dev.mode==='desync' && ready) return {h:'<span>Напрямую: гостевая сеть идёт мимо VPN правилом маршрутизации, а рукопожатия ломает десинк устройства.</span>', d:rpDir('desync')};
@@ -18667,7 +18767,10 @@
     return dvPathChip(vpnPath());
   }
   // Чип — в своём узле (`data-dvc`): опрос статуса и тик Wi-Fi перерисовывают его поверх, не трогая строку с кнопкой и форму.
-  function dvChipBox(key, html){ return '<span class="dv-c" data-dvc="'+key+'">'+html+'</span>'; }
+  function dvChipBox(key, html){
+    if(typeof _dvLast!=='undefined' && _dvLast && _dvLast.dev.self) html='<span class="chip">не действует</span>';
+    return '<span class="dv-c" data-dvc="'+key+'">'+html+'</span>';
+  }
   // dir хранится машинно (vpn|direct|block|s2..s7) — подпись доп-выхода берём из его ИМЕНИ,
   // а не из номера: в карточке выходов человек назвал его сам, номер ему ни о чём не говорит.
   // Подпись — для тоста: чип строки рисует dvDirChip.
@@ -18750,6 +18853,8 @@
   function dvModeCard(dev, ready, net, ports){
     var m=dev.mode||'split', tl=[['split','i-route','Раздельно','по общим правилам'],['bypass','i-globe','Мимо VPN','весь трафик напрямую'],['force','i-shield','В VPN','весь трафик в туннель']];
     if(ready || m==='desync') tl.push(['desync','i-zap','В десинк','напрямую, рукопожатия — десинком']);
+    if(dev.self) return '<div class="card" data-dvp="route"><div class="wt">Сохранённый режим</div><div class="cline">Это адрес самого роутера — правила устройства не применяются.</div>'
+      + (m!=='split' ? '<div class="acts"><button type="button" class="btn" data-dvm="split">Удалить правило режима</button></div>' : '')+'</div>';
     var h='<div class="card" data-dvp="route"><div class="wt">Режим устройства</div><div class="opt'+(tl.length===3?' c3':'')+'">'
       + tl.map(function(x){ return optTile('data-dvm', x[0], x[0]===m, x[1], x[2], x[3]); }).join('')+'</div>'
       // «В VPN» сильнее не всего: порт-правила и свои сайты стоят в ядре выше, «мимо» сети и сайтов — в цепочке выше, а гостевая
@@ -18785,6 +18890,7 @@
   // Граница — ТА, ЧТО В ЯДРЕ: KEEP_SETS (apply-bypass.sh) — только наборы основного туннеля; группа через выход живёт в своём
   // наборе и в исключение не входит (ревью шага 4b, круг 2). Хвост «сейчас» — тот же факт пути, что у лестницы.
   function dvKeepCard(dev){
+    if(dev.self) return '';
     if(dev.mode!=='bypass') return '';
     return '<div class="card" data-dvp="route"><div class="wt">Исключения</div><div class="kv swrow"><div class="grow"><div class="k">Мои правила «в VPN» действуют</div>'
       + '<div class="v"><span>домены, адреса и группы основного туннеля, добавленные вручную, всё равно пойдут через VPN; группы через выходы, общие списки и гео — нет</span><span id="dv-keep-t">'+(dev.keep ? dvVpnTail(vpnPath()) : '')+'</span></div></div>'
@@ -18794,15 +18900,15 @@
   // и гео это не выражается (они на всю сеть). Стоят в ядре выше режима устройства, сети и общих списков. Пометка «есть и в
   // других списках» — справка, а не тревога: домен назван ещё одним правилом (гео, одиночный домен, пул десинка), строки
   // склеивает dns-merge.sh, и работают оба.
-  function dvOwnCard(drules, f, guest){
+  function dvOwnCard(drules, f, guest, inactive){
     var rows=drules.map(function(r, i){
       return '<div class="lrow"><div class="grow"><div class="nm"><span class="mono">'+esc(r.val)+'</span>'+rpBadge(ruleKindOf(r.val))+'</div>'
-        + (r.conf ? '<div class="ds" title="Домен назначен ещё одним правилом — гео-категорией, одиночным доменом или пулом десинка. Работают оба: адреса домена попадут в наборы обоих правил, а кто сильнее — решает порядок, описанный внизу экрана.">есть и в других списках</div>' : '')+'</div>'
+        + (r.conf && !inactive ? '<div class="ds" title="Домен назначен ещё одним правилом — гео-категорией, одиночным доменом или пулом десинка. Работают оба: адреса домена попадут в наборы обоих правил, а кто сильнее — решает порядок, описанный внизу экрана.">есть и в других списках</div>' : '')+'</div>'
         + dvChipBox('o'+i, dvDirChip(r.dir, false, guest))+'<button type="button" class="btn sm" data-dva="own-del" data-dvi="'+i+'" data-rdel="'+esc('own:'+r.val)+'">убрать</button></div>';
     }).join('');
-    return rpSect('i-at', 'Свои сайты и адреса', 'только для этого устройства — сильнее его режима, сети и общих списков', drules.length,
-      (rows || '<div class="lempty">своих правил нет — устройство идёт по общим спискам и своему режиму</div>')
-      + '<div class="dv-form" id="dv-oform">'+dvOwnFormHtml(f)+'</div>', '', ' data-dvp="route"', 'dv-site', 'w2');
+    return rpSect('i-at', 'Свои сайты и адреса', inactive ? 'сохранённые правила — на этом адресе не действуют' : 'только для этого устройства — сильнее его режима, сети и общих списков', drules.length,
+      (rows || '<div class="lempty">'+(inactive ? 'своих правил нет' : 'своих правил нет — устройство идёт по общим спискам и своему режиму')+'</div>')
+      + (inactive ? '' : '<div class="dv-form" id="dv-oform">'+dvOwnFormHtml(f)+'</div>'), '', ' data-dvp="route"', 'dv-site', 'w2');
   }
   function dvOwnFormHtml(f){
     var sl=devSlotChoices(); f.dvSlot=dvFormSlot(f.dvSlot);
@@ -18838,6 +18944,7 @@
   }
   function dvInhRows(dev, net, gl, rany){
     var w=dvWho(dev, net), h='';
+    if(w==='self') return '<div class="cline">'+dvRestMode(dev, net, false).h+'</div>';
     // Строка ведёт к СВОЕЙ сети на экране «Wi-Fi и подсети» (ключ модели `wfModel`: `n:<имя>`, гостевая — `g`).
     function nrow(nm, ds, m, k){ return lrowGo('net:'+k,'изменить режим сети')+'<div class="grow"><div class="nm">'+nm+'</div><div class="ds">'+ds+'</div></div>'
       + (m ? rpNetDir(m) : '<span class="chip">режим не получен</span>')+CHEV+'</div>'; }
@@ -18881,6 +18988,7 @@
   // статуса, та же лестница, что строка «Весь остальной трафик»). Каждая фраза — своим узлом: перевод ищет ключ по узлу.
   function dvLadHtml(dev, rules, drules, net, gl, ready, rany){
     var w=dvWho(dev, net), m=dev.mode, st=[], dir=dvWhoDirect(w), tun=dvWhoTunnel(w), guest=(w==='guest');
+    if(w==='self') return noteBox(dvRestMode(dev, net, ready).h, 'warn');
     var ss=(net && net.ssid) ? '«<span class="sens">'+esc(net.ssid)+'</span>» ' : '', vp=vpnPath(), tp=tun ? dvTunPath(dev, w) : '', fn=slotNum(dev.fslot);
     // Строки, которые ядро пропускает (`ok:false` — роутер разобрал их тем же port-lib.sh), в счёт не идут: они не решают ничего.
     var rl=rules.filter(portLive), pa=(rany||[]).filter(portLive), nP=rl.length, nA=pa.length, nD=drules.length;
@@ -18969,10 +19077,10 @@
     if(screenAlive(r)) rpPut(r, dvRestHtml(L.dev, L.net, L.ready, L.rules.concat(L.rany)));
     if(screenAlive(a)) rpPut(a, dvInhHtml(L.dev, L.net, L.gl, L.rany));
     if(screenAlive(b)) rpPut(b, dvLadHtml(L.dev, L.rules, L.drules, L.net, L.gl, L.ready, L.rany));
-    if(screenAlive(k)) k.innerHTML=L.dev.keep ? dvVpnTail(vpnPath()) : '';
+    if(screenAlive(k)) k.innerHTML=(!L.dev.self && L.dev.keep) ? dvVpnTail(vpnPath()) : '';
     Array.prototype.forEach.call(document.querySelectorAll('[data-dvc]'), function(el){
       var key=el.getAttribute('data-dvc'), i=parseInt(key.slice(1),10), rr=(key.charAt(0)==='o') ? L.drules[i] : L.rules[i];
-      if(rr && screenAlive(el)) el.innerHTML=(key.charAt(0)==='p') ? portChip(rr, guest) : dvDirChip(rr.dir, false, guest);
+      if(rr && screenAlive(el)) el.innerHTML=L.dev.self ? '<span class="chip">не действует</span>' : (key.charAt(0)==='p') ? portChip(rr, guest) : dvDirChip(rr.dir, false, guest);
     });
   }
   function dvCurPaint(){
@@ -19019,12 +19127,14 @@
   function portChip(r, guest){ return portLive(r) ? dvDirChip(r.dir, true, guest) : '<span class="chip">не действует</span>'; }
   // Своих правил нет, а правила всего роутера по портам есть — «идёт по своему режиму» было бы неправдой: они стоят в ядре выше
   // режима (ревью пачки 3, круг 1). Где они — строкой «Наследует от сети и роутера».
-  function dvPortsCard(rules, guest, rany){
+  function dvPortsCard(rules, guest, rany, inactive){
     // У гостевой «мимо» из правил роутера действуют только блокировки — тот же счёт, что у строки «Наследует» (ревью пачки 3, круг 2).
     var zp=enabledSlots.some(function(s){ return s.transport==='zapret'; }), nA=(rany||[]).filter(function(r){ return portLive(r) && (!guest || r.dir==='block'); }).length;
     var rows=rules.map(function(r, i){
       return portRowHtml(r, dvChipBox('p'+i, portChip(r, guest)), 'data-dva="port-del" data-dvi="'+i+'" data-rdel="'+esc('port:'+r.proto+':'+r.ports)+'"');
     }).join('');
+    if(inactive) return rpSect('i-hash', 'Правила по портам', 'сохранённые правила — на этом адресе не действуют', rules.length,
+      rows || '<div class="lempty">правил по портам нет</div>', '', ' data-dvp="ports"', 'dv-ports', 'w2');
     return rpSect('i-hash', 'Правила по портам', 'решают раньше всего — даже раньше режима устройства', rules.length,
       (rows || (nA ? '<div class="lempty">своих правил по портам нет — действуют правила всего роутера (строкой в «Наследует от сети и роутера»)</div>'
                    : '<div class="lempty">правил по портам нет — устройство целиком идёт по своему режиму</div>'))
@@ -19162,6 +19272,7 @@
     var L=_dvLast; if(!L) return '';
     var w=dvWho(L.dev, L.net);
     if(w==='guest') return 'Гостевая сеть идёт мимо VPN правилом маршрутизации: «→ в VPN» заводит правило для всей сети, а на это устройство оно не подействует.';
+    if(w==='self') return 'Это адрес самого роутера — правила устройства не применяются.';
     if(w==='dev-bypass' && !L.dev.keep) return 'Устройство целиком идёт мимо VPN: «→ в VPN» заводит правило для всей сети, а на него оно не подействует, пока не включено исключение «Мои правила «в VPN» действуют» на вкладке «Маршрут».';
     if(w==='dev-desync' || w==='net-bypass') return 'Устройство целиком идёт напрямую: «→ в VPN» заводит правило для всей сети, а на него оно не подействует.';
     return '';
@@ -19423,12 +19534,12 @@
     var S=dwState(ip); S.grpOpen=false; dwHalt();
     if(!_dvSch || _dvSch.ip!==ip) _dvSchNote='';   // another device: its schedule's note is not this one's
     body.innerHTML='<div class="vwrap">'+dvHeadHtml(dev, st, rules.length, tab)
-      + devForeignHtml(dev, rules.length, drules.length)+devOwnerHtml(dev, rules.length, drules.length)
-      + dvModeCard(dev, ready, net, rules.concat(rany))+dvOwnCard(drules, f, guest)
+      + devForeignHtml(dev, rules.length, drules.length)+devSelfHtml(dev, rules.length, drules.length)+devOwnerHtml(dev, rules.length, drules.length)
+      + dvModeCard(dev, ready, net, rules.concat(rany))+dvOwnCard(drules, f, guest, dev.self)
       + '<div class="'+rpSectOpen('dv-inh')+'" data-rsk="dv-inh" data-dvp="route" id="dv-inh">'+dvInhHtml(dev, net, gl, rany)+'</div>'
       + '<div class="card w2" data-dvp="route" id="dv-lad">'+dvLadHtml(dev, rules, drules, net, gl, ready, rany)+'<div id="dv-schnote">'+_dvSchNote+'</div></div>'
       + dvKeepCard(dev)
-      + dvPortsCard(rules, guest, rany)+dvPortCard(f)
+      + dvPortsCard(rules, guest, rany, dev.self)+(dev.self ? '' : dvPortCard(f))
       + '<div class="tpane" data-dvp="sched" id="dv-sch">'+RP_WAIT+'</div>'
       + '<div class="tpane" data-dvp="stat" id="dv-stat">'+dvStatHtml(dev, (_dvStat && _dvStat.mac===String(dev.mac||'').toLowerCase()) ? _dvStat.d : null)+'</div>'
       + dwCardsHtml()+'</div>';
@@ -20719,6 +20830,8 @@
       rqGate();
       return;
     }
+    // A successful own-address verdict revokes this remembered client. Preserve fallback on unavailable/ordinary missing lists.
+    if(list.some(function(dev){ return dev.self && (dev.ip===_rqDev || dev.ip===sel.value); })) { _rqDev=''; sel.value=''; }
     var keep=_rqDev || sel.value || String((_rpLast.dev||{}).you||'');
     var rows=devPickSort(list);   // порядок — общий с конструктором правила (`devPickSort`)
     var h='', hit=false;
@@ -20765,7 +20878,8 @@
   // совет нельзя, выбор пуст. Причина уже написана подписью под выбором.
   function rqGate(){
     var b=document.getElementById('rq-go'), sel=document.getElementById('rq-dev');
-    if(b && !_rqBusy) b.disabled=!(sel && (sel.value || _rqDev));
+    var ip=sel && (sel.value || _rqDev);
+    if(b && !_rqBusy) b.disabled=!ip || !!((rqDev(ip)||{}).self);
   }
   // `aria-busy`, а НЕ `disabled`: кнопка в этот момент в фокусе (и у мыши, и у Enter), а запертая
   // кнопка фокус теряет — следующий Tab начинается с начала страницы. Повтор вопроса запирает `_rqBusy`.
@@ -20803,6 +20917,7 @@
     var port=parseInt((document.getElementById('rq-port')||{}).value, 10);
     if(!(port>0 && port<=65535)){ showToast('порт — число от 1 до 65535', false); return; }
     var ip=sel.value || _rqDev;
+    if((rqDev(ip)||{}).self){ showToast('Это адрес самого роутера — правила устройства не применяются.', false); return; }
     // Совет обязан быть ВЫПОЛНИМЫМ: при пустом списке выбирать нечего, и «выберите устройство» —
     // тупик (кнопку гейт запер, а Enter в поле мимо него проходит).
     if(!ip){ showToast(rqDevs() ? 'роутер не видит ни одного устройства' : 'список устройств ещё не получен', false); return; }
@@ -21303,7 +21418,7 @@
   }
   function rnDevs(){
     var d=_rnD && _rnD.d;
-    return (d && !d.__fail && !rpBadResp(d) && Array.isArray(d.devices)) ? d.devices : null;
+    return (d && !d.__fail && !rpBadResp(d) && Array.isArray(d.devices)) ? d.devices.filter(function(dev){ return !dev.self; }) : null;
   }
   function rnDev(f){
     var L=rnDevs()||[], hit=null;
@@ -21311,9 +21426,9 @@
     return hit;
   }
   function rnDefDev(){
-    var d=_rnD && _rnD.d, ds=rnDevs()||[], you=String((d && d.you)||'');
+    var d=_rnD && _rnD.d, ds=devPickSort(rnDevs()||[]), you=String((d && d.you)||'');
     if(you && ds.some(function(x){ return x.ip===you; })) return you;
-    return ds.length ? devPickSort(ds)[0].ip : '';
+    return ds.length ? ds[0].ip : '';
   }
   // Устройство в гостевой сети, выведенной «мимо VPN», — правило маршрутизации pref 90, оно сильнее любых
   // меток: «в VPN» и выход ведут напрямую. ОТВЕТ ОДИН на экран устройства и конструктор (`dvNet`+`dvWho`) — он
@@ -25256,7 +25371,7 @@
   // nothing is computed but an age from two clock readings the router gave. Its actions — pick the port again, get anew, the masking —
   // run at the owner in the background like the getting itself; ONE job at a time (the router's rule), so one status line and one
   // poll for all of them. A config that is the main channel's server now is not worked on (the router refuses) — said before the click.
-  var WP_MASK={gen:'собрана роутером', custom:'ваша', other:'есть в конфиге'};
+  var WP_MASK={gen:'собрана роутером', old:'собрана роутером прежней версии — её заменит «Подобрать порт заново»', custom:'ваша', other:'есть в конфиге'};
   // `known` — the router answered about the records at all (`warp_info`): with no answer a card says so instead of «no record» —
   // «router didn't answer» is not a fact about the config, and «Вернуть собранную роутером» was offered on it (review s.121).
   // Every button carries `data-wpk` (action:config) — the redraw returns the focus by it (FOCUS_ATTRS): the cards repeat each
@@ -25290,7 +25405,7 @@
       var epa=String(it.ep||''), eps=(it.port ? ((epa.indexOf(':')>=0 ? '['+epa+']' : epa)+':'+it.port) : epa);
       h+=kv('Сервер Cloudflare', '<span class="mono sens">'+esc(eps)+'</span>'+(ago(it.pat) ? ' · <span>порт подобран</span> <span>'+ago(it.pat)+'</span>' : ''));
       // What the pick saw: the ports that did NOT pass before the one that did. Ports after it were not asked — no claim about them.
-      if(it.pat>0) h+=kv('Провайдер режет', it.cut ? '<span>при подборе не прошли порты</span> <span class="mono">'+esc(String(it.cut).split(',').join(', '))+'</span>' : 'первый же проверенный порт прошёл');
+      if(it.pat>0) h+=kv('Провайдер режет', it.cut ? '<span>на выбранном сервере с этой маскировкой при подборе не прошли порты</span> <span class="mono">'+esc(String(it.cut).split(',').join(', '))+'</span>' : 'на выбранном сервере с этой маскировкой первый же проверенный порт прошёл');
       if(it.colo) h+=kv('Точка Cloudflare при подборе', coloHtml(it.colo));
       h+=kv('Маскировка первого пакета', (it.i1==='none') ? '<span class="wr">нет — провайдер может оборвать поток после рукопожатия</span>' : (WP_MASK[it.i1]||WP_MASK.other));
     }
@@ -25306,7 +25421,7 @@
       + '<details class="wp-mask" data-more="wpm-'+nq+'"><summary class="act mut" data-wpk="sum:'+nq+'">Своя маскировка</summary>'
       +   '<textarea class="inp mono" rows="3" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Своя маскировка первого пакета" placeholder="&lt;b 0x…&gt;&lt;r 16&gt;" data-wpm="'+nq+'" data-nwd="wpm-'+nq+'">'+esc(nwDraftGet('wpm-'+name, ''))+'</textarea>'
       +   '<div class="acts">'+wb('btn gh', 'mask', 'Проверить и сохранить', dis)
-      +   ((gen || !known) ? '' : wb('btn gh', 'maskgen', (it && it.i1==='none') ? 'Добавить собранную роутером' : 'Вернуть собранную роутером', dis))+'</div>'
+      +   ((gen || !known) ? '' : wb('btn gh', 'maskgen', (it && it.i1==='none') ? 'Добавить собранную роутером' : (it && it.i1==='old') ? 'Обновить маскировку роутера' : 'Вернуть собранную роутером', dis))+'</div>'
       +   '<div class="cline"><span>Только теги AmneziaWG:</span> <span class="mono kw" translate="no">&lt;b 0x…&gt; &lt;r N&gt; &lt;rc N&gt; &lt;rd N&gt; &lt;c&gt; &lt;t&gt;</span> <span>— байты, случайные байты, буквы, цифры, счётчик и время. Переносы строк и пробелы между тегами роутер уберёт сам. Сначала он спросит WARP с этой маскировкой и запишет её, только если он ответил.</span></div></details>'
       + (main ? '<div class="cline">Этот конфиг выбран сервером AmneziaWG для основного канала: порт, ключ и маскировку меняют, а выход на нём создают, когда там выбран другой сервер.</div>' : '');
     return h+'</div>';
@@ -25511,8 +25626,8 @@
         + '<label class="dsfld" style="margin-top:0">Сразу подключить через него<select id="wp-rider" class="inp" data-nwd="wp-rider">'+sel+'</select></label>'
         + '<div class="acts"><button type="button" class="btn pri" id="wp-get"'+((run || !bin) ? ' disabled' : '')+'>'+(wl.length ? 'Получить ещё один' : 'Получить WARP')+'</button></div>'
         + '<div class="cline lead" id="wp-st" aria-live="polite">'+(!bin ? 'нужен AmneziaWG — поставьте его в «Компонентах»' : '')+'</div>'
-        + '<div class="cline">Роутер зарегистрируется у Cloudflare, найдёт порт, который провайдер не режет, сохранит конфиг «WARP» (следующий — «WARP-2») и создаст выход без групп; выбранный сервер поедет через него. Обычно до 30 секунд.</div>'
-        + '<div class="kv"><div class="grow"><div class="k">Маскировка первого пакета</div><div class="v">роутер собирает её сам: начало соединения выглядит как QUIC, а содержимое случайное и новое при каждом подключении — шаблона, который можно выучить, нет</div></div></div>'
+        + '<div class="cline">Роутер зарегистрируется у Cloudflare, найдёт адрес и порт, которые провайдер не режет, сохранит конфиг «WARP» (следующий — «WARP-2») и создаст выход без групп; выбранный сервер поедет через него. Обычно до 30 секунд, если провайдер мешает — до трёх минут.</div>'
+        + '<div class="kv"><div class="grow"><div class="k">Маскировка первого пакета</div><div class="v">роутер собирает её сам: соединение начинается настоящим QUIC-запросом к www.apple.com, случайная часть новая при каждом подключении; если провайдер режет и его — роутер пробует запросы DNS и STUN</div></div></div>'
         + '</div>';
       wl.forEach(function(n){
         var x=slotAll.filter(function(z){ return z.transport==='awg' && z.config===n; })[0]||null;
@@ -25599,7 +25714,7 @@
           if(!postAction('slot_add', null, 'создаю выход '+dn, {name:n, transport:'awg', config:n, fallback:'main'}, rep, rep)) _wpFoc=was;
         }
         else if(v==='repick'){
-          if(askConfirm('Подобрать порт для '+dn+' заново? Роутер проверит порты пробным ключом — до двух минут, работающий выход это не трогает. Конфиг изменится, только если его порт больше не проходит: тогда выход перезапустится.')) job({action:'warp_repick', name:n}, 'подбираю порт WARP');
+          if(askConfirm('Подобрать порт для '+dn+' заново? Роутер проверит порты, а если нужно — другие адреса и маскировки, пробным ключом — до трёх минут, работающий выход это не трогает. Конфиг изменится, только если его порт больше не проходит, идёт через московский узел Cloudflare или в конфиге прежняя маскировка роутера: тогда выход перезапустится.')) job({action:'warp_repick', name:n}, 'подбираю порт WARP');
         }
         else if(v==='reget'){
           // «…и в бэкапе, снятом раньше»: the old registration is given back to Cloudflare — a config restored from an earlier
@@ -26876,6 +26991,23 @@
       var d=r[0];
       if(!d || typeof d!=='object' || d.error || d.need_login){ oops(body,'не удалось получить состояние шифрованного DNS'); return; }
       body.innerHTML=dnsScrHtml(d, _prefsAt>=t0);
+      // Devices asking DNS past the router are drawn by address at once; their NAMES need the device list (`section=devices`, six
+      // sources — slow on a busy house), asked only when there are such rows and painted into that card alone. Its failure leaves
+      // the addresses, never the screen.
+      wireCacts(body);
+      if(d.lan_dns && d.lan_dns.devs && d.lan_dns.devs.length)
+        ldnsDevsAsk().then(function(dv){
+          if(!dv || !Array.isArray(dv.devices)) return;
+          // The card is replaced IN PLACE (a direct child of the deck: `.vwrap>.wfull` spans the row only for a direct child); focus
+          // inside it (a device row, the stock-admin door) comes back on the same node of the new card.
+          var old=document.getElementById('dns-lan'), tmp=document.createElement('div');
+          if(!screenAlive(body) || !old || !old.parentNode) return;
+          var a=document.activeElement, sig=(a && old.contains(a)) ? focusMark() : null;
+          tmp.innerHTML=dnsLanHtml(d.lan_dns, dv);
+          if(!tmp.firstChild) return;
+          old.parentNode.replaceChild(tmp.firstChild, old);
+          if(sig) focusBack(document.getElementById('dns-lan'), sig);
+        }, function(){});
       // Ключ того, что нарисовано в «Сейчас DNS» (разбор у dnsScrTick): лента сверит его со своим ответом.
       var dn=document.getElementById('dns-now'); if(dn){ dn._k=dnsScrKey(dnsNowOf(dohAsTech(d))); dn._t0=t0; }
       nwFocusBack(body, fsig);
@@ -27063,9 +27195,12 @@
     var P=(dohFam(d.proto)==='dot') ? 'dot' : (d.proto==='odoh' && hasO) ? 'odoh' : 'doh';
     var n=dnsNowOf(dohAsTech(d));
     var h='<div class="vwrap">';
+    // «Сейчас DNS» is about the router; that devices skip it is said below — here only a pointer, so the green card does not stand
+    // alone above the problem.
     h+='<div class="card w2 eq" id="dns-now"><div class="wt">Сейчас DNS</div>'
       + (n ? dnsScrNowHtml(n, d) : '<div class="cline">Роутер не сообщает, чем резолвит: на нём нет слоя шифрованного DNS — обновите систему.</div>')
-      + dohHealthHtml(d)+'</div>';
+      + dohHealthHtml(d)
+      + (ldnsBad(d.lan_dns) ? dkLine('Не все устройства спрашивают роутер — подробности ниже, в «DNS у устройств».', true) : '')+'</div>';
     // ШИФРОВАНИЕ — КОГДА: три тумблера (раздельный резолв рунета — третьим: это тоже правило пути DNS). Без бинаря тумблер
     // персистится, но шифрования нет — так и сказано, и поставить можно прямо отсюда (движок компонентов, связка doh — обе программы
     // разом). Ход установки виден, пока она идёт, — и тогда, когда ставится одна DoT при стоящем DoH.
@@ -27123,7 +27258,113 @@
       + optTile('data-dnsp', 'dot', P==='dot', 'i-lock', 'DoT', dotNa ? naT() : 'поверх TLS · порт 853', dotNa)
       + (hasO ? optTile('data-dnsp', 'odoh', P==='odoh', 'i-shield', 'ODoH', !odNa ? 'через посредника · порт 443' : dohMiss ? naT() : 'нужна новая программа DoH · нажмите, чтобы обновить', odNa) : '')
       + '</div>' + (P==='odoh' ? odohPaneHtml(d) : dohResPaneHtml(d, P==='dot'));
-    return h+'</div></div>';
+    return h+'</div>'+dnsLanHtml(d.lan_dns, ldnsDevsKept())+'</div>';
+  }
+  // WHO ASKS DNS PAST THE ROUTER — the router's facts (lan-dns.sh scan via `lan_dns`), the words here. Everything above says how
+  // the ROUTER resolves; a device that never asks it gets none of it, and on an ISP that answers plain DNS itself (Dom.ru: a stub
+  // for every blocked name) it gets the stub, so neither the VPN's domain rules nor Zapret help (tester 30.10.2026: «encryption
+  // on» while the stock DHCP fields handed every device 1.1.1.1). Two causes, two doors: the router's own DHCP hands out a foreign
+  // DNS (fixed in one place — the field is named), or the address comes from elsewhere. Which of the two a device's resolver is,
+  // the ROUTER says (`dhcp` — handed out by the DHCP of the device's own network): the panel matching addresses itself read a lease
+  // still held after the fix as «own DNS», never matched IPv6 and mixed the guest network's option into the main one (review
+  // s.175). Not from the router's DHCP ⇒ no verdict of ours: set on the device, an app, or an old lease — the footnote names all
+  // three. `null` (older router) — no card at all.
+  // Every phrase is its own text node (a span where it stands beside an address): the English layer translates whole nodes.
+  // The networks in the panel's own words (wfBrWord: the home bridge is «домашняя подсеть»); a key is the router's, so an own
+  // property only — `constructor` fits the tag alphabet.
+  var LDNS_NET={lan:'домашняя подсеть', '*':'все сети'};
+  function ldnsNet(n){
+    var o=Object.prototype.hasOwnProperty;
+    return o.call(LDNS_NET, n) ? LDNS_NET[n] : o.call(WF_BR, 'br-'+n) ? WF_BR['br-'+n] : String(n);
+  }
+  function ldnsBad(L){ return !!(L && ((L.dhcp && L.dhcp.length) || (L.devs && L.devs.length))); }
+  // The stock admin answers on the router's LAN address only. From outside (the panel's TLS access by a WAN name) `http://<host>/`
+  // would be plain HTTP to whatever answers there — an upstream box's login page asking for a password (review s.175). A door only
+  // for a WHOLE private, ULA or link-local literal (`10.home.example.net` is a public name), a one-label name other than
+  // `localhost` (an SSH tunnel's door would open the PC's own port 80) or Xiaomi's own local name.
+  function ldnsLanHost(){
+    var h=String(location.hostname||'');
+    return (/^(10\.\d+|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254)\.\d+\.\d+$/.test(h) || /^\[?(f[cd][0-9a-f]{2}|fe80):[0-9a-f:]*\]?$/i.test(h)
+            || (/^[a-z0-9-]+$/i.test(h) && !/^localhost$/i.test(h)) || /^(router\.)?miwifi\.com$/i.test(h)) ? h : '';
+  }
+  // The device list (names) — the last answer is kept: every redraw of the screen (a toggle, a path change) paints the names at
+  // once instead of bare addresses for a second, then asks again (a device renamed or new since shows up — a time gate kept the
+  // old name after a rename, review s.175 r2). ONE request in flight: quick redraws share it instead of running the heaviest
+  // section in parallel; its failure keeps the last answer — for LDNS_DEVS_TTL only: an address is lent for the lease, and a list
+  // kept all day by failing refreshes named today's owner of .142 by this morning's (review s.175 r3).
+  var _ldnsDevs=null, _ldnsDevsP=null, _ldnsDevsAt=0, LDNS_DEVS_TTL=300000;
+  function ldnsDevsAsk(){
+    if(!_ldnsDevsP) _ldnsDevsP=fetchJson('/cgi-bin/data?section=devices').then(function(dv){
+      _ldnsDevsP=null; if(dv && Array.isArray(dv.devices)){ _ldnsDevs=dv; _ldnsDevsAt=Date.now(); } return dv;
+    }, function(){ _ldnsDevsP=null; return null; });
+    return _ldnsDevsP;
+  }
+  function ldnsDevsKept(){ return (_ldnsDevs && Date.now()-_ldnsDevsAt < LDNS_DEVS_TTL) ? _ldnsDevs : null; }
+  // Back to the tab while the card shows a finding: its door sends the person to the stock admin in a NEW tab, and the fix made
+  // there is seen only by a new scan — without one the card kept the finding, as if the fix had not worked (review s.175 r3). The
+  // whole screen is asked again (the «Сейчас DNS» pointer reads the same answer); drafts and focus survive a redraw.
+  function ldnsOnShow(){
+    var c=document.getElementById('dns-lan');
+    if(busy || nwTyping() || document.hidden || !c || !c.hasAttribute('data-bad') || !screenAlive(c) || !navShows('nw-dns')) return;
+    navIfShown('nw-dns', openDns)();
+  }
+  document.addEventListener('visibilitychange', ldnsOnShow);
+  function dnsLanHtml(L, devs){
+    if(!L || typeof L!=='object') return '';
+    // A full-width card: the router's DHCP and the devices are two columns (`.fauto` — two on a desk, one on a phone), the warning
+    // and the footnote run under both. With one of the two empty the other takes the whole width.
+    var h='<div class="card wfull" id="dns-lan"'+(ldnsBad(L) ? ' data-bad="1"' : '')+'><div class="wt">DNS у устройств</div>', cA='', cB='', plain=false, adm=ldnsLanHost();
+    (L.dhcp||[]).forEach(function(x){
+      plain=true;
+      // `own` — the router's own address stands in the same line: devices get the router first and these beside it, and many ask
+      // both. Not «directly, past the router» for every query — but part of them, still.
+      cA+='<div class="kv"><div class="grow"><div class="k">'+(x.own ? 'Роутер раздаёт и чужой DNS' : 'Роутер раздаёт чужой DNS')+'</div><div class="v wr"><span class="mono">'
+        + esc(String(x.addr||'').split(' ').join(', '))+'</span> — <span>'+esc(ldnsNet(x.net))+'</span></div>'
+        + (x.own ? '<div class="v">Вместе с адресом роутера устройства получают и эти, и часть запросов уходит на них — мимо роутера.</div>'
+          : '<div class="v">Устройства с DNS «автоматически» получают эти адреса и спрашивают их напрямую, мимо роутера.</div>')
+        + '<div class="v">'+(x.src==='stock' ? 'Уберите их в настройках Xiaomi: «Настройки» → «Настройки локальной сети» → «DHCP-сервер», поля DNS1 и DNS2 оставьте пустыми.'
+          : x.src==='uci' ? 'Они заданы опцией 6 в dhcp_option настроек DHCP роутера (/etc/config/dhcp) — уберите её.'
+          : '<span>Они заданы строкой dhcp-option в файле</span> <span class="mono">'+esc(String(x.src||'').replace(/^file:/,''))+'</span>')+'</div>'
+        + '<div class="v">Новый DNS устройства получат, когда переподключатся к сети.</div>'
+        // The door under the text, not beside it: beside, a phone squeezed the instructions into a column of two words a line.
+        + (x.src==='stock' && adm ? '<div class="acts" style="justify-content:flex-start;margin-top:6px"><a class="btn sm gh" id="dns-lan-adm-'+esc(x.net)+'" href="http://'+esc(adm)+'/" target="_blank" rel="noopener">Настройки Xiaomi</a></div>' : '')
+        + '</div></div>';
+    });
+    var byIp={}; ((devs && devs.devices) || []).forEach(function(v){ if(v && v.ip) byIp[v.ip]=v; });
+    // ONE row per device (the router sends one line per device × resolver × port: 8.8.8.8 and 8.8.4.4 were two rows under one
+    // name, and the focus came back to the first of them — review s.175 r2). «Plain» if any of its queries is; «от роутера» only if
+    // every one of its resolvers is the router's hand-out.
+    var ds=[], seen={}, other=false;
+    (L.devs||[]).forEach(function(x){
+      var g=seen[x.ip];
+      if(!g){ g=seen[x.ip]={ip:x.ip, to:[], plain:false, dhcp:true}; ds.push(g); }
+      if(g.to.indexOf(x.to)<0) g.to.push(x.to);
+      if(x.port!==853) g.plain=true;
+      if(x.dhcp!==true) g.dhcp=false;
+    });
+    if(ds.length){
+      cB+='<div class="kv"><div class="grow"><div class="k">Спрашивают мимо роутера</div></div></div>';
+      ds.forEach(function(x){
+        var v=byIp[x.ip], nm=v ? devName(v) : x.ip;
+        if(x.plain) plain=true;
+        if(!x.dhcp) other=true;
+        // The name and the LAN address under the streamer blur and out of the translation, as on every device row (devRow).
+        cB+=(v ? lrowGo('dev:'+x.ip, 'открыть устройство') : '<div class="lrow">')
+          + '<div class="grow"><div class="nm"><span class="sens" translate="no">'+esc(nm)+'</span></div><div class="ds"><span class="mono">'+esc(x.to.join(', '))+'</span> · <span>'
+          + (x.plain ? 'обычный DNS, открытым' : 'DoT, зашифрованный')+'</span>'+(v ? ' · <span class="mono sens">'+esc(x.ip)+'</span>' : '')+'</div></div>'
+          + (x.dhcp ? '<span class="chip">от роутера</span>' : '')+(v ? CHEV : '')+'</div>';
+      });
+      if(other) cB+=dkLine('Без пометки «от роутера» — адрес прописан на самом устройстве, его меняет программа или устройство ещё держит старую раздачу роутера: переподключите его к сети, а если не поможет — поставьте на нём получение DNS автоматически.');
+    }
+    if(cA || cB) h+='<div class="fauto">'+(cA ? '<div>'+cA+'</div>' : '')+(cB ? '<div>'+cB+'</div>' : '')+'</div>';
+    // What such queries lose; «the ISP can substitute the answer» only where a query goes in the clear — DoT is authenticated
+    // (the ISP can block it, not forge it).
+    if(ldnsBad(L)) h+=noteBox(plain ? 'Такие запросы идут мимо шифрованного DNS, правил по доменам, блокировки рекламы и своих имён роутера. Если они уходят мимо VPN, провайдер может подменить ответ — и тогда не поможет ни VPN по доменам, ни Zapret.'
+      : 'Такие запросы идут мимо шифрованного DNS, правил по доменам, блокировки рекламы и своих имён роутера.', 'warn');
+    else if(L.ct) h+=dkLine('Все устройства, которые сейчас обращаются к DNS, спрашивают роутер.');
+    if(!L.ct) h+=dkLine('Соединения устройств роутеру не видны — проверить, кто спрашивает мимо, нельзя.', true);
+    // What is seen — only when connections WERE read (beside «not visible» it contradicted the line above).
+    return h+(L.ct ? '<div class="cline">Видно обычный DNS и DoT за последние полминуты. DNS через HTTPS в браузере или приложении от обычного трафика не отличить.</div>' : '')+'</div>';
   }
   // РЕЗОЛВЕР DoH и DoT — один выбор на оба протокола: при выключенном шифровании он сохранится и применится при включении. Выбор и
   // поля — из черновика, пока он есть (разбор у _nwDraft), и тогда экран говорит, что это ещё не применено.
@@ -27319,7 +27560,8 @@
         if(g!==P.gen) return;
         if(!navShows(o.rep.route)){ stop(); return; }
         tries++;
-        fetchJson('/cgi-bin/data?section='+o.section).then(function(x){
+        // `o.q` — what the poll does NOT need asked (the DNS screen's `lan=0`: its device scan is drawn by nothing here).
+        fetchJson('/cgi-bin/data?section='+o.section+(o.q||'')).then(function(x){
           if(g!==P.gen) return;
           var m=document.getElementById(o.msgId); if(m && screenAlive(m)) m.textContent=(x && x.install_msg)||'';
           if(tries>90) P.spent=true;
@@ -27335,7 +27577,7 @@
     P.kick=function(d){ if(!o.waitOf(d)) P.spent=false; else if(!P.spent) P.start(); };
     return P;
   }
-  var dohIP=instPoll({rep:navIfShown('nw-dns', openDns), section:'doh', msgId:'doh-inst-msg', cardId:'dns-enc', waitOf:dohWaitOf, needsInst:dohNeedsInst});
+  var dohIP=instPoll({rep:navIfShown('nw-dns', openDns), section:'doh', q:'&lan=0', msgId:'doh-inst-msg', cardId:'dns-enc', waitOf:dohWaitOf, needsInst:dohNeedsInst});
   var paIP=instPoll({rep:navIfShown('pn-access', openAccess), section:'panel_access', msgId:'pa-inst-msg', cardId:'pa-open', waitOf:paWaitOf, needsInst:paNeedsInst, onEnd:paInstEnd});
   function dohPollStart(){ dohIP.start(); }
 
@@ -27549,6 +27791,9 @@
         else if(fs==='RBRUN') showToast('Откат прерван', false);
       }
       updExpect=false; updFails=0; updData=d; updPaint(b, fsig);
+      // Фоновая проверка серверов молчит, пока идёт обновление (разбор у `updBusyTill`); срок, а не флаг: ушли с экрана — опрос
+      // встал, и флаг «идёт» остался бы навсегда.
+      updBusyTill=d.apply.running ? Date.now()+120000 : 0;
     }).catch(function(e){
       if(!screenAlive(b)) return;
       // Уже нарисованное не стираем: отказ опроса во время обновления — ожидаемо (роутер занят), спросим ещё раз. Но не вечно: после
@@ -27557,7 +27802,9 @@
       // Только что запустили обновление (`updExpect`), а первый же опрос упал по сети — ждём так же, как во время хода: иначе экран до
       // повторного открытия не заметил бы, что обновление идёт (ревью шага 6c, круг 2).
       if(updData && b.querySelector('.vwrap')){
-        if(updData.apply.running || updExpect){ updFails++; if(updFails<UPD_FAIL_MAX) updArm(b); else { updExpect=false; updPaint(b, null); } }
+        // Опрос не дошёл, а прогон идёт — фон молчит и дальше (роутер занят, панель перезапускается): иначе через две минуты он вернулся
+        // бы посреди переигрыша выходов (ревью с.175).
+        if(updData.apply.running || updExpect){ updBusyTill=Date.now()+120000; updFails++; if(updFails<UPD_FAIL_MAX) updArm(b); else { updExpect=false; updPaint(b, null); } }
         return;
       }
       b.innerHTML='<div class="vwrap"><div class="card w2" id="upd-ver"><div class="wt">Версия</div>'+dkLine((e && e.net)
@@ -27566,7 +27813,9 @@
   }
   // Опрос НЕ передаёт примету фокуса: снятая ДО запроса, она вернула бы фокус туда, откуда человек за время ответа ушёл Tab'ом
   // (ревью шага 6c, круг 1). Фокус внутри заменяемой карточки держит сама поштучная замена (`updPaint`).
-  function updArm(b){ if(updT) clearTimeout(updT); updT=setTimeout(function(){ updT=null; if(screenAlive(b) && !document.hidden) updLoad(b, null); else if(screenAlive(b)) updArm(b); }, UPD_POLL); }
+  // A hidden tab does not poll, so the quiet window is kept alive here while the run goes: else after two minutes away the return to
+  // the tab let the ping sweep start before the next poll renewed it (review s.177).
+  function updArm(b){ if(updT) clearTimeout(updT); updT=setTimeout(function(){ updT=null; if(screenAlive(b) && !document.hidden) updLoad(b, null); else if(screenAlive(b)){ if(updData && updData.apply && updData.apply.running) updBusyTill=Date.now()+120000; updArm(b); } }, UPD_POLL); }
   // КАРТОЧКИ КОЛОДЫ МЕНЯЮТСЯ ПОШТУЧНО — у каждого экрана, который освежает себя опросом («Обновление» во время хода, «О роутере»
   // раз в 5 с, «Бэкап» во время применения). Перерисовка всей колоды уносила кнопку «Проверить обновления» из-под клика (замер на
   // живом роутере: браузер ждал «стабильного» узла и не дождался) и сворачивала раскрытые журналы. Сверка — со СВОЕЙ строкой,
@@ -27592,6 +27841,15 @@
   function updPaint(b, fsig){
     var d=updData;
     deckPaint(b, ['upd-ver', 'upd-run', 'upd-rb', 'upd-int'], [updVerHtml(d), updRunHtml(d), updRbHtml(d), updIntHtml(d)]);
+    // Пока идёт — карточка хода ПЕРВОЙ (макет): на телефоне «Версия» иначе закрывала бы весь экран хода. Переставляется узел «Версии», а
+    // не колода заново: перезапись свернула бы раскрытые журналы и унесла фокус со строки хода (её и ждёт `_nwFocus` после клика).
+    var vn=document.getElementById('upd-ver'), rn=document.getElementById('upd-run');
+    if(vn && rn && vn.parentNode===rn.parentNode){
+      if(d.apply.running){ if(rn.nextSibling!==vn) rn.parentNode.insertBefore(vn, rn.nextSibling); }
+      else if(vn.nextSibling!==rn) rn.parentNode.insertBefore(vn, rn);
+    }
+    var p=d.apply.running ? updProg(d) : null;
+    if(p && rn) updRunFill(rn, d, p);
     nwFocusBack(b, fsig);
     if(d.apply.running && updFails<UPD_FAIL_MAX) updArm(b);
   }
@@ -27647,11 +27905,150 @@
     if(n>0) return 'Файлы уже новой версии, но её установщик кончился ошибкой: повторите обновление или откатитесь к снимку в карточке «Откат».';
     return 'Ни один файл не заменён — роутер работает на прежней версии. Повторите обновление, когда причина уйдёт; откатываться не нужно.';
   }
+  /* ---- ХОД ЭТАПАМИ (`prog` от роутера, prog-lib.sh; макет `rr-update`, с.174) ----
+     Нажатие «Установить» на живом роутере ~1,5 мин ждало в очереди веб-сервера, а само обновление шло ещё ~75 с — и экран всё это время крутил
+     одно «Обновляю…». Теперь роутер говорит план, состояние каждого этапа, его счётчики и время по СВОЕМУ аптайму (часы браузера и
+     роутера тут ни при чём); панель только называет ключи. Чисел, которых роутер не сказал, здесь нет: проценты и скорость — только у
+     скачивания (размер известен из подписанного описания), у замены — «N из M», у «Применить настройки заново» — шаги в порядке
+     переигрыша и что делается сейчас. Общей полосы нет: скачивание — секунда, настройки — минута, общий процент врал бы.
+     Состояние этапа: now · ok · bad (прогон кончился отказом на нём, или не встал шаг настроек) · cut (держатель прогона умер) · wait. */
+  function updMmss(s){ s=Math.max(0, Math.round(Number(s)||0)); var m=Math.floor(s/60), r=s%60; return m+':'+(r<10 ? '0' : '')+r; }
+  function updTook(s){ s=Math.max(0, Math.round(Number(s)||0)); var m=Math.floor(s/60), r=s%60; return (m ? m+' <span>мин</span> ' : '')+r+' <span>с</span>'; }
+  var UPD_STAGE={dl:{n:'Скачать пакет'}, chk:{n:'Проверить подпись и пакет', rb:'Проверить снимок'}, snap:{n:'Снимок для отката', rb:'Снимок текущего набора'},
+                 swap:{n:'Заменить файлы', rb:'Вернуть файлы'}, apply:{n:'Применить настройки заново'}};
+  // Шаги «Применить настройки заново» (`subs`) и что делается сейчас (`now`) — слова панели к ключам роутера. Ключ, которого панель не
+  // знает (роутер новее открытой страницы), просто не называется.
+  var UPD_SUB={rules:'правила', lists:'списки', groups:'группы', geo:'гео', exits:'выходы', replay:'настройки'};
+  var UPD_NOW={prep:'готовлю установку', rules:'ставлю правила маршрутизации', domains:'доменные правила', lists:'списки', mark:'маркировка',
+               bypass:'вырезы «мимо VPN»', carrier:'несущая', dns:'DNS', home:'«доступ домой»', doh:'шифрованный DNS', warm:'прогрев доменов',
+               panel:'панель', tasks:'задачи', cron:'автозапуск и cron', final:'проверка установки'};
+  // Ход годится, только если он про ЭТО действие: откат и обновление пишут один файл итога, а ход — свой режим.
+  function updProg(d){
+    var p=d.prog, a=d.apply, rb=/^RB/.test(String(a.state||''));
+    return (p && Array.isArray(p.plan) && Array.isArray(p.stages) && Array.isArray(p.subs) && (p.mode==='rollback')===rb) ? p : null;
+  }
+  function updSub(p, k){ for(var i=0;i<p.subs.length;i++) if(p.subs[i].k===k) return p.subs[i]; return null; }
+  function updBar(pct){ return '<div class="meter"><i style="width:'+Math.max(0, Math.min(100, Math.round(pct)))+'%"></i></div>'; }
+  function updStepDs(p, s, why){
+    var rb=(p.mode==='rollback'), up=Number(p.up)||0, dl=p.dl, k=s.k, st=s.st, h='';
+    var CUT='<div class="ds wr"><span>оборвано: перезагрузка роутера или нехватка памяти</span></div>';
+    if(k!=='apply' && st==='bad') return '<div class="ds wr">'+esc(why || 'не удалось')+'</div>';
+    if(k!=='apply' && st==='cut') return CUT;
+    if(k==='dl'){
+      if(st==='now'){
+        if(!dl || !(Number(dl.got)>=0)) return '<div class="ds"><span>спрашиваю GitHub описание релиза</span></div>';
+        var got=Number(dl.got), tot=Number(dl.total)||0, el=up-(Number(dl.ts)||up), pct=tot ? got*100/tot : 0;
+        // Скорость — ОДНИМ текстовым узлом с единицей («512 Б/с»): правило перевода видит единицу целиком, а «/» отдельным узлом
+        // оставлял «Б/» по-русски (ревью с.175).
+        return '<div class="ds">'+humanBytes(got)+' <span>из</span> '+humanBytes(tot)+' · '+Math.round(pct)+'%'+(el>=2 ? ' · '+humanBytes(got/el)+'/с' : '')+updBar(pct)+'</div>';
+      }
+      if(st==='ok' && dl){ var t=(s.te!=null ? Number(s.te) : up)-(Number(dl.ts)||0);
+        return '<div class="ds">'+humanBytes(dl.total)+(t>=1 ? ' · '+humanBytes(Number(dl.total)/t)+'/с' : '')+'</div>'; }
+      return st==='wait' ? '<div class="ds"><span>пакет релиза с GitHub</span></div>' : '';
+    }
+    if(k==='chk') return '<div class="ds"><span>'+(rb ? (st==='ok' ? 'снимок открыт, набор проверен' : 'открываю снимок и проверяю набор')
+                                                        : (st==='ok' ? 'подпись автора и суммы файлов сошлись' : 'подпись автора, затем сумма каждого файла'))+'</span></div>';
+    if(k==='snap'){
+      if(st==='ok' && s.f==='same') return '<div class="ds"><span>набор не изменился — снимок не нужен, точка отката прежняя</span></div>';
+      if(st==='ok' && s.m>0) return '<div class="ds">'+s.m+' <span>'+updPl(s.m, 'файл', 'файла', 'файлов')+' — '+(rb ? 'в памяти до конца отката' : 'если что-то пойдёт не так, откат вернёт их')+'</span></div>';
+      return '<div class="ds"><span>'+(rb ? 'текущий набор — в память, на случай сбоя посреди возврата' : 'текущие файлы — на случай отката')+'</span></div>';
+    }
+    if(k==='swap'){
+      if(st==='now' && s.m>0) return '<div class="ds">'+s.n+' <span>из</span> '+s.m+updBar(s.n*100/s.m)+'</div>';
+      if(st==='ok' && s.m>0) return '<div class="ds">'+s.n+' <span>из</span> '+s.m+(s.x>0 ? ' · <span>выпавших из пакета снято:</span> '+s.x : '')+'</div>';
+      return '<div class="ds"><span>файлы кода и панели</span></div>';
+    }
+    if(k==='apply'){
+      if(st==='wait') return '<div class="ds"><span>правила маршрутизации · группы · гео · списки · выходы — без перезагрузки роутера</span></div>';
+      // Шагов ещё нет: пройденный — без слов, а отказ или обрыв — с причиной прогона ниже (до первого шага кончился и он: ревью с.175, круг 3).
+      if(!p.subs.length && st==='ok') return '';
+      var parts=[], bad='';
+      p.subs.forEach(function(x){
+        var nm=UPD_SUB[x.k]; if(!nm || x.st==='skip') return;
+        // Не встал — «✗» и у выходов («выходы 1 из 2 ✗»): число одно не говорит, что шаг кончился отказом.
+        var xb=(x.st==='bad' || x.st==='cut'), xn=(x.k==='exits' && x.m>0 && (x.st==='now' || x.n<x.m || xb)) ? ' '+x.n+' <span>из</span> '+x.m : '';
+        var v=xn+(xb ? ' ✗' : (x.st==='ok' && !xn) ? ' ✓' : '');
+        parts.push('<span>'+nm+'</span>'+v);
+        if(x.st==='bad' && x.why) bad+='<div class="ds wr">'+esc(x.why)+'</div>';
+      });
+      if(st==='now' && p.now){
+        var n=p.now, w=UPD_NOW[n.k], m=/^(\d+)(?: (.*))?$/.exec(String(n.a||''));
+        if(n.k==='exit' && m) w='<span>выход №</span>'+m[1]+(m[2] ? ' «'+esc(m[2])+'»' : '');
+        else if(w) w='<span>'+w+'</span>';
+        if(w) w='<span>сейчас</span> '+w+(n.d==='hs' ? ': <span>жду рукопожатия с сервером</span>' : '');
+      }
+      // Шаги через «·», что делается сейчас — через тире (макет: «… выходы 2 из 4 — сейчас выход №4 «WARP»: жду рукопожатия с сервером»).
+      // Этап красный, а своей причины ни у одного шага нет (прогон кончился отказом или оборвался посреди шага) — причина прогона.
+      if(!bad && st==='bad') bad='<div class="ds wr">'+esc(why || 'не удалось')+'</div>';
+      else if(!bad && st==='cut') bad=CUT;
+      return (parts.length || w ? '<div class="ds">'+parts.join(' · ')+(w ? (parts.length ? ' — ' : '')+w : '')+'</div>' : '')+bad;
+    }
+    return h;
+  }
+  // «124 файла» — число и слово по-русски (1 файл · 2 файла · 5 файлов; 11–14 — «файлов»).
+  function updPl(n, one, few, many){ n=Math.abs(Number(n)||0)%100; var d=n%10; return (n>10 && n<20) ? many : d===1 ? one : (d>=2 && d<=4) ? few : many; }
+  // Время этапа: идущего — от его начала до «сейчас» роутера, кончившегося — его длина. Без конца у не идущего (оборвался, ход не закрыт)
+  // времени нет: иначе «оборвано … 47:12» росло бы с каждым заходом (ревью с.175).
+  function updStepTm(p, s){
+    if(s.ts==null || s.st==='wait' || (s.te==null && s.st!=='now')) return '';
+    return updMmss((s.te!=null ? Number(s.te) : Number(p.up)||0)-Number(s.ts));
+  }
+  function updStepCls(s){ return 'st'+({ok:' ok', now:' now', bad:' bad', cut:' cut'}[s.st]||''); }
+  // Строка этапа — одна разметка на обе карточки: живая (`live`) — пустые места под описание и время, их вписывает updRunFill.
+  function updStepRow(p, s, why, live){
+    var L=UPD_STAGE[s.k]||{n:s.k}, tm=live ? '' : updStepTm(p, s);
+    return '<div class="'+(live ? 'st' : updStepCls(s))+'" data-k="'+esc(s.k)+'"><div class="grow"><b>'+esc((p.mode==='rollback' && L.rb) ? L.rb : L.n)+'</b>'
+      + '<div data-ut="ds">'+(live ? '' : updStepDs(p, s, why))+'</div></div><span class="tm" data-ut="tm">'+tm+'</span></div>';
+  }
+  function updStepsHtml(p, why){ return '<div class="steps">'+p.stages.map(function(s){ return updStepRow(p, s, why, false); }).join('')+'</div>'; }
+  // ИДЁТ — КАРТОЧКА ОБОЛОЧКОЙ, ЖИВОЕ ПРАВИТСЯ НА МЕСТЕ (ревью с.175, круг 1). В разметке хода тикают секунды и байты, а колода сверяет
+  // строку карточки — узел менялся бы каждые 2 с: фокус на «Журнале» падал в BODY, открытый журнал прыгал наверх, читалка заново
+  // объявляла строку хода, пульс этапа дёргался. Оболочка постоянна, пока идёт прогон (режим и план — его, роутера); заголовок, время,
+  // «этап K из N», строки этапов и журнал вписывает updRunFill — каждую часть, только когда сменилась ЕЁ запись (`_ut`), а не по
+  // сериализации браузера.
+  function updRunShell(p, rb){
+    return '<div class="card wfull" id="upd-run"><div class="wt">'+(rb ? 'Идёт откат' : 'Идёт обновление')+'</div>'
+      + '<div class="lrow"><div class="grow"><div class="nm" id="upd-run-now" role="status" tabindex="-1" data-ut="head"></div>'
+      + '<div class="ds"><span>идёт</span> <span data-ut="el"></span> · <span data-ut="at" aria-live="polite"></span>'
+      + ' · <span>страницу можно закрыть — '+(rb ? 'откат идёт на роутере' : 'обновление идёт на роутере')+'</span></div></div><span class="chip wr">идёт</span></div>'
+      + (updFails>=UPD_FAIL_MAX ? dkLine('Роутер перестал отвечать на опрос — откройте экран ещё раз.', true) : '')
+      + '<div class="steps">'+p.stages.map(function(s){ return updStepRow(p, s, '', true); }).join('')+'</div>'
+      + '<details class="ri-more" data-more="log"><summary>'+(rb ? 'Журнал отката' : 'Журнал обновления')+'</summary><div class="ri-list mono" data-ut="log"></div></details></div>';
+  }
+  function updUt(node, v, html){
+    if(!node || node._ut===v) return false;
+    node._ut=v; if(html) node.innerHTML=v; else node.textContent=v;
+    return true;
+  }
+  function updRunFill(card, d, p){
+    var a=d.apply, rb=(p.mode==='rollback'), why=updWhy(a);
+    var q=function(s){ return card.querySelector(s); }, cur=0;
+    p.stages.forEach(function(s, i){ if(s.st!=='wait') cur=i; });
+    updUt(q('[data-ut="head"]'), p.ver ? esc(p.ver.from)+' → '+esc(p.ver.to) : (rb ? 'Откатываю к снимку…' : 'Обновляю…'), true);
+    updUt(q('[data-ut="el"]'), updMmss((Number(p.up)||0)-(Number(p.t0)||0)));
+    updUt(q('[data-ut="at"]'), '<span>этап</span> '+(cur+1)+' <span>из</span> '+p.stages.length, true);
+    p.stages.forEach(function(s){
+      var row=q('.steps .st[data-k="'+s.k+'"]'); if(!row) return;
+      var c=updStepCls(s); if(row._utc!==c){ row._utc=c; row.setAttribute('class', c); }
+      updUt(row.querySelector('[data-ut="ds"]'), updStepDs(p, s, why), true);
+      updUt(row.querySelector('[data-ut="tm"]'), updStepTm(p, s));
+    });
+    // Журнал: прокрученный к низу — у низа и остаётся (новые строки видны), прокрученный выше — там, где его читают.
+    var lg=q('[data-ut="log"]'), sh=lg ? (Number(lg.scrollHeight)||0) : 0, top=lg ? (Number(lg.scrollTop)||0) : 0, end=lg && top+(Number(lg.clientHeight)||0)>=sh-4;
+    if(updUt(lg, a.log.map(function(l){ return '<div>'+esc(l)+'</div>'; }).join(''), true)) lg.scrollTop=end ? (Number(lg.scrollHeight)||0) : top;
+  }
+  // Последняя строка журнала без метки этапа, и ПРИЧИНА отказа — у владельца журнала (`why`: первая строка-отказ), а без неё — последняя.
+  function updLast(a){ return String(a.log.length ? a.log[a.log.length-1] : '').replace(/^\[[a-z]+\] /, ''); }
+  function updWhy(a){ return String(a.why||'') || updLast(a); }
   function updRunHtml(d){
     var a=d.apply, st=a.state; if(!(Number(a.at)>0) && !a.running) return '';
     var rb=(st==='RBOK' || st==='RBFAIL' || st==='RBRUN'), ok=(st==='OK' || st==='RBOK'), fail=(st==='FAIL' || st==='RBFAIL');
-    var last=String(a.log.length ? a.log[a.log.length-1] : '').replace(/^\[[a-z]+\] /, ''), why=String(a.why||'') || last;
+    var last=updLast(a), why=updWhy(a);
+    var p=updProg(d);
     var h='<div class="card w2" id="upd-run"><div class="wt">'+(a.running ? (rb ? 'Идёт откат' : 'Идёт обновление') : rb ? 'Последний откат' : 'Последнее обновление')+'</div>';
+    // ИДЁТ — ЭТАПАМИ, когда роутер их говорит: версия «откуда → куда», сколько идёт и какой этап, сами этапы, журнал свёрнутым. Во всю
+    // ширину колоды (макет: CardF) — оболочкой, живое вписывает updRunFill.
+    if(a.running && p) return updRunShell(p, rb);
     if(a.running)
       return h+'<div class="lrow"><div class="grow"><div class="nm" id="upd-run-now" role="status" tabindex="-1">'+(rb ? 'Откатываю к снимку…' : 'Обновляю…')+'</div>'
         + '<div class="ds one" aria-live="polite">'+esc(last)+'</div></div><span class="chip wr">идёт</span></div>'
@@ -27661,16 +28058,30 @@
     var cut=(st==='RUNNING' || st==='RBRUN');   // держатель умер посреди прогона (ребут, нехватка памяти)
     var v=ok ? {d:'', w:'готово'} : fail ? {d:' bad', w:'не удалось'} : cut ? {d:' warn', w:'прервано'} : {d:' off', w:'завершено'};
     var pc=updPageCode(), stale=updJust || (pc>0 && Number(d.code)>0 && pc!==Number(d.code));
+    // Сколько заняло — по аптайму роутера, когда прогон говорил ход и успел закрыться (t1).
+    var took=(p && p.t1!=null) ? ' · <span>заняло</span> '+updTook(Number(p.t1)-(Number(p.t0)||0)) : '';
     h+='<div class="lrow"><span class="dot'+v.d+'"></span><div class="grow"><div class="nm" id="upd-run-now" tabindex="-1"><span class="pk-t"><span>'+(rb ? 'Откат к снимку' : 'Обновление')+'</span> — <span>'+v.w+'</span></span></div>'
-      + '<div class="ds"><span>'+esc(fmtAge(Math.max(0, (Number(a.now)||0)-(Number(a.at)||0))))+'</span></div></div></div>';
+      + '<div class="ds"><span>'+esc(fmtAge(Math.max(0, (Number(a.now)||0)-(Number(a.at)||0))))+'</span>'+took+'</div></div></div>';
+    // «ПРАВИЛА ПРИМЕНИТЕ» — ТОЛЬКО КОГДА ОНИ НЕ ВСТАЛИ (решение пользователя 30.10.2026, с.174): установщик новой версии ставит их сам
+    // (`rules` в шагах настроек). Не встали — этап красный со своей причиной, и кнопка «Починить правила» возвращается. Откат, чей
+    // установщик шага `rules` не делал, — прежний совет; и откат БЕЗ хода тоже: после отката на версию старше хода отвечает уже её
+    // status-json, хода в нём нет, а её установщик правил не ставит (ревью с.175, круг 2). У ОБНОВЛЕНИЯ без хода совета нет (круг 1):
+    // правила ставит установщик этой версии, а ход пропадает только с перезагрузкой — она переставила их тоже — или у прогона,
+    // начатого не этой панелью (первое обновление на эту версию шло прежним CGI, но правила ставил уже её установщик).
+    var rs=p ? updSub(p, 'rules') : null, rulesBad=!!(rs && rs.st==='bad'), rulesAsk=ok && (rulesBad || (rb && (!p || !rs)));
     if(ok){
       if(stale) h+=dkLine(rb ? 'Эта страница открыта до отката — обновите её, чтобы панель совпала с роутером.' : 'Эта страница открыта до обновления — обновите её, и панель будет новой.');
-      h+=dkLine('Правила примените кнопкой «Починить правила» или перезагрузкой роутера.')
-        + '<div class="acts">'+(stale ? updBtn('reload', 'Обновить страницу', true, false) : '')+'<button type="button" class="btn gh" data-repair="1"'+(busy ? ' disabled' : '')+'>Починить правила</button></div>';
+      if(rulesBad) h+=dkLine('Правила маршрутизации не встали — причина в этапе «Применить настройки заново». Поставьте их кнопкой «Починить правила» или перезагрузкой роутера.', true);
+      else if(rulesAsk) h+=dkLine('Правила примените кнопкой «Починить правила» или перезагрузкой роутера.');
+      if(stale || rulesAsk) h+='<div class="acts">'+(stale ? updBtn('reload', 'Обновить страницу', true, false) : '')
+        + (rulesAsk ? '<button type="button" class="btn gh" data-repair="1"'+(busy ? ' disabled' : '')+'>Починить правила</button>' : '')+'</div>';
     } else if(fail) h+='<div class="cline wr">'+esc(why)+'</div>'+(rb ? '' : dkLine(updMixWords(a)));
     else if(st==='RBRUN') h+=dkLine('Откат оборвали на полпути — перезагрузкой роутера или нехваткой памяти. Часть файлов могла вернуться, часть — нет: повторите откат.', true);
     else if(st==='RUNNING') h+=dkLine('Обновление оборвали на полпути — перезагрузкой роутера или нехваткой памяти.', true)+dkLine(updMixWords({}));
     else h+=dkLine('Чем кончилось, этот апдейтер не записывал — смотрите журнал.');
+    // ЭТАПЫ — свёрнутыми; раскрыты, когда действие кончилось на глазах или что-то не так (отказ, обрыв, не встал шаг настроек).
+    var bad=!!p && p.stages.some(function(s){ return s.st==='bad' || s.st==='cut'; });
+    if(p) h+='<details class="ri-more" data-more="steps"'+((updJust || !ok || bad) ? ' open' : '')+'><summary>Этапы</summary>'+updStepsHtml(p, why)+'</details>';
     return h+'<details class="ri-more" data-more="log"'+(ok ? '' : ' open')+'><summary>'+(rb ? 'Журнал отката' : 'Журнал обновления')+'</summary><div class="ri-list mono">'
       + a.log.map(function(l){ return '<div>'+esc(l)+'</div>'; }).join('')+'</div></details></div>';
   }
@@ -27717,7 +28128,9 @@
   function updWire(b){
     // Обновление и откат — ОБА фоном (откат ставит и установщик возвращённой версии, синхронный CGI убил бы uhttpd по потолку): роутер
     // принял — вердикт проверки больше не правда, а конец ловит опрос (`updExpect`) и говорит его тостом.
-    var started=function(r){ if(r && r.ok){ updChk=null; updExpect=true; } updLoad(b, focusMark()); };
+    // Принято — фон молчит СРАЗУ, а не с первого опроса, показавшего «идёт»: обход, начатый до клика, иначе дозаполнял бы свой пул.
+    var started=function(r){ if(r && r.ok){ updChk=null; updExpect=true; updBusyTill=Date.now()+120000; } else updBusyTill=0; updLoad(b, focusMark()); };
+    var refused=function(){ updBusyTill=0; updLoad(b, focusMark()); };
     b.addEventListener('click', function(ev){
       for(var x=ev.target; x && x!==b; x=x.parentNode){
         if(!x.getAttribute) continue;
@@ -27728,13 +28141,15 @@
         else if(k==='apply'){
           // Вопрос — ПЕРЕД запуском: файлы заменяются на ходу, отменить на полпути нечем. Фокус после — на строку «идёт».
           if(postAction('gh_apply_scripts', 'Скачать и установить новую версию скриптов и панели? Настройки и ключи не трогаются; перед заменой обновление само снимет снимок для отката.',
-                        'запускаю обновление…', {}, started, function(){ updLoad(b, focusMark()); }))
-            _nwFocus={s:['#upd-run-now', '#upd-chk'], g:_navGen};
+                        'запускаю обновление…', {}, started, refused)){
+            _nwFocus={s:['#upd-run-now', '#upd-chk'], g:_navGen}; updBusyTill=Date.now()+120000;
+          }
         } else if(k==='rollback'){
           // Итог отката роутер пишет туда же, где итог обновления (RBOK | RBFAIL), — его и покажет карточка «Последний откат».
           if(postAction('gh_rollback', 'Вернуть скрипты и панель из последнего снимка? Настройки и ключи не трогаются.', 'откатываю…', {},
-                        started, function(){ updLoad(b, focusMark()); }))
-            _nwFocus={s:['#upd-run-now', '[data-upd="rollback"]'], g:_navGen};
+                        started, refused)){
+            _nwFocus={s:['#upd-run-now', '[data-upd="rollback"]'], g:_navGen}; updBusyTill=Date.now()+120000;
+          }
         }
         return;
       }

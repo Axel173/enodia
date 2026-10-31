@@ -811,23 +811,26 @@ case "$act" in
 			done
 			if [ ! -s "$cof.rc" ]; then
 				[ -e "$cof.cut" ] || : > "$cof.k"
-				# The tree walk's owner — daemon-lib.sh::proc_tree (shared with the task runner); an older library without it — the
-				# former walk.
+				# The tree's owner — daemon-lib.sh::proc_tree_kill (frozen first: a child born mid-way does not survive; shared with the
+				# task runner); an older library — its walk, or the former one.
 				[ -n "$CBN_LIB" ] || { CBN_LIB=1; if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi; }
-				if command -v proc_tree >/dev/null 2>&1; then ctree=$(proc_tree "$cpid")
+				if command -v proc_tree_kill >/dev/null 2>&1; then proc_tree_kill "$cpid" 1
 				else
-					ctree="$cpid"; cq="$cpid"
-					while [ -n "$cq" ]; do
-						cn=""
-						for cp in $cq; do
-							for cf in $(grep -l "^PPid:[[:space:]]*$cp\$" /proc/[0-9]*/status 2>/dev/null); do
-								cc=${cf#/proc/}; cc=${cc%/status}; cn="$cn $cc"
+					if command -v proc_tree >/dev/null 2>&1; then ctree=$(proc_tree "$cpid")   # tree-kill-fallback:
+					else
+						ctree="$cpid"; cq="$cpid"
+						while [ -n "$cq" ]; do
+							cn=""
+							for cp in $cq; do
+								for cf in $(grep -l "^PPid:[[:space:]]*$cp\$" /proc/[0-9]*/status 2>/dev/null); do   # tree-kill-fallback:
+									cc=${cf#/proc/}; cc=${cc%/status}; cn="$cn $cc"
+								done
 							done
+							ctree="$ctree$cn"; cq=$cn
 						done
-						ctree="$ctree$cn"; cq=$cn
-					done
+					fi
+					kill -TERM $ctree 2>/dev/null; sleep 1; kill -KILL $ctree 2>/dev/null
 				fi
-				kill -TERM $ctree 2>/dev/null; sleep 1; kill -KILL $ctree 2>/dev/null
 			fi
 			# CGI жив — он прочтёт вывод и уберёт времянки сам; мёртв — убираем мы (запас на чтение живым CGI).
 			sleep 3; kill -0 $$ 2>/dev/null || rm -f "$cof" "$cof.rc" "$cof.k" "$cof.cut"
@@ -3396,9 +3399,14 @@ EOF
 		# файла видит «IDLE» (разбор у packages.sh::set_state). Лок в /tmp — примета «идёт» для дампа.
 		# Самообновления апдейтера (`self`) перед обновлением БОЛЬШЕ НЕТ: код едет одним подписанным пакетом, и его установщик
 		# берётся ИЗ ПАКЕТА, — прежний шаг и был тем «старый роутер обязан уметь завтрашнее», от которого уходили.
+		# ХОД ЭТАПАМИ (экран «Обновление»): файл хода начинается ЗДЕСЬ, до строки RUNNING — опрос между кликом и первым этапом иначе
+		# показал бы этапы прошлого прогона; флаг ENODIA_UPD_PROG=1 отдаётся прогону, и говорят только его писатели (prog-lib.sh).
+		# Флаг — только прогону, чей файл хода начат (каталог наш, 0700): не начат — прогон молчит, экран рисует его по-прежнему.
+		_upf=""; if [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; prog_begin apply && _upf=1; fi
 		echo RUNNING > "$ENODIA_STATE/.gh-update.state.new" && mv -f "$ENODIA_STATE/.gh-update.state.new" "$ENODIA_STATE/.gh-update.state"
-		spawn_bg /tmp/enodia-gh-update.pid -c "touch /tmp/enodia-gh-update.lock; if sh '$ENODIA_DIR/gh-update.sh' apply >'$ENODIA_STATE/.gh-update.log' 2>&1; then s=OK; else s=FAIL; fi; echo \$s >'$ENODIA_STATE/.gh-update.state.new' && mv -f '$ENODIA_STATE/.gh-update.state.new' '$ENODIA_STATE/.gh-update.state'; rm -f /tmp/enodia-gh-update.lock"
-		printf '{"ok":true,"code":0,"msg":"Обновление запущено: пакет скачивается и проверяется подписью, потом ставится. Когда кончится — обновите страницу и примените правила: «Починить правила» или перезагрузка."}\n'; exit 0 ;;
+		spawn_bg /tmp/enodia-gh-update.pid -c "touch /tmp/enodia-gh-update.lock; if ENODIA_UPD_PROG=$_upf sh '$ENODIA_DIR/gh-update.sh' apply >'$ENODIA_STATE/.gh-update.log' 2>&1; then s=OK; else s=FAIL; fi; echo \$s >'$ENODIA_STATE/.gh-update.state.new' && mv -f '$ENODIA_STATE/.gh-update.state.new' '$ENODIA_STATE/.gh-update.state'; rm -f /tmp/enodia-gh-update.lock"
+		# «Примените правила» — больше не совет: установщик новой версии ставит их сам (install.sh, шаг 5b; решение пользователя 30.10.2026).
+		printf '{"ok":true,"code":0,"msg":"Обновление запущено — его ход виден этапами. Страницу можно закрыть: обновление идёт на роутере."}\n'; exit 0 ;;
 	gh_rollback)
 		[ -f "$ENODIA_DIR/gh-update.sh" ] || fail "gh-update.sh не установлен"
 		# Откат ПОСРЕДИ обновления перемешал бы два набора файлов (вторая вкладка, страница, открытая до запуска) — гард тот же, что
@@ -3413,8 +3421,9 @@ EOF
 		# Строка начала — в журнал ДО отката: вторая вкладка во время RBRUN иначе показывала бы под «Идёт откат» хвост журнала прошлого
 		# обновления (ревью шага 6c, круг 3).
 		printf '%s\n' '[rollback] откат к последнему снимку начат' > "$ENODIA_STATE/.gh-update.log" 2>/dev/null
+		_upf=""; if [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; prog_begin rollback && _upf=1; fi   # ход этапами — как у обновления
 		echo RBRUN > "$ENODIA_STATE/.gh-update.state.new" && mv -f "$ENODIA_STATE/.gh-update.state.new" "$ENODIA_STATE/.gh-update.state"
-		spawn_bg /tmp/enodia-gh-update.pid -c "touch /tmp/enodia-gh-update.lock; if sh '$ENODIA_DIR/gh-update.sh' rollback >>'$ENODIA_STATE/.gh-update.log' 2>&1; then s=RBOK; else s=RBFAIL; fi; echo \$s >'$ENODIA_STATE/.gh-update.state.new' && mv -f '$ENODIA_STATE/.gh-update.state.new' '$ENODIA_STATE/.gh-update.state'; rm -f /tmp/enodia-gh-update.lock"
+		spawn_bg /tmp/enodia-gh-update.pid -c "touch /tmp/enodia-gh-update.lock; if ENODIA_UPD_PROG=$_upf sh '$ENODIA_DIR/gh-update.sh' rollback >>'$ENODIA_STATE/.gh-update.log' 2>&1; then s=RBOK; else s=RBFAIL; fi; echo \$s >'$ENODIA_STATE/.gh-update.state.new' && mv -f '$ENODIA_STATE/.gh-update.state.new' '$ENODIA_STATE/.gh-update.state'; rm -f /tmp/enodia-gh-update.lock"
 		printf '{"ok":true,"code":0,"msg":"Откат к последнему снимку запущен. Когда кончится — обновите страницу и примените правила: «Починить правила» или перезагрузка."}\n'; exit 0 ;;
 
 	# --- Браузер-свип ByeDPI: применяем стратегии ВЖИВУЮ к боевому ciadpi, а реальный браузер

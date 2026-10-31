@@ -538,6 +538,9 @@ slot_remove_routing() {   # $1 = id
 # does not answer in time — the flush goes on as before, the retry is the daemon's.
 SLOT_HS_WAIT=3
 slot_wait_hs() {   # $1 = iface -> 0 — the handshake is there
+    # Inside an update the screen says it: «сейчас выход №N «имя»: жду рукопожатия с сервером» (prog-lib.sh). A subshell — the library
+    # and what it loads stay out of this plugin's names; loaded only under the update's flag.
+    if [ "${ENODIA_UPD_PROG:-}" = 1 ] && [ -f "$ENODIA_DIR/prog-lib.sh" ]; then ( . "$ENODIA_DIR/prog-lib.sh"; prog_nowd hs ) 2>/dev/null; fi
     daemon_step_init; _swn=0
     while [ "$_swn" -lt $((SLOT_HS_WAIT * DAEMON_STEP_Q)) ]; do
         _swh=$("$ENODIA_BIN/awg" show "$1" latest-handshakes 2>/dev/null | awk 'NR==1{print $2+0}')
@@ -726,12 +729,31 @@ try_clean() {
     [ "${_tdir:-0}" = 1 ] && rm -rf "$TRY_DIR"
     lbl_lock_drop "$TRY_LOCK"
 }
+# THE ROAD THIS ADDRESS TAKES NOW wins: road.sh's rule is per ADDRESS (pref 82–87), so a live carrier to it rides that road
+# whichever config is probed — a probe going its own way took that carrier off its road for the probe's seconds (review s.136 r3,
+# L2). Its table empty (the road exit is down) — the carrier goes direct, and so does the probe. $1 — the address; sets _ttab only
+# when such a rule stands.
+try_road_tab() {
+    _trk=$(ip rule show 2>/dev/null | awk -v a="$1" '{ p = $1; sub(/:$/, "", p) } p ~ /^8[2-7]$/ { for (i = 2; i < NF; i++) if ($i == "to" && $(i + 1) == a) { for (j = i; j < NF; j++) if ($j == "lookup") { print $(j + 1); exit } } }')   # not-wan: road.sh's own rules
+    case "$_trk" in
+        100[2-7]) if [ -n "$(ip route show table "$_trk" 2>/dev/null | head -n 1)" ]; then _ttab=$_trk; else _ttab=main; fi ;;   # not-wan: the road exit's own table
+    esac
+}
+# A KILLED probe's traces (`ip rule add` doesn't dedupe): under the lock no other probe lives, so EVERY pref-51 rule is one — by
+# whatever address and table (a road's too) — left by SIGKILL or the OOM killer, the EXIT trap never ran. try-each's servers are
+# random pool addresses no later probe would name, and the rule sent that Cloudflare address past the tunnel till the reboot (review
+# s.173 r3). All of them go, bounded — right after the lock is taken.
+try_rules_sweep() { _trs=0; while [ "$_trs" -lt 64 ] && ip rule del pref "$TRY_PREF" 2>/dev/null; do _trs=$((_trs + 1)); done; }
+# The probe's rule to its server $_tep by table $_ttab. A refusal clears _tep: the cleanup has no rule of ours to remove.
+try_rule_put() {
+    ip rule add to "$_tep" lookup "$_ttab" pref "$TRY_PREF" 2>/dev/null || { _tep=""; log >&2 "проба: правило к серверу не встало"; return 1; }
+}
 cmd_try() {   # $1 = путь конфига ; $2 = URL ; $3 = потолок запроса, с (по умолчанию 10)
     [ -f "$1" ] && [ -n "$2" ] || { log >&2 "проба: нужны конфиг и URL"; return 4; }
     [ -x "$ENODIA_BIN/amneziawg-go" ] && [ -x "$ENODIA_BIN/awg" ] || { log >&2 "проба: нет программ AmneziaWG"; return 4; }
     command -v lbl_lock_take >/dev/null 2>&1 || { log >&2 "проба: нет label-lib.sh — обновите скрипты"; return 4; }
     lbl_lock_take "$TRY_LOCK" 'transport-awg\.sh' || { log >&2 "проба: идёт другая проба"; return 5; }
-    _tep=""; _tdir=0; _ttab=main
+    _tep=""; _tdir=0; _ttab=main; try_rules_sweep
     trap try_clean EXIT
     trap 'exit 1' INT TERM HUP PIPE
     # Under our lock a leftover is a killed probe's (its pid is gone) — removed, then made anew; mkdir refuses a planted name.
@@ -750,21 +772,13 @@ cmd_try() {   # $1 = путь конфига ; $2 = URL ; $3 = потолок з
             _ttab=$(slot_table "$_trv")
         fi
     fi
-    # THE ROAD THIS ADDRESS TAKES NOW wins: road.sh's rule is per ADDRESS (pref 82–87), so a live carrier to it rides that road
-    # whichever config is probed — a probe going its own way took that carrier off its road for the probe's seconds (review s.136 r3,
-    # L2). Its table empty (the road exit is down) — the carrier goes direct, and so does the probe.
-    _trk=$(ip rule show 2>/dev/null | awk -v a="$_tep" '{ p = $1; sub(/:$/, "", p) } p ~ /^8[2-7]$/ { for (i = 2; i < NF; i++) if ($i == "to" && $(i + 1) == a) { for (j = i; j < NF; j++) if ($j == "lookup") { print $(j + 1); exit } } }')   # not-wan: road.sh's own rules
-    case "$_trk" in
-        100[2-7]) if [ -n "$(ip route show table "$_trk" 2>/dev/null | head -n 1)" ]; then _ttab=$_trk; else _ttab=main; fi ;;   # not-wan: the road exit's own table
-    esac
+    try_road_tab "$_tep"
     # A rider's MTU ceiling — the config's own road's (road.sh mtu-cap), when that is the road taken.
     if [ "$_ttab" != main ] && [ -n "$_trc" ] && [ "$_ttab" = "$(slot_table "${_trv:-0}")" ]; then
         _tmu=$(printf '%s' "$_tam" | cut -f2); [ -n "$_tmu" ] || _tmu=$AWG_MTU_DEFAULT
         [ "$_tmu" -gt "$_trc" ] 2>/dev/null && _tam=$(printf '%s\t%s' "$(printf '%s' "$_tam" | cut -f1)" "$_trc")
     fi
-    ip rule del to "$_tep" lookup main pref "$TRY_PREF" 2>/dev/null   # a killed probe's trace: `ip rule add` doesn't dedupe
-    for _trn in 2 3 4 5 6 7; do ip rule del to "$_tep" lookup "$(slot_table "$_trn")" pref "$TRY_PREF" 2>/dev/null; done   # …by any road table it took
-    ip rule add to "$_tep" lookup "$_ttab" pref "$TRY_PREF" 2>/dev/null || { _tep=""; log >&2 "проба: правило к серверу не встало"; return 4; }
+    try_rule_put || return 4
     awg_if_start "$TRY_IF" "$TRY_CONF" "$_tam" "проба" >&2 || return 4
     _tca=$(curl_ca_opt "$2" --interface "$TRY_IF")   # the CA probe — by the probe's own path, not the default route
     # shellcheck disable=SC2086
@@ -778,6 +792,99 @@ cmd_try() {   # $1 = путь конфига ; $2 = URL ; $3 = потолок з
         _tmm=$(awk -v t="$_tmc" 'BEGIN{ if (t + 0 > 0) printf "%.0f", t * 1000 }')
         [ -z "$_tmm" ] || printf '\ntry_ms=%s\n' "$_tmm"
     fi
+    return 0
+}
+# MANY CANDIDATES ON ONE DAEMON (`try-each <URL> <s> <stop-ERE> <list>`) — warp.sh's pick asks dozens of addresses, ports and
+# maskings, and `try` costs a daemon start and up to its whole ceiling per candidate (9 ports ≈ 100 s). Measured on AX3600
+# 30.10.2026 (dev notes «сервер-через-WARP» §29.1): `awg setconf` on an interface that is already UP replaces the peer, and the
+# fresh peer's keepalive starts its handshake at once — 0.09–1.04 s. So: one interface, a setconf per candidate, the request only
+# to a candidate that shook hands — and three verdicts instead of two («no packet reaches the server» is not «cut after the
+# handshake»: the first is cured by another address, the second by another masking).
+# The list — one candidate config path per line, each a whole config of the caller's (key, address, server, masking). A candidate
+# whose address/MTU or masking differs from the one before restarts the daemon (an I1 changed under a live daemon is not
+# measured). Each candidate's server gets the pref-51 rule for its turn, by the road it takes now (try_road_tab — as `try`).
+# Output, as it goes (the caller reports progress): `#<n>` — candidate n starts; `=<n>⇥<hs>⇥<rc>` — its end: hs 1|0 — a handshake
+# within TRY_HS seconds, `-` — NOT ASKED (no IPv4 server, the text refused); rc — curl's code (`-` — no request); the answer →
+# `<candidate>.out`. Stops after a candidate whose answer matches <stop-ERE> — one ERE per line, EVERY one matching some
+# line of the answer (empty — never) — or once TRY_BUDGET seconds (0 — no limit) are spent: `!budget`. Codes: 0 — walked · 4 — the
+# interface did not come up · 5 — another probe.
+TRY_HS=${TRY_HS:-3}
+try_stop() {   # $1 = the stop EREs, $2 = the answer → 0 when every ERE matches a line of it
+    [ -n "$1" ] || return 1
+    printf '%s\n' "$1" | { while IFS= read -r _tse; do [ -z "$_tse" ] || grep -Eq "$_tse" "$2" 2>/dev/null || exit 1; done; exit 0; }
+}
+cmd_try_each() {   # $1 = URL ; $2 = потолок запроса, с ; $3 = stop-ERE ; $4 = список кандидатов
+    [ -n "$1" ] && [ -f "$4" ] || { log >&2 "проба: нужны URL и список"; return 4; }
+    [ -x "$ENODIA_BIN/amneziawg-go" ] && [ -x "$ENODIA_BIN/awg" ] || { log >&2 "проба: нет программ AmneziaWG"; return 4; }
+    command -v lbl_lock_take >/dev/null 2>&1 || { log >&2 "проба: нет label-lib.sh — обновите скрипты"; return 4; }
+    # THE LOCK IS WAITED FOR, up to TRY_LOCK_WAIT s (lbl_lock_take alone gives up after ~5 s): the other probes are short but come in
+    # rows — cgi-bin/ping asks each Amnezia Premium server for up to 6 s, and the WARP screen pings the servers as it opens; «Получить
+    # для устройства» clicked right after the screen opened was refused (AX3600 30.10.2026, the panel walk of 1.3.5-dev.2).
+    daemon_step_init
+    _tlw=$(uptime_s)
+    while ! lbl_lock_take "$TRY_LOCK" 'transport-awg\.sh'; do
+        [ $(( $(uptime_s) - _tlw )) -lt "${TRY_LOCK_WAIT:-40}" ] 2>/dev/null || { log >&2 "проба: идёт другая проба"; return 5; }
+    done
+    _tep=""; _tdir=0; _ttab=main; try_rules_sweep
+    trap try_clean EXIT
+    trap 'exit 1' INT TERM HUP PIPE
+    rm -rf "$TRY_DIR" 2>/dev/null
+    ( umask 077; mkdir "$TRY_DIR" ) 2>/dev/null || { log >&2 "проба: не создать свой каталог $TRY_DIR"; return 4; }
+    _tdir=1
+    _tt0=$(uptime_s); _tn=0; _tsig=""; _tca="-"
+    while IFS= read -r _tcf <&3; do
+        [ -n "$_tcf" ] || continue
+        _tn=$((_tn+1))
+        if [ "${TRY_BUDGET:-0}" -gt 0 ] 2>/dev/null && [ $(( $(uptime_s) - _tt0 )) -ge "$TRY_BUDGET" ]; then echo '!budget'; break; fi
+        echo "#$_tn"
+        rm -f "$_tcf.out"
+        _tam=$(slot_gen_conf "$_tcf" "$TRY_CONF")
+        _tnep=$(ifconf_ep_host "$TRY_CONF")
+        if [ -z "$(printf '%s' "$_tam" | cut -f1)" ] || ! printf '%s' "$_tnep" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+            printf '=%s\t-\t-\n' "$_tn"; continue      # no Address, or a server that is not IPv4: NOT ASKED (not «no handshake»)
+        fi
+        if [ "$_tnep" != "$_tep" ]; then
+            [ -z "$_tep" ] || ip rule del to "$_tep" lookup "$_ttab" pref "$TRY_PREF" 2>/dev/null
+            _tep=$_tnep; _ttab=main; try_road_tab "$_tep"
+            try_rule_put || return 4
+        fi
+        _tns="$_tam|$(grep -E '^[[:space:]]*I1[[:space:]]*=' "$TRY_CONF" | head -n 1)"
+        if [ "$_tns" != "$_tsig" ] || ! ip link show "$TRY_IF" >/dev/null 2>&1; then
+            awg_if_start "$TRY_IF" "$TRY_CONF" "$_tam" "проба" </dev/null >&2 || return 4
+            _tsig=$_tns
+        fi
+        # a setconf on the UP interface — the first candidate's too: awg_if_start added its peer before the link went up
+        "$ENODIA_BIN/awg" setconf "$TRY_IF" "$TRY_CONF" 2>/dev/null || { printf '=%s\t-\t-\n' "$_tn"; continue; }   # text refused: not asked
+        slot_keepalive "$TRY_IF"
+        # TRY_HS_FIRST — handshakes the FIRST candidate gets (a re-pick asks its config's own port there: one lost packet must not
+        # move a working config); each next one is a fresh peer by setconf, its initiation goes out at once (review s.173 r2)
+        _ths=0; _thn=1; [ "$_tn" = 1 ] && _thn=${TRY_HS_FIRST:-1}
+        while :; do
+            _thw=0
+            while [ "$_thw" -lt $(( TRY_HS * ${DAEMON_STEP_Q:-1} )) ]; do
+                _thl=$("$ENODIA_BIN/awg" show "$TRY_IF" latest-handshakes 2>/dev/null | awk '{ print $2; exit }')
+                if [ -n "$_thl" ] && [ "$_thl" != 0 ]; then _ths=1; break; fi
+                daemon_step; _thw=$((_thw+1))
+            done
+            [ "$_ths" = 0 ] || break
+            _thn=$((_thn - 1)); [ "$_thn" -gt 0 ] 2>/dev/null || break
+            "$ENODIA_BIN/awg" setconf "$TRY_IF" "$TRY_CONF" 2>/dev/null || break
+            slot_keepalive "$TRY_IF"
+        done
+        [ "$_ths" = 1 ] || { printf '=%s\t0\t-\n' "$_tn"; continue; }
+        [ "$_tca" != "-" ] || _tca=$(curl_ca_opt "$1" --interface "$TRY_IF")   # once: the CA probe by the probe's own path
+        # shellcheck disable=SC2086
+        curl -s $_tca --interface "$TRY_IF" --connect-timeout 4 --max-time "${2:-10}" "$1" </dev/null > "$_tcf.out" 2>/dev/null; _trc=$?
+        # 60 — the certificate, not the path: the CA probe ran on a candidate whose flow was cut and learnt nothing, and a build that
+        # needs --cacert (C144) then read every carrying candidate as «cut» (review s.173 r1) — asked again by THIS path, then once more
+        if [ "$_trc" = 60 ] && [ -z "$_tca" ]; then
+            _tca=$(curl_ca_opt "$1" --interface "$TRY_IF")
+            # shellcheck disable=SC2086
+            [ -z "$_tca" ] || { curl -s $_tca --interface "$TRY_IF" --connect-timeout 4 --max-time "${2:-10}" "$1" </dev/null > "$_tcf.out" 2>/dev/null; _trc=$?; }
+        fi
+        printf '=%s\t1\t%s\n' "$_tn" "$_trc"
+        [ "$_trc" = 0 ] && try_stop "$3" "$_tcf.out" && break
+    done 3< "$4"
     return 0
 }
 
@@ -964,5 +1071,6 @@ case "$1" in
     conf-gen)   shift; cmd_conf_gen "$@" ;;   # поколение протокола конфигов (разбор у cmd_conf_gen)
     # The config probe on a throwaway interface takes no carrier (its own awgt0, no route, no marks) — hence no carrier_run.
     try)        cmd_try "$2" "$3" "$4"; exit $? ;;
-    *) echo "usage: $0 up|down|cold|rewarm|status|health|failover|dns|slot-up <id> <cfg>|slot-down <id>|slot-probe <id> <cfg>|slot-iface <id>|slot-age <id>|conf-gen <файл>…|try <конфиг> <URL> [с]"; exit 2 ;;
+    try-each)   cmd_try_each "$2" "$3" "$4" "$5"; exit $? ;;
+    *) echo "usage: $0 up|down|cold|rewarm|status|health|failover|dns|slot-up <id> <cfg>|slot-down <id>|slot-probe <id> <cfg>|slot-iface <id>|slot-age <id>|conf-gen <файл>…|try <конфиг> <URL> [с]|try-each <URL> <с> <stop-ERE> <список>"; exit 2 ;;
 esac

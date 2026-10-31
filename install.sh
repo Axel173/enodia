@@ -81,7 +81,10 @@ err()  { _IERR=1; printf "${RED}[FAIL]${NC}  %s\n" "$1" >&2; }
 # «установщик кончился ошибкой» and nobody could tell where (BE7000, the test release of 15.10.2026: the log held «Проверяю
 # окружение…» alone). The exit trap names the last thing it said; an `err` already said why.
 _ILAST=""; _IERR=0
-trap '_irc=$?; if [ "$_irc" != 0 ] && [ "$_IERR" = 0 ]; then printf "%s\n" "[FAIL]  установщик оборвался молча (код $_irc) после шага «${_ILAST:-начало}» — повторите установку; если повторится, пришлите диагностику" >&2; fi' EXIT
+trap '_irc=$?; if [ "$_irc" != 0 ] && [ "$_IERR" = 0 ]; then printf "%s\n" "[FAIL]  установщик оборвался молча (код $_irc) после шага «${_ILAST:-начало}» — повторите установку; если повторится, пришлите диагностику" >&2; fi; command -v il_drop >/dev/null 2>&1 && il_drop' EXIT
+# A signal ends the run THROUGH the exit trap (C121): it drops the switching lock step 5b holds (il_drop) — a lock of a killed installer
+# otherwise stayed for the watchdog to reap, and its reap waits while «work» of the holder lives (review s.175 r2).
+trap 'exit 1' INT TERM HUP PIPE
 
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
 ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
@@ -107,6 +110,15 @@ if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
 command -v wan_iface >/dev/null 2>&1 || wan_iface() { ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'; }
 command -v bin_path    >/dev/null 2>&1 || bin_path()    { printf '%s' "$ENODIA_BIN/$1"; }
 command -v bin_install >/dev/null 2>&1 || bin_install() { mv -f "$1" "$ENODIA_BIN/$2" && chmod +x "$ENODIA_BIN/$2"; }
+# The switching lock for step 5b — its owner's way of taking it (daemon-lib.sh::switch_hold: waits for a live watchdog tick or heal
+# run, which drive the carrier WITHOUT the lock, and reaps a dead holder's lock). Shim: the lock only when free (packages.sh does it so).
+if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
+command -v switch_hold >/dev/null 2>&1 || switch_hold() { ( set -C; echo $$ > "$1" ) 2>/dev/null; }
+# The update's progress for the «Обновление» screen: this installer is its last stage («Применить настройки заново»), and it says
+# which step runs now (prog-lib.sh owns the file; outside a run the panel started every writer is a no-op).
+if [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; fi
+command -v prog_now >/dev/null 2>&1 || { prog_now() { :; }; prog_sub() { :; }; }
+prog_now prep
 : "${BIN_DIR:=$ENODIA_DIR}"
 # Провал раскладки бинаря обязан быть ГРОМКИМ: `bin_install` возвращает 1 (нет места, файл занят,
 # накопитель выдернули), а под `set -e` это роняло установщик БЕЗ ЕДИНОЙ СТРОКИ — «мигнуло и
@@ -967,14 +979,13 @@ CARRIER_UP=0
 if [ "$PANEL_ONLY" = 1 ] && [ "$KEEP_TRANSPORT" = 1 ]; then
     # Переустановка ПОВЕРХ настроенной системы (см. KEEP_TRANSPORT в секции 2). Флаг, маркировку
     # и несущую не трогаем вовсе: чужой выбор — не наш, а снятый флаг при живых правилах и демонах
-    # выключил бы сторожа на работающем роутере. Переигрывать нам тут НЕЧЕГО и НЕЧЕМ: сами мы
-    # firewall не перезагружаем (секция 1 в панельном режиме пропущена целиком, `FW3_WIPED`
-    # остаётся 0 ⇒ и repair в 5b не зовётся), а правила, смытые ЧУЖИМ reload'ом (вебморда Xiaomi),
-    # вернёт сторож — он видит пропажу `FORWARD -o <dev>` и зовёт тот же `vpn-toggle.sh repair`.
+    # выключил бы сторожа на работающем роутере. Правила, что стоят в ядре, поставил ПРЕЖНИЙ код —
+    # их ставит заново новым кодом шаг 5b (`vpn-toggle.sh repair`), тем же путём, что кнопка
+    # «Починить правила»; правила, смытые ЧУЖИМ reload'ом позже (вебморда Xiaomi), вернёт сторож.
     _kt_name=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
     [ -n "$_kt_name" ] || _kt_name=awg
     log "Транспорт уже выбран ($_kt_name) — маршрутизацию не трогаю"
-    ok "Обновлены скрипты, панель и cron; транспорт и его правила остались как были"
+    ok "Обновлены скрипты, панель и cron; транспорт остался как был — правила новым кодом поставит шаг ниже"
 elif [ "$PANEL_ONLY" = 1 ]; then
     # Ни маркировки, ни несущей, ни флага `.transport`: пустой флаг + отсутствие awg.conf — и есть
     # признак «транспорта нет вовсе», по которому heal, сторож и repair понимают, что чинить
@@ -1036,10 +1047,66 @@ fi   # /PANEL_ONLY (конец секции 5: ядро маркировки + �
 # приём, что в proto-install.sh п.5b и transport-awg.sh::replay_fw3). Зовём ПОСЛЕ подъёма
 # несущей: repair читает .transport и иначе поднял бы не тот транспорт. На ПЕРВОЙ установке
 # переигрывать нечего — repair отработает как no-op.
-if [ "$FW3_WIPED" = 1 ] && [ -f "$ENODIA_DIR/vpn-toggle.sh" ]; then
-    log "awg_setup сделал firewall reload — переигрываю цепочки (vpn-toggle repair)…"
-    sh "$ENODIA_DIR/vpn-toggle.sh" repair >/dev/null 2>&1 || true
-    ok "Правила переиграны (вырезы, порты, устройства, десинк, доп-выходы, доступ снаружи)"
+#
+# …И ВСЕГДА ПОВЕРХ НАСТРОЕННОЙ СИСТЕМЫ (KEEP_TRANSPORT: обновление и переустановка с ПК). Правила в ядре
+# поставил ПРЕЖНИЙ код, а новый мог переложить их иначе (новая семья, другой порядок цепочек), — и
+# прежде обновление кончалось советом «примените правила: «Починить правила» или перезагрузка».
+# Решение пользователя 30.10.2026 (с.174): обновление ставит их само, тем же `repair`, что и кнопка, —
+# первым шагом этапа «Применить настройки заново», до переигрыша персиста. Цена та же, что у кнопки:
+# repair сбрасывает установленные соединения (ct_flush, инвариант NSS/ECM). Не встали — ВЕРДИКТ, а не
+# «переиграны»: причина (первая строка repair) идёт в журнал и на экран, и кнопка «Починить правила»
+# возвращается только тогда. Транспорта нет вовсе — ставить нечего (`skip`: экран не рисует шаг).
+#
+# ЛОК СМЕНЫ ТРАНСПОРТА — НА repair И ПЕРЕИГРЫШ 5c ВМЕСТЕ (ревью с.175, круги 1–2). repair кладёт маршрут несущей, переигрывает ядро
+# и сбрасывает соединения: посреди смены, которую ведёт сторож (перебор конфигов, повтор «Выкл», перевыбор дороги, его свип
+# выходов), он резал бы её — глобальный ct_flush убивает ответ на первое рукопожатие только что поднятого демона, и лестница
+# шагала бы дальше. Переигрыш по той же причине сам ждёт этот лок и отказывает. Берёт лок ВЛАДЕЛЕЦ способа — switch_hold: ждёт и
+# живой тик сторожа и heal (они водят несущую БЕЗ лока), и чужой лок, а лок умершего держателя снимает сразу; лок — со СВОИМ пидом.
+# Под ним — repair и `heal.sh replay held`. Не дождались за минуту — правила не трогаем и говорим это: шаг красный, «Починить
+# правила» вернётся; переигрыш тогда подождёт и откажет по-своему. Снимает лок il_drop — и здесь, и ловушкой выхода.
+SWITCH_LOCK=/tmp/enodia-switching.lock
+IL_MINE=0; IL_REPLAY_BLOCKED=0
+il_drop() { if [ "$IL_MINE" = 1 ] && [ "$(cat "$SWITCH_LOCK" 2>/dev/null)" = "$$" ]; then rm -f "$SWITCH_LOCK"; fi; IL_MINE=0; }
+# ПРЯМОЙ РЕЖИМ СТОРОЖА (FAILOPEN: сервер мёртв, трафик идёт мимо туннеля) — без несущей: repair поднял бы её и вернул маршрут в
+# table 1000, и помеченный трафик ушёл бы в мёртвый туннель, а сторож, который это снимает, ждал бы наш лок всю установку
+# (ревью с.175, круг 2). `rules` — тот же список без шагов несущей; её вернёт сам сторож, когда сервер оживёт.
+WD_STATE=/tmp/enodia-watchdog.state
+# …и переигрыш 5c — тоже без несущей (ENODIA_NO_CARRIER: его секция 5.6 подняла бы её так же; ревью с.175, круг 3).
+IL_DIRECT=0; if [ "$(cat "$WD_STATE" 2>/dev/null)" = FAILOPEN ]; then IL_DIRECT=1; fi
+if { [ "$FW3_WIPED" = 1 ] || [ "$KEEP_TRANSPORT" = 1 ]; } && [ -f "$ENODIA_DIR/vpn-toggle.sh" ]; then
+    prog_now rules
+    # Шаг правил — на экран ДО repair: его slots-up иначе первым вписал бы «выходы» (порядок шагов — порядок их появления).
+    prog_sub rules now
+    if switch_hold "$SWITCH_LOCK" 60; then IL_MINE=1; fi
+    # The watchdog may enter or leave FAILOPEN while switch_hold waits for its tick. Choose the carrier policy from the state
+    # after the wait; the same snapshot then governs repair and the replay under our lock.
+    IL_DIRECT=0; if [ "$(cat "$WD_STATE" 2>/dev/null)" = FAILOPEN ]; then IL_DIRECT=1; fi
+    if [ "$IL_MINE" = 0 ]; then
+        IL_REPLAY_BLOCKED=1
+        warn "Правила НЕ переставлены: идёт смена транспорта (занят $SWITCH_LOCK дольше минуты) — «Починить правила» в панели, когда она кончится"
+        prog_sub rules bad 0 0 "идёт смена транспорта — правила не переставлены; поставьте их кнопкой «Починить правила», когда она кончится"
+    else
+        _rpv=repair; if [ "$IL_DIRECT" = 1 ]; then _rpv=rules; fi
+        if [ "$FW3_WIPED" = 1 ]; then log "awg_setup сделал firewall reload — переигрываю цепочки (vpn-toggle $_rpv)…"
+        else log "ставлю правила маршрутизации новым кодом (vpn-toggle $_rpv)…"; fi
+        # Ход repair не говорит (ENODIA_UPD_PROG=): его slots-up — первый из двух подъёмов выходов, и экран прыгал бы «выходы 4 из 4» →
+        # «0 из 4»; выходы рассказывает переигрыш 5c.
+        _rpo=$(ENODIA_UPD_PROG= sh "$ENODIA_DIR/vpn-toggle.sh" "$_rpv" 2>&1) && _rpr=0 || _rpr=$?
+        if [ "$_rpr" = 0 ]; then
+            # Итог — СЛОВАМИ repair («OK: …»): при выключенном VPN он ставит только блокировки и «доступ домой», и общий список
+            # «маркировка, вырезы…» был бы неправдой.
+            _rpk=$(printf '%s\n' "$_rpo" | grep '^OK:' | tail -n 1 || true)
+            ok "${_rpk:-Правила переиграны}"
+            prog_sub rules ok
+        else
+            # Причина — первая непустая строка отказа, без хвостового «:» (за ним у repair идёт команда для консоли, экрану она ни к чему).
+            _rpw=$(printf '%s\n' "$_rpo" | grep -v '^[[:space:]]*$' | head -n 1 | sed 's/[:[:space:]]*$//' || true)
+            warn "Правила НЕ переиграны: ${_rpw:-repair кончился с кодом $_rpr} — «Починить правила» в панели или перезагрузка"
+            prog_sub rules bad 0 0 "${_rpw:-repair кончился с кодом $_rpr}"
+        fi
+    fi
+else
+    prog_sub rules skip
 fi
 
 # 5c. ПЕРЕИГРЫШ ПЕРСИСТА ПОДСИСТЕМ (`heal.sh replay`). `repair` выше чинит ПРАВИЛА, но
@@ -1050,21 +1117,35 @@ fi
 # из 13 наших ipset живут 2. Замерено на железе 08.08.2026 (deactivate → установка поверх).
 # На ПЕРВОЙ установке персиста нет — replay отработает как no-op. Нефатально: установка не
 # должна падать из-за переигрыша.
-if [ -f "$ENODIA_DIR/heal.sh" ]; then
+if [ "$IL_REPLAY_BLOCKED" = 1 ]; then
+    # A watchdog can drive the carrier without a switching-lock file. After switch_hold timed out, replay's file-only gate
+    # cannot protect it from that tick either; defer both halves of the operation together.
+    warn "Персист подсистем НЕ переигран: идёт смена транспорта — повторите после её завершения"
+    prog_sub replay bad 0 0 "настройки не переиграны: идёт смена транспорта — повторите после её завершения"
+elif [ -f "$ENODIA_DIR/heal.sh" ]; then
     log "переигрываю персист подсистем (группы, гео, списки, десинк, доп-выходы)…"
     # ВЕРДИКТ — ПО КОДУ. Переигрыш отказывается, когда занят лок смены транспорта (код 3), и
     # безусловное «переигран» было бы ровно тем враньём, ради которого этот шаг и заводили.
-    if sh "$ENODIA_DIR/heal.sh" replay >/dev/null 2>&1; then
+    # Лок держим МЫ (5b) — `held`: переигрыш не ждёт сам себя (тот же признак ставит transport.sh под локом своего вызывателя).
+    if [ "$IL_MINE" = 1 ]; then _ilh=held; else _ilh=""; fi
+    # Признак — в окружение на время переигрыша, а не префиксом вызова: строку `if sh … heal.sh replay` сверяет C85 (код читают).
+    if [ "$IL_DIRECT" = 1 ]; then ENODIA_NO_CARRIER=1; export ENODIA_NO_CARRIER; fi
+    if sh "$ENODIA_DIR/heal.sh" replay $_ilh >/dev/null 2>&1; then
         ok "Персист подсистем переигран (группы, гео, списки, DNS-hosts, десинк, доп-выходы)"
     else
         warn "Персист подсистем НЕ переигран (шла смена транспорта или переигрыш не смог). Повторите: sh $ENODIA_BOOT/boot.sh heal.sh replay"
+        prog_sub replay bad 0 0 "настройки не переиграны: шла смена транспорта или переигрыш не смог — перезагрузите роутер"
     fi
 fi
+unset ENODIA_NO_CARRIER    # только переигрышу 5c: дальше установщик зовёт другое, и признак ему не адресован
+# Лок 5b — снимаем свой (сверка пида: вторым его мог взять уже другой держатель).
+il_drop
 
 # ============================================================================
 # 6. АВТОЗАПУСК ЧЕРЕЗ /etc/rc.local
 # ============================================================================
 log "Настраиваю автозапуск..."
+prog_now cron
 
 # ВАЖНО: на стоковой BE7000 /etc/rc.local сбрасывается при ребуте (overlay),
 # поэтому рассчитывать на него нельзя. Используем cron + heal.sh —
@@ -1375,6 +1456,7 @@ rmdir "$ENODIA_DIR/bin" 2>/dev/null || true   # уберём каталог, е�
 # ============================================================================
 # 8. ФИНАЛЬНАЯ ПРОВЕРКА
 # ============================================================================
+prog_now final
 # Ожидаемая скорость: AWG (Go-реализация) на стоке — ориентировочно 200-400
 # Мбит. Гигабит на этом железе/прошивке недостижим (нужен модуль ядра/OpenWrt).
 # ----------------------------------------------------------------------------

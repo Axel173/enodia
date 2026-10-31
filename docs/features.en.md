@@ -50,6 +50,9 @@ travelling, over mobile internet.
 
 - **Encrypted DNS:** DoH, DoT, DoQ and DoH3 (over QUIC) and ODoH — through a relay, so the resolver never learns whose
   questions they are.
+- **Who asks DNS past the router:** the panel shows the devices that ask another DNS directly, and says when the router
+  itself hands them another address over DHCP. Such queries are not encrypted by the router, skip the domain rules and ad
+  blocking, and the ISP can substitute their answers.
 - **Ad and tracker blocking** — by lists, for the whole home network.
 - **Your own DNS records** and addresses pinned to devices.
 

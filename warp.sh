@@ -7,15 +7,15 @@
 # create the private key on THEIR side. Here the key is generated on the router (`awg genkey`) and never leaves it; one
 # registration per config. The API is Cloudflare's unofficial client API (the Android app's): it changes ⇒ every deviation is a
 # refusal in words («Cloudflare сменил порядок — нужна новая версия панели»), never a half-written config.
-# MASKING (spike BE7000 10.10.2026, dev notes «сервер-через-WARP-дизайн» §9): plain WireGuard to WARP is cut by the ISP after the
-# handshake (~3 KB). The config always carries an I1 the ROUTER builds: a QUIC Initial header — the bytes every real QUIC
-# Initial has — with the connection id and the body random (`<r N>` is re-drawn by amneziawg-go on EVERY handshake): nothing to
-# learn but «this is QUIC», nothing to go stale. S1..S4 stay 0 and H1..H4 = 1..4: the server is vanilla WireGuard.
-# PORT BY THE RESULT (hardware test of the registration, BE7000 10.10.2026, dev notes §10): WARP listens on many ports and the ISP
-# cuts some of them right after the handshake — 2408, WARP's standard one, gave a handshake and 92 bytes, 891 carried. A handshake
-# proves nothing, so the config gets the first port that CARRIES DATA: `transport-awg.sh try` raises a throwaway interface per port
-# and asks Cloudflare's trace through it (`warp=on` = pass; the same answer names the colo). None passes ⇒ an error in words and no
-# config, and the registration nobody uses is given back (`fail` → `give_back`).
+# MASKING (spike BE7000 10.10.2026, dev notes «сервер-через-WARP-дизайн» §9; remade s.173, §29.1): the config always carries an I1
+# the ROUTER builds — since 1.3.5 a real QUIC Initial whose payload decrypts to a ClientHello (gen_i1: the old header over random
+# bytes was itself what the ISP cut on 2408/1701/4500). S1..S4 stay 0 and H1..H4 = 1..4: the server is vanilla WireGuard.
+# THE SERVER BY THE RESULT (BE7000 10.10.2026, §10; AX3600 30.10.2026, §29.1): WARP listens on many addresses and ports, and the ISP
+# may close an address (no handshake at all) or cut a flow after the handshake (2408: a handshake and 92 bytes). A handshake proves
+# nothing, so the config gets the first candidate that CARRIES DATA — Cloudflare's trace through it says `warp=on` and names the
+# colo — asked on ONE throwaway interface (`transport-awg.sh try-each`), in three steps (pick): the registration's address × the
+# ports, then other maskings where the flow was cut, then other WARP pools where nothing answered or only Moscow (DME) did. None
+# passes ⇒ an error that says which of the two the ISP does, no config, and the registration nobody uses is given back.
 # SEVERAL, AND WHAT IS KNOWN ABOUT EACH (user's decisions 10.10.2026). `get` no longer stops at one: the next config is WARP-2,
 # WARP-3… — its own key each, never a copy. What the router learnt while getting one (which ports the ISP cut, where Cloudflare took
 # the connection, when) and the registration's id and token used to die with the /tmp answer — now they are a record (REG below),
@@ -56,7 +56,10 @@ WARP_PUB='bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo='   # one server key for e
 NAME=WARP                                              # the first config and its exit; the next ones — WARP-2 … WARP-9 (next_name)
 PORTS="891 500 1701 4500 854 878 894 908 2408"          # the measured one first, WARP's standard one last (cut here)
 TRACE=https://1.1.1.1/cdn-cgi/trace                     # answers `warp=on` + `colo=XXX` only through WARP
-TRY_SECS=8                                             # per port: a live WARP answers in ~1 s; worst case ≤ 9 × ~11 s
+TRY_SECS=8                                             # the trace's ceiling once a candidate shook hands: a live WARP answers in ~1 s
+PICK_BUDGET=${ENODIA_WARP_BUDGET:-120}                 # the search, s (a silent candidate costs 3 s, a cut one ~4 s); with the
+                                                       # registration, a lock wait and the last candidate — within «до трёх минут»
+case "$PICK_BUDGET" in ''|*[!0-9]*) PICK_BUDGET=150 ;; esac
 ST=/tmp/enodia-warp.json; PIDF=/tmp/enodia-warp.pid
 STARTF=/tmp/enodia-warp.start                          # the pid of the front verb that is launching a job right now (busy)
 STARTL=/tmp/enodia-warp-start.lock                     # «is a job alive?» and «the start is mine» are ONE step under it (take_start)
@@ -77,6 +80,7 @@ command -v curl_ca_opt >/dev/null 2>&1 || curl_ca_opt() { return 0; }
 if [ -f "$ENODIA_DIR/json-lib.sh" ]; then . "$ENODIA_DIR/json-lib.sh"; fi   # jtxt: a byte cut that keeps UTF-8 whole
 command -v jtxt >/dev/null 2>&1 || jtxt() { tr -d '"\000-\037\\'; }
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
+command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
 command -v clock_sane >/dev/null 2>&1 || clock_sane() { _csn=${1:-$(date +%s 2>/dev/null)}; case "$_csn" in ''|*[!0-9]*) return 1 ;; esac; [ "$_csn" -gt 1700000000 ] 2>/dev/null && [ "$_csn" -lt 4102444800 ] 2>/dev/null; }
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi   # pid_runs: alive AND ours
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -d "/proc/$1" ]; }
@@ -87,10 +91,76 @@ TAB=$(printf '\t')
 NL='
 '
 
-# The masking packet: QUIC v1 Initial long header — first byte 0xce (long header, Initial, 4-byte packet number), version
-# 00000001, DCID length 8, DCID random, SCID length 0, token length 0, length 0x44d0 (1232), packet number + payload random ⇒
-# 1250 bytes, the size of a real client Initial. Measured: works like a captured template, with and without Jc.
-gen_i1() { printf '<b 0xce0000000108><r 8><b 0x000044d0><r 1232>'; }
+# THE MASKING — the first packet before every handshake (I1). Until 1.3.4 the router sent a QUIC Initial HEADER over RANDOM bytes
+# (I1_OLD), and that is what the ISP cut on 2408/1701/4500 (AX3600 30.10.2026, dev notes «сервер-через-WARP» §29.1): a DPI that
+# decrypts QUIC Initials — the keys come from the packet itself (RFC 9001 §5.2) — found garbage and dropped the flow, while with a
+# DNS query, a STUN request, no I1 at all, or a QUIC Initial that decrypts to a real ClientHello, 1 MB passed on every port. So the
+# router builds a REAL one (`quic`): QUIC v1, pn 0, an 8-byte DCID drawn here, a CRYPTO frame whose ClientHello names I1_SNI,
+# PADDING to the 1200 bytes a client Initial has; only the hello's random and the GCM tag are `<r N>` (new per handshake — the tag
+# is checked by nobody who only reads). The cut keeps the header-protection sample static, so the protected header stays valid.
+# sh + the stock openssl (HMAC-SHA256 for the keys, AES-128-CTR from IV‖00000002 = GCM's keystream, AES-128-ECB for the mask) +
+# busybox hexdump: RFC 9001 A.1/A.2 vectors pass on OpenSSL 1.0.2q (AX3600) and 1.1.1l (BE7000), and dev/quic-i1-decode.py
+# (an independent decoder) reads the result as that ClientHello. openssl is already a hard dependency (the update package's
+# signature). It fails — the DNS query (pure sh): never an EMPTY line, `awg setconf` refuses a config with one whole.
+# `dns` / `stun` — the pick's other maskings (they too carried 1 MB where the old one was cut).
+I1_OLD='<b 0xce0000000108><r 8><b 0x000044d0><r 1232>'
+I1_SNI=www.apple.com
+QSALT=38762cf7f55934b34d179ae6a4c80cadccbb7f0a          # QUIC v1 initial salt
+h2b() { printf "$(printf '%s' "$1" | sed 's/../\\x&/g')"; }
+b2h() { hexdump -v -e '/1 "%02x"'; }
+hmac() { openssl dgst -sha256 -mac HMAC -macopt "hexkey:$1" 2>/dev/null | sed -n 's/^.*= *//p'; }   # data on stdin → hex
+qlabel() {   # HKDF-Expand-Label (TLS 1.3), one HMAC block: $1 secret, $2 label, $3 length → hex
+    _ql="tls13 $2"
+    h2b "$(printf '%04x%02x' "$3" "${#_ql}")$(printf '%s' "$_ql" | b2h)0001" | hmac "$1" | cut -c1-$(( $3 * 2 ))
+}
+qvint() { if [ "$1" -lt 64 ]; then printf '%02x' "$1"; else printf '%04x' $(( $1 | 16384 )); fi; }
+gen_quic() {
+    _qd=$(head -c 8 /dev/urandom | b2h)
+    _qc=$(qlabel "$(h2b "$_qd" | hmac "$QSALT")" "client in" 32)
+    _qk=$(qlabel "$_qc" "quic key" 16); _qv=$(qlabel "$_qc" "quic iv" 12); _qh=$(qlabel "$_qc" "quic hp" 16)
+    [ "${#_qk}" = 32 ] && [ "${#_qv}" = 24 ] && [ "${#_qh}" = 32 ] || return 1
+    _qn=$(printf '%s' "$I1_SNI" | b2h)
+    _qs="$(printf '%04x00%04x' $(( ${#I1_SNI} + 3 )) "${#I1_SNI}")$_qn"
+    _qe="0000$(printf '%04x' $(( ${#_qs} / 2 )))$_qs"
+    _qb="0303$(head -c 32 /dev/urandom | b2h)00000000$(printf '%04x' $(( ${#_qe} / 2 )))$_qe"
+    _qhe="01$(printf '%06x' $(( ${#_qb} / 2 )))$_qb"
+    _qf="0600$(qvint $(( ${#_qhe} / 2 )))"
+    _qp="$_qf$_qhe"
+    # 1200 = header 17 (first byte, version, DCID length + 8, SCID/token lengths, pn) + the 2-byte length + payload + tag 16
+    _qz=$(( 1200 - 19 - ${#_qp} / 2 - 16 )); [ "$_qz" -le 0 ] || _qp="$_qp$(head -c "$_qz" /dev/zero | b2h)"
+    _qct=$(h2b "$_qp" | openssl enc -aes-128-ctr -K "$_qk" -iv "${_qv}00000002" 2>/dev/null | b2h)
+    [ "${#_qct}" = "${#_qp}" ] || return 1
+    _qm=$(h2b "$(printf '%s' "$_qct" | cut -c7-38)" | openssl enc -aes-128-ecb -nopad -K "$_qh" 2>/dev/null | b2h)   # sample = ct[3:19]
+    [ "${#_qm}" = 32 ] || return 1
+    _qhd="$(printf '%02x' $(( 0xc0 ^ (0x$(printf '%s' "$_qm" | cut -c1-2) & 15) )))0000000108${_qd}0000$(qvint $(( 1 + ${#_qp} / 2 + 16 )))$(printf '%s' "$_qm" | cut -c3-4)"
+    # static up to the hello's random (frame header + 6), but never short of the sample's end (byte 19 of the ciphertext)
+    _qkp=$(( ${#_qf} / 2 + 6 )); _qr=32
+    [ "$_qkp" -ge 19 ] || { _qr=$(( 32 - (19 - _qkp) )); _qkp=19; }
+    printf '<b 0x%s%s><r %s><b 0x%s><r 16>' "$_qhd" "$(printf '%s' "$_qct" | cut -c1-$(( _qkp * 2 )))" "$_qr" \
+        "$(printf '%s' "$_qct" | cut -c$(( (_qkp + _qr) * 2 + 1 ))-)"
+}
+gen_dns() {   # an A query for I1_SNI with EDNS0 padding (96 random bytes) — a well-formed query
+    _qn=""; _qr=$I1_SNI
+    while [ -n "$_qr" ]; do _ql=${_qr%%.*}; _qn="$_qn$(printf '%02x' ${#_ql})$(printf '%s' "$_ql" | b2h)"; [ "$_ql" = "$_qr" ] && _qr="" || _qr=${_qr#*.}; done
+    printf '<r 2><b 0x01000001000000000001%s0000010001000029100000000000%04x000c%04x><r 96>' "$_qn" 100 96
+}
+gen_stun() { printf '<b 0x000100182112a442><r 12><b 0x80220014><r 20>'; }   # a Binding Request with a 20-byte SOFTWARE attribute
+# The router's masking of kind $1 (quic — the default, dns, stun). Never empty: a quic the box cannot build gives the DNS one.
+gen_i1() {
+    case "${1:-quic}" in
+        dns) gen_dns ;;
+        stun) gen_stun ;;
+        *) _qo=$(gen_quic 2>/dev/null) && printf '%s' "$_qo" | grep -Eq "$MASK_RE" && printf '%s' "$_qo" || gen_dns ;;
+    esac
+}
+# Is masking $1 one the ROUTER built (any version, any kind) → 0. By FORM: the quic one is random per config, so «equal to a fresh
+# gen_i1» (how 1.2–1.3 told its own from the person's) no longer holds.
+is_gen_i1() {
+    [ "$1" = "$I1_OLD" ] && return 0
+    [ "$1" = "$(gen_stun)" ] && return 0
+    printf '%s' "$1" | grep -Eq '^<b 0xc[0-9a-f]0000000108[0-9a-f]{16}0000[0-9a-f]+><r [0-9]+><b 0x[0-9a-f]+><r 16>$' && return 0
+    printf '%s' "$1" | grep -Eq '^<r 2><b 0x01000001000000000001[0-9a-f]+00000100010000291000000000000064000c0060><r 96>$'
+}
 
 # THE JOB'S ID — whoever starts a work may name it (ENODIA_WARP_JOB: the panel makes an id per start and the CGI exports it; the
 # background work inherits the environment). It goes into EVERY status line of that work, at the END of the object (cmd_status
@@ -101,29 +171,31 @@ put() {
     _wpj=$1; [ -z "$JOB" ] || _wpj="${1%\}},\"job\":\"$JOB\"}"
     _wpt=$(mktemp "$ST.XXXXXX" 2>/dev/null) || return 1; printf '%s\n' "$_wpj" > "$_wpt" && mv "$_wpt" "$ST"   # mktemp: O_EXCL, no planted name
 }
-# The config for port $1 from the registration's answer (reg_new's variables): the probe and the saved file are one text. `_wi1` —
-# a masking to keep (reget of a config with the person's own); empty — the router's.
+# A candidate config — server $1, port $2, masking $3: the pick's MK (see pick). wconf — from the registration's answer (reg_new's
+# variables), the probe and the saved file one text; masking $3, else `_wi1` (reget keeps the person's own), else the router's.
 wconf() {
     printf '[Interface]\nPrivateKey = %s\nAddress = %s/32%s\nMTU = 1280\n' "$_wpriv" "$_wv4" "${_wv6:+, $_wv6/128}"
-    printf 'S1 = 0\nS2 = 0\nJc = 4\nJmin = 40\nJmax = 70\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\nI1 = %s\n' "${_wi1:-$(gen_i1)}"
-    printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' "$WARP_PUB" "$_wep" "$1"
+    printf 'S1 = 0\nS2 = 0\nJc = 4\nJmin = 40\nJmax = 70\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\nI1 = %s\n' "${3:-${_wi1:-$(gen_i1)}}"
+    printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' "$WARP_PUB" "$1" "$2"
 }
 # …the same for ANOTHER device: a phone has no resolver of its own inside the tunnel — Cloudflare's.
-dconf() { wconf "$1" | awk '{ print } /^MTU = 1280$/ { print "DNS = 1.1.1.1, 1.0.0.1" }'; }
-# The text of config $1 with: the key and address of ANOTHER registration ($2, $3; empty — its own), the Endpoint's port $4 and the
-# masking $5 (empty — its own; a config that had none gets the line before [Peer]). One awk for the probe's copy and the saved file.
+dconf() { wconf "$@" | awk '{ print } /^MTU = 1280$/ { print "DNS = 1.1.1.1, 1.0.0.1" }'; }
+# The text of config $1 with: the key and address of ANOTHER registration ($2, $3; empty — its own), the Endpoint $4 — `host:port`
+# whole, or a bare port for the host it has — and the masking $5 (empty — its own; a config that had none gets the line before
+# [Peer]). One awk for the probe's copy and the saved file.
 conf_as() {
     awk -v pk="$2" -v ad="$3" -v pt="$4" -v i1="$5" '
         { sub(/\r$/, "") }
         /^[ \t]*PrivateKey[ \t]*=/ { if (pk != "") { print "PrivateKey = " pk; next } }
         /^[ \t]*Address[ \t]*=/    { if (ad != "") { print "Address = " ad; next } }
-        /^[ \t]*Endpoint[ \t]*=/   { if (pt != "") { v = $0; sub(/:[0-9]+[ \t]*$/, "", v); print v ":" pt; next } }
+        /^[ \t]*Endpoint[ \t]*=/   { if (pt ~ /:/) { print "Endpoint = " pt; next }
+                                     if (pt != "") { v = $0; sub(/:[0-9]+[ \t]*$/, "", v); print v ":" pt; next } }
         /^[ \t]*I1[ \t]*=/         { seen = 1; if (i1 != "") { print "I1 = " i1; next } }
         /^[ \t]*\[Peer\]/          { if (i1 != "" && !seen) { print "I1 = " i1; seen = 1 } }
         { print }' "$1"
 }
-xconf() { conf_as "$_wsrc" "$_wpriv" "$_wv4/32${_wv6:+, $_wv6/128}" "$1" "$_wi1"; }
-oconf() { conf_as "$_wsrc" "" "" "$1" ""; }   # …and the config AS IT IS but for the port: its own key, address and masking
+xconf() { conf_as "$_wsrc" "$_wpriv" "$_wv4/32${_wv6:+, $_wv6/128}" "$1:$2" "${3:-$_wi1}"; }
+oconf() { conf_as "$_wsrc" "" "" "$1:$2" "$3"; }   # …and the config AS IT IS but for the server: its own key, address and masking
 say() { put "{\"state\":\"running\",\"op\":\"$OP\",\"name\":\"$_wnm\",\"msg\":\"$1\"}"; }
 # A registration this run made and NO SAVED CONFIG OWNS YET (_wgid, _wgtok — set by reg_new): the throwaway of a probe, a new one
 # before its config is written. Every refusal goes through `fail`, so it is given back there — no branch has to remember (the
@@ -354,28 +426,227 @@ reg_del() {
     rm -f "$_wdh"
     return 0
 }
-# The port BY THE RESULT → _wport _wcolo _wcut (the ports that did not pass, by commas). $1 — the port to ask first (the config's
-# own, at a re-pick), $2 — «only this one» (a masking is tried on the port the config already has). `$MK <port>` prints the
-# candidate config.
-pick() {
-    _wport=""; _wcolo=""; _wcut=""
-    _wpl=$1; [ -n "$2" ] || for _wp in $PORTS; do [ "$_wp" = "$1" ] || _wpl="$_wpl $_wp"; done
-    _wn=0; _wall=0
-    for _wp in $_wpl; do _wall=$((_wall+1)); done
-    for _wp in $_wpl; do
-        _wn=$((_wn+1))
-        if [ -n "$2" ]; then say "спрашиваю WARP с этой маскировкой (порт $_wp)"; else say "ищу порт, который провайдер не режет: $_wp ($_wn из $_wall)"; fi
-        $MK "$_wp" > "$W/conf" || fail "не удалось записать конфиг"
-        _wtr=$(sh "$ENODIA_DIR/transport-awg.sh" try "$W/conf" "$TRACE" "$TRY_SECS" 2>/dev/null); _wrc=$?
-        case "$_wrc" in
-            0) if printf '%s\n' "$_wtr" | grep -qx 'warp=on'; then
-                   _wport=$_wp; _wcolo=$(printf '%s\n' "$_wtr" | sed -n 's/^colo=\([A-Z][A-Z][A-Z]\)$/\1/p' | head -n 1); break
-               fi ;;
-            4) _wsoon=1; fail "не поднялся пробный интерфейс AmneziaWG — проверьте его в «Компонентах»" ;;
-            5) _wsoon=1; fail "сейчас идёт другая проба конфига — повторите через минуту" ;;
+# THE PICK — BY THE RESULT, IN THREE STEPS (dev notes «сервер-через-WARP» §29.1, AX3600 30.10.2026) → _wport, _wepn (the server that
+# passed), _wmkn (its masking's kind: own|quic|dns|stun) and _wi1n (its text; empty — the config's own), _wcolo, _wcut (the ports
+# that did not pass on the first server, by commas — the record's «при подборе не прошли»); nothing passed — _wwhy (closed|cut)
+# and _wyna (how many servers were asked). The chosen candidate's text is $W/conf.
+# Every candidate is asked by `transport-awg.sh try-each` — ONE throwaway daemon, a setconf per candidate (a handshake in ~0.2 s),
+# the trace only where a handshake came — and gets one of three verdicts: pass (the trace says warp=on), hs (a handshake, then
+# nothing: the ISP cuts the FLOW — another masking cures it; measured: only the old masking was cut on 2408/1701/4500), none (not
+# even a handshake: the ADDRESS may be closed — measured: 188.114.96–97 silent on every port here — or the ISP drops the masked first
+# packet itself: the old masking on 2408 got no handshake in one order and «a handshake, then cut» in another, the DPI is stateful).
+#   1. the first server _wep0 × the port $1 and then PORTS, with the masking _wmk0;
+#   2. no pass (and _wrot=1) — the router's other maskings on the ports that shook hands, or on the first two when none did: «no
+#      handshake» does not prove the address, so the masking is asked before the address is blamed;
+#   3. no pass outside Moscow yet (and _wswp=1) — one address of each other WARP pool, on the port/masking that passed, else on the
+#      ports that shook hands, else on 891 500 2408.
+# A pass on DME (Cloudflare's Moscow point — it filters by destination since spring 2026; most pools land there from Russia) is
+# kept as the last resort while the steps look for another. `$2` = the first candidate only (a masking is checked on the port the
+# config has). All within PICK_BUDGET seconds. `$MK <server> <port> <masking>` prints a candidate (an empty masking — its own).
+WARP_POOLS="8.6.112 8.34.70 8.34.146 8.35.211 8.39.125 8.39.204 8.39.214 8.47.69 162.159.192 162.159.195 188.114.96 188.114.97 188.114.98 188.114.99"
+# try-each stops at an answer that is WARP's AND not from DME — both lines (one ERE per line, every one must match: a `colo=` alone
+# is any Cloudflare answer, warp=off too)
+STOP_ERE='^warp=on$
+^colo=([^D]|D[^M]|DM[^E])'
+mk_set() {   # $1 = kind → _wym, its text; built ONCE per kind per pick (a new text per candidate would restart the probe's daemon)
+    case "$1" in
+        quic) [ -n "$_wyq" ] || _wyq=$(gen_i1 quic); _wym=$_wyq ;;
+        dns)  [ -n "$_wyd" ] || _wyd=$(gen_i1 dns); _wym=$_wyd ;;
+        stun) _wym=$(gen_stun) ;;
+        *)    _wym="" ;;
+    esac
+}
+cand() {   # $1 = server, $2 = port, $3 = masking kind → the next candidate of step $_wys
+    _wyk=$((_wyk+1)); mk_set "$3"
+    $MK "$1" "$2" "$_wym" > "$W/c$_wys/$_wyk" || fail "не удалось записать конфиг"
+    printf '%s\n' "$W/c$_wys/$_wyk" >> "$W/c$_wys/list"
+    printf '%s\t%s\t%s\t%s\n' "$_wyk" "$1" "$2" "$3" >> "$W/c$_wys/meta"
+}
+step_new() { _wys=$((_wys+1)); _wyst=$1; _wyk=0; rm -rf "$W/c$_wys"; mkdir "$W/c$_wys" || fail "нет места для работы"; }   # $1 = port|mask|pool
+mk_word() { case "$1" in quic) echo QUIC ;; dns) echo DNS ;; stun) echo STUN ;; *) if [ "$_wmku" = 1 ]; then echo прежняя; else echo своя; fi ;; esac; }
+# The step's candidates → try-each; the verdicts in order → $W/v (server⇥port⇥kind⇥verdict⇥colo⇥file⇥step), progress in words.
+step_run() {
+    [ -s "$W/c$_wys/list" ] || return 0
+    _wyb=$(( PICK_BUDGET - ($(uptime_s) - _wyt0) )); [ "$_wyb" -gt 0 ] || return 0
+    _wya=$(grep -c '' "$W/c$_wys/list")
+    # the config's OWN port (a re-pick's first candidate) gets a second handshake: one lost packet must not move a working config —
+    # the wait (TRY_HS) is shorter than WireGuard's own 5-s retry (review s.173 r2)
+    _wyhf=1; [ "$_wyst" = port ] && [ -n "$_wycur" ] && _wyhf=2
+    { TRY_BUDGET=$_wyb TRY_HS_FIRST=$_wyhf sh "$ENODIA_DIR/transport-awg.sh" try-each "$TRACE" "$TRY_SECS" "$STOP_ERE" "$W/c$_wys/list" 2>/dev/null </dev/null
+      echo "!rc $?"; } | while IFS= read -r _wyl; do
+        case "$_wyl" in
+            '#'*) _wyi=${_wyl#\#}
+                  _wyx=$(awk -F"$TAB" -v i="$_wyi" '($1 "") == (i "") { print $2 "\t" $3 "\t" $4; exit }' "$W/c$_wys/meta")
+                  _wyp=$(printf '%s' "$_wyx" | cut -f2)
+                  if [ "$_wyo" = 1 ]; then say "спрашиваю WARP с этой маскировкой (порт $_wyp)"
+                  else case "$_wyst" in
+                      port) say "ищу порт, который провайдер не режет: $_wyp ($_wyi из $_wya)" ;;
+                      mask) say "пробую другую маскировку ($(mk_word "$(printf '%s' "$_wyx" | cut -f3)")): порт $_wyp ($_wyi из $_wya)" ;;
+                      *)    say "ищу другой адрес WARP: $(printf '%s' "$_wyx" | cut -f1):$_wyp ($_wyi из $_wya)" ;;
+                  esac; fi ;;
+            *) printf '%s\n' "$_wyl" >> "$W/c$_wys/res" ;;
         esac
-        _wcut="$_wcut${_wcut:+,}$_wp"
     done
+    sed -n 's/^=//p' "$W/c$_wys/res" 2>/dev/null > "$W/c$_wys/eq"
+    while IFS="$TAB" read -r _wyi _wyh _wyr; do
+        _wyx=$(awk -F"$TAB" -v i="$_wyi" '($1 "") == (i "") { print $2 "\t" $3 "\t" $4; exit }' "$W/c$_wys/meta")
+        # `-` — NOT ASKED (the server is not an IPv4 address and its name did not resolve, or setconf refused the text): no
+        # verdict about the ISP at all — «none» here moved a working IPv6 config away and blamed the ISP (review s.173 r1)
+        _wyv=none; _wycl=""; [ "$_wyh" = - ] && _wyv=skip
+        if [ "$_wyh" = 1 ]; then
+            _wyv=hs
+            if [ "$_wyr" = 0 ] && grep -qx 'warp=on' "$W/c$_wys/$_wyi.out" 2>/dev/null; then
+                _wyv=pass; _wycl=$(sed -n 's/^colo=\([A-Z][A-Z][A-Z]\)$/\1/p' "$W/c$_wys/$_wyi.out" | head -n 1)
+            fi
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$_wyx" "$_wyv" "${_wycl:--}" "$W/c$_wys/$_wyi" "$_wys" >> "$W/v"
+    done < "$W/c$_wys/eq"
+    # The probe cut short: a pass found by an EARLIER step (a Moscow one, kept while step 3 looked further) is still an answer —
+    # throwing it away gave «другая проба» and no config though a working one was found (review s.173 r1); nothing found — a refusal
+    # that half a minute may change (`soon`).
+    _wyrc=$(sed -n 's/^!rc //p' "$W/c$_wys/res" 2>/dev/null)
+    [ "$_wyrc" = 0 ] && return 0
+    awk -F"$TAB" '$4 == "pass" { f = 1 } END { exit !f }' "$W/v" && return 0
+    _wsoon=1
+    case "$_wyrc" in
+        4) fail "не поднялся пробный интерфейс AmneziaWG — проверьте его в «Компонентах»" ;;
+        5) fail "сейчас идёт другая проба конфига — повторите через минуту" ;;
+        *) fail "проба прервалась — повторите через минуту" ;;
+    esac
+}
+# The verdicts so far: the first pass outside DME → 0 (chosen), else the first DME pass is the fallback; the line → _wyw.
+best() {
+    _wyw=$(awk -F"$TAB" '$4 == "pass" && $5 != "DME" { print; exit }' "$W/v" 2>/dev/null)
+    [ -n "$_wyw" ] && return 0
+    _wyw=$(awk -F"$TAB" '$4 == "pass" { print; exit }' "$W/v" 2>/dev/null)
+    return 1
+}
+rnd() { _wyr=$(head -c 2 /dev/urandom | b2h); echo $(( 0x${_wyr:-0} )); }
+pick() {
+    _wport=""; _wcolo=""; _wcut=""; _wepn=""; _wmkn=""; _wi1n=""; _wwhy=""; _wyna=0; _wyw=""
+    _wys=0; _wyq=""; _wyd=""; _wyo=0; [ -n "$2" ] && _wyo=1; _wycur=$1
+    _wyt0=$(uptime_s); : > "$W/v"
+    # 1. the first server, its ports
+    step_new port
+    _wpl=$1; [ -n "$2" ] || for _wp in $PORTS; do [ "$_wp" = "$1" ] || _wpl="$_wpl $_wp"; done
+    for _wp in $_wpl; do cand "$_wep0" "$_wp" "$_wmk0"; done
+    step_run
+    # the first server could not be asked at all (IPv6, a name that did not resolve): nothing is known — no other address or masking
+    # is tried in its place, and nothing is changed (a name may resolve later — `soon`)
+    if ! awk -F"$TAB" '$7 == 1 && $4 != "skip" { f = 1 } END { exit !f }' "$W/v"; then
+        # an IPv4 server not asked: the config has no Address (main said «не поднялся пробный интерфейс» here) — not a name
+        if printf '%s' "$_wep0" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then _wsoon=1; fail "не поднялся пробный интерфейс AmneziaWG — проверьте его в «Компонентах»"; fi
+        _wwhy=skip; case "$_wep0" in *:*) ;; *) _wsoon=1 ;; esac; return 0
+    fi
+    _wcut=$(awk -F"$TAB" '$7 == 1 && $4 != "pass" && $4 != "skip" { printf "%s%s", s, $2; s = "," }' "$W/v")
+    if ! best && [ "$_wyo" = 0 ]; then
+        # 2. no pass: the other maskings — on the ports that shook hands (the flow was cut), else on the first two (nothing shook
+        #    hands, and that may be the masking dropped, not the address closed)
+        if [ -z "$_wyw" ] && [ "$_wrot" = 1 ]; then
+            _wy2p=$(awk -F"$TAB" '$7 == 1 && $4 == "hs" { print $2 }' "$W/v" | head -n 3 | tr '\n' ' ')
+            [ -n "$_wy2p" ] || _wy2p=$(printf '%s\n' $_wpl | head -n 2 | tr '\n' ' ')
+            step_new mask
+            # …and the router's OLD masking last, for a config being moved off it: where everything new is cut and the old still
+            # passes, «режет на всех портах» would be said of a config that carries (review s.173 r2)
+            _wy2k="quic dns stun"; [ "$_wmku" = 1 ] && _wy2k="$_wy2k own"
+            for _wyk2 in $_wy2k; do
+                [ "$_wyk2" = "$_wmk0" ] && continue
+                for _wp in $_wy2p; do cand "$_wep0" "$_wp" "$_wyk2"; done
+            done
+            step_run
+        fi
+        # 3. no pass outside Moscow: the other pools — on what passed; else with the masking that first shook hands, on its ports;
+        #    else on the ports most ISPs leave open
+        if ! best && [ "$_wswp" = 1 ]; then
+            if [ -n "$_wyw" ]; then _wy3p=$(printf '%s' "$_wyw" | cut -f2); _wy3k=$(printf '%s' "$_wyw" | cut -f3)
+            else
+                _wy3k=$(awk -F"$TAB" '$4 == "hs" { print $3; exit }' "$W/v")
+                if [ -n "$_wy3k" ]; then _wy3p=$(awk -F"$TAB" -v k="$_wy3k" '$4 == "hs" && $3 == k && !s[$2]++ { print $2 }' "$W/v" | head -n 2 | tr '\n' ' ')
+                else _wy3p="891 500 2408"; _wy3k=$_wmk0; fi
+            fi
+            step_new pool
+            for _wyp3 in $(for _wyl in $WARP_POOLS; do printf '%05d %s\n' "$(rnd)" "$_wyl"; done | sort | cut -d' ' -f2); do
+                case "$_wep0" in "$_wyp3".*) continue ;; esac
+                _wya3="$_wyp3.$(( $(rnd) % 254 + 1 ))"
+                for _wp in $_wy3p; do cand "$_wya3" "$_wp" "$_wy3k"; done
+            done
+            step_run
+            best
+        fi
+    fi
+    if [ -z "$_wyw" ]; then
+        _wyna=$(awk -F"$TAB" '$4 != "skip" { print $1 }' "$W/v" | sort -u | grep -c '')
+        if awk -F"$TAB" '$4 == "hs" { f = 1 } END { exit !f }' "$W/v"; then
+            _wwhy=cut
+            # the first server never shook hands — the cut happened elsewhere: the ports named are those that DID shake hands and were
+            # cut (any server), not the first server's silent ones (review s.173 r3)
+            awk -F"$TAB" '$7 == 1 && $4 == "hs" { f = 1 } END { exit !f }' "$W/v" ||
+                _wcut=$(awk -F"$TAB" '$4 == "hs" && !s[$2]++ { printf "%s%s", c, $2; c = "," }' "$W/v")
+        else _wwhy=closed; fi
+        return 0
+    fi
+    _wepn=$(printf '%s' "$_wyw" | cut -f1); _wport=$(printf '%s' "$_wyw" | cut -f2); _wmkn=$(printf '%s' "$_wyw" | cut -f3)
+    _wcolo=$(printf '%s' "$_wyw" | cut -f5); [ "$_wcolo" != - ] || _wcolo=""
+    mk_set "$_wmkn"; _wi1n=$_wym
+    # What the record and the card call «cut»: the ports that did not pass BEFORE the chosen one on ITS server with ITS masking — the
+    # first step's list put the port in use among «не прошли» once another masking or server was taken (review s.173 r1)
+    _wyf=$(printf '%s' "$_wyw" | cut -f6)
+    _wcut=$(awk -F"$TAB" -v f="$_wyf" -v a="$_wepn" -v k="$_wmkn" '($6 "") == (f "") { exit }
+        ($1 "") == (a "") && ($3 "") == (k "") && $4 != "pass" && $4 != "skip" { printf "%s%s", s, $2; s = "," }' "$W/v")
+    cp "$_wyf" "$W/conf" || fail "не удалось записать конфиг"
+}
+# The pick's start for an EXISTING config (`target` read it): its own server — an address the person or an earlier pick found (a
+# name the probe resolves), else the registration's — and its own masking first; the router's other maskings only when the one it
+# has is not the person's (`custom` is a choice, not overridden), other addresses always.
+pick_from_conf() {
+    _wep0=$(cfg_ep "$_wsrc" | tr -cd 'A-Za-z0-9.:-'); [ -n "$_wep0" ] || _wep0=$_wep   # into JSON words: nothing to escape
+    _wmk0=own; _wswp=1; _wrot=1; _wmku=0
+    _wyc1=$(cfg_val "$_wsrc" I1 | mask_norm)
+    case "$(printf '%s' "$_wold" | cut -f9)" in
+        custom) _wrot=0 ;;
+        gen) ;;
+        # no record: an I1 of none of the router's forms is the person's own (warpscout's file — §29's own workaround), not rotated
+        *) [ -z "$_wyc1" ] || is_gen_i1 "$_wyc1" || _wrot=0 ;;
+    esac
+    # THE ROUTER'S OLD MASKING (≤ 1.3.4) is what the ISP cut (§29.1), and a port that still passes with it today flips within minutes
+    # (§29.2) — the pick starts with the current one, so every config made before gets it on its next pick (review s.173 r1)
+    [ "$_wrot" = 1 ] && [ "$_wyc1" = "$I1_OLD" ] && { _wmk0=quic; _wmku=1; }
+    return 0
+}
+same_conf() { [ "$_wport" = "$_wcur" ] && [ "$_wepn" = "$_wep0" ] && [ "$_wmkn" = own ]; }   # the pick kept the config as it is
+moved_msg() {   # what the pick changed in config $_wnm, in words
+    if [ "$_wepn" != "$_wep0" ]; then
+        if awk -F"$TAB" -v a="$_wep0" '($1 "") == (a "") && $4 == "pass" { f = 1 } END { exit !f }' "$W/v" 2>/dev/null; then
+            printf '«%s»: прежний адрес шёл через московский узел Cloudflare — теперь %s:%s' "$_wnm" "$_wepn" "$_wport"
+        else printf '«%s»: адрес %s не подошёл — теперь %s:%s' "$_wnm" "$_wep0" "$_wepn" "$_wport"; fi   # silent or cut — both happen
+    elif [ "$_wmku" = 1 ] && [ "$_wmkn" = quic ]; then printf '«%s»: прежняя маскировка роутера заменена новой (QUIC), порт %s' "$_wnm" "$_wport"
+    elif [ "$_wmkn" != own ]; then printf '«%s»: маскировку провайдер режет — роутер собрал новую (%s), порт %s' "$_wnm" "$(mk_word "$_wmkn")" "$_wport"
+    elif awk -F"$TAB" -v a="$_wep0" -v p="$_wcur" '($1 "") == (a "") && ($2 "") == (p "") && $4 == "pass" { f = 1 } END { exit !f }' "$W/v" 2>/dev/null; then
+        printf '«%s»: порт %s шёл через московский узел Cloudflare — теперь %s' "$_wnm" "$_wcur" "$_wport"
+    else printf '«%s»: порт %s провайдер режет — теперь %s' "$_wnm" "$_wcur" "$_wport"; fi
+}
+# A server that could not be asked: an IPv6 literal (the probe and its rules are IPv4) — or a name that did not resolve, which a
+# later try may cure; «нужен адрес IPv4» told the person to change a config that only waited for DNS (review s.173 r2).
+skip_why() {
+    case "$_wep0" in
+        *:*) printf 'роутер не смог спросить сервер конфига (%s): нужен адрес IPv4' "$_wep0" ;;
+        *)   printf 'роутер не смог спросить сервер конфига (%s): его имя не разрешилось, повторите позже' "$_wep0" ;;
+    esac
+}
+# The refusal's reason in words: get/device/reget say «Cloudflare выдал WARP, но …» (`why_get`), the others name WARP (`why_own`).
+why_get() {
+    case "$_wwhy" in
+        skip)   skip_why ;;
+        closed) printf 'провайдер не пропускает к нему ни одного пакета (проверено адресов: %s)' "$_wyna" ;;
+        *)      printf 'провайдер режет его на всех портах (%s)' "$(printf '%s' "$_wcut" | sed 's/,/, /g')" ;;
+    esac
+}
+why_own() {
+    case "$_wwhy" in
+        skip)   skip_why ;;
+        closed) printf 'провайдер не пропускает к WARP ни одного пакета (проверено адресов: %s)' "$_wyna" ;;
+        *)      printf 'провайдер режет WARP на всех портах (%s)' "$(printf '%s' "$_wcut" | sed 's/,/, /g')" ;;
+    esac
 }
 # The first free name: WARP, WARP-2 … WARP-9 (an exit takes the same one). On a filesystem without letter case `warp.conf` is
 # the same file — `ls | grep -i`, not `-e`.
@@ -522,8 +793,9 @@ cmd_run() {   # $1 = rider (optional)
     get_room "$1" || fail "$_wtm"
     work_dir
     reg_new
+    _wep0=$_wep; _wmk0=quic; _wrot=1; _wswp=1
     MK=wconf; pick ""
-    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но провайдер режет его на всех портах ($(echo $PORTS | sed 's/ /, /g')) — конфиг не сохранён"
+    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но $(why_get) — конфиг не сохранён"
     say "сохраняю конфиг (порт $_wport)"
     mkdir -p "$ENODIA_STATE/configs" || fail "нет каталога конфигов"
     _wtmp="$ENODIA_STATE/configs/$_wnm.conf.$$"
@@ -568,7 +840,7 @@ cmd_repick() { target "$1" || { echo "[warp] $_wtm"; return 1; }; need_awg || re
     take_start || { echo "$BUSY_MSG"; return 1; }
     OP=repick
     if [ "$2" = own ]; then start run-repick-own "$1"; else start run-repick "$1"; fi
-    echo "[warp] подбираю порт — до двух минут"; }
+    echo "[warp] подбираю порт — до трёх минут"; }
 # THE PICK WITH THE CONFIG'S OWN KEY — for an exit that SHAKES HANDS AND CARRIES NOTHING (the watchdog's call, `repick <cfg>
 # own`). WHY (BE7000, 12.10.2026, the walk of 1.2.0-dev.8): the throwaway registration needs Cloudflare's API, and from an ISP
 # that filters WARP the API answers only THROUGH A TUNNEL (through awg0/awg4 — 0.3 s, through WAN — a timeout). A silent WARP
@@ -605,19 +877,20 @@ cmd_run_repick_own() {
     say "снимаю выход на время подбора — он всё равно не везёт"
     ( umask 077; set -C; printf '%s\n' "$_wnm" > "$HOLDF" ) 2>/dev/null   # noclobber: the name lives in the shared /tmp
     for _wx in $(exits_of "$_wnm"); do sh "$ENODIA_DIR/transport.sh" slot-down "$_wx" >/dev/null 2>&1; done
+    pick_from_conf
     MK=oconf; pick "$_wcur"
     # nothing passes: the exits first (who did not come up is named in the refusal), then the refusal
-    [ -n "$_wport" ] || { own_back; fail "провайдер режет WARP на всех портах ($(echo "$_wcut" | sed 's/,/, /g')) — конфиг не изменён$(reup_note)"; }
-    _wo=$(printf '%s' "$_wold" | cut -f2); _wi=$(printf '%s' "$_wold" | cut -f9)
+    [ -n "$_wport" ] || { own_back; fail "$(why_own) — конфиг не изменён$(reup_note)"; }
+    _wo=$(printf '%s' "$_wold" | cut -f2); _wi=$(printf '%s' "$_wold" | cut -f9); [ "$_wmkn" = own ] || _wi=gen
     set -- "$_wopub" "${_wo:-0}" "$(printf '%s' "$_wold" | cut -f3)" "$(printf '%s' "$_wold" | cut -f4)" "$(printf '%s' "$_wold" | cut -f5)" \
         "$_wport" "$_wcut" "$_wcolo" "${_wi:--}" "$(now_s)"
-    if [ "$_wport" = "$_wcur" ]; then
+    if same_conf; then
         still_there
         reg_put "$@"
         own_back
         put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся$(reup_note)\"}"; exit 0
     fi
-    conf_new "$_wsrc" "" "" "$_wport" ""
+    conf_new "$_wsrc" "" "" "$_wepn:$_wport" "$_wi1n"
     conf_write
     reg_put "$@"
     say "перезапускаю выход"
@@ -629,7 +902,7 @@ cmd_run_repick_own() {
         [ -n "$_wxi" ] && [ -e "/sys/class/net/$_wxi" ] && sh "$ENODIA_DIR/transport.sh" slot-down "$_wx" >/dev/null 2>&1
     done
     own_back         # by the new text; a refusal above (the config deleted, no room for it) brings them back by the old one — the trap
-    put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"«$_wnm»: порт $_wcur провайдер режет — теперь $_wport$(reup_note)\"}"
+    put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"$(moved_msg)$(reup_note)\"}"
     exit 0
 }
 # Does an own-key pick keep the exits of config $1 down right now → 0. The answer of a LIVE job only: the name it wrote and its
@@ -651,23 +924,24 @@ cmd_run_repick() {
     OP=repick; target "$1" || fail "$_wtm"
     work_dir
     reg_new; _wi1=""
+    pick_from_conf
     MK=xconf; pick "$_wcur"
     give_back
-    [ -n "$_wport" ] || fail "провайдер режет WARP на всех портах ($(echo "$_wcut" | sed 's/,/, /g')) — конфиг не изменён"
-    _wo=$(printf '%s' "$_wold" | cut -f2); _wi=$(printf '%s' "$_wold" | cut -f9)
+    [ -n "$_wport" ] || fail "$(why_own) — конфиг не изменён"
+    _wo=$(printf '%s' "$_wold" | cut -f2); _wi=$(printf '%s' "$_wold" | cut -f9); [ "$_wmkn" = own ] || _wi=gen
     # the record's new line (what this pick saw); written at once when the config does not change, after the config when it does
     set -- "$_wopub" "${_wo:-0}" "$(printf '%s' "$_wold" | cut -f3)" "$(printf '%s' "$_wold" | cut -f4)" "$(printf '%s' "$_wold" | cut -f5)" \
         "$_wport" "$_wcut" "$_wcolo" "${_wi:--}" "$(now_s)"
-    if [ "$_wport" = "$_wcur" ]; then
+    if same_conf; then
         # …the record only: of a config that is STILL THERE. Deleted (and pruned) during the probe, it got its record back —
         # id and token for a key no config held — and the last word spoke of a deleted config (review s.123, round 4).
         still_there
         reg_put "$@"
         put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся\"}"; exit 0
     fi
-    conf_new "$_wsrc" "" "" "$_wport" ""
+    conf_new "$_wsrc" "" "" "$_wepn:$_wport" "$_wi1n"
     conf_save "$@"
-    put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"«$_wnm»: порт $_wcur провайдер режет — теперь $_wport$(reup_note)\"}"
+    put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"$(moved_msg)$(reup_note)\"}"
     exit 0
 }
 
@@ -687,11 +961,17 @@ cmd_run_reget() {
         _wkeep=$(cfg_val "$_wsrc" I1 | mask_norm)
         # …but the router's OWN packet is the router's whatever the record says: a config got before the record existed has none,
         # and its I1 came out of gen_i1 — kept as «the person's», the card then called it «ваша» (review s.122).
-        if [ "$_wkeep" != "$(gen_i1)" ] && printf '%s' "$_wkeep" | grep -Eq "$MASK_RE"; then _wkind=custom; else _wkeep=""; fi
+        if ! is_gen_i1 "$_wkeep" && printf '%s' "$_wkeep" | grep -Eq "$MASK_RE"; then _wkind=custom; else _wkeep=""; fi
     fi
     reg_new; _wi1=$_wkeep
+    # its own server first (an address that worked for it), the person's masking kept and not rotated — else the router's quic
+    pick_from_conf; if [ -n "$_wkeep" ]; then _wmk0=own; _wrot=0; else _wmk0=quic; _wrot=1; fi
+    # …and a server the probe cannot ask (IPv6, a name) gives way to the NEW registration's address: «получить заново» is the cure
+    # for a bot's config, and it must not refuse where it used to work (main took the registration's address — review s.173 r2)
+    printf '%s' "$_wep0" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || _wep0=$_wep
+    _wmku=0
     MK=wconf; pick "$_wcur"
-    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но провайдер режет его на всех портах ($(echo "$_wcut" | sed 's/,/, /g')) — конфиг «$_wnm» не изменён"
+    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но $(why_get) — конфиг «$_wnm» не изменён"
     say "сохраняю конфиг (порт $_wport)"
     cp "$W/conf" "$W/new" || fail "не удалось записать конфиг"
     # The order is the promise «never a config on a registration that was given back»: the new text is WRITTEN (a failed write —
@@ -739,7 +1019,7 @@ cmd_mask() { target "$1" || { echo "[warp] $_wtm"; return 1; }; need_awg || retu
         _wmf=$(mktemp /tmp/enodia-warp-mask.XXXXXX 2>/dev/null) || { echo "[warp] нет места для работы"; return 1; }
         printf '%s' "$_wmt" > "$_wmf"; set -- "$1" "$_wmf"
     fi
-    OP=mask; start run-mask "$1" "$2"; echo "[warp] проверяю маскировку — до 20 секунд"; }
+    OP=mask; start run-mask "$1" "$2"; echo "[warp] проверяю маскировку — до минуты"; }
 cmd_run_mask() {
     OP=mask
     _wkind=gen; _wi1=$(gen_i1)
@@ -751,8 +1031,10 @@ cmd_run_mask() {
     printf '%s' "$_wi1" | grep -Eq "$MASK_RE" || fail "маскировка — только теги <b 0x…>, <r N>, <rc N>, <rd N>, <c>, <t> подряд"
     work_dir
     reg_new
+    pick_from_conf; _wrot=0; _wswp=0; _wmk0=own; _wmku=0      # this masking on this server and port — nothing else is the question
     MK=xconf; pick "$_wcur" only
     give_back
+    [ "$_wwhy" != skip ] || fail "$(why_own) — конфиг «$_wnm» не изменён"
     [ -n "$_wport" ] || fail "с этой маскировкой WARP не ответил (порт $_wcur) — конфиг «$_wnm» не изменён"
     conf_new "$_wsrc" "" "" "" "$_wi1"
     _wo=$(printf '%s' "$_wold" | cut -f2)
@@ -774,8 +1056,9 @@ cmd_run_device() {
     OP=device; _wnm=""
     work_dir
     reg_new; _wi1=""
+    _wep0=$_wep; _wmk0=quic; _wrot=1; _wswp=1
     MK=dconf; pick ""
-    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но провайдер режет его на всех портах ($(echo $PORTS | sed 's/ /, /g')) — конфиг не собран"
+    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но $(why_get) — конфиг не собран"
     rm -f "$DEVF"
     _wdn=$(umask 077; mktemp "$DEVF.XXXXXX" 2>/dev/null) && cp "$W/conf" "$_wdn" && mv "$_wdn" "$DEVF" || { rm -f "$_wdn"; fail "не удалось собрать конфиг"; }
     owned
@@ -846,9 +1129,11 @@ cmd_info() {
             _wct=$(printf '%s' "$_wr" | cut -f7 | tr -cd '0-9,'); _wcl=$(printf '%s' "$_wr" | cut -f8 | tr -cd 'A-Z')
             _wik=$(printf '%s' "$_wr" | cut -f9 | tr -cd 'a-z')
         fi
-        # The masking as it IS: none in the config — «none», whatever the record remembers.
+        # The masking as it IS: none in the config — «none», whatever the record remembers; the router's OLD one (≤ 1.3.4, cut on
+        # some ports — §29.1) — «old», the next pick replaces it.
         [ "$_wm" = 1 ] || _wik=none
-        case "$_wik" in gen|custom|none) ;; *) _wik=other ;; esac
+        [ "$_wik" = none ] || [ "$_wik" = custom ] || [ "$(cfg_val "$_wf" I1 | mask_norm)" != "$I1_OLD" ] || _wik=old
+        case "$_wik" in gen|custom|none|old) ;; *) _wik=other ;; esac
         [ "$_wfirst" = 1 ] || printf ','
         _wfirst=0
         printf '{"name":"%s","own":%s,"at":%s,"pat":%s,"ep":"%s","port":"%s","cut":"%s","colo":"%s","i1":"%s"}' \

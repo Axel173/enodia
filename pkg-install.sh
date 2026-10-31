@@ -85,6 +85,12 @@ ROTATED=0       # прежние снимки сняты ради места п�
 case "$MODE" in rollback) TAG=rollback ;; *) TAG=apply ;; esac
 log()  { printf '%s\n' "[$TAG] $*"; }
 stop() { printf '%s\n' "[$TAG] СТОП: $*"; }
+# The run's progress by stages for the «Обновление» screen (prog-lib.sh owns the file; its writers are no-ops outside a run the panel
+# started). `install`: the library of the PACKAGE — the installed code may be older than this run (the first update to a version
+# that has it). `rollback`: the package is the snapshot (older) and this installer is the installed one — so is the library.
+case "$MODE" in rollback) PROG_LIB_DIR=$ENODIA_DIR ;; *) PROG_LIB_DIR=$SRC ;; esac
+if [ -f "$PROG_LIB_DIR/prog-lib.sh" ]; then . "$PROG_LIB_DIR/prog-lib.sh"; fi
+command -v prog_stage >/dev/null 2>&1 || { prog_stage() { :; }; prog_count() { :; }; prog_flag() { :; }; prog_ver() { :; }; }
 
 # Путь из манифеста можно ставить на роутер: только относительный, без «..», только код и данные
 # панели. Секреты и настройки (awg.conf, configs/…) в манифест не кладут — а здесь последний заслон,
@@ -266,6 +272,7 @@ pi_snapshot() {    # $1 = куда (файл) · $2 = quiet (провал без
     fi
     mv -f "$1.part" "$1" || { rm -f "$1.part"; stop "снимок не лёг на место — ничего не заменено"; return 1; }
     SNAP="$1"
+    _pisn=$(wc -l < "$T/have" 2>/dev/null | tr -cd '0-9'); prog_count "${_pisn:-0}" "${_pisn:-0}"   # «N файлов — откат вернёт их»
     return 0
 }
 
@@ -338,7 +345,14 @@ pi_swap() {
     # Порядок: всё, кроме страницы, потом страница.
     grep -vxF 'web/index.html' "$T/new" > "$T/order" || true
     if grep -qxF 'web/index.html' "$T/new"; then printf '%s\n' 'web/index.html' >> "$T/order"; fi
+    # «N of M» for the screen: every file the loop passes counts, the unchanged ones too — the screen asks how far the swap went,
+    # not how much it wrote. About twenty writes a swap whatever M is: the panel asks every 2 s, and a write per file is a fork more
+    # per file on the slowest stage (the swap on a USB drive).
+    _pim=$(wc -l < "$T/order" 2>/dev/null | tr -cd '0-9'); _pim=${_pim:-0}; _pin=0; _pik=$((_pim / 20 + 1))
+    prog_stage swap; prog_count 0 "$_pim"
     while IFS= read -r _r || [ -n "$_r" ]; do
+        _pin=$((_pin + 1))
+        if [ $((_pin % _pik)) = 0 ]; then prog_count "$_pin" "$_pim"; fi
         # Путь проверен при чтении манифеста, но между проверкой и записью список лежал файлом — перепроверка стоит ноль.
         pi_safe "$_r" || { stop "путь вне белого списка в списке замен: $_r"; return 1; }
         _s="$SRC/$_r"; _d="$ENODIA_DIR/$_r"
@@ -370,6 +384,7 @@ pi_swap() {
             else stop "не удалось снять $_r"; return 1; fi
         done < "$T/gone"
     fi
+    prog_count "$_pin" "$_pim" "$NDEL"
     return 0
 }
 
@@ -417,15 +432,18 @@ cmd_install() {
     T=$(mktemp -d /tmp/enodia-pkg-inst.XXXXXX 2>/dev/null) || T=""
     [ -n "$T" ] && [ -d "$T" ] || { T=""; stop "не создать рабочий каталог в /tmp"; return 1; }
     pi_gate || return 1
+    prog_stage chk        # the updater's checks go on here (manifest, paths, syntax) — the same stage, its time counts on
     pi_check_src || return 1
     _nn=$(pi_name "$SRC/VERSION"); _nc=$(pi_code "$SRC/VERSION")
     _on=$(pi_name "$ENODIA_DIR/VERSION"); _oc=$(pi_code "$ENODIA_DIR/VERSION")
+    prog_ver "${_on:-?}" "${_oc:-0}" "${_nn:-?}" "${_nc:-0}"
     if [ -n "$_oc" ]; then
         log "ставлю ${_nn:-?} (код ${_nc:-?}) поверх ${_on:-?} (код ${_oc:-?})"
     else
         log "ставлю ${_nn:-?} (код ${_nc:-?}) — прежней версии на роутере нет"
     fi
     pi_space_ok || return 1
+    prog_stage snap
     if [ "$MODE" = rollback ]; then
         # Снимок текущего — только для самовозврата, в ОЗУ: сохранять его незачем, а ротация унесла
         # бы тот самый снимок, к которому откатываемся.
@@ -458,6 +476,7 @@ cmd_install() {
             log "свежая установка: прежнего набора нет — снимать нечего, отката у неё не будет"
         elif ! pi_changed; then
             NOSNAP=1
+            prog_flag same
             log "набор не изменился — снимок не нужен, точка отката прежняя"
         else
             # ВЕРСИИ СТОЯЩИХ БИНАРЕЙ — ПОКА МАНИФЕСТ ПРЕЖНИЙ (ревью ветки релиза, круг 2): новый пакет может везти новые сборки,
@@ -535,6 +554,7 @@ cmd_install() {
     fi
     log "итог: заменено $NREP, удалено $NDEL"
     PHASE=""
+    prog_stage apply      # the new version's installer: the rules with the new code, then the replay of the settings
     if ! pi_run_installer; then
         if [ "$FRESH" = 1 ]; then
             stop "установщик версии ${_nn:-?} кончился ошибкой — файлы уже на месте; повторите установку"
@@ -550,7 +570,9 @@ cmd_install() {
     elif [ -z "$SNAP" ]; then
         log "готово: ${_nn:-?} (код ${_nc:-?}): набор не изменился, точка отката прежняя"
     else
-        log "готово: ${_nn:-?} (код ${_nc:-?}), заменено $NREP, удалено $NDEL, снимок ${SNAP##*/}. Правила примените: «Починить правила» или перезагрузка"
+        # No «примените правила» advice any more: this package's install.sh puts the rules in with the new code itself (step 5b), and
+        # says so — or why not — on its own. A rollback keeps the advice: there the installer is the snapshot's, maybe older than that.
+        log "готово: ${_nn:-?} (код ${_nc:-?}), заменено $NREP, удалено $NDEL, снимок ${SNAP##*/}"
     fi
     return 0
 }

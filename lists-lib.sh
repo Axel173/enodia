@@ -424,7 +424,9 @@ collect_critical() {  # stdout: «IP/CIDR<TAB>причина[<TAB>уточнен
 	# «Блокировка» спрашивает этот список на каждый показ и опрос, и grep по ним шёл бы каждый раз.
 	for _ccd in /etc/dnsmasq.d /tmp/dnsmasq.d; do
 		for _ccf in "$_ccd"/*.conf; do
-			case "${_ccf##*/}" in 06-adblock.conf|07-zapret-dom.conf|1[0-9]-geo*.conf) continue ;; esac
+			# The bulk snippets — one list, at dns-lib.sh::dns_bulk_snippet (lan-dns.sh skips the same); the shim is that line.
+			if command -v dns_bulk_snippet >/dev/null 2>&1; then dns_bulk_snippet "$_ccf" && continue
+			else case "${_ccf##*/}" in 06-adblock.conf|07-zapret-dom.conf|1[0-9]-geo*.conf) continue ;; esac; fi
 			[ -f "$_ccf" ] && grep -hE '^[[:space:]]*server=' "$_ccf" 2>/dev/null
 		done
 	done \

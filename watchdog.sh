@@ -893,8 +893,8 @@ slot_fail_event() {   # $1=id $2=cfg $3=fallback $4=причина: desync|noans
             # «оставил поднятым» right above «снимает выход» — review s.128, round 2).
             _sfl="Перезапуск дал бы то же рукопожатие и тот же обрыв, поэтому роутер подбирает ему другой порт."
             _sfle="A restart would give the same handshake and the same cut, so the router picks another port for it."
-            _sfn="Так провайдеры обрывают WARP на отдельных портах. Роутер уже подбирает порт заново сам: на время подбора он снимает выход (тот всё равно не везёт); найдётся проходящий порт — выход заработает через минуту-другую, и придёт письмо «снова работает». Не найдётся — роутер повторит подбор через $((ROAD_REPICK_GAP / 3600)) ч и продолжит спрашивать выход каждые 2 минуты. Подобрать порт или получить WARP заново можно и вручную: в панели — «WARP от Cloudflare»."
-            _sfne="This is how ISPs cut WARP on particular ports. The router is already picking the port again by itself: it takes the exit down for the pick (it carries nothing anyway); if another port passes, the exit works in a minute or two and a \"works again\" email follows. If none does, the router repeats the pick in $((ROAD_REPICK_GAP / 3600)) h and keeps asking the exit every 2 minutes. You can also pick the port or get WARP again by hand: «WARP from Cloudflare» in the panel."
+            _sfn="Так провайдеры обрывают WARP на отдельных портах. Роутер уже подбирает порт заново сам: на время подбора он снимает выход (тот всё равно не везёт); найдётся проходящий порт — выход заработает через несколько минут, и придёт письмо «снова работает». Не найдётся — роутер повторит подбор через $((ROAD_REPICK_GAP / 3600)) ч и продолжит спрашивать выход каждые 2 минуты. Подобрать порт или получить WARP заново можно и вручную: в панели — «WARP от Cloudflare»."
+            _sfne="This is how ISPs cut WARP on particular ports. The router is already picking the port again by itself: it takes the exit down for the pick (it carries nothing anyway); if another port passes, the exit works within a few minutes and a \"works again\" email follows. If none does, the router repeats the pick in $((ROAD_REPICK_GAP / 3600)) h and keeps asking the exit every 2 minutes. You can also pick the port or get WARP again by hand: «WARP from Cloudflare» in the panel."
         fi
         # WARP, but nothing started in this tick: the last pick is too fresh (it did not help), or another WARP job holds the verb.
         if [ "$ROAD_WARP" = 2 ]; then
@@ -1481,11 +1481,21 @@ DNS возвращён на обычный ($DOH_PLAIN_DNS1 / $DOH_PLAIN_DNS2), 
     return 0
 }
 
+# THE ECM DELAY BY THE FACT (nfq-platform.sh, BE7000: vendor ECM took a wired client's flow before its ClientHello). zapret.sh's
+# bricks raise it as they wire a queue and `release` gives it back, but the knob is debugfs — an ECM reload resets it under a live
+# queue — and an intent-gated teardown skips release. One level-triggered look per tick puts it right; a router without the knob
+# leaves before any lock. In the log only what the platform says: a change, or once per episode that it could not look.
+ecm_sweep() {
+    [ -f "$ENODIA_DIR/nfq-platform.sh" ] || return 0
+    _ecs=$(sh "$ENODIA_DIR/nfq-platform.sh" ecm-sync 2>&1)
+    [ -z "$_ecs" ] || log "ecm: $(printf '%s' "$_ecs" | tr '\n' ' ')"
+}
+
 # Порядок НЕ произволен: живость DNS проверяем ДО прогрева доменов. Прогрев БЕЗУСЛОВНО
 # переставляет свой часовой штамп, и на тике отката он сжёг бы слот, резолвя через резолвер,
 # который следующей же строкой признаётся мёртвым, — правила по доменам остались бы на протухших
 # адресах ещё на час. Обратной зависимости нет: проба резолвера от прогрева не зависит.
-finish() { slot_health_sweep; doh_health_sweep; domain_warm_sweep; exit "${1:-0}"; }
+finish() { slot_health_sweep; doh_health_sweep; domain_warm_sweep; ecm_sweep; exit "${1:-0}"; }
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 

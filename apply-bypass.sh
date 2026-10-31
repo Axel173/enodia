@@ -115,6 +115,9 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # port-lib.sh (у хранилища три читателя, копии фильтра расходились). Шима нет намеренно: без файла
 # rebuild_ports оставляет прежнюю цепочку и говорит об этом, а port-add отказывает.
 if [ -f "$ENODIA_DIR/port-lib.sh" ]; then . "$ENODIA_DIR/port-lib.sh"; fi
+# «Is this the router's OWN address» — ip-lib.sh::ip_is_self (src_not_self, rule_add_ip). Shim = the old behaviour.
+if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
+command -v ip_is_self >/dev/null 2>&1 || ip_is_self() { return 1; }
 if ! command -v ct_flush >/dev/null 2>&1; then
     ct_flush()     { conntrack -F >/dev/null 2>&1 || true; }
     ct_flush_src() { [ -n "$1" ] && conntrack -D --src "$1" >/dev/null 2>&1; return 0; }
@@ -390,8 +393,43 @@ dst_store_add() {   # $1 store, $2 address
     grep -qxF -- "$_dsa" "$1" 2>/dev/null || store_add "$1" "$2"
 }
 
+# A SOURCE RULE ON THE ROUTER'S OWN ADDRESS (ip-lib.sh::ip_is_self) is refused at entry by every source verb: it is no device,
+# so the rule either takes the router's OWN traffic (bypass — VPN_EXCLUDE hangs on OUTPUT; device desync — POSTROUTING) or never
+# matches anything (force, keep, ports). It came with a backup of the router this one sits behind (AX3600 30.10.2026). One
+# sentence for the panel; nothing is stored.
+src_not_self() {
+    ip_is_self "$1" || return 0
+    echo "$1 — адрес самого роутера, а не устройства в сети: правило на нём не ставлю"
+    return 1
+}
+
 # --- применение/снятие ОДНОГО правила (идемпотентно) ---
+# The router's own address is refused HERE too, not only at entry: this is the one writer of `-s` into VPN_EXCLUDE (add-ip, the
+# replay of `.bypass-ips` and the device-desync ACCEPT all come through it), and a stored line on the own address — imported, or
+# the WAN address that moved onto it — must not take the router's traffic at the next replay. The line stays in the store: the
+# panel shows it with its own badge and removes it.
+# Replay is additive: an older version may have ALREADY installed this source rule before the address became our own. Remove
+# every duplicate and evict its accelerated flows; merely refusing another add leaves that unsafe rule active through updates.
+rule_drop_self_ip() (
+    _rsi_removed=0
+    while iptables -t mangle -C "$EXCLUDE_CHAIN" -s "$1" -j ACCEPT 2>/dev/null; do
+        rule_del_ip "$1" || { echo "[apply-bypass] не удалось снять правило на адресе самого роутера $1" >&2; return 1; }
+        _rsi_removed=1
+    done
+    [ "$_rsi_removed" = 0 ] || ct_flush_src "$1"
+    return 0
+)
+# Legacy `vpn-toggle exclude X/32` accepted a host alias. The panel opens/removes devices by bare IP: preserve this own-address
+# entry in that spelling during replay, otherwise the warning would offer removal of a row it cannot open. Other source
+# verbs already accept bare IPv4 only. Atomic replacement keeps the old store intact if normalization cannot be saved.
+rule_self_store_host() {
+    case "$1" in */32)
+        [ -f "$STORE_IPS" ] || return 0
+        lbl_commit_out "$STORE_IPS" awk -v own="$1" -v host="${1%/32}" '$0==own {$0=host} {print}' "$STORE_IPS" ;;
+    esac
+}
 rule_add_ip() {
+    if ip_is_self "$1"; then rule_drop_self_ip "$1" && rule_self_store_host "$1" || return 1; echo "[apply-bypass] $1 — адрес самого роутера: правило «мимо VPN» не ставлю"; return 1; fi
     iptables -t mangle -C "$EXCLUDE_CHAIN" -s "$1" -j ACCEPT 2>/dev/null || \
         iptables -t mangle -A "$EXCLUDE_CHAIN" -s "$1" -j ACCEPT
 }
@@ -965,19 +1003,26 @@ rebuild_desync() {
     _dsremove_fail=0
     _wired=$(sh "$ZAPRET_SH" src-list 2>/dev/null)
     for _old in $_wired; do
-        grep -qxF "$_old" "$STORE_DESYNC" 2>/dev/null && continue
+        # A stored own address is no longer a source-device owner, even if the old wiring still stands after an upgrade.
+        if ! ip_is_self "$_old" && grep -qxF "$_old" "$STORE_DESYNC" 2>/dev/null; then continue; fi
         desync_unwire "$_old" || { _dsremove_fail=1; continue; }
         # Снять и ВТОРУЮ половину режима — ACCEPT «идти напрямую». Ловушка (поймана на железе
         # 04.08.2026 первым же прогоном): без этого устройство оставалось выведенным из туннеля,
         # но уже без десинка — то есть тихо получало ХУДШИЙ из режимов, которого никто не просил.
         # Гард по .bypass-ips обязателен: тот же ACCEPT может принадлежать режиму «мимо VPN».
-        grep -qxF "$_old" "$STORE_IPS" 2>/dev/null || rule_del_ip "$_old"
+        if ip_is_self "$_old"; then rule_drop_self_ip "$_old" || _dsremove_fail=1
+        else grep -qxF "$_old" "$STORE_IPS" 2>/dev/null || rule_del_ip "$_old"; fi
     done
     [ -s "$STORE_DESYNC" ] || { echo "[apply-bypass] десинк устройств: нет зарегистрированных"; return "$_dsremove_fail"; }
-    _dsn=0; _dsfail=""
+    _dsn=0; _dsfail=""; _dsself=""
     while IFS= read -r _dsip; do
         [ -n "$_dsip" ] || continue
         echo "$_dsip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || continue   # в iptables уходит подстановка
+        # The router's own address: neither half (src_not_self above has the why) — and said apart, not as «нет nfqws?».
+        if ip_is_self "$_dsip"; then
+            rule_drop_self_ip "$_dsip" || _dsremove_fail=1
+            _dsself="$_dsself $_dsip"; continue
+        fi
         # Прямой путь — тем же кирпичом, что «мимо VPN» (цепочка VPN_EXCLUDE): десинк имеет смысл
         # ТОЛЬКО вне туннеля. Идемпотентен, второй раз ничего не добавит.
         rule_add_ip "$_dsip"
@@ -986,7 +1031,7 @@ rebuild_desync() {
     done < "$STORE_DESYNC"
     # Провал src-wire = нет бинаря nfqws (или ядро не приняло NFQUEUE). Устройство при этом идёт
     # НАПРЯМУЮ, но без десинка — молчать об этом нельзя: в панели режим виден, а эффекта нет.
-    echo "[apply-bypass] десинк устройств: $_dsn${_dsfail:+, БЕЗ десинка (нет nfqws?):$_dsfail}"
+    echo "[apply-bypass] десинк устройств: $_dsn${_dsfail:+, БЕЗ десинка (нет nfqws?):$_dsfail}${_dsself:+, не ставлю (адрес самого роутера):$_dsself}"
     return "$_dsremove_fail"
 }
 # Refusal (including a busy source transaction) must precede persist/direct-path edits.
@@ -1188,7 +1233,7 @@ case "$1" in
     # --- вырезы «мимо VPN». conntrack_flush ОБЯЗАТЕЛЕН в каждой ветке, ровно как в force-*
     #     ниже: без него правило есть, а трафик идёт по-старому (NSS/ECM держит маршрут).
     #     Доказано на железе — см. комментарий к conntrack_flush.
-    add-ip)    [ -z "$2" ] && { echo "нужен IP";    exit 1; }; desync_drop "$2" || exit 1; ensure_chain; store_add "$STORE_IPS" "$2"; rule_add_ip "$2"; conntrack_flush; echo "IP $2 -> хранилище + применён" ;;
+    add-ip)    [ -z "$2" ] && { echo "нужен IP";    exit 1; }; src_not_self "$2" || exit 1; desync_drop "$2" || exit 1; ensure_chain; store_add "$STORE_IPS" "$2"; rule_add_ip "$2"; conntrack_flush; echo "IP $2 -> хранилище + применён" ;;
     # Снятие «мимо VPN» уносит и исключение из него: без выреза оно бессмысленно (устройство и так
     # метится ядром), а осиротевшая строка врала бы тумблером в панели. Владелец связи — движок,
     # чтобы CLI и панель не расходились.
@@ -1226,6 +1271,7 @@ case "$1" in
         # Формат проверяем ЗДЕСЬ, а не только в CGI (зеркало keep-add-ip и port-add): из CLI движок
         # обязан быть так же безопасен, а мусор в хранилище потом молча выпадал бы из сборки.
         echo "$2" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || { echo "нужен IPv4"; exit 1; }
+        src_not_self "$2" || exit 1
         _fs=""; case "$3" in s[2-7]) _fs="$3" ;; ''|0|main) _fs="" ;; *) echo "выход: s2..s7 или пусто"; exit 1 ;; esac
         # Явный отказ вместо тихого фолбэка: zapret-выход десинкает по адресу назначения и
         # марку не разбирает — «устройство целиком» через него не выразить (см. rebuild_force).
@@ -1301,6 +1347,7 @@ case "$1" in
         command -v port_line_ok >/dev/null 2>&1 || { echo "нет port-lib.sh — обновите скрипты роутера"; exit 1; }
         _src="$2"; _pro="$3"; _pts=$(port_list_norm "$4"); _dir="$5"
         port_src_ok   "$_src" || { echo "src: нужен IPv4 или any"; exit 1; }
+        [ "$_src" = any ] || src_not_self "$_src" || exit 1
         port_proto_ok "$_pro" || { echo "proto: udp|tcp|both"; exit 1; }
         port_list_ok  "$_pts" || { echo "порты: all или список 80,443,40000-65535"; exit 1; }
         port_dir_ok   "$_dir" || { echo "куда: vpn|direct|block|s2..s7"; exit 1; }
@@ -1334,6 +1381,7 @@ case "$1" in
     keep-add-ip)
         [ -z "$2" ] && { echo "нужен IP"; exit 1; }
         echo "$2" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || { echo "нужен IPv4"; exit 1; }
+        src_not_self "$2" || exit 1
         grep -qxF "$2" "$STORE_IPS" 2>/dev/null || { echo "IP $2 не в списке «мимо VPN» — исключать не из чего"; exit 1; }
         store_add "$STORE_KEEP" "$2"; rebuild_keep; ct_flush_src "$2"
         echo "IP $2 -> мимо VPN, но ручные правила (домены/адреса/группы «в VPN») действуют" ;;
@@ -1350,6 +1398,7 @@ case "$1" in
     desync-add-ip)
         [ -z "$2" ] && { echo "нужен IP"; exit 1; }
         echo "$2" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || { echo "нужен IPv4"; exit 1; }
+        src_not_self "$2" || exit 1
         [ -f "$ZAPRET_SH" ] || { echo "нет zapret.sh — обновите скрипты"; exit 1; }
         # Гейт «есть чем десинкать» — В ДВИЖКЕ: без бинаря режим означал бы «просто мимо VPN»,
         # а панель показывала бы «в десинк». Отказываем с причиной ДО записи в хранилище.

@@ -3,7 +3,8 @@
 # Data bundles travel inside the signed code package; the binary store is written by an install — the Zapret component's, or
 # zapret.sh rebuilding a cache a storage move lost (usb-offload.sh carries files, not this directory).
 # Keep the complete stock extension directory visible to every iptables reader while new rules exist.
-# No global acceleration switch: raw CT opts only selected TCP443 flows out of vendor ECM.
+# No global acceleration switch where a per-flow one exists: raw CT opts only selected TCP443 flows out of vendor ECM. A newer ECM
+# with no such package gets the one global knob it has (ecm-hold, below), held only while our queues are wired.
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
 ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 ENODIA_BIN=${ENODIA_BIN:-/data/usr/app/enodia-bin}
@@ -21,6 +22,17 @@ KM_LOCK=/tmp/enodia-nfq-platform.lock
 KM_CHAIN=ENODIA_NFQ_RAW
 KM_FILES="nfnetlink_queue.ko xt_NFQUEUE.ko iptable_raw.ko xt_CT.ko enodia_noflow.ko libxt_NFQUEUE.so libxt_CT.so"
 KM_MODULES="nfnetlink_queue xt_NFQUEUE iptable_raw xt_CT enodia_noflow"
+# ECM's slow-path allowance (measured on BE7000 30.10.2026, dev notes «AX3600-NFQUEUE» §ECM): its PPE takes a WIRED client's flow
+# to the fast path before the ClientHello — NFQUEUE got SYN, SYN-ACK and ACK and never the ClientHello (3/3, the router's own wired
+# client too), so every desync consumer did nothing for wired clients while Wi-Fi ones were fine. The default classifier keeps
+# each TCP/UDP flow on the slow path until it has seen this many packets — ONE count over both directions
+# (ecm_front_end_get_slow_packet_count) — stock 0, not kept over a reboot. 8 already let the ClientHello through; 20 kept the whole
+# queue window with the 10-MB download as fast. GLOBAL (every flow's first packets) ⇒ held only while one of OUR queues is wired —
+# the stock's own NFQUEUE (mipctld, `--queue-balance`) is not ours to serve. AX3600's older ECM has no such file (enodia_noflow
+# does it there per flow). The delay must cover twice the widest queue window (zapret.sh CB), our queues are zapret.sh QNUM: C148.
+KM_ECM=/sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts
+KM_ECM_DELAY=20
+KM_QUEUES=212
 km_log() { km_last=$*; echo "[nfq-platform] $*" >&2; }   # km_last: a failed rebuild repeats its reason (km_prepare)
 # /tmp is shared with the stock's daemons, some of them `nobody`: an entry another uid made is not ours — a planted lock would
 # hold every teardown off, a planted run dir would let its owner swap the extensions we bind-mount for root's iptables and forge
@@ -112,8 +124,8 @@ km_unlock() {
     rm -f "$KM_LOCK/pid"; rmdir "$KM_LOCK" 2>/dev/null
     exit "$km_result"
 }
-km_lock() {
-    km_wait=0
+km_lock() {   # $1 = looks before giving up (a second each; default 25)
+    km_wait=0; km_nopid=0
     until mkdir "$KM_LOCK" 2>/dev/null; do
         # ONE look at the owner: a lock gone since the failed mkdir is a hand-off, not a plant — removing «what is there now» would
         # remove the next root holder's lock and let two of us in.
@@ -121,13 +133,20 @@ km_lock() {
         km_u=$(stat -c %u "$KM_LOCK" 2>/dev/null) || { [ -e "$KM_LOCK" ] || [ -L "$KM_LOCK" ] || continue; km_u=$KM_UID; }
         if [ ! -L "$KM_LOCK" ] && { [ -z "$KM_UID" ] || [ "$km_u" = "$KM_UID" ]; }; then
             km_pid=$(cat "$KM_LOCK/pid" 2>/dev/null)
-            case "$km_pid" in ''|*[!0-9]*) : ;; *)
-                if ! kill -0 "$km_pid" 2>/dev/null; then rm -f "$KM_LOCK/pid"; rmdir "$KM_LOCK" 2>/dev/null; continue; fi ;;
+            case "$km_pid" in
+                ''|*[!0-9]*)
+                    # A holder writes its pid right after its mkdir: none for three looks is a holder killed in between (or one on a
+                    # full /tmp, which fails its own writes anyway). Left alone it held every later caller — since the ECM knob, the
+                    # watchdog's tick and an uninstall too. Falls through to the count: a lock that will not go cannot spin us.
+                    km_nopid=$((km_nopid+1))
+                    if [ "$km_nopid" -ge 3 ]; then rm -f "$KM_LOCK/pid"; rmdir "$KM_LOCK" 2>/dev/null; km_nopid=0; fi ;;
+                *)  km_nopid=0
+                    if ! kill -0 "$km_pid" 2>/dev/null; then rm -f "$KM_LOCK/pid"; rmdir "$KM_LOCK" 2>/dev/null; continue; fi ;;
             esac
         else
             rm -rf "$KM_LOCK" 2>/dev/null   # planted by another uid (see km_mine); counted below, so a re-planter cannot spin us
         fi
-        km_wait=$((km_wait+1)); [ "$km_wait" -lt 25 ] || { km_log 'операция уже выполняется'; return 1; }
+        km_wait=$((km_wait+1)); [ "$km_wait" -lt "${1:-25}" ] || { km_log 'операция уже выполняется'; return 1; }
         sleep 1
     done
     echo $$ > "$KM_LOCK/pid"
@@ -264,8 +283,88 @@ km_fw3_helpers_drop() {   # $1 = iptables | ip6tables
         "$1" -t raw -F "$km_hc" && "$1" -t raw -X "$km_hc" || return 1
     done
 }
+# Raised AFTER the queue rule is in, given back by the FACT, both under the lock: a give reads the rules and writes the knob in one
+# hold of it, so a wire's raise, coming after its rule, either finds that rule already seen (kept) or comes after the write (raises
+# again). Raised before the rule, a give in between lowered the knob under a live queue. Only a value this owner raised is given
+# back, and only while the knob still holds it — a value set since is not ours. The memo (RAM, like the knob) is «<found> <raised>»:
+# the raised value, not today's KM_ECM_DELAY, says «still ours» — an update that changes the delay under a live queue must read our
+# own old raise as ours, or the give would put back 20 instead of the stock 0.
+# Three callers: zapret.sh's bricks (`ecm-hold`, as they wire), `release` (the give, as a consumer goes) and the watchdog's tick
+# (`ecm-sync`, both ways by the fact) — the knob is debugfs, an ECM reload resets it, and an intent-gated teardown skips release.
+km_ecm_now() {
+    km_now=$(cat "$KM_ECM" 2>/dev/null)
+    case "$km_now" in ''|*[!0-9]*) km_log 'задержка ускорения ECM не читается'; return 1 ;; esac
+}
+km_ecm_memo() {   # → km_found, km_raised (empty: no memo, or not ours to read)
+    km_found=''; km_raised=''
+    km_mine "$KM_RUN" && [ -f "$KM_RUN/ecm" ] || return 1
+    read -r km_found km_raised < "$KM_RUN/ecm" 2>/dev/null
+    case "$km_found" in ''|*[!0-9]*) km_found=0 ;; esac
+    case "$km_raised" in ''|*[!0-9]*) km_raised=$KM_ECM_DELAY ;; esac
+}
+# 0 — a queue of ours is wired, 1 — none, 2 — the rules did not read (unread is not empty: it would lower the knob under a queue).
+# Read where our queues live: zapret.sh queues IPv4 only (C148 refuses an ip6tables queue there), and a failing IPv6 dump (no IPv6
+# mangle on some build) held the knob up for good. A consumer that queues IPv6 brings its family here. zapret.sh's capability
+# probe (chain ENODIA_NFQ_PROBE, never jumped to) queues nothing — not ours to serve.
+km_ecm_queued() {
+    km_r4=$(iptables-save -t mangle 2>/dev/null) || { km_log 'правила не читаются — задержка ECM не тронута'; return 2; }
+    km_qre=$(echo $KM_QUEUES | sed 's/ /|/g')
+    printf '%s\n' "$km_r4" | grep -v '^-A ENODIA_NFQ_PROBE ' |
+        grep -E -- "-j NFQUEUE --queue-num ($km_qre)( |\$)" >/dev/null   # not `-q`: C134
+}
+# Anything of the kernel package set up this boot. Without it the knob is all this owner holds here.
+km_pkg_live() { [ -d "$KM_RUN/xt" ] || [ -f "$KM_RUN/active" ] || [ -f "$KM_RUN/owned.modules" ]; }
+km_ecm_hold() {
+    km_ecm_now || return 1
+    [ "$km_now" -lt "$KM_ECM_DELAY" ] || return 0
+    # The found value is kept first — a raise without it is one nobody gives back — and by EVERY raise: a value below ours is never
+    # ours (the knob was reset since, or someone set it), and the give must put back that one, not the first boot's. Except our own
+    # earlier raise (a smaller delay before an update): that one keeps the value it found.
+    km_ecm_memo; km_f=$km_now
+    [ -z "$km_raised" ] || [ "$km_now" != "$km_raised" ] || km_f=$km_found
+    km_memo_put ecm "$km_f $KM_ECM_DELAY" || { km_log 'задержка ускорения ECM не поднята: нет места в /tmp'; return 1; }
+    # A memo of a raise that did not happen would read as «ours, reset from outside»: it goes with the failed write.
+    echo "$KM_ECM_DELAY" > "$KM_ECM" || {
+        rm -f "$KM_RUN/ecm"; km_log 'задержка ускорения ECM не поднята — проводные клиенты останутся без десинка'; return 1;
+    }
+}
+# The fact said «no queue of ours»: put back the value found, if the knob still holds our raise.
+km_ecm_back() {
+    km_gave=''
+    km_ecm_memo || return 0
+    km_was=$km_found
+    if [ "$km_now" = "$km_raised" ]; then
+        echo "$km_was" > "$KM_ECM" || { km_log 'задержка ускорения ECM не возвращена'; return 1; }
+        km_gave=1
+    fi
+    rm -f "$KM_RUN/ecm"
+}
+km_ecm_give() {
+    [ -f "$KM_ECM" ] && [ -f "$KM_RUN/ecm" ] || return 0
+    km_ecm_now || return 1
+    km_ecm_queued; case $? in 0) return 0 ;; 2) return 1 ;; esac
+    km_ecm_back
+}
+# The tick's look: a line when it changed the knob (a heal worth the watchdog's log) or could not (the dispatcher says that once
+# an episode).
+km_ecm_sync() {
+    km_ecm_now || return 1
+    km_ecm_queued; case $? in
+        0) [ "$km_now" -lt "$KM_ECM_DELAY" ] || return 0
+           km_ecm_hold && km_log "задержка ускорения ECM была $km_now при живой очереди десинка — поднята до $KM_ECM_DELAY" ;;
+        1) [ -f "$KM_RUN/ecm" ] || return 0
+           km_ecm_back || return 1
+           [ -z "$km_gave" ] || km_log "очередей десинка нет — задержка ускорения ECM возвращена к $km_was" ;;
+        *) return 1 ;;
+    esac
+}
 km_release() {
     [ -d "$KM_RUN" ] || return 0
+    # Its own resource: a knob not given back stops no package release (km_ecm_give logs its own reason).
+    km_ecm_give || :
+    # Nothing of the kernel package was set up this boot (a router that only has the ECM knob; AX3600 before Zapret's first prepare):
+    # nothing more to release — someone else's /usr/lib/iptables mount or a full /tmp is no reason to fail an uninstall there.
+    km_pkg_live || return 0
     if km_mounted && ! km_own_mount; then km_log 'чужое монтирование iptables оставлено'; return 1; fi
     if km_own_mount; then
         iptables-save > "$KM_RUN/rules.v4" && ip6tables-save > "$KM_RUN/rules.v6" || return 1
@@ -304,19 +403,41 @@ case "$1" in
     sources) km_sources ;;
     bytes-needed) if km_profile && ! km_cache_ok; then echo "$KM_BYTES"; else echo 0; fi ;;
     bytes-installed) if [ -d "$KM_STORE" ]; then du -sk "$KM_STORE" | awk '{print $1*1024}'; else echo 0; fi ;;
-    install|prepare|wire-set|wire-src|release|remove)
-        # A router this owner does not serve (every native kernel) takes no lock and leaves nothing in /tmp.
+    # For the status screen: the knob, and the value it had before we raised it. Nothing where the knob does not exist.
+    ecm) [ -f "$KM_ECM" ] || exit 0
+        km_v=$(cat "$KM_ECM" 2>/dev/null); km_v=${km_v:-не читается}
+        if ! km_ecm_memo; then echo "$km_v"
+        elif [ "$km_v" = "$km_raised" ]; then echo "$km_v (поднято нами, было $km_found)"
+        else echo "$km_v (наш подъём до $km_raised изменён извне, было $km_found)"; fi ;;
+    install|prepare|wire-set|wire-src|ecm-hold|ecm-sync|release|remove)
+        # A router this owner does not serve (every native kernel without the ECM knob) takes no lock and leaves nothing in /tmp.
         case "$1" in
             prepare|wire-set|wire-src) km_profile || exit 0 ;;
+            ecm-hold|ecm-sync) [ -f "$KM_ECM" ] || exit 0 ;;
             release) [ -d "$KM_RUN" ] || exit 0 ;;
             remove) [ -d "$KM_RUN" ] || [ -e "$KM_STORE" ] || [ -e "$KM_INTENT" ] || exit 0 ;;
         esac
-        km_lock || exit 1
+        # The tick does not wait out another operation: the next tick looks again (a held tick delays the whole watchdog). Where the
+        # knob is all this owner holds, a lock held for good (its holder killed, the pid reused) must not fail a teardown or an
+        # uninstall either: the knob goes back by the fact on a later look.
+        if [ "$1" = ecm-sync ]; then km_lock 2 2>/dev/null || exit 0
+        elif { [ "$1" = release ] || [ "$1" = remove ]; } && ! km_pkg_live && [ ! -e "$KM_STORE" ] && [ ! -e "$KM_INTENT" ]; then
+            km_lock || exit 0
+        else km_lock || exit 1; fi
         case "$1" in
             install) km_install ;;
             prepare) km_prepare || { km_release; exit 1; } ;;
             wire-set) km_wire set "$3" "$2" ;;
             wire-src) km_wire src "$3" "$2" ;;
+            ecm-hold) km_ecm_hold ;;
+            ecm-sync)
+                # A failure says its reason once an episode: the tick asks every 2 minutes, its log in RAM is rotated by nobody. A
+                # good look ends the episode. Into a file of ours, not `$(…)`: a subshell would not be this lock's holder.
+                km_ecm_sync 2> "$KM_RUN/ecm.out"; km_rc=$?
+                if [ "$km_rc" = 0 ]; then rm -f "$KM_RUN/ecm.fail"; cat "$KM_RUN/ecm.out" >&2
+                elif [ ! -f "$KM_RUN/ecm.fail" ]; then : > "$KM_RUN/ecm.fail"; cat "$KM_RUN/ecm.out" >&2; fi
+                rm -f "$KM_RUN/ecm.out"
+                exit "$km_rc" ;;
             release) km_release ;;
             remove)
                 if km_own_mount; then
@@ -336,5 +457,5 @@ case "$1" in
                 done
                 rm -rf "$KM_STORE"; rm -f "$KM_INTENT" ;;
         esac ;;
-    *) echo 'usage: nfq-platform.sh supported|installed|profile|sources|install|prepare|wire-set <set> add|del|wire-src <ip> add|del|release|remove' >&2; exit 2 ;;
+    *) echo 'usage: nfq-platform.sh supported|installed|profile|sources|ecm|install|prepare|wire-set <set> add|del|wire-src <ip> add|del|ecm-hold|ecm-sync|release|remove' >&2; exit 2 ;;
 esac

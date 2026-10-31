@@ -100,6 +100,10 @@ emit_devices() {
 	# стенд (dev/devices-static-test.sh) обязан уметь подсунуть свой файл — иначе список
 	# устройств проверяется только на живом роутере. Имя переменной — то же, что у lease-lib.sh.
 	LEASES=${LEASE_FILE:-/tmp/dhcp.leases}
+	# «Is this the router's OWN address» — ip-lib.sh::ip_is_self (dev_extra's `self`). Sourced HERE, like emit_tech does: the other
+	# sections need no route library. No library — nothing is flagged, the list stays as it was.
+	if [ -f "$D/ip-lib.sh" ]; then . "$D/ip-lib.sh"; fi
+	command -v ip_is_self >/dev/null 2>&1 || ip_is_self() { return 1; }
 	# ОДИН АДРЕС — ОДНА СТРОКА. Источников ШЕСТЬ (аренды · соседи без аренды · три хранилища
 	# режимов · порт-правила · правила по адресам), и каждый следующий обязан пропускать уже
 	# напечатанное. Раньше каждый цикл сверялся ПО-СВОЕМУ (awk по арендам плюс grep по чужим
@@ -216,12 +220,16 @@ emit_devices() {
 		# Ответ у владельца (lease-lib), считать подсети здесь нельзя — разъедутся.
 		_xfor=false
 		ip_is_local "$1" || _xfor=true
+		# АДРЕС САМОГО РОУТЕРА — local to lease-lib (`dev lo`), so `foreign` stays false, but it is no device: the engine does not
+		# apply a rule there (apply-bypass.sh::src_not_self) and the panel must say why the rule sits idle and offer to remove it.
+		_xself=false
+		ip_is_self "$1" && _xself=true
 		# Своё имя — по MAC устройства (у строки без MAC — владельца адреса: ip_owner_now выше), и у ПРЕЖНЕГО владельца адреса
 		# тоже: заметка «правило заводилось для …» обязана звать его тем же именем, что и весь список.
 		dn_of "$_xmac"; _xal=$_dno
 		dn_of "$_xom"; _xoa=$_dno
-		printf ',"stale":%s,"pinned":%s,"rand":%s,"owner_lost":%s,"owner_mac":"%s","owner_host":"%s","owner_alias":"%s","owner_now":"%s","foreign":%s,"pinned_stock":%s,"stock_ip":"%s","alias":"%s"' \
-			"$_xst" "$_xpin" "$_xrnd" "$_xlost" "$_xom" "$_xoh" "$_xoa" "$_xon" "$_xfor" "$_xpst" "$_xsip" "$_xal"
+		printf ',"stale":%s,"pinned":%s,"rand":%s,"owner_lost":%s,"owner_mac":"%s","owner_host":"%s","owner_alias":"%s","owner_now":"%s","foreign":%s,"self":%s,"pinned_stock":%s,"stock_ip":"%s","alias":"%s"' \
+			"$_xst" "$_xpin" "$_xrnd" "$_xlost" "$_xom" "$_xoh" "$_xoa" "$_xon" "$_xfor" "$_xself" "$_xpst" "$_xsip" "$_xal"
 	}
 	printf '{"devices":['
 	first=1
@@ -1262,8 +1270,23 @@ emit_doh() {
 	if [ "$pbc" = 2 ] && [ -f /tmp/enodia-proto-install.pid ] && [ -d "/proc/$(cat /tmp/enodia-proto-install.pid 2>/dev/null)" ]; then pkg_busy=true; fi
 	[ "$pkg_busy" = true ] && [ "$pmine" = 1 ] && installing=true
 	[ "$pmine" = 1 ] && [ -f "$DS/.proto-install.log" ] && imsg=$(tail -n1 "$DS/.proto-install.log" 2>/dev/null | jesc 160)
-	printf '{"on":%s,"auto":%s,"auto_active":%s,"installed":%s,"dot_installed":%s,"proto":"%s","proto_now":"%s","running":%s,"installing":%s,"pkg_busy":%s,"install_msg":"%s","resolver":"%s","nextdns_id":"%s","custom_url":"%s","custom_ips":"%s","cur_src":"%s","cur_dns":"%s","cur_via":"%s","untun":%s,"untun_age":%s,"retun_in":%s,"cool":%s,"miss":%s,"miss_max":%s,"dotfb":%s,"dotfb_age":%s,"dotfb_retry":%s,"bail_in":%s,"split_conflict":%s,"split_on":%s,"doh_bin":%s,"resolvers":[%s],"catalog":[%s],"odoh_capable":%s,"odoh_target":"%s","odoh_relay":"%s","odoh_relay_now":"%s","odoh_custom_target":"%s","odoh_custom_relay":"%s","odoh_ips":"%s","odohfb":%s,"odohfb_age":%s,"odohfb_retry":%s,"odoh_targets":[%s],"odoh_relays":[%s],"odoh_sig":"%s","quic_installed":%s,"quicfb":%s,"quicfb_age":%s,"quicfb_retry":%s,"quicfb_to":"%s"}\n' \
-		"$on" "$auto" "$auto_active" "$installed" "$dot_inst" "$proto" "$proto_now" "$running" "$installing" "$pkg_busy" "$imsg" "$res" "$nid" "$cust" "$custips" "$cur_src" "$cur_dns" "$cur_via" "$h_untun" "$h_uage" "$h_retun" "$h_cool" "$h_miss" "$h_mmax" "$h_dfb" "$h_dfba" "$h_dfbr" "$h_bail" "$split_conflict" "$split_on" "$doh_bin" "$arr" "$cat_json" "$o_cap" "$o_t" "$o_r" "$o_now" "$o_ct" "$o_cr" "$o_ips" "$h_ofb" "$h_ofba" "$h_ofbr" "$o_tj" "$o_rj" "$o_sig" "$q_inst" "$h_qfb" "$h_qfba" "$h_qfbr" "$h_qfbt"
+	# WHO ASKS DNS PAST THE ROUTER — the owner's facts (lan-dns.sh scan): a network whose DHCP hands out a foreign DNS, devices
+	# asking a resolver directly. Everything above answers how the ROUTER resolves; a device that never asks it gets none of it
+	# (Dom.ru tester 30.10.2026: «encryption on» while the stock DHCP fields handed out 1.1.1.1). The JSON is the owner's too
+	# (`json` — under the router's busybox in its stand): the first cut built it here with an awk that busybox reads as a call
+	# (`d (…)`, C118) and printed nothing on every finding (review s.175). No script (older payload), or anything but an object
+	# — `null`, and the screen draws no card.
+	# COST: a scan reads the config chain and the connection table — the install poll (every 2 s, its answer drawn by nothing
+	# but the progress) asks with `lan=0` and gets none; the screen's own ask is capped at 8 s by the script itself (lan-dns.sh::
+	# ld_cap — its whole process tree): a slow table (a torrent box) costs the card, never the whole DNS screen (review s.175 r2).
+	# Not `timeout -t` here: it killed only the top `sh` while the pipeline's children held this `$(…)` open (review s.175 r3).
+	ldns=null
+	if [ -f "$D/lan-dns.sh" ] && [ "$(qv lan)" != 0 ]; then
+		ldns=$(sh "$D/lan-dns.sh" json 8 2>/dev/null)
+		case "$ldns" in '{'*'}') ;; *) ldns=null ;; esac
+	fi
+	printf '{"on":%s,"auto":%s,"auto_active":%s,"installed":%s,"dot_installed":%s,"proto":"%s","proto_now":"%s","running":%s,"installing":%s,"pkg_busy":%s,"install_msg":"%s","resolver":"%s","nextdns_id":"%s","custom_url":"%s","custom_ips":"%s","cur_src":"%s","cur_dns":"%s","cur_via":"%s","untun":%s,"untun_age":%s,"retun_in":%s,"cool":%s,"miss":%s,"miss_max":%s,"dotfb":%s,"dotfb_age":%s,"dotfb_retry":%s,"bail_in":%s,"split_conflict":%s,"split_on":%s,"doh_bin":%s,"resolvers":[%s],"catalog":[%s],"odoh_capable":%s,"odoh_target":"%s","odoh_relay":"%s","odoh_relay_now":"%s","odoh_custom_target":"%s","odoh_custom_relay":"%s","odoh_ips":"%s","odohfb":%s,"odohfb_age":%s,"odohfb_retry":%s,"odoh_targets":[%s],"odoh_relays":[%s],"odoh_sig":"%s","quic_installed":%s,"quicfb":%s,"quicfb_age":%s,"quicfb_retry":%s,"quicfb_to":"%s","lan_dns":%s}\n' \
+		"$on" "$auto" "$auto_active" "$installed" "$dot_inst" "$proto" "$proto_now" "$running" "$installing" "$pkg_busy" "$imsg" "$res" "$nid" "$cust" "$custips" "$cur_src" "$cur_dns" "$cur_via" "$h_untun" "$h_uage" "$h_retun" "$h_cool" "$h_miss" "$h_mmax" "$h_dfb" "$h_dfba" "$h_dfbr" "$h_bail" "$split_conflict" "$split_on" "$doh_bin" "$arr" "$cat_json" "$o_cap" "$o_t" "$o_r" "$o_now" "$o_ct" "$o_cr" "$o_ips" "$h_ofb" "$h_ofba" "$h_ofbr" "$o_tj" "$o_rj" "$o_sig" "$q_inst" "$h_qfb" "$h_qfba" "$h_qfbr" "$h_qfbt" "$ldns"
 }
 
 # --- ЛЕНТА ТЕХНИЧЕСКОГО СОСТОЯНИЯ «Обзора» (техбар): факты, которые меняются САМИ, без участия

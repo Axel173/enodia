@@ -236,8 +236,9 @@ carrier_run() {
 # так же). Спрашивают двое, и вопросы у них разные: «работает прежняя СБОРКА» (gh-update.sh bin-status: путь тот же, файл заменён)
 # и «работает со СТАРОГО МЕСТА» (usb-offload.sh: файл переехал, а место держит удалённый inode).
 exe_deleted() { ls -l /proc/[0-9]*/exe 2>/dev/null | sed -n 's#^.* /proc/\([0-9][0-9]*\)/exe -> \(.*\) (deleted)$#\1 \2#p'; }
-# proc_tree <pid> — the pid and ALL its descendants, every level (walk /proc by PPid). ONE copy for every «kill the whole tree»:
-# the panel console's ceiling (cgi-bin/action), the background download of gh-update.sh, the task runner (tasks.sh). Killing the
+# proc_tree <pid> — the pid and ALL its descendants, every level (walk /proc by PPid). ONE copy of the walk; a KILL of the tree goes
+# through proc_tree_kill below (C149), which freezes the tree between walks — a bare «walk, then kill» misses a child born mid-way.
+# Its users: the panel console's ceiling (cgi-bin/action), gh-update.sh's background download, the task runner, lan-dns.sh. Killing the
 # top alone leaves the grandchildren (a script's `ping`, curl under a subshell) alive and orphaned. Collect while the parent is
 # ALIVE: once it dies its children get PPid 1 and this walk can no longer find them.
 proc_tree() {
@@ -252,6 +253,30 @@ proc_tree() {
 		_pt_all="$_pt_all$_pt_n"; _pt_q=$_pt_n
 	done
 	echo "$_pt_all"
+}
+# proc_tree_kill <pid> [grace] — kill the pid and ALL its descendants, with NO survivor born mid-way: the ONE «kill the whole tree»
+# (lan-dns.sh's cap, the console's ceiling in cgi-bin/action, the task runner, gh-update.sh's background download). «Walk, then
+# kill» leaves whatever the tree forks between the walk and the signal — a loaded stand pool showed it (s.177: an `ip route get`
+# born in that window outlived lan-dns.sh's cap). So the tree is FROZEN first: SIGSTOP on what a walk found (a stopped process
+# forks no more), walked again — a child born before its parent stopped shows up now — until a walk finds nothing new (8 walks
+# at most); then TERM and CONT (a stopped process takes TERM once it runs again). `grace` — seconds before KILL of the same list,
+# for what ignores TERM. The caller is never in the tree: it is the parent, or a watchdog started apart from it.
+# The signals go to EVERY walk's list, not the last one's (review s.177): a child stopped by an early walk whose parent exited before
+# its own STOP landed is adopted by init and missing from the later walks — and a stopped process never exits by itself, it would
+# sit in state T till the reboot, holding its pidfile and port, deaf to the TERM of `start-stop-daemon -K`.
+proc_tree_kill() {
+	_ptk=''; _ptk_i=0; _ptk_all=''
+	while :; do
+		_ptk_n=$(proc_tree "$1")
+		kill -STOP $_ptk_n 2>/dev/null
+		_ptk_all="$_ptk_all $_ptk_n"
+		[ "$_ptk_n" = "$_ptk" ] && break
+		_ptk=$_ptk_n; _ptk_i=$((_ptk_i+1))
+		[ "$_ptk_i" -lt 8 ] || break
+	done
+	kill -TERM $_ptk_all 2>/dev/null; kill -CONT $_ptk_all 2>/dev/null
+	case "${2:-}" in ''|0|*[!0-9]*) ;; *) sleep "$2"; kill -KILL $_ptk_all 2>/dev/null ;; esac
+	return 0
 }
 # СМЕРТЬ ПРОЦЕССА ЖДЁМ ТОЖЕ ПО ПРОЦЕССУ. `start-stop-daemon -K` и `kill` шлют сигнал и возвращаются СРАЗУ, а за ними у нас идёт то,
 # чему нужен уже мёртвый: бинд того же порта (перезапуск) или снос каталога, из которого процесс служит. Смена раскладки гасила

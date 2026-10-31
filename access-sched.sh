@@ -1061,7 +1061,10 @@ sc_want_fetch() {   # `geo.sh wanted` in the background; not twice at once, and 
 		[ $(( $(uptime_s) - _wfl )) -ge "$SC_WANT_GAP" ] || return 0
 	fi
 	uptime_s > "$SC_RUN/wanted.at" 2>/dev/null
-	start-stop-daemon -S -b -m -p "$SC_RUN/wanted.pid" -x /bin/sh -- "$ENODIA_DIR/geo.sh" wanted >/dev/null 2>&1
+	# The download outlives whoever asked for it: neither a switching-lock holder's mark (the watchdog would count it as the holder's
+	# work and keep a killed holder's lock for the whole fetch) nor an update's progress flag (daemon-lib.sh::switch_work_alive,
+	# prog-lib.sh::prog_on; review s.175 r3 — the twin of heal.sh's lists/geo downloads).
+	ENODIA_SWITCH_HOLDER= ENODIA_UPD_PROG= start-stop-daemon -S -b -m -p "$SC_RUN/wanted.pid" -x /bin/sh -- "$ENODIA_DIR/geo.sh" wanted >/dev/null 2>&1
 	return 0
 }
 

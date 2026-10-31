@@ -2009,6 +2009,29 @@
      «запас есть / кончается / кончился»), поэтому своих порогов здесь нет. */
   .meter{height:7px;border-radius:4px;background:var(--soft2);overflow:hidden}
   .meter i{display:block;height:100%;border-radius:99px;background:var(--acc)}
+  /* НУМЕРОВАННЫЕ ШАГИ С СОСТОЯНИЕМ (ход обновления, макет `rr-update`): номер — отдельным элементом, а не частью текста; пройденный —
+     галка, идущий — акцент и пульс, впереди — номер; справа — время шага. Не встал — красный «!», оборвался — предупреждающий:
+     макет называет это словами («этап красный со своей причиной»), но рисует только ok/now — эти два состояния его же цветами. */
+  .steps{counter-reset:st}
+  .steps .st{display:flex;gap:10px;padding:8px 0;font-size:13px;line-height:1.45;color:var(--ink3)}
+  .steps .st+.st{border-top:1px dashed var(--line)}
+  .steps .st::before{counter-increment:st;content:counter(st);width:19px;height:19px;border-radius:6px;flex:none;
+    background:var(--soft2);color:var(--ink3);font-size:11px;font-weight:600;display:grid;place-items:center;margin-top:1px}
+  .steps .st b{font-weight:500}
+  .steps .st.ok{color:var(--ink2)}
+  .steps .st.ok::before{content:'\2713';background:var(--acc-soft);color:var(--acc-deep)}
+  .steps .st.now{color:var(--ink)}
+  .steps .st.now::before{background:var(--acc);color:#fff;animation:stpulse 1.4s ease-in-out infinite}
+  @keyframes stpulse{50%{opacity:.5}}
+  .steps .st.bad{color:var(--ink)}
+  .steps .st.bad::before{content:'!';background:var(--bad-soft);color:var(--bad)}
+  .steps .st.cut::before{content:'!';background:var(--warn-soft);color:var(--warn)}
+  .steps .st .grow{min-width:0}
+  .steps .st .ds{font-size:12px;color:var(--ink3);margin-top:2px;overflow-wrap:anywhere;word-break:break-word}   /* имя выхода, причина с путём — на 320 px не за край */
+  .steps .st .ds.wr{color:var(--bad)}
+  .steps .st .tm{margin-left:auto;flex:none;font-size:12px;color:var(--ink3);font-variant-numeric:tabular-nums;padding-left:8px}
+  .steps .st .meter{margin-top:6px;max-width:340px}
+  @media (prefers-reduced-motion:reduce){ .steps .st.now::before{animation:none} }
   /* ПОЛОСА ДОЛЕЙ («Куда идёт трафик»): несколько кусков на 100 %, цвет — у выхода. От `.meter`
      отличается тем, что кусков МНОГО и они не про «запас», поэтому и порогов у неё нет.
      Фон виден только пока доли не сошлись в 100 % (минимальная ширина тонкого куска). */

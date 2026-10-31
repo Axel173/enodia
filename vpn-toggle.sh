@@ -49,6 +49,9 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$_itc" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"; }
 # No ipt-lib.sh with `mss_clamp` (a partial update) ⇒ the old path: no clamp.
 command -v mss_clamp >/dev/null 2>&1 || { mss_clamp() { :; }; mss_unclamp() { :; }; }
+# «Is this the router's OWN address» (ip-lib.sh::ip_is_self) — cmd_exclude refuses one. Shim = the old behaviour.
+if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
+command -v ip_is_self >/dev/null 2>&1 || ip_is_self() { return 1; }
 if ! command -v ct_flush >/dev/null 2>&1; then
     ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
     ct_flush_src_n(){ [ -n "$1" ] && conntrack -D --src "$1" 2>/dev/null | wc -l; return 0; }
@@ -671,6 +674,9 @@ restore_cron() { if [ -f "$ENODIA_DIR/uninstall.sh" ]; then sh "$ENODIA_DIR/unin
 cmd_exclude() {
     IP=$1
     [ -z "$IP" ] && { echo "укажите IP: vpn-toggle.sh exclude 192.168.31.50"; exit 1; }
+    # The router's own address: VPN_EXCLUDE hangs on OUTPUT too, so `-s <own>` would take all its own traffic past the marking
+    # (the reason at apply-bypass.sh::src_not_self, the engine this verb mirrors into).
+    ip_is_self "$IP" && { echo "$IP — адрес самого роутера, а не устройства в сети: исключать нечего"; exit 1; }
     ensure_chain
     iptables -t mangle -C "$EXCLUDE_CHAIN_PRE" -s "$IP" -j ACCEPT 2>/dev/null && {
         echo "IP $IP уже исключён"; exit 0

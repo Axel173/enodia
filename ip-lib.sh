@@ -95,6 +95,21 @@ is_private_ip() {
     return 1
 }
 
+# ip_is_self <ipv4> — code 0 when the address is one of the ROUTER's OWN (any interface: LAN bridges, WAN, carriers, lo).
+# Why: client rules are keyed by IPv4, and a settings backup imported onto a router that sits BEHIND the one it came from
+# brings the upstream LAN's addresses — one of them can be THIS router's WAN address (AX3600 30.10.2026: its own
+# 192.168.31.128 in `.bypass-ips` from a BE7000 backup). Such a source rule is not idle: VPN_EXCLUDE hangs on mangle OUTPUT
+# and the per-device desync rule on POSTROUTING, so it takes ALL the router's own traffic. The kernel's local table is the
+# answer (measured on BE7000 and AX3600: `ip route get` prints `local <ip> dev lo …` for every own address, a client's line
+# starts with the address): it knows every address of every interface, so no own list to drift. `/32` is the same host.
+ip_is_self() {
+    [ -n "$1" ] || return 1
+    case "$(ip route get "${1%/32}" 2>/dev/null | sed -n 1p)" in
+        "local "*) return 0 ;;
+    esac
+    return 1
+}
+
 # wan_iface — имя интерфейса дефолт-маршрута (eth0 на BE7000, eth1 на AX3600), пусто = дефолта нет.
 # ЖИВЁТ ЗДЕСЬ, а не в watchdog.sh, потому что нужен КАЖДОМУ, кто ходит в сеть МИМО туннеля
 # (`curl --interface`): WAN-гейт сторожа, проба внешнего адреса, сверка часов (clock-lib.sh).

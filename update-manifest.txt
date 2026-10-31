@@ -126,7 +126,13 @@ dhcp-static.sh
 # Свои имена устройств — метка панели по MAC («Алиса» вместо голого MAC). Пишет панель (действие dev_name), читают
 # cgi-bin/data и wifi-stats.sh через его `list` (разбор персиста один); нет файла — «Переименовать» честно отказывает, список прежний.
 dev-names.sh
+# Who in the house asks DNS past the router: a network whose DHCP hands out a foreign DNS, devices asking a resolver directly.
+# Read-only (live dnsmasq config, conntrack); called by cgi-bin/data (section doh) and dump.sh — no file, no card, nothing else.
+lan-dns.sh
 label-lib.sh
+# The update's progress by stages for the «Обновление» screen (/tmp/enodia-upd.prog): written by gh-update, pkg-install, install,
+# heal replay and slots-up, read by gh-update.sh status-json — one owner of the file and its format.
+prog-lib.sh
 cfg-names.sh
 # «Дорога к серверу»: пакеты несущей к её серверу — через другой выход (адрес VPS заблокирован провайдером). Правила pref 82..87
 # выводит из хранилищ эндпоинтов; зовут apply-bypass, net-tune, slots, vpn-toggle, uninstall — все с гардом `-f`: нет файла —

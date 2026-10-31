@@ -1105,7 +1105,12 @@ tk_hist_add() {   # <id> <ts> <dur> <code> <trig> <seq> <flag> — RAM history, 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" "$7" >> "$TK_RUN/$1.hist"
 	tail -n 20 "$TK_RUN/$1.hist" > "$TK_RUN/$1.hist.new" 2>/dev/null && mv -f "$TK_RUN/$1.hist.new" "$TK_RUN/$1.hist"
 }
-tk_kill_tree() { _kt=$(proc_tree "$1"); kill -TERM $_kt 2>/dev/null; sleep 1; kill -KILL $_kt 2>/dev/null; return 0; }
+# The tree's owner — daemon-lib.sh::proc_tree_kill (frozen first: a child born mid-way does not survive); an older library — the
+# former walk-then-kill.
+tk_kill_tree() {
+	if command -v proc_tree_kill >/dev/null 2>&1; then proc_tree_kill "$1" 1; return 0; fi
+	_kt=$(proc_tree "$1"); kill -TERM $_kt 2>/dev/null; sleep 1; kill -KILL $_kt 2>/dev/null; return 0   # tree-kill-fallback:
+}
 # alive = a process that is not a zombie: our finished background child stays in /proc as Z until `wait`
 tk_alive() { [ -d "/proc/$1" ] && [ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" != Z ]; }
 # tk_note_gate <id> <ok|fail> — rc 0 = speak now (TK_NREP = runs of this outcome held back since the last word), rc 1 = hold.

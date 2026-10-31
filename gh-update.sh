@@ -152,6 +152,11 @@ if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
 command -v curl_ca_opt >/dev/null 2>&1 || curl_ca_opt() { return 0; }
 if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
 command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
+# The run's progress by stages for the «Обновление» screen: this file writes the download and the checks, status-json reads it all
+# (the owner of the file and its format — prog-lib.sh). A code dir without the library (a mixed install) — no progress, the screen
+# draws the run as before.
+if [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; fi
+command -v prog_json >/dev/null 2>&1 || { prog_stage() { :; }; prog_dl() { :; }; prog_ver() { :; }; prog_close() { :; }; prog_json() { printf 'null'; }; }
 
 # Опция доверия для ЭТОГО роутера. Пусто = системного доверия хватает (обычный случай).
 gh_ca_opt() { curl_ca_opt; }
@@ -312,15 +317,17 @@ gh_socks_release() {
 # собираем, ПОКА жив родитель: после его смерти их PPid = 1. `.dl` снимаем и без живого фона: файл лежит рядом с местом установки
 # до самого `mv` (проверки размера, ELF и суммы — секунды), а это пик 20-МБ /data.
 gh_bg_stop() {
-    if [ -n "$GH_BGPID" ] && command -v proc_tree >/dev/null 2>&1; then   # the walk's owner — daemon-lib.sh
-        kill $(proc_tree "$GH_BGPID") 2>/dev/null
+    if [ -n "$GH_BGPID" ] && command -v proc_tree_kill >/dev/null 2>&1; then   # the tree's owner — daemon-lib.sh (frozen first)
+        proc_tree_kill "$GH_BGPID"
+    elif [ -n "$GH_BGPID" ] && command -v proc_tree >/dev/null 2>&1; then   # an older daemon-lib.sh: its walk
+        kill $(proc_tree "$GH_BGPID") 2>/dev/null   # tree-kill-fallback:
     elif [ -n "$GH_BGPID" ]; then   # an older daemon-lib.sh without proc_tree: the former walk, byte for byte
         _gbk="$GH_BGPID"; _gbq="$GH_BGPID"
         while [ -n "$_gbq" ]; do
             _gbn=""
             for _gbp in $_gbq; do
                 for _gbf in /proc/[0-9]*/status; do
-                    grep -q "^PPid:[[:space:]]*$_gbp\$" "$_gbf" 2>/dev/null || continue
+                    grep -q "^PPid:[[:space:]]*$_gbp\$" "$_gbf" 2>/dev/null || continue   # tree-kill-fallback:
                     _gbc=${_gbf#/proc/}; _gbn="$_gbn ${_gbc%/status}"
                 done
             done
@@ -332,7 +339,9 @@ gh_bg_stop() {
     GH_BGPID=; GH_BGDL=
     return 0
 }
-gh_exit() { gh_bg_stop; gh_socks_release; }
+# Signals ignored for the cleanup itself (review s.177): in busybox ash a second trapped signal inside the EXIT trap runs `exit 1`
+# and drops the rest of it — between proc_tree_kill's STOP and its CONT that left the download tree frozen for good.
+gh_exit() { trap '' INT TERM HUP PIPE; gh_bg_stop; gh_socks_release; }
 trap 'gh_exit' EXIT
 trap 'exit 1' INT TERM HUP PIPE
 # ОДНА попытка через socks. `--resolve` здесь не нужен и не работает: имя резолвит прокси
@@ -1146,6 +1155,9 @@ upd_store_busy() {
 cmd_apply() {
     _force="$1"
     upd_store_busy apply && return 1
+    # The download stage opens with the release description: it is the first network step, and the screen's first line must not
+    # wait for the first byte of the package.
+    prog_stage dl
     lc=$(local_code)
     if ! rel_load; then
         case "$REL_STATE" in
@@ -1157,6 +1169,7 @@ cmd_apply() {
     if [ "$_force" != "--force" ] && [ "$REL_CODE" -le "$lc" ]; then
         log "[apply] на GitHub код $REL_CODE <= локального $lc — это даунгрейд, отмена (--force чтобы всё равно)"; return 1
     fi
+    prog_ver "$(local_name)" "$lc" "$REL_VERSION" "$REL_CODE"
     # Пакет и его распаковка живут в ОЗУ (флеш 20 МБ, важен ПИК): текст жмётся примерно вчетверо.
     _tf=$(df -k /tmp 2>/dev/null | awk 'NR==2{print $4+0}'); case "$_tf" in ''|*[!0-9]*) _tf=0 ;; esac
     _tneed=$((REL_SIZE * 6 / 1024 + 2048))
@@ -1169,10 +1182,13 @@ cmd_apply() {
     trap 'exit 1' INT TERM HUP
     _pu="https://github.com/$REPO/releases/download/$REL_TAG/$REL_PKG"
     log "[apply] релиз $REL_VERSION (код $REL_CODE): подпись сошлась, качаю $REL_PKG ($REL_SIZE байт)"
+    # curl writes the package straight to this path, so the screen's bytes and speed are the file's own size (no write per chunk).
+    prog_dl "$REL_SIZE" "$PKG_TMP/pkg.tar.gz"
     if ! gh_get "$_pu" "$PKG_TMP/pkg.tar.gz"; then
         _pr=$(gh_code_reason "$(gh_code_get)")
         log "[apply] СТОП: пакет не скачался: ${_pr:-нет связи с GitHub} — ничего не заменено"; pkg_cleanup; return 1
     fi
+    prog_stage chk
     _psz=$(wc -c < "$PKG_TMP/pkg.tar.gz" 2>/dev/null | tr -d ' ')
     if [ "$_psz" != "$REL_SIZE" ]; then
         log "[apply] СТОП: пакет пришёл не того размера (${_psz:-0} байт вместо $REL_SIZE) — ничего не заменено"; pkg_cleanup; return 1
@@ -1266,6 +1282,7 @@ snap_list() { ls -1 "$SNAP_DIR" 2>/dev/null | grep '^[0-9]\{8\}-[0-9]\{6\}\.tar\
 # ВОЗВРАЩЁННОЙ версии. Установщик берём УСТАНОВЛЕННЫЙ: в снимке его может не быть вовсе.
 cmd_rollback() {
     upd_store_busy rollback && return 1
+    prog_stage chk        # opening the snapshot and its guard — the rollback's «check» (prog-lib.sh::prog_plan)
     last=$(snap_list | tail -n 1)
     [ -n "$last" ] || { log "[rollback] нет снимков в $SNAP_DIR"; return 1; }
     [ -f "$ENODIA_DIR/pkg-install.sh" ] || { log "[rollback] нет $ENODIA_DIR/pkg-install.sh — откатывать нечем; переустановите с компьютера"; return 1; }
@@ -1484,9 +1501,17 @@ cmd_status_json() {
     # «откатитесь» тогда унёс бы прошлое УДАЧНОЕ обновление (ревью шага 6c, круг 2). Число — из ПОСЛЕДНЕЙ строки итога.
     _rp=$(grep '^\[\(apply\|rollback\)\] итог: заменено [0-9]' "$GH_UPD_LOG" 2>/dev/null | tail -n 1 | sed 's/.*заменено \([0-9]*\).*/\1/')
     case "$_rp" in ''|*[!0-9]*) _rp=0 ;; esac
-    printf '{"name":"%s","code":%s,"repo":"%s","ref":"%s","snaps":[%s],"rb":%s,"apply":{"state":"%s","running":%s,"at":%s,"now":%s,"replaced":%s,"why":"%s","log":[' \
+    # THE RUN BY STAGES (`prog`, null — no run the panel started since boot). Its stage left running is judged by the outcome here:
+    # running · ended well · ended with a refusal · its holder died (RUNNING without a live holder — a reboot, the OOM killer).
+    case "$_run:$_st" in
+        true:*)              _po=run ;;
+        *:OK|*:RBOK|*:DONE)  _po=ok ;;
+        *:FAIL|*:RBFAIL)     _po=fail ;;
+        *)                   _po=cut ;;
+    esac
+    printf '{"name":"%s","code":%s,"repo":"%s","ref":"%s","snaps":[%s],"rb":%s,"prog":%s,"apply":{"state":"%s","running":%s,"at":%s,"now":%s,"replaced":%s,"why":"%s","log":[' \
         "$(printf '%s' "$(local_name)" | jesc 60)" "$(local_code)" "$(printf '%s' "$REPO" | jesc 120)" "$(printf '%s' "$GH_REF" | jesc 60)" \
-        "$_sn" "$_rb" "$_st" "$_run" "$_at" "$(date +%s)" "$_rp" "$(printf '%s' "$(upd_why)" | jesc 600)"
+        "$_sn" "$_rb" "$(prog_json "$_po")" "$_st" "$_run" "$_at" "$(date +%s)" "$_rp" "$(printf '%s' "$(upd_why)" | jesc 600)"
     # Потолок строки 600: причина 429 весит ~310–330 байт (разбор у packages.sh::cmd_op_json).
     [ -f "$GH_UPD_LOG" ] && tail -n 60 "$GH_UPD_LOG" 2>/dev/null | jlines 600
     printf ']}}\n'
@@ -1500,8 +1525,10 @@ case "$1" in
     bin-unstage)   cmd_bin_unstage ;;
     bin-arch)      bin_arch ;;
     check)         cmd_check ;;
-    apply)         cmd_apply "$2" ;;
-    rollback)      cmd_rollback ;;
+    # The stage left running ends with the run (its outcome is the state file the CGI's background node writes after us). Not
+    # `exit` here: the cleanup below the `case` (this run's GH_TMP) must still run — `( exit N )` hands the code to `_rc` as it is.
+    apply)         cmd_apply "$2"; _gar=$?; prog_close; ( exit "$_gar" ) ;;
+    rollback)      cmd_rollback; _gar=$?; prog_close; ( exit "$_gar" ) ;;
     verify)        cmd_verify "$2" ;;
     check-json)    cmd_check_json ;;
     verify-json)   cmd_verify_json ;;
