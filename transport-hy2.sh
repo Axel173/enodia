@@ -106,6 +106,21 @@ proc_alive() { p=$(cat "$1" 2>/dev/null | tr -d ' \r\n'); [ -n "$p" ] && kill -0
 # проект — slot_socks_is_ours (slot-tun-lib.sh; держатель не определился = считаем наш).
 socks_ours() { slot_socks_is_ours "$SOCKS_PORT" "$HY2_PID"; }
 
+# The QUIC client opens SOCKS after the handshake. Report the actual route of
+# a timed-out handshake while the endpoint publication still owns its rule.
+hy2_warp_timeout() {   # daemon log, endpoint IPv4 rows
+    local _hwt_ip _hwt_dev
+    grep -Eq 'failed to initialize client.*handshake did not complete in time' "$1" 2>/dev/null || return 1
+    [ -f "$ENODIA_DIR/road.sh" ] || return 1
+    for _hwt_ip in $2; do
+        _hwt_dev=$(ip -4 route get "$_hwt_ip" 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1);exit}}')  # not-wan: the selected path to this QUIC endpoint
+        case "$_hwt_dev" in
+            awg[2-7]) sh "$ENODIA_DIR/road.sh" hy2-warp-timeout "${_hwt_dev#awg}" && return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # ---- резолв сервера по имени (анти-FATAL на старте) ----
 # ЗАЧЕМ: пользователь даёт конфиг как удобно — почти всегда server ПО ИМЕНИ (ссылка
 # hy2://…@host…). hysteria резолвит это имя ОДИН раз при старте через системный resolver
@@ -155,10 +170,7 @@ command -v carrier_up_mark >/dev/null 2>&1 || carrier_up_mark() { return 0; }
 # dns-lib.sh::seed_host_dns — ОДНОЙ копией на hy2/xray и их доп-выходы (у слота свой seed-файл).
 # Здесь остаётся hy2-специфика: вытащить `server:` из YAML (и отрезать :port).
 # $1 — файл конфига (деф. боевой $HY2_YAML); параметр нужен доп-выходам (Ф3).
-hy2_server_host() {
-    _h=$(grep -E '^[[:space:]]*server:' "${1:-$HY2_YAML}" 2>/dev/null | head -1 | sed 's/^[[:space:]]*server:[[:space:]]*//; s/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')
-    echo "${_h%:*}"                                      # отрезать :port
-}
+hy2_server_host() { hy2_conf_host "${1:-$HY2_YAML}"; }
 seed_server_dns() {
     [ -s "$HY2_YAML" ] || { log "нет $HY2_YAML"; return 1; }
     _host=$(hy2_server_host)
@@ -171,18 +183,39 @@ seed_server_dns() {
 # фолбэк — server из конфига, если он сразу IP. Только IPv4 (iplist_set = cidr4).
 # $1 — seed-файл (деф. боевой), $2 — конфиг (деф. боевой): параметры для доп-выходов (Ф3).
 hy2_endpoint_ip() {
-    _ip=$(sed -n 's%^address=/[^/]*/%%p' "${1:-$SEED_CONF}" 2>/dev/null | head -1)
-    [ -n "$_ip" ] && { echo "$_ip"; return 0; }
-    _h=$(hy2_server_host "${2:-$HY2_YAML}")
-    echo "$_h" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' && echo "$_h"
+    seed_ipv4_rows "$(hy2_server_host "${2:-$HY2_YAML}")" "${1:-$SEED_CONF}"
 }
 # Исключить endpoint hy2-сервера из маркировки (иначе свои же пакеты к VPS, если его
 # IP в iplist_set, заворачиваются в xtun = петля). Зовём ДО постановки default->xtun.
-exclude_endpoint() {
-    ep=$(hy2_endpoint_ip)
-    [ -n "$ep" ] || { log "endpoint hy2 не определён — пропуск анти-петли"; return 0; }
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-set "$ep" >/dev/null 2>&1
-    log "endpoint $ep исключён из маркировки (анти-петля)"
+hy2_endpoints() {   # set|warm|clear, slot, [slot config]
+    _hep=''; _hek=''; _he_host=''
+    if [ "$1" != clear ]; then
+        if [ -n "$2" ]; then
+            _hep=$(hy2_endpoint_ip "$(slot_seed "$2")" "$(slot_conf "$2")")
+            _he_host=$(hy2_server_host "$(slot_conf "$2")")
+            _hek=${3:-}
+        else
+            _hep=$(hy2_endpoint_ip)
+            _he_host=$(hy2_server_host)
+            _hek=$(head -n1 "$ENODIA_STATE/.hy2-active" 2>/dev/null)
+            if [ "$1" = warm ] && [ "$(cat "$TRANSPORT_FLAG" 2>/dev/null)" = hy2 ]; then
+                _her="$ENODIA_STATE/.endpoint-bypass"; _he_tag=$(lbl_endpoint_key "$_her")
+                if [ -n "$_hek" ] && [ "$_he_tag" = "hy2/$_hek" ]; then
+                    if [ -f "$ENODIA_DIR/road.sh" ] && ! sh "$ENODIA_DIR/road.sh" wire >&2; then
+                        log "warm Hy2: road wire failed for the live endpoint publication"
+                    fi
+                    return 0
+                fi
+                # This daemon can still be using the IP excluded by the previous release.
+                if [ -z "$_he_tag" ]; then
+                    for _he_ip in $(cat "$_her" 2>/dev/null); do
+                        is_ipv4 "$_he_ip" && _hep="$_hep $_he_ip"
+                    done
+                fi
+            fi
+        fi
+    fi
+    carrier_endpoint "$2" "$_hep" "${_hek:+hy2/$_hek}" '' "$_he_host"
 }
 
 # ---- DNS ------------------------------------------------------------------
@@ -231,7 +264,9 @@ hy2_go_cap() {
 }
 spawn_hysteria() {
     daemon_log_fresh "$HY2_LOG"
-    seed_server_dns || return 1            # посеять server-host->IP в локальный dnsmasq; 1 = не зарезолвили
+    HY2_PUBLISHING=1
+    [ "${1:-}" = seeded ] || seed_server_dns || return 1
+    hy2_endpoints set '' || return 1
     start-stop-daemon -S -b -m -p "$HY2_PID" -x /bin/sh -- -c "exec $(hy2_go_cap)'$HY2' -c '$HY2_YAML' >>'$HY2_LOG' 2>&1"
 }
 
@@ -252,6 +287,7 @@ free_foreign_socks() {
     i=0; while [ $i -lt 5 ]; do netstat -ltn 2>/dev/null | grep -q "$SOCKS_ADDR:$SOCKS_PORT" || break; sleep 1; i=$((i+1)); done
 }
 start_daemons() {
+    local _hy_warm=0
     [ -x "$HY2" ] || { log "НЕТ бинаря $HY2 — поставьте его в панели: «Компоненты»"; return 1; }
     [ -x "$HEV" ] || { log "НЕТ бинаря $HEV"; return 1; }
     [ -s "$HY2_YAML" ] || { log "НЕТ конфига $HY2_YAML — добавьте hy2-конфиг (меню)"; return 1; }
@@ -261,6 +297,8 @@ start_daemons() {
     if ! proc_alive "$HY2_PID"; then
         log "запускаю hysteria…"
         spawn_hysteria || { log "hysteria не запущена: не удалось зарезолвить server-host. Лог:"; tail -n 15 "$HY2_LOG" 2>/dev/null; return 1; }
+    else
+        _hy_warm=1
     fi
     # ВНИМАНИЕ: socks открывается ТОЛЬКО ПОСЛЕ установления QUIC-сессии с сервером, а у
     # hysteria2 (UDP/QUIC) на цензурируемых/throttle-сетях хендшейк бывает медленным — на
@@ -273,10 +311,17 @@ start_daemons() {
     # (bin_on_store), а не по каталогу: в раскладке «всё на накопителе» каталог бинарей и есть
     # накопитель, и вопрос «в хранилище ли он» отвечает «нет» про файл на флешке.
     if ! daemon_wait_port "$HY2_PID" hysteria 25 "$SOCKS_ADDR" "$SOCKS_PORT"; then
-        log "hysteria не слушает $SOCKS_PORT: $DAEMON_WAIT_WHY (socks5.listen в конфиге обязан быть $SOCKS_ADDR:$SOCKS_PORT). Лог:"; tail -n 15 "$HY2_LOG" 2>/dev/null
+        if [ "$_hy_warm" = 1 ] || ! hy2_warp_timeout "$HY2_LOG" "$(hy2_endpoint_ip)"; then
+            log "hysteria не слушает $SOCKS_PORT: $DAEMON_WAIT_WHY (socks5.listen в конфиге обязан быть $SOCKS_ADDR:$SOCKS_PORT). Лог:"
+        fi
+        tail -n 15 "$HY2_LOG" 2>/dev/null
         return 1
     fi
     socks_ours || { log "socks $SOCKS_PORT держит ЧУЖОЙ демон — наша hysteria не забиндила (несущую поверх чужого socks не поднимаю)"; return 1; }
+    if [ "$_hy_warm" = 1 ]; then
+        HY2_PUBLISHING=1
+        hy2_endpoints warm '' || return 1
+    fi
     if ! proc_alive "$HEV_PID"; then
         log "запускаю hev (tun2socks)…"
         start-stop-daemon -S -b -m -p "$HEV_PID" -x "$HEV" -- "$HEV_YAML"
@@ -295,17 +340,30 @@ stop_daemons() {
     # а по stale-пидфайлу proc_alive однажды попадёт в ПЕРЕИСПОЛЬЗОВАННЫЙ системой pid и решит
     # «демон жив» — start_daemons тогда его не поднимет, а несущей нет.
     rm -f "$HEV_PID" "$HY2_PID" 2>/dev/null
+    if [ "${HY2_PUBLISHING:-}" = 1 ] || [ "$(cat "$TRANSPORT_FLAG" 2>/dev/null)" = hy2 ] || [ "${1:-}" = defer ]; then
+        seed_host_retire "$SEED_CONF" "${1:-}"
+        hy2_endpoints clear ''
+    fi
 }
 
 # Перезапустить ТОЛЬКО hysteria с текущим $HY2_YAML (hev/xtun не трогаем — тот же socks-порт).
 # Для перебора hy2-резервов: меняем конфиг и поднимаем hysteria заново. 0 — socks снова слушает;
 # 1 — не поднялась; 2 — server-host НЕ РЕЗОЛВИТСЯ (несущую не трогали) — код для cmd_failover.
-restart_hy2() {
+restart_hy2() {   # [config, name (empty if restored), seed retire mode]
     # Резолв кандидата ДО остановки живой hysteria — зеркало restart_xray: seed_host_dns ретраит
     # до 6 раз, и всё это время демон был бы уже убит ради кандидата, который может не встать
-    # вовсе (минуты «интернет есть/нет» на каждом проходе пула). Повторный сев в spawn_hysteria
-    # бесплатен — seed_host_dns идемпотентен (dns-lib.sh).
-    seed_server_dns || { log "restart_hy2: server-host не резолвится — несущую не трогаю"; return 2; }
+    # вовсе (минуты «интернет есть/нет» на каждом проходе пула).
+    local _hfr_host _hfr_ip=""
+    if [ "$#" -gt 0 ]; then
+        _hfr_host=$(hy2_server_host "$1")
+        [ -n "$_hfr_host" ] || return 2
+        if ! is_ipv4 "$_hfr_host"; then
+            seed_resolve_host "$_hfr_host" || return 2
+            _hfr_ip=$_sh_ip
+        fi
+    else
+        seed_server_dns || { log "restart_hy2: server-host не резолвится — несущую не трогаю"; return 2; }
+    fi
     # ГОНКА РЕСТАРТА (поймана на ciadpi слота, dev43; здесь ТОТ ЖЕ класс, см. разбор в
     # xray-transport.sh::restart_xray). Ждём РЕАЛЬНОЙ смерти демона, убираем пидфайл (иначе
     # start-stop-daemon -S по нему найдёт живого и не стартует вовсе), добиваем держателя порта,
@@ -314,10 +372,17 @@ restart_hy2() {
     i=0; while [ $i -lt 6 ] && proc_alive "$HY2_PID"; do sleep 1; i=$((i+1)); done
     rm -f "$HY2_PID" 2>/dev/null
     free_foreign_socks
-    spawn_hysteria || { log "restart_hy2: резолв server-host не удался"; return 1; }
-    # QUIC-хендшейк бывает ~15-17 с (см. start_daemons); на накопителе потолок поднимет daemon-lib.
-    daemon_wait_port "$HY2_PID" hysteria 25 "$SOCKS_ADDR" "$SOCKS_PORT" || { log "restart_hy2: $DAEMON_WAIT_WHY"; return 1; }
-    socks_ours
+    if { [ "$#" = 0 ] || {
+        { [ -z "$2" ] || { ( umask 077; lbl_commit_out "$HY2_YAML" cat "$1" ) &&
+            printf '%s\n' "$2" > "$ENODIA_STATE/.hy2-active"; }; } &&
+        seed_host_dns "$_hfr_host" "$SEED_CONF" "$_hfr_ip"
+    }; } && spawn_hysteria seeded && daemon_wait_port "$HY2_PID" hysteria 25 "$SOCKS_ADDR" "$SOCKS_PORT" && socks_ours; then return 0; fi
+    log "restart_hy2: $DAEMON_WAIT_WHY"
+    start-stop-daemon -K -p "$HY2_PID" 2>/dev/null
+    rm -f "$HY2_PID" 2>/dev/null
+    seed_host_retire "$SEED_CONF" "${3:-}"
+    hy2_endpoints clear ''
+    return 1
 }
 
 # Перебор hy2-резервов ВНУТРИ транспорта (зеркало cmd_failover из xray-transport.sh).
@@ -367,14 +432,17 @@ cmd_failover() {
         log "hy2-failover: починка несущей не помогла — перехожу к перебору серверов"
     fi
 
-    tried=""; dns_dead=0; _hfwl=0
+    tried=""; dns_dead=0; _hfwl=0; _hfr_touched=0
     # Аплинк пропал посреди перебора — прерываем; спрашиваем, только если он был жив НА СТАРТЕ (разбор — зеркало в
     # xray-transport.sh::cmd_failover: молчащая уже на старте проба = перебор вслепую, обрывать его ею нельзя).
     _hfw=0
     command -v wan_probe_ok >/dev/null 2>&1 && command -v wan_recheck >/dev/null 2>&1 && wan_probe_ok && _hfw=1
     for f in "$ENODIA_STATE"/hy2-configs/*.yaml; do
         [ -f "$f" ] || continue
-        [ -e "$SWITCH_LOCK" ] && { log "hy2-failover: ручной switch (lock) в процессе — прерываю перебор"; return 1; }
+        if [ -e "$SWITCH_LOCK" ]; then
+            [ "$_hfr_touched" = 0 ] || seed_dns_reload_pending
+            log "hy2-failover: ручной switch (lock) в процессе — прерываю перебор"; return 1
+        fi
         # VPN выключили вручную посреди перебора — дальше не пробуем (зеркало xray-transport.sh).
         carrier_barred && { log "hy2-failover: VPN выключили вручную — прерываю перебор"; break; }
         name=$(basename "$f" .yaml)
@@ -386,15 +454,11 @@ cmd_failover() {
             continue
         fi
         log "hy2-failover: пробую $name…"
-        # Провал cp (нет места на /data, битый файл) НЕ должен переписывать .hy2-active: реестр
-        # соврал бы про активный сервер, а поднимался бы прежний конфиг.
-        cp "$f" "$HY2_YAML" || { log "hy2-failover: не удалось положить конфиг $name — пропускаю"; continue; }
-        chmod 600 "$HY2_YAML"
-        echo "$name" > "$ENODIA_STATE/.hy2-active"
-        restart_hy2; rc=$?
+        restart_hy2 "$f" "$name" defer; rc=$?
+        [ "$rc" = 2 ] || _hfr_touched=1
         [ "$rc" = 2 ] && { dns_dead=1; log "hy2-failover: $name не резолвится — DNS мёртв (upstream заперт в несущей)"; }
         if [ "$rc" = 0 ] && cmd_health; then
-            exclude_endpoint        # анти-петля: endpoint нового резерва мимо маркировки
+            seed_dns_reload_pending   # A literal winner can have no new seed to publish.
             ct_flush_route "$FWMARK" "$TABLE"
             ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" 8)
             log "hy2-failover OK: встал на $name (egress ${ip:-?})"
@@ -419,11 +483,13 @@ hy2-конфиг: $name — VPN снова работает. Внешний IP: 
         fi
     done
     # Ни один резерв не встал → вернём исходный активный, чтобы down/мониторинг шли по нему.
-    if [ -n "$tried" ] && [ -n "$cur" ] && [ -f "$ENODIA_STATE/hy2-configs/$cur.yaml" ]; then
-        cp "$ENODIA_STATE/hy2-configs/$cur.yaml" "$HY2_YAML" && chmod 600 "$HY2_YAML"
-        echo "$cur" > "$ENODIA_STATE/.hy2-active"
-        carrier_barred || restart_hy2 || true
+    if [ "$_hfr_touched" = 1 ] && [ -n "$cur" ] && [ -f "$ENODIA_STATE/hy2-configs/$cur.yaml" ]; then
+        f="$ENODIA_STATE/hy2-configs/$cur.yaml"
+        if ( umask 077; lbl_commit_out "$HY2_YAML" cat "$f" ) && printf '%s\n' "$cur" > "$ENODIA_STATE/.hy2-active"; then
+            carrier_barred || restart_hy2 "$HY2_YAML" ''
+        fi
     fi
+    [ "$_hfr_touched" = 0 ] || seed_dns_reload_pending
     carrier_barred && { log "hy2-failover: перебор прерван — VPN выключен вручную, несущую не поднимаю"; return 1; }
     if [ "$_hfwl" = 1 ]; then
         log "hy2-failover: перебор прерван — нет интернета от провайдера (пробовал:$tried); несущая на ${cur:-текущем}"
@@ -448,7 +514,6 @@ cmd_up() {
         stop_daemons
         return 1
     fi
-    exclude_endpoint        # анти-петля: endpoint мимо маркировки ДО постановки default->xtun
     apply_hy2_routing
     set_hy2_dns
     echo hy2 > "$TRANSPORT_FLAG"
@@ -467,11 +532,10 @@ cmd_down() {
     # ЧИСТЫЙ РЕЛИНКВИШ (симметрично transport-awg/xray down): отпускаем ТОЛЬКО свою несущую
     # (xtun) → fail-open в прямой. НЕ решаем, что поднять следом, и НЕ трогаем .transport —
     # это забота ОРКЕСТРАТОРА (transport.sh switch <name>).
-    stop_daemons
+    stop_daemons defer
     iptables -D FORWARD -o "$TUN" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -i "$TUN" -j ACCEPT 2>/dev/null
     ip route flush table "$TABLE" 2>/dev/null || true
-    seed_host_clear "$SEED_CONF"           # снять сид server-host — ОБЕ копии, /etc и живую /tmp; снятое отмечено ⇒ set_direct_dns ниже перезапустит dnsmasq и при том же upstream
     set_direct_dns
     rm -f /tmp/enodia-watchdog.xstate /tmp/enodia-failover-episode 2>/dev/null
     ct_flush
@@ -550,18 +614,22 @@ slot_start_daemons() {   # $1 = id ; $2 = имя конфига
     [ -x "$HY2" ] || { log "слот №$1: НЕТ бинаря $HY2"; return 1; }
     [ -x "$HEV" ] || { log "слот №$1: НЕТ бинаря hev"; return 1; }
     _id="$1"; _port=$(slot_socks_port "$_id")
-    slot_gen_conf "$_id" "$2" || return 1
+    if ! proc_alive "$(slot_hy2_pid "$_id")"; then slot_gen_conf "$_id" "$2" || return 1; fi
     _h=$(hy2_server_host "$(slot_conf "$_id")")
     [ -n "$_h" ] || { log "слот №$_id: не нашёл server в конфиге"; return 1; }
     seed_host_dns "$_h" "$(slot_seed "$_id")" || return 1   # без резолва hysteria упала бы FATAL
+    hy2_endpoints set "$_id" "$2" || return 1
     slot_free_socks "$_id" "$(slot_hy2_pid "$_id")"
     if ! proc_alive "$(slot_hy2_pid "$_id")"; then
         log "слот №$_id: запускаю hysteria на socks :$_port (конфиг $2)…"
         daemon_log_fresh "$(slot_hy2_log "$_id")"
-        start-stop-daemon -S -b -m -p "$(slot_hy2_pid "$_id")" -x /bin/sh -- -c "exec $(hy2_go_cap)'$HY2' -c '$(slot_conf "$_id")' >>'$(slot_hy2_log "$_id")' 2>&1"
+        start-stop-daemon -S -b -m -p "$(slot_hy2_pid "$_id")" -x /bin/sh -- -c "exec $(hy2_go_cap)'$HY2' -c '$(slot_conf "$_id")' >>'$(slot_hy2_log "$_id")' 2>&1" || return 1
     fi
     if ! slot_wait_socks "$_port" "$(slot_hy2_pid "$_id")" hysteria 25; then
-        log "слот №$_id: hysteria не слушает :$_port ($DAEMON_WAIT_WHY). Лог:"; tail -n 15 "$(slot_hy2_log "$_id")" 2>/dev/null
+        if ! hy2_warp_timeout "$(slot_hy2_log "$_id")" "$(hy2_endpoint_ip "$(slot_seed "$_id")" "$(slot_conf "$_id")")"; then
+            log "слот №$_id: hysteria не слушает :$_port ($DAEMON_WAIT_WHY). Лог:"
+        fi
+        tail -n 15 "$(slot_hy2_log "$_id")" 2>/dev/null
         return 1
     fi
     slot_hev_up "$_id"          # hev + ожидание xtunN (общий слой)
@@ -571,15 +639,8 @@ slot_stop_daemons() {   # $1 = id
     slot_hev_down "$_id"
     start-stop-daemon -K -p "$(slot_hy2_pid "$_id")" 2>/dev/null
     rm -f "$(slot_hy2_pid "$_id")" 2>/dev/null
-}
-
-# Анти-петля выхода: IP сервера слота мимо маркировки (аддитивный per-slot стор, Ф2).
-slot_exclude_endpoint() {   # $1 = id
-    _id="$1"
-    _ep=$(hy2_endpoint_ip "$(slot_seed "$_id")" "$(slot_conf "$_id")")
-    [ -n "$_ep" ] || { log "слот №$_id: endpoint не определён — пропуск анти-петли"; return 0; }
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "$_ep" >/dev/null 2>&1
-    log "слот №$_id: endpoint $_ep исключён из маркировки (анти-петля)"
+    seed_host_retire "$(slot_seed "$_id")"
+    hy2_endpoints clear "$_id"
 }
 
 # Контракт слота (transport.sh _slot_dispatch): slot-up <id> <cfg> / slot-down <id> / slot-health <id>.
@@ -592,7 +653,6 @@ cmd_slot_up() {   # $1 = id ; $2 = имя конфига
         slot_stop_daemons "$_id"
         return 1
     fi
-    slot_exclude_endpoint "$_id"
     slot_apply_routing "$_id"
     ct_flush_slot "$_id"   # only this exit's flows (ct-lib.sh)
     log "слот №$_id: hy2-несущая $(slot_tun "$_id") в table $(slot_table "$_id") (конфиг $_cfg)"
@@ -603,12 +663,7 @@ cmd_slot_down() {   # $1 = id
     case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     slot_remove_routing "$_id"
     slot_stop_daemons "$_id"
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1
     rm -f "$(slot_hev_yaml "$_id")" "$(slot_conf "$_id")" 2>/dev/null
-    if seed_host_clear "$(slot_seed "$_id")"; then  # ОБЕ копии; HUP конфиг НЕ перечитывает — нужен рестарт
-        /etc/init.d/dnsmasq restart >/dev/null 2>&1 || killall -HUP dnsmasq 2>/dev/null
-        rm -f "${DNS_RELOAD_MARK:-/tmp/enodia-dns-reload}" 2>/dev/null   # перезапустили сами — отметка снятого сида исполнена
-    fi
     ct_flush_slot "$_id"
     log "слот №$_id: hy2-несущая снята"
     return 0

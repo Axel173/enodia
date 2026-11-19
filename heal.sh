@@ -74,12 +74,6 @@ command -v age_since >/dev/null 2>&1 || age_since() {
 if [ -f "$ENODIA_DIR/nf-i18n.sh" ]; then . "$ENODIA_DIR/nf-i18n.sh"; fi
 command -v nf_lang >/dev/null 2>&1 || nf_lang() { echo ru; }
 
-# Слой шифрованного DNS (doh-lib.sh): подъём https_dns_proxy на буте (секция 5.14 ниже). Шим —
-# без lib DoH недоступен, doh_want=false ⇒ секция no-op. [[doh-direct-modes-backlog]]
-if [ -f "$ENODIA_DIR/doh-lib.sh" ]; then . "$ENODIA_DIR/doh-lib.sh"; fi
-command -v doh_enabled >/dev/null 2>&1 || doh_enabled() { return 1; }
-command -v doh_want >/dev/null 2>&1 || doh_want() { return 1; }   # старая lib без авто-режима
-
 # Где лежит бинарь (store-lib.sh) — нужен ОДНОМУ месту: диагностическому срезу `awg show` в конце
 # (секция 6). С внешним накопителем awg живёт не в $ENODIA_DIR, и путь оттуда знает только lib.
 # Шим — прежний путь байт-в-байт, как у всех остальных потребителей.
@@ -286,7 +280,18 @@ why_skip() { if [ "$vpn_off" = 1 ]; then echo "VPN выключен челове
 # (fail-open вместо несущей). Роутер БЕЗ накопителя (основной сценарий) не платит ничего: нет
 # маркера .bin-store — usb-offload.sh выходит первой строкой. Ошибка нефатальна: без накопителя
 # загрузка обязана идти как всегда, поэтому дальше heal работает по резидентным путям.
+# The mount owner's duplicate resolution can execute a binary. Purge the
+# visible paths first; the mount owner checks a late USB before admitting it.
+if [ "$REPLAY" = 0 ] && [ -f "$ENODIA_DIR/gh-update.sh" ]; then
+    sh "$ENODIA_DIR/gh-update.sh" bin-purge || :
+fi
 [ -f "$ENODIA_DIR/usb-offload.sh" ] && sh "$ENODIA_DIR/usb-offload.sh" mount-ensure
+
+# Resolve encrypted DNS paths only after the purge and mount. A removed USB
+# copy may have hidden a compatible flash binary when heal first started.
+if [ -f "$ENODIA_DIR/doh-lib.sh" ]; then . "$ENODIA_DIR/doh-lib.sh"; fi
+command -v doh_enabled >/dev/null 2>&1 || doh_enabled() { return 1; }
+command -v doh_want >/dev/null 2>&1 || doh_want() { return 1; }   # старая lib без авто-режима
 
 # 0a+. …и ВТОРОЙ вопрос про транспорт, которого прежде не задавали вовсе: а ПОДНИМЕТСЯ ли он на
 # ЭТОМ роутере. `configured` выше судит по НАМЕРЕНИЮ, а намерение приезжает и ИЗ БЭКАПА ЧУЖОГО
@@ -825,6 +830,9 @@ fi
 # покрывает и АВТО-режим прямых транспортов (стамп в /tmp ставит doh_apply_dns из up-пути секции
 # 5.6, т.е. к этому моменту он уже есть). [[doh-direct-modes-backlog]]
 prog_now doh
+if [ "$REPLAY" = 1 ] && command -v doh_reconcile_retired >/dev/null 2>&1; then
+    doh_reconcile_retired 3>&-
+fi
 if doh_want 2>/dev/null && ! doh_running 2>/dev/null; then
     echo "--- DoH: поднимаю https_dns_proxy (включён/авто, но не запущен) ---"
     # Функция ЗАСОРСЕНА, то есть демон родится в НАШЕМ процессе и унесёт наши дескрипторы:
@@ -895,6 +903,20 @@ prog_now panel
 if [ -f ./web-ui.sh ] && ip -4 addr show "$(lan_if)" 2>/dev/null | grep -q 'inet '; then
     echo "--- панель: второй заход (TLS + доступ снаружи; сама панель уже поднята в 0b) ---"
     sh ./web-ui.sh start 2>&1 3>&- || true
+fi
+
+# 5.17b. THE SERVER LIST'S XRAY ROWS (xray-transport.sh meta-warm → xray-profile-lib.sh::xp_meta_rows). Their cache lives in RAM and
+# is keyed by the library too: after a boot and after an update it is empty, and the first «Серверы» paid ~0.3 s a profile (91
+# profiles: 20 s on AX3600, walk 19.11.2026). Filled here in the background at the lowest priority, never holding heal. A fill
+# still running (a replay during the boot's fill) is asked by its pid's OWN argv: start-stop-daemon's `-x /bin/nice` never matches
+# it — nice has become the shell by then (probed on AX3600, review 1) — and a second fill would read every profile again beside
+# it. `3>&-` — the caller's fd 3 must not ride into a daemon (as for lists above).
+_mw_pid=$(cat /tmp/enodia-xray-meta-warm.pid 2>/dev/null | tr -d ' \r\n')
+if [ -n "$_mw_pid" ] && { tr '\000' ' ' < "/proc/$_mw_pid/cmdline"; } 2>/dev/null | grep -q 'xray-transport\.sh meta-warm'; then
+    echo "--- xray: список серверов уже прогревается — второй раз не запускаю ---"
+elif [ -f "$ENODIA_DIR/xray-transport.sh" ] && [ -x /bin/nice ] && ls "$ENODIA_STATE"/xray-configs/*.json >/dev/null 2>&1; then
+    ENODIA_UPD_PROG= ENODIA_SWITCH_HOLDER= start-stop-daemon -S -b -m -p /tmp/enodia-xray-meta-warm.pid \
+        -x /bin/nice -- -n 19 /bin/sh "$ENODIA_DIR/xray-transport.sh" meta-warm >/dev/null 2>&1 3>&- || true
 fi
 
 # 5.18. THE USER'S TASKS («Задачи», tasks.sh). The cron lines are DERIVED from the registry on /data: replayed here on boot and in

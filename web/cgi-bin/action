@@ -9,7 +9,7 @@
 #  - только POST (GET/прочее -> отказ);
 #  - CSRF-токен синхронизатора (сверка с /tmp/enodia-panel-token, его выдаёт cgi-bin/token);
 #  - белый список действий; неизвестное -> отказ;
-#  - тело <= 32 КБ (запас под загрузку конфига base64-ом; обычные действия — сотни байт).
+#  - normal requests <= 32 KiB. Raw config save buffers up to 256 KiB; subscription relay streams up to 2 MiB.
 #  - 2FA-гейт (totp.sh) — см. разбор в cgi-bin/status; включён = знать пароль панели мало.
 # uhttpd НЕ ПЕРЕДАЁТ CGI своё окружение (замер на железе 01.09.2026 пробным CGI: все ENODIA_*
 # пусты), а в режиме «всё на накопителе» литералы указывают в пустоту — панель отвечала бы
@@ -156,6 +156,7 @@ hs_reap() {   # $1 — мёртвый пид из лока
 	return 0
 }
 hold_switch() {
+	_hs_owner=${1:-$$}
 	_hsw=0
 	while [ "$_hsw" -lt 60 ]; do
 		_hsp=$(cat "$SWITCH_LOCK" 2>/dev/null | tr -d ' \r\n')
@@ -168,14 +169,14 @@ hold_switch() {
 			# лок раньше нас, его не потеряет, а мы её дождёмся (ревью с.96, круг 2 — прежде обе шли дальше, одна без лока). Сверка и
 			# снятие — атомарно, у владельца: голой паре вторая вкладка успевала вклиниться между ними (хвост ревью с.96).
 			hs_reap "$_hsp"
-			( set -C; echo $$ > "$SWITCH_LOCK" ) 2>/dev/null && { SWITCH_LOCK_MINE=1; break; }
+			( set -C; echo "$_hs_owner" > "$SWITCH_LOCK" ) 2>/dev/null && { SWITCH_LOCK_MINE=1; break; }
 			_hsw=$((_hsw + 1)); continue   # счёт — и тут: неснимаемый лок (права, раздел) не должен крутить цикл вечно
 		fi
 		sleep 1; _hsw=$((_hsw + 1))
 	done
 	# Свой пид внутри и создание АТОМАРНО (`set -C`): по пиду сторож отличает CGI, убитый uhttpd на закрытой вкладке (SIGKILL,
 	# ловушка молчит), и снимает его лок сразу, а не через 30 минут (watchdog.sh::switch_lock_held); вторая вкладка ждёт живую первую.
-	[ "$SWITCH_LOCK_MINE" = 1 ] || { ( set -C; echo $$ > "$SWITCH_LOCK" ) 2>/dev/null && SWITCH_LOCK_MINE=1; }
+	[ "$SWITCH_LOCK_MINE" = 1 ] || { ( set -C; echo "$_hs_owner" > "$SWITCH_LOCK" ) 2>/dev/null && SWITCH_LOCK_MINE=1; }
 	# Держатель с пидом ЖИВ (или смену ведёт его потомок) и за минуту не отпустил — идти поверх нельзя: это и есть гонка, которую лок
 	# закрывает. Отказ словами; держатели без пида (установка, перенос, CLI) — как раньше, дальше без лока.
 	if [ "$SWITCH_LOCK_MINE" != 1 ]; then
@@ -183,7 +184,7 @@ hold_switch() {
 		case "$_hsp" in ''|*[!0-9]*) ;; *) { [ -d "/proc/$_hsp" ] || hs_work_alive "$_hsp"; } && fail "${HS_FAIL_MSG:-идёт смена транспорта или сервера либо перезапуск компонентов (другая вкладка или сам роутер) — повторите через минуту}" ;; esac
 	fi
 	# Метка держателя — потомкам: смену ведут они, и SIGKILL закрытой вкладки их не трогает (daemon-lib.sh::switch_work_alive).
-	if [ "$SWITCH_LOCK_MINE" = 1 ]; then ENODIA_SWITCH_HOLDER=$$; export ENODIA_SWITCH_HOLDER; fi
+	if [ "$SWITCH_LOCK_MINE" = 1 ]; then ENODIA_SWITCH_HOLDER=$_hs_owner; export ENODIA_SWITCH_HOLDER; fi
 	trap 'drop_switch' EXIT
 	trap 'exit 1' INT TERM HUP PIPE
 }
@@ -200,7 +201,7 @@ carrier_busy_now() {
 # `transport.sh dns` читал прежний `.transport`, и два doh_apply_dns ставили и снимали правила резолвера навстречу друг другу.
 # Чужой лок — отказ «через минуту». Тик сторожа или heal — ЖДЁМ до 20 с: здоровый тик идёт секунды, и отказ «роутер сам
 # восстанавливает соединение» на каждом пятидесятом клике был бы ложью; дольше — это уже перебор, и отказ честный. Дальше держим
-# лок со своим пидом (hold_switch): новые тики его чтут, а лок вкладки, закрытой посреди пробы, сторож снимет сразу.
+# лок с пидом владельца (hold_switch): новые тики его чтут, а лок мёртвого держателя сторож снимет сразу.
 # `doh_retry` устроен сложнее (перепроводка в фоновом узле) и этого хелпера не зовёт — у него свои мутанты стенда.
 dns_rewire_hold() {
 	[ -e "$SWITCH_LOCK" ] && fail "Роутер занят другой операцией — попробуйте через минуту"
@@ -209,8 +210,20 @@ dns_rewire_hold() {
 		[ "$_dbw" -ge "${DNS_REWIRE_WAIT:-20}" ] && fail "Роутер сейчас сам восстанавливает соединение — попробуйте через минуту"
 		sleep 1; _dbw=$((_dbw + 1))
 	done
-	hold_switch
+	hold_switch "$@"
 	[ "$SWITCH_LOCK_MINE" = 1 ] || fail "Роутер занят другой операцией — попробуйте через минуту"
+}
+
+# The live proxy can open a new connection as soon as its OUTPUT rule goes.
+# Keep the old routing in place until both the recorded process and its listener are gone.
+doh_edit_unwire() {
+	_deu_pid=$(cat "$DOH_PID" 2>/dev/null)
+	doh_stop
+	if ! daemon_wait_gone "$_deu_pid" 2 || daemon_uport_listens "$DOH_ADDR" "$DOH_PORT"; then
+		case "${1:-}" in restore-ladder) doh_lv_restore || : ;; *) doh_lv_drop ;; esac
+		fail "Не удалось остановить прежний резолвер — повторите попытку"
+	fi
+	doh_resolver_mark del; doh_resolver_bypass del
 }
 
 # ВЫКЛЮЧЕН ЛИ VPN ЧЕЛОВЕКОМ (`.vpn-off`, персист с 02.09.2026). Спрашивают ВЫБОРЫ СЕРВЕРА: они
@@ -227,8 +240,32 @@ vpn_is_off() { [ -f "$ENODIA_STATE/.vpn-off" ]; }
 
 len=${CONTENT_LENGTH:-0}
 case "$len" in ''|*[!0-9]*) len=0 ;; esac
-{ [ "$len" -gt 0 ] && [ "$len" -le 32768 ]; } || fail "пустой или слишком большой запрос"
-body=$(head -c "$len")
+FORM_BODY_MAX=32768
+RAW_SAVE_BODY_MAX=262144
+SUBS_RELAY_MAX=2097152
+relay_body_too_large() { fail "слишком большой запрос (предел — 2 МиБ)"; }
+form_prefix=''
+[ "$len" -gt 0 ] || fail "пустой или слишком большой запрос"
+if [ "$CONTENT_TYPE" = application/x-enodia-subscription ]; then
+	# One short authenticated header, then the original provider bytes on stdin.
+	RELAY_HEADER_MAX=256  # bytes, including the terminating newline
+	[ "$len" -le $((SUBS_RELAY_MAX + RELAY_HEADER_MAX)) ] || relay_body_too_large
+	IFS= read -r -n "$RELAY_HEADER_MAX" body || fail "пустой или слишком большой запрос"
+	[ "${#body}" -lt "$RELAY_HEADER_MAX" ] || fail "пустой или слишком большой запрос"
+	relay_len=$((len - ${#body} - 1))
+	[ "$relay_len" -gt 0 ] || fail "пустой или слишком большой запрос"
+	[ "$relay_len" -le "$SUBS_RELAY_MAX" ] || relay_body_too_large
+else
+	if [ "$len" -gt "$FORM_BODY_MAX" ]; then
+		# Bound the encoded form before any read. It is held in shell memory during the save.
+		[ "$len" -le "$RAW_SAVE_BODY_MAX" ] || fail "слишком большой запрос (предел — 256 КиБ)"
+		# The panel sends action and token first. Parse only complete fields before accepting the rest.
+		form_prefix=$(head -c "$FORM_BODY_MAX")
+		case "$form_prefix" in *'&'*) body=${form_prefix%&*} ;; *) fail "пустой или слишком большой запрос" ;; esac
+	else
+		body=$(head -c "$len")
+	fi
+fi
 
 field() { echo "$body" | tr '&' '\n' | grep "^$1=" | head -1 | cut -d= -f2-; }
 # «ЖИВ ЛИ ДЕСИНК» СПРАШИВАЕМ У ПЛАГИНА, А НЕ У ФАЙЛА. `.zapret-on` значит «zapret — несущая всего
@@ -317,6 +354,12 @@ cap_run() {
 	return "$_crr"
 }
 wui_run() { cap_run web-ui.sh "$@"; _wur=$?; WUI_OUT=$CAP_OUT; return "$_wur"; }
+alt_raise_why() {
+	local _arw
+	_arw=$(printf '%s\n' "$1" | grep -m1 -E '^\[road\] (Hysteria2 handshake timed out through WARP|Тайм-аут рукопожатия Hysteria2 через WARP)')
+	if [ -n "$_arw" ]; then printf '%s\n' "$_arw" | jesc 200
+	else printf '%s\n' "$1" | grep -E 'резолв|зарезолвил|удал|встан' | tail -2 | jesc 200; fi
+}
 # owner_relay <script> [args] — the OWNER's one-line JSON answer relayed as is (tasks.sh, access-sched.sh: they validate and
 # answer, this CGI only carries). Through cap_run: uhttpd's SIGKILL of a lost client must not cut a registry write halfway on
 # SIGPIPE. cap_run merges stderr into the same file, so a stray warning (`mv: …`) before the answer must not turn it into
@@ -364,6 +407,11 @@ slot_ids_of() {
 # AN EXIT NAMES THIS CONFIG — it is not deleted: the exit goes on by its working copy, cannot come up after a restart or a reboot,
 # and its screen says nothing of it. Every «Получить WARP» makes such a pair, so the trap was one click away (hardware walk
 # 12.10.2026: «Удалить конфиг» on WARP-2 under exit №5). The first holder is named; the road guard covers only an exit somebody rides.
+road_delete() {
+	[ ! -f "$ENODIA_DIR/road.sh" ] || sh "$ENODIA_DIR/road.sh" del "$1" "$2" >/dev/null 2>&1 ||
+		fail "не удалось снять дорогу к серверу $2 — повторите удаление"
+}
+
 held_refuse() {   # $1 = transport, $2 = config name
 	_dhx=$(slot_ids_of "$1" "$2"); _dhx=${_dhx%%,*}
 	[ -z "$_dhx" ] || fail "конфиг $2 держит выход №$_dhx — сначала удалите выход или смените его сервер"
@@ -412,8 +460,13 @@ cfg_mv() {
 		for _rf in .failover-home .last.bak.name; do
 			_rv=$(cat "$ENODIA_STATE/$_rf" 2>/dev/null | tr -d ' \r\n'); [ "$_rv" = "$_mo" ] && echo "$_mn" > "$ENODIA_STATE/$_rf"
 		done
-		# Дорога к серверу (road.sh) — свойство файла конфига: едет за ним, иначе новое имя шло бы напрямую к заблокированному адресу.
-		[ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" mv awg "$_mo" "$_mn" >/dev/null 2>&1
+	fi
+	if [ -f "$ENODIA_DIR/apply-bypass.sh" ]; then
+		sh "$ENODIA_DIR/apply-bypass.sh" endpoint-mv "$_mk/$_mo" "$_mk/$_mn" >/dev/null 2>&1 ||
+			echo "warn не удалось перенести привязку работающего сервера"
+	fi
+	if [ -s "$ENODIA_STATE/.cfg-via" ] && [ -f "$ENODIA_DIR/road.sh" ]; then
+		_mro=$(sh "$ENODIA_DIR/road.sh" mv "$_mk" "$_mo" "$_mn" 2>&1) || echo "warn $(printf '%s' "$_mro" | tail -n 1 | sed 's/^\[road\] //')"
 	fi
 	echo "slots $_msl"
 	return 0
@@ -455,8 +508,20 @@ wf_why() { _wy=$(printf '%s\n' "$1" | tail -n 1); printf '%s' "${_wy:-не уд�
 tok=$(field token)
 act=$(field action)
 
+if [ -n "$form_prefix" ] && [ "$act" != save_config_raw ]; then
+	fail "пустой или слишком большой запрос"
+fi
 echo "$tok" | grep -qE '^[0-9a-f]+$' || fail "нет токена"
 { [ -s "$TOKFILE" ] && [ "$tok" = "$(cat "$TOKFILE")" ]; } || fail "неверный токен (перезагрузите панель)"
+if [ -n "$form_prefix" ]; then
+	body=$form_prefix$(head -c "$((len - FORM_BODY_MAX))")
+	[ "${#body}" -eq "$len" ] || fail "пустой или слишком большой запрос"
+	unset form_prefix
+fi
+if [ -n "${relay_len:-}" ]; then
+	[ "$act" = import_sub_body ] || fail "неизвестное действие"
+fi
+
 
 # Запуск скрипта с ЗАХАРДкоженными аргументами, возврат JSON {ok,code,msg}.
 run() {
@@ -642,7 +707,369 @@ bulk_dsts() {
 	echo "$_n"
 }
 
+# cap_run gives the edit a separate process and file-backed output (C127).
+# The child takes the lock itself, so a killed CGI cannot release it or stop publication.
+doh_edit() {
+	exec </dev/null
+	read -r _de_pid _ < /proc/self/stat || fail "Не удалось запустить смену DNS"
+	[ -f "$ENODIA_DIR/doh-lib.sh" ] || fail "doh-lib.sh не установлен (обновите панель)"
+	ENODIA_DIR="$ENODIA_DIR"; . "$ENODIA_DIR/doh-lib.sh"
+	if [ "$act" = set_odoh ]; then
+		command -v doh_odoh_target >/dev/null 2>&1 || fail "библиотека DoH старше ODoH (обновите панель)"
+	fi
+	dns_rewire_hold "$_de_pid"
+	case "$act" in
+	set_doh_resolver)
+		r=$(field resolver | tr -cd 'a-z0-9')
+		case " $(doh_resolver_list) " in *" $r "*) : ;; *) fail "неизвестный резолвер" ;; esac
+		nid=$(field nextdns_id | tr -cd 'a-f0-9' | cut -c1-16)
+		[ "$r" = nextdns ] && [ -z "$nid" ] && fail "для NextDNS укажите ID профиля"
+		# DoQ/DoH3 chosen: whether the NEW resolver answers them is asked of this router's path below, before its switch (s.151); the
+		# own resolver is judged by its name below, once parsed.
+		# --- СВОЙ резолвер: разобрать ввод и ПОСЧИТАТЬ ЯКОРЯ ДО единой правки состояния ---
+		# Разбор и валидация — в doh-lib (doh_custom_parse), здесь только длина: поле приходит из
+		# сети, и обрезать его до разбора дешевле, чем гонять регексп по мегабайту.
+		cu=""; cs=""; cips=""; cdp=""
+		if [ "$r" = custom ]; then
+			# urldecode ОБЯЗАТЕЛЕН: панель шлёт значение через encodeURIComponent, и без декода
+			# сюда приходит `https%3A%2F%2F…` — строгий разбор такое отвергает ЦЕЛИКОМ, то есть
+			# поле не работало бы вовсе ни с одним адресом. Порядок «декод → обрезка» сознателен:
+			# режем то, что человек ввёл, а не проценты. Пробелы НЕ трогаем — их края снимет
+			# doh_custom_parse, а внутренние обязаны уронить разбор (см. его шапку).
+			cin=$(urldecode "$(field custom_url | cut -c1-900)" | cut -c1-300)
+			[ -n "$cin" ] || fail "укажите адрес своего резолвера"
+			cp=$(doh_custom_parse "$cin") || fail "адрес не похож на резолвер: ждём https://хост/путь, tls://хост, имя или IP"
+			cu=$(printf '%s' "$cp" | cut -f1); cs=$(printf '%s' "$cp" | cut -f2); ch=$(printf '%s' "$cp" | cut -f3)
+			cdp=$(printf '%s' "$cp" | cut -f4)   # порт DoT из `tls://хост:порт` (пусто = 853); библиотека старше поля — пусто
+			# DoT предъявляет имя в SNI, и `-s` у dot-proxy обязателен ⇒ голый IP с ним несовместим.
+			# Говорим это ДО того, как что-то поменяли: иначе человек получил бы откат вместо ответа.
+			[ "$(doh_proto)" = dot ] && [ -z "$cs" ] && fail "для DoT нужно ИМЯ резолвера (у IP нечего предъявить в SNI) — введите имя или переключите протокол на DoH"
+			# DoQ/DoH3 check the certificate by NAME too (doh-lib.sh::doh_quic_can for the own resolver).
+			case "$(doh_proto)" in doq|doh3) [ -z "$cs" ] && fail "для DoQ и DoH3 нужно ИМЯ резолвера (сертификат проверяется по имени) — введите имя или переключите протокол на DoH" ;; esac
+			# Якоря считаем ЗДЕСЬ, пока DNS ещё держит ПРЕЖНИЙ (рабочий) резолвер — после переключения
+			# резолвить было бы уже нечем. Пустой набор = отказ: без якорей в прямом режиме запросы к
+			# резолверу попадут под десинк, то есть мы своими руками положим DNS всему дому.
+			if [ -n "$cs" ]; then
+				# Конвейер якорей — ОДИН на двоих (doh-lib::doh_anchor_ips), он же канонизирует
+				# набор сортировкой: иначе первый же перерезолв в стороже объявил бы «адреса
+				# сменились» лишь потому, что резолвер отдал те же A-записи в другом порядке.
+				cips=$(doh_anchor_ips "$cs")
+				[ -n "$cips" ] || fail "не удалось узнать адреса $cs — проверьте имя (сейчас DNS ещё работает через прежний резолвер)"
+			else
+				cips="$ch"
+			fi
+		fi
+		# Прежний резолвер запоминаем ДО перезаписи: недостижимый новый откатим на него (проба ниже).
+		prev=$(doh_resolver_name); prevnid=$(cat "$ENODIA_STATE/.doh-nextdns-id" 2>/dev/null)
+		prevcu=$(cat "$ENODIA_STATE/.doh-custom-url" 2>/dev/null); prevcs=$(cat "$ENODIA_STATE/.doh-custom-sni" 2>/dev/null)
+		prevcips=$(cat "$ENODIA_STATE/.doh-custom-ips" 2>/dev/null); prevcdp=$(cat "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null)
+		# The form the new resolver's rules WILL travel in (mark into the carrier / RETURN past it): the one the switch's own rewire lays
+		# (doh_rewire_form — transport.sh dns's dispatch), so its QUIC is probed the way it will ride. The old anchors' form was asked
+		# before (s.151): with none laid (paused after a failure) there was no probe at all, and an untunneled resolver was asked past the
+		# carrier the rewire then puts it back into (review s.151 r2 L2, r3 L4).
+		# ON A RUNG (the QUIC level moved the old resolver's proxy below) the new resolver is asked too, but its silence refuses nothing:
+		# it STAYS on that rung, the screen's «QUIC до резолвера не проходит» now said of the resolver that was asked (review s.151 r3 M1);
+		# it answers — it goes up to QUIC. Refusing there brought the old one back on QUIC its path cuts, and the ladder fell again inside
+		# the CGI — the house without names for half a minute (r2 M1). The ladder's state of both levels is saved first: a rollback gives
+		# the old resolver ITS rungs back (r3 L1).
+		_qform=''; _qrung=0
+		case "$(doh_proto)" in doq|doh3)
+			if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
+				[ "$(doh_proto_now)" != "$(doh_proto)" ] && _qrung=1
+				_qform=$(doh_rewire_form)
+			fi ;;
+		esac
+		doh_lv_save
+		# put_resolver <dir> — the new resolver's files into <dir>: a snapshot for the precheck, then the state itself. Своё — тремя
+		# файлами разом: URL (DoH), имя (SNI для DoT; пусто у литерала) и якоря.
+		put_resolver() {
+			echo "$r" > "$1/.doh-resolver"
+			[ "$r" = nextdns ] && echo "$nid" > "$1/.doh-nextdns-id"
+			if [ "$r" = custom ]; then
+				echo "$cu" > "$1/.doh-custom-url"
+				echo "$cs" > "$1/.doh-custom-sni"
+				echo "$cips" > "$1/.doh-custom-ips"
+				if [ -n "$cdp" ]; then echo "$cdp" > "$1/.doh-custom-dot-port"; else rm -f "$1/.doh-custom-dot-port" 2>/dev/null; fi
+			fi
+			return 0
+		}
+		# Under DoQ/DoH3 the new resolver's QUIC handshake first, from THIS router (s.151): silent — refused before ANYTHING changes.
+		# ASKED FROM A SNAPSHOT (review s.153 r1 B3): the current `.doh-*` + the new resolver's files, read in a subshell (doh-lib reads
+		# every path at call time). The state, the old proxy and its anchors stay as they are through the precheck — the old resolver
+		# keeps answering the house (s.151 r2 L3: torn down before it, its proxy rode without anchors for the precheck's seconds).
+		# The entire check and its outcome belong to the worker, including cleanup of the snapshot.
+		# Not in_dir: its EXIT trap would replace drop_switch's.
+		_qok=1
+		if [ -n "$_qform" ]; then
+			_rsnap="/tmp/enodia-cgi-in.$_de_pid"; rm -rf "$_rsnap" 2>/dev/null
+			( umask 077; mkdir "$_rsnap" ) 2>/dev/null || fail "не удалось создать временный каталог"
+			trap 'drop_switch; rm -rf "$_rsnap"' EXIT
+			cp -p "$ENODIA_STATE"/.doh-* "$_rsnap/" 2>/dev/null
+			put_resolver "$_rsnap"
+			if ( ENODIA_STATE="$_rsnap"; doh_wire_via "$(doh_proto)" "$_qform" ); then
+				[ "$_qrung" = 1 ] && doh_lv_forget quic        # answers here: up from the old resolver's rung
+			elif [ "$_qrung" = 0 ]; then
+				_qok=0                                       # silent where QUIC passes: refused, nothing changed
+			fi                                               # silent on a rung: stays on it
+			rm -rf "$_rsnap" 2>/dev/null
+		fi
+		if [ "$_qok" = 0 ]; then
+			doh_lv_drop
+			# «возвращён custom» человеку ничего не говорит, когда прежний тоже был своим.
+			pname="$prev"; [ "$prev" = custom ] && pname="прежний адрес"
+			fail "резолвер $r не отвечает по $(doh_proto_label "$(doh_proto)") — возвращён $pname"
+		fi
+		# Вердикт «853 этим путём закрыт» был про ПРЕЖНИЙ резолвер: новый обязан сперва попробовать DoT. The QUIC rung stays (above).
+		if [ "$_qrung" = 1 ]; then doh_lv_forget dot; else command -v doh_fb_forget >/dev/null 2>&1 && doh_fb_forget; fi
+		# Teardown правил СТАРОГО резолвера ДО записи нового: правила снимаются по ТЕКУЩЕМУ содержимому файлов (.doh-custom-ips и
+		# прочих) — переписать их раньше значило бы оставить марку/RETURN прежних адресов висеть в mangle навсегда.
+		doh_edit_unwire restore-ladder
+		put_resolver "$ENODIA_STATE"
+		# Под новый резолвер: DoH активен (тумблер ИЛИ авто держит DNS) → перезапустить прокси + переиграть
+		# DNS (добавит марку/RETURN :443 НОВОГО резолвера). Выключен → просто персист, применится при включении.
+		if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
+			doh_restart
+			sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+			# ФУНКЦИОНАЛЬНАЯ ПРОБА нового резолвера: dnsmasq уже смотрит на прокси с НОВЫМ URL — не
+			# отвечает (недостижим/заблокирован ISP/битый NextDNS-ID) ⇒ вернуть ПРЕЖНИЙ резолвер, DNS
+			# всего дома не рвём (симметрия авто-режима doh_apply_dns, только откат на резолвер, не на plain).
+			# Заодно проба ГРЕЕТ TCP+TLS+HTTP/2 первого запроса — без неё пару секунд после смены клиенты
+			# ловили «Try again» (та же грабля, что при включении тумблера, см. doh_apply_dns).
+			# 4 попытки, а не дефолтные 2: холодная сессия к новому резолверу бывает медленной
+			# (таймаут+перебор anycast-IP), а ложный откат выглядит как «резолвер не работает».
+			# ПЕРВЫМ — указатель dnsmasq на прокси (у владельца, doh_upstream_set): ручной режим с 31.08 сам проверяет имена и при
+			# отказе откатывает DNS на путь плагина, и проба имён через ТОТ DNS проходит — «ок» при мёртвом новом резолвере, без
+			# возврата прежнего и с паузой 15 минут (ревью ветки fix/dot-tails, круг 2).
+			if ! doh_upstream_set || ! doh_probe 4; then
+				doh_edit_unwire
+				# Переезд, если он случился на попытке НОВОГО резолвера, — вердикт о нём, а не о прежнем: прежнему возвращаем ЕГО лестницу
+				# из снимка (обе ступени и сроки), а не забытую: иначе он вернулся бы на DoH с экраном «DoT не проходит», хотя его DoT
+				# работал, или поднялся бы на QUIC, который его путь режет (review s.151 r3 L1).
+				doh_lv_restore
+				echo "$prev" > "$ENODIA_STATE/.doh-resolver"
+				if [ -n "$prevnid" ]; then echo "$prevnid" > "$ENODIA_STATE/.doh-nextdns-id"; else rm -f "$ENODIA_STATE/.doh-nextdns-id" 2>/dev/null; fi
+				# Своё возвращаем ЦЕЛИКОМ, включая якоря: прежний резолвер тоже мог быть своим, и
+				# полуоткат (имя старое, адреса новые) оставил бы правила на чужих IP.
+				if [ -n "$prevcu" ]; then
+					echo "$prevcu" > "$ENODIA_STATE/.doh-custom-url"; echo "$prevcs" > "$ENODIA_STATE/.doh-custom-sni"
+					echo "$prevcips" > "$ENODIA_STATE/.doh-custom-ips"
+					if [ -n "$prevcdp" ]; then echo "$prevcdp" > "$ENODIA_STATE/.doh-custom-dot-port"; else rm -f "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null; fi
+				else
+					rm -f "$ENODIA_STATE/.doh-custom-url" "$ENODIA_STATE/.doh-custom-sni" "$ENODIA_STATE/.doh-custom-ips" "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null
+				fi
+				doh_restart
+				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+				# ПРИЧИНА, а не «не отвечает». Отказ по сертификату выглядит для человека так же
+				# («не работает»), но чинится совсем иначе — и такой отказ бывает ПЛАВАЮЩИМ: на
+				# железе 14.08.2026 dns.comss.one по DoH прошёл 2 раза из 3, а по DoT — всегда.
+				# Единственный, кто знает правду, — лог демона; ловим сигнатуру mbedTLS в свежем
+				# хвосте (лог мы только что переписали рестартом, старое сюда не попадёт).
+				why=""
+				[ -z "$why" ] && grep -q 'BADCERT_CN_MISMATCH' /tmp/enodia-doh.log 2>/dev/null && \
+					why=" (сертификат резолвера не принят; у этого адреса такое бывает через раз — попробуйте протокол DoT)"
+				[ -z "$why" ] && grep -q 'BADCERT' /tmp/enodia-doh.log 2>/dev/null && \
+					why=" (сертификат резолвера не прошёл проверку)"
+				# «возвращён custom» человеку ничего не говорит, когда прежний тоже был своим.
+				pname="$prev"; [ "$prev" = custom ] && pname="прежний адрес"
+				fail "резолвер $r не отвечает$why — возвращён $pname"
+			fi
+		fi
+		doh_lv_drop
+		printf '{"ok":true,"code":0,"msg":"Резолвер шифрованного DNS: %s%s"}\n' "$r" "$(dot_fb_tail)"; exit 0 ;;
+
+	# --- Протокол шифрованного DNS: doh (HTTPS/:443) | dot (TLS/:853, наш dot-proxy). Зеркало
+	# set_doh_resolver: teardown обоих портов (del в либе proto-agnostic), персист, при активном
+	# DNS — перезапуск под новый бинарь + функциональная проба с откатом на прежний протокол.
+	set_doh_proto)
+		# Digits stay: `a-z` alone turned «doh3» into «doh» — the repeated-DoH branch answered ok and DoH3 could never be chosen
+		# (AX3600, 1.3.0-dev.9, 20.10.2026; the class is held by dev/sanitize-case-test.py).
+		v=$(field value | tr -cd 'a-z0-9')
+		case "$v" in doh|dot|odoh|doq|doh3) : ;; *) fail "ожидается doh|dot|odoh|doq|doh3" ;; esac
+		prev=$(doh_proto)
+		if [ "$v" = "$prev" ]; then
+			# ПОВТОРНЫЙ ВЫБОР DoT, ПОКА РОУТЕР ШИФРУЕТ ПО DoH (переезд порта), — просьба «проверь DoT СЕЙЧАС», а не пустой клик:
+			# иначе человеку, починившему путь (сменил выход, провайдер открыл 853), оставалось ждать сверку сторожа до часа.
+			# Тот же ход, что у включения тумблера: забыть вердикт, поднять прокси под DoT, переиграть DNS — а решит проба
+			# имён в doh_apply_dns (не пошли — doh_dot_rescue переедет обратно, и хвост ответа это скажет).
+			# То же для ODoH на откате «DoH напрямую к цели»: повторный клик — «проверь ретрансляторы сейчас».
+			if [ "$v" = odoh ] && [ "$(doh_proto_now)" = doh ] && \
+			   { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; }; then
+				doh_odoh_forget; doh_edit_unwire; doh_restart
+				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+				doh_upstream_set || fail "Ни один ретранслятор не ответил, и DoH к цели тоже — вернул прежний DNS. Роутер проверит снова сам."
+			fi
+			if [ "$v" = dot ] && command -v doh_dot_forget >/dev/null 2>&1 && \
+			   { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; } && doh_dot_forget; then
+				doh_edit_unwire; doh_restart
+				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+				# ИТОГ — ПО ФАКТУ (указатель dnsmasq на прокси — у владельца, doh_upstream_set), а не бодрым «ок»: не пошли ни DoT, ни
+				# DoH — DNS откатан на прежний путь и стоит пауза, а тост говорил «Протокол шифрованного DNS: dot» (ревью ветки, круг 1).
+				doh_upstream_set || fail "Резолвер не ответил ни по DoT, ни по DoH — вернул прежний DNS. Роутер проверит снова сам."
+			fi
+			# DoQ/DoH3 on a rung below (the QUIC level of the ladder): the repeated choice is «check it NOW» — the same move as DoT's.
+			case "$v" in doq|doh3)
+				if [ "$(doh_proto_now)" != "$v" ] && { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; }; then
+					# The handshake FIRST, the way the proxy travels (review s.151 r2 M3): forgetting the rung restarts the proxy on QUIC, and a
+					# path that still cuts it cost the whole house its names for the ladder's fall — on every click. The watchdog asks so too.
+					doh_wire_via "$v" "$(doh_rewire_form)" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")"
+					if doh_lv_forget quic; then
+						doh_edit_unwire; doh_restart
+						sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+						doh_upstream_set || fail "Резолвер не ответил ни по $(doh_proto_label "$v"), ни по протоколам ниже — вернул прежний DNS. Роутер проверит снова сам."
+					fi
+				fi ;;
+			esac
+			printf '{"ok":true,"code":0,"msg":"Протокол шифрованного DNS: %s%s"}\n' "$v" "$(dot_fb_tail)"; exit 0
+		fi
+		# DoQ/DoH3 — their own component (the QUIC program); the own resolver needs a NAME. Both said BEFORE the switch: else doh_start
+		# would quietly not rise, the probe fail, and the person see a rollback instead of the reason.
+		case "$v" in doq|doh3)
+			[ -x "$QUIC_BIN" ] || fail "для $(doh_proto_label "$v") нужен компонент «DoQ и DoH3» — установите его в «Компонентах»"
+			doh_quic_can "$v" || fail "у своего резолвера указан IP — для $(doh_proto_label "$v") нужно ИМЯ (сертификат проверяется по имени)" ;;
+		esac
+		[ -x "$(doh_bin_for "$v")" ] || fail "бинарь для $v не установлен — нажмите «Установить» в карточке"
+		# ODoH умеет только новая сборка программы DoH (наш патч): прежняя ключа -O не знает и не стартует. Говорим ДО переключения.
+		[ "$v" = odoh ] && ! doh_odoh_capable && fail "программа DoH не умеет ODoH — обновите её в «Компонентах» (шифрованный DNS)"
+		# Свой резолвер, введённый ГОЛЫМ IP,c DoT несовместим (в SNI нечего предъявить, а `-s`
+		# обязателен). Сказать это ДО переключения — иначе doh_start молча не поднимется, проба
+		# провалится и человек увидит откат вместо причины.
+		[ "$v" = dot ] && [ "$(doh_resolver_name)" = custom ] && [ -z "$(dot_resolver_sni custom)" ] && \
+			fail "у своего резолвера указан IP — для DoT нужно ИМЯ (или оставьте DoH)"
+		# DOES QUIC ANSWER HERE — asked of THIS router's path before anything changes (s.151): whether a resolver answers DoQ/DoH3 depends
+		# on the country and the ISP. The handshake probe the ladder uses (doh_wire_ok: the program's `-Q`, in the form the resolver's
+		# anchors travel), one ceiling for all addresses — seconds, where a switch to a silent QUIC resolver fell down its rungs inside the
+		# CGI for minutes (review s.150 R3-5). Asked only when the anchors' form is known: without anchors (paused after a failure, the
+		# old protocol's program missing) the probe would ride another way than the proxy will (review s.151 r2 L2, L4) — the switch's
+		# own ladder answers then. Off — nothing travels: the choice is stored and asked on switching on, by the ladder.
+		# THE GATE IS THE INTENT, the restart's own question after the write below: «encryption on» (or the auto mode holding DNS) —
+		# doh_enabled asked here, before the write, is about the OLD protocol's program; with it missing (only «DoQ и DoH3» installed)
+		# the precheck was skipped and the proxy then rose on a silent QUIC (review s.151 r2 L4). THE FORM is the one the rewire lays
+		# (doh_rewire_form) — no anchors (paused, the old program missing) or an untunneled resolver no longer skip or misroute it.
+		case "$v" in doq|doh3)
+			if doh_on_intent || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
+				doh_wire_via "$v" "$(doh_rewire_form)" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")"
+			fi ;;
+		esac
+		doh_edit_unwire
+		echo "$v" > "$ENODIA_STATE/.doh-proto"
+		# Новый выбор человека — прежний вердикт о порте забыт: выбранный DoT сперва пробуем честно, а не
+		# продолжаем шифровать по DoH, куда его увела прошлая проверка (doh-lib.sh::doh_dot_fallback).
+		command -v doh_fb_forget >/dev/null 2>&1 && doh_fb_forget
+		command -v doh_odoh_forget >/dev/null 2>&1 && doh_odoh_forget
+		if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
+			doh_restart
+			# DID THE QUIC PROGRAM COME UP — asked NOW, while it is knowable: a failed rewire below stops the proxy (doh_apply_fail →
+			# doh_dns_bailout), and asked after it every silent resolver read «the program did not start» (review s.150, round 2).
+			_pup=1; case "$v" in doq|doh3) doh_wait_listen 15 || _pup=0 ;; esac
+			sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+			# Попыток больше дефолта: у DoT холодный старт стоит 3 с таймаута на IP + 3 с backoff,
+			# и одиночная проба ложно объявляла «протокол не заработал» (железо 2026-07-27).
+			# Указатель на прокси — первым (разбор у set_doh_resolver: проба через откатанный DNS плагина проходит).
+			# ODoH, ответивший ТОЛЬКО откатом «DoH напрямую к цели» (ретрансляторы молчат), — не заработавший выбор: сохрани мы его, сторож
+			# пробовал бы вернуться на ODoH под домом раз за разом (ревью с.145, круг 1). Проверка — по стампу отката у владельца.
+			_odfb=0; [ "$v" = odoh ] && [ -f "${DOH_ODOH_FALLBACK:-/nonexistent}" ] && _odfb=1
+			if ! doh_upstream_set || ! doh_probe 4 || [ "$_odfb" = 1 ]; then
+				# WHY, asked before the rollback restarts the proxy: for DoQ/DoH3 a program that never came up is not «the resolver is silent»
+				# (the rungs below run the OTHER programs; a QUIC block alone keeps the choice on a rung and does not end here) — review s.150.
+				_pwhy='резолвер не отвечает; :853 может резать провайдер'
+				case "$v" in doq|doh3)
+					if [ "$_pup" = 1 ]; then _pwhy='резолвер не отвечает ни по нему, ни по протоколам ниже'
+					else _pwhy='программа DoQ и DoH3 не запустилась на роутере'; fi ;;
+				esac
+				doh_edit_unwire
+				echo "$prev" > "$ENODIA_STATE/.doh-proto"
+				command -v doh_odoh_forget >/dev/null 2>&1 && doh_odoh_forget
+				doh_restart
+				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+				# The pair is chosen on the ODoH pane, which shows only once ODoH is selected — with the default pair dead that was a
+				# dead end (review s.147). With encryption off the choice is only saved, so the way out is named here.
+				[ "$v" = odoh ] && fail "ретрансляторы ODoH не ответили — возвращён $prev. Выбрать другую пару: выключите «Шифровать всегда» и «Само, когда туннеля нет», выберите ODoH и пару, затем включите их снова."
+				fail "протокол $v не заработал ($_pwhy) — возвращён $prev"
+			fi
+		fi
+		printf '{"ok":true,"code":0,"msg":"Протокол шифрованного DNS: %s%s"}\n' "$v" "$(dot_fb_tail)"; exit 0 ;;
+
+	# --- ODoH: цель и ретранслятор (doh-lib.sh, блок «OBLIVIOUS DoH»). Зеркало set_doh_resolver: разбор и якоря своих имён — ДО
+	# единой правки (пока DNS держит прежний путь), пара одного владельца — отказ, teardown правил по СТАРЫМ адресам, запись,
+	# при активном ODoH — перезапуск и проба имён с откатом на прежнюю пару. ODoH не выбран — просто персист, применится при выборе.
+	set_odoh)
+		t=$(field target | tr -cd 'a-z0-9'); r=$(field relay | tr -cd 'a-z0-9')
+		{ [ "$t" = custom ] || [ -n "$(doh_tab "$DOH_ODOH_TARGETS" "$t" 5)" ]; } || fail "неизвестная цель"
+		{ [ "$r" = auto ] || [ "$r" = custom ] || [ -n "$(doh_tab "$DOH_ODOH_RELAYS" "$r" 5)" ]; } || fail "неизвестный ретранслятор"
+		ct=''; cr=''
+		if [ "$t" = custom ]; then
+			ct=$(doh_odoh_parse_url "$(urldecode "$(field custom_target | cut -c1-900)" | cut -c1-300)" target) || \
+				fail "адрес цели не подходит: ждём https://имя/путь — без порта и не IP"
+		fi
+		if [ "$r" = custom ]; then
+			cr=$(doh_odoh_parse_url "$(urldecode "$(field custom_relay | cut -c1-900)" | cut -c1-300)" relay) || \
+				fail "адрес ретранслятора не подходит: ждём https://имя/путь — без порта и не IP"
+		fi
+		# URL пары, как она встанет (для проверки владельцев): цель и каждый ретранслятор списка.
+		turl=$ct; [ -n "$turl" ] || turl=$(doh_tab "$DOH_ODOH_TARGETS" "$t" 5)
+		if [ "$r" = custom ]; then rurls=$cr; elif [ "$r" = auto ]; then rurls=$(for k in $(doh_tab_keys "$DOH_ODOH_RELAYS"); do doh_tab "$DOH_ODOH_RELAYS" "$k" 5; done); else rurls=$(doh_tab "$DOH_ODOH_RELAYS" "$r" 5); fi
+		for ru in $rurls; do
+			doh_odoh_same_owner "$turl" "$ru" && fail "цель и ретранслятор у одного владельца ($(doh_url_host "$ru")): он увидит и адрес, и вопросы — выберите другой ретранслятор"
+		done
+		# Якоря СВОИХ имён — сейчас, пока DNS ещё работает: после переключения резолвить было бы нечем. Пусто — отказ (без якорей в
+		# прямом режиме запросы к ним ушли бы под десинк). Каталожные считает перерезолв (стартовые — в таблице).
+		newips=$(cat "$ENODIA_STATE/.doh-odoh-ips" 2>/dev/null)
+		for cu in $ct $cr; do
+			ch=$(doh_url_host "$cu")
+			ci=$(doh_anchor_ips "$ch" | tr '\n' ' ' | sed 's/ $//')
+			[ -n "$ci" ] || fail "не удалось узнать адреса $ch — проверьте имя (сейчас DNS ещё работает через прежний путь)"
+			newips=$(printf '%s\n%s %s\n' "$(printf '%s\n' "$newips" | awk -v h="$ch" '($1 "") != (h "")')" "$ch" "$ci" | grep -v '^$' | sort -u)
+		done
+		# Прежнее — для отката.
+		pt=$(cat "$ENODIA_STATE/.doh-odoh-target" 2>/dev/null); pr=$(cat "$ENODIA_STATE/.doh-odoh-relay" 2>/dev/null)
+		pct=$(cat "$ENODIA_STATE/.doh-odoh-custom-target" 2>/dev/null); pcr=$(cat "$ENODIA_STATE/.doh-odoh-custom-relay" 2>/dev/null)
+		pips=$(cat "$ENODIA_STATE/.doh-odoh-ips" 2>/dev/null)
+		odoh_put() {   # <цель> <ретранслятор> <свой адрес цели> <свой ретранслятора> <якоря>
+			echo "$1" > "$ENODIA_STATE/.doh-odoh-target"; echo "$2" > "$ENODIA_STATE/.doh-odoh-relay"
+			if [ -n "$3" ]; then echo "$3" > "$ENODIA_STATE/.doh-odoh-custom-target"; else rm -f "$ENODIA_STATE/.doh-odoh-custom-target" 2>/dev/null; fi
+			if [ -n "$4" ]; then echo "$4" > "$ENODIA_STATE/.doh-odoh-custom-relay"; else rm -f "$ENODIA_STATE/.doh-odoh-custom-relay" 2>/dev/null; fi
+			if [ -n "$5" ]; then printf '%s\n' "$5" > "$ENODIA_STATE/.doh-odoh-ips"; else rm -f "$ENODIA_STATE/.doh-odoh-ips" 2>/dev/null; fi
+		}
+		active=0
+		[ "$(doh_proto)" = odoh ] && { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; } && active=1
+		# Teardown по СТАРЫМ адресам — до записи (правила снимаются по текущему файлу якорей и текущей паре).
+		[ "$active" = 1 ] && { doh_edit_unwire; }
+		# A catalog choice keeps the person's own address for later (the DoH resolver's custom URL is kept the same way): which one
+		# is used is said by .doh-odoh-target/relay, and «своё» chosen again shows it instead of an empty field (review s.147).
+		odoh_put "$t" "$r" "${ct:-$pct}" "${cr:-$pcr}" "$newips"
+		doh_odoh_forget   # новое намерение: прежние вердикты лестницы были про другую пару
+		if [ "$active" = 1 ]; then
+			doh_restart
+			sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+			# Пара, ответившая ТОЛЬКО откатом (DoH к цели), — не работающая пара: ODoH через неё не идёт (ревью с.145, круг 1).
+			if ! doh_upstream_set || ! doh_probe 4 || [ -f "$DOH_ODOH_FALLBACK" ]; then
+				doh_edit_unwire
+				doh_odoh_forget
+				odoh_put "$pt" "$pr" "$pct" "$pcr" "$pips"
+				doh_restart
+				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
+				fail "ODoH через эту пару не отвечает — возвращена прежняя"
+			fi
+		fi
+		printf '{"ok":true,"code":0,"msg":"ODoH: цель %s, ретранслятор %s%s"}\n' "$t" "$r" "$(dot_fb_tail)"; exit 0 ;;
+	esac
+}
+
 case "$act" in
+	dns_scan_start)
+		[ -f "$ENODIA_DIR/dns-scan.sh" ] || fail "Проверяльщик DNS не установлен (обновите скрипты)"
+		# Raw fields are validated by the owner, never silently stripped/coerced.
+		# Selectors are ASCII; only the comma needs form decoding. In particular,
+		# %00/%0A must not disappear in a shell command substitution and turn an
+		# invalid selector into a valid one.
+		sp=$(field proto); sv=$(field path); sk=$(field keys | sed 's/%2[Cc]/,/g')
+		sh "$ENODIA_DIR/dns-scan.sh" start "$sp" "$sv" "$sk"; exit 0 ;;
+	dns_scan_cancel)
+		[ -f "$ENODIA_DIR/dns-scan.sh" ] || fail "Проверяльщик DNS не установлен (обновите скрипты)"
+		si=$(field id)
+		case "$si" in ''|*[!a-f0-9]*) fail "неверный ID проверки" ;; esac
+		[ "${#si}" = 16 ] || fail "неверный ID проверки"
+		sh "$ENODIA_DIR/dns-scan.sh" cancel "$si"; exit 0 ;;
 	ping)        printf '{"ok":true,"code":0,"msg":"pong"}\n'; exit 0 ;;
 	vpn_on)      run vpn-toggle.sh on ;;
 	vpn_off)     run vpn-toggle.sh off ;;
@@ -782,7 +1209,10 @@ case "$act" in
 		# потомком init уже не числится и живёт — это законный запуск службы.
 		# Конец команды — по файлу кода, а не `kill -0`: завершившийся фоновый потомок до `wait` остаётся зомби, и `kill -0` отвечал бы
 		# «жив» — каждая команда ждала бы весь потолок.
-		cof=/tmp/enodia-console.$$
+		cof=$(mktemp /tmp/enodia-console.$$.XXXXXX) || fail "не удалось создать временный файл"
+		[ -n "$CBN_LIB" ] || { CBN_LIB=1; if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi; }
+		c_ref=
+		if command -v proc_ref_alive >/dev/null 2>&1; then c_ref=$(proc_start_id "$$"); fi
 		# `.rc` ловушка НЕ трогает: по нему сторож узнаёт, что команда кончилась, и стёртый раньше его взгляда он принимал за «идёт» —
 		# минуту крутил опрос и гасил дерево уже закончившейся команды вместе с её честным фоном (ревью шага 6d, круг 3). Его убирает сторож.
 		trap 'rm -f "$cof" "$cof.k" "$cof.cut"' EXIT
@@ -813,7 +1243,6 @@ case "$act" in
 				[ -e "$cof.cut" ] || : > "$cof.k"
 				# The tree's owner — daemon-lib.sh::proc_tree_kill (frozen first: a child born mid-way does not survive; shared with the
 				# task runner); an older library — its walk, or the former one.
-				[ -n "$CBN_LIB" ] || { CBN_LIB=1; if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi; }
 				if command -v proc_tree_kill >/dev/null 2>&1; then proc_tree_kill "$cpid" 1
 				else
 					if command -v proc_tree >/dev/null 2>&1; then ctree=$(proc_tree "$cpid")   # tree-kill-fallback:
@@ -832,8 +1261,14 @@ case "$act" in
 					kill -TERM $ctree 2>/dev/null; sleep 1; kill -KILL $ctree 2>/dev/null
 				fi
 			fi
-			# CGI жив — он прочтёт вывод и уберёт времянки сам; мёртв — убираем мы (запас на чтение живым CGI).
-			sleep 3; kill -0 $$ 2>/dev/null || rm -f "$cof" "$cof.rc" "$cof.k" "$cof.cut"
+			# A slow CGI still needs its output and exit code. Wait for that CGI
+			# to exit, then also cover the case where its EXIT trap never ran.
+			if [ -n "$c_ref" ]; then
+				while proc_ref_alive "$$" "$c_ref"; do sleep 1; done
+			else
+				while kill -0 "$$" 2>/dev/null; do sleep 1; done
+			fi
+			rm -f "$cof" "$cof.rc" "$cof.k" "$cof.cut"
 		) </dev/null >/dev/null 2>&1 &
 		# CGI ждёт конца команды или вердикта сторожа; свой предел — с запасом, на случай если сторож сам не дожил.
 		ci=0; cwmax=$((cmax + cmax/10 + 30))
@@ -1166,349 +1601,7 @@ case "$act" in
 		# DoQ/DoH3 chosen: whether QUIC answers is asked by doh_apply_dns's direct path — exactly where the auto mode takes DNS.
 		sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
 		printf '{"ok":true,"code":0,"msg":"Авто-DNS в прямых режимах включён"}\n'; exit 0 ;;
-	set_doh_resolver)
-		[ -f "$ENODIA_DIR/doh-lib.sh" ] || fail "doh-lib.sh не установлен (обновите панель)"
-		ENODIA_DIR="$ENODIA_DIR"; . "$ENODIA_DIR/doh-lib.sh"
-		dns_rewire_hold   # чужая операция — отказ, тик сторожа — подождать; дальше под своим локом
-		r=$(field resolver | tr -cd 'a-z0-9')
-		case " $(doh_resolver_list) " in *" $r "*) : ;; *) fail "неизвестный резолвер" ;; esac
-		nid=$(field nextdns_id | tr -cd 'a-f0-9' | cut -c1-16)
-		[ "$r" = nextdns ] && [ -z "$nid" ] && fail "для NextDNS укажите ID профиля"
-		# DoQ/DoH3 chosen: whether the NEW resolver answers them is asked of this router's path below, before its switch (s.151); the
-		# own resolver is judged by its name below, once parsed.
-		# --- СВОЙ резолвер: разобрать ввод и ПОСЧИТАТЬ ЯКОРЯ ДО единой правки состояния ---
-		# Разбор и валидация — в doh-lib (doh_custom_parse), здесь только длина: поле приходит из
-		# сети, и обрезать его до разбора дешевле, чем гонять регексп по мегабайту.
-		cu=""; cs=""; cips=""; cdp=""
-		if [ "$r" = custom ]; then
-			# urldecode ОБЯЗАТЕЛЕН: панель шлёт значение через encodeURIComponent, и без декода
-			# сюда приходит `https%3A%2F%2F…` — строгий разбор такое отвергает ЦЕЛИКОМ, то есть
-			# поле не работало бы вовсе ни с одним адресом. Порядок «декод → обрезка» сознателен:
-			# режем то, что человек ввёл, а не проценты. Пробелы НЕ трогаем — их края снимет
-			# doh_custom_parse, а внутренние обязаны уронить разбор (см. его шапку).
-			cin=$(urldecode "$(field custom_url | cut -c1-900)" | cut -c1-300)
-			[ -n "$cin" ] || fail "укажите адрес своего резолвера"
-			cp=$(doh_custom_parse "$cin") || fail "адрес не похож на резолвер: ждём https://хост/путь, tls://хост, имя или IP"
-			cu=$(printf '%s' "$cp" | cut -f1); cs=$(printf '%s' "$cp" | cut -f2); ch=$(printf '%s' "$cp" | cut -f3)
-			cdp=$(printf '%s' "$cp" | cut -f4)   # порт DoT из `tls://хост:порт` (пусто = 853); библиотека старше поля — пусто
-			# DoT предъявляет имя в SNI, и `-s` у dot-proxy обязателен ⇒ голый IP с ним несовместим.
-			# Говорим это ДО того, как что-то поменяли: иначе человек получил бы откат вместо ответа.
-			[ "$(doh_proto)" = dot ] && [ -z "$cs" ] && fail "для DoT нужно ИМЯ резолвера (у IP нечего предъявить в SNI) — введите имя или переключите протокол на DoH"
-			# DoQ/DoH3 check the certificate by NAME too (doh-lib.sh::doh_quic_can for the own resolver).
-			case "$(doh_proto)" in doq|doh3) [ -z "$cs" ] && fail "для DoQ и DoH3 нужно ИМЯ резолвера (сертификат проверяется по имени) — введите имя или переключите протокол на DoH" ;; esac
-			# Якоря считаем ЗДЕСЬ, пока DNS ещё держит ПРЕЖНИЙ (рабочий) резолвер — после переключения
-			# резолвить было бы уже нечем. Пустой набор = отказ: без якорей в прямом режиме запросы к
-			# резолверу попадут под десинк, то есть мы своими руками положим DNS всему дому.
-			if [ -n "$cs" ]; then
-				# Конвейер якорей — ОДИН на двоих (doh-lib::doh_anchor_ips), он же канонизирует
-				# набор сортировкой: иначе первый же перерезолв в стороже объявил бы «адреса
-				# сменились» лишь потому, что резолвер отдал те же A-записи в другом порядке.
-				cips=$(doh_anchor_ips "$cs")
-				[ -n "$cips" ] || fail "не удалось узнать адреса $cs — проверьте имя (сейчас DNS ещё работает через прежний резолвер)"
-			else
-				cips="$ch"
-			fi
-		fi
-		# Прежний резолвер запоминаем ДО перезаписи: недостижимый новый откатим на него (проба ниже).
-		prev=$(doh_resolver_name); prevnid=$(cat "$ENODIA_STATE/.doh-nextdns-id" 2>/dev/null)
-		prevcu=$(cat "$ENODIA_STATE/.doh-custom-url" 2>/dev/null); prevcs=$(cat "$ENODIA_STATE/.doh-custom-sni" 2>/dev/null)
-		prevcips=$(cat "$ENODIA_STATE/.doh-custom-ips" 2>/dev/null); prevcdp=$(cat "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null)
-		# The form the new resolver's rules WILL travel in (mark into the carrier / RETURN past it): the one the switch's own rewire lays
-		# (doh_rewire_form — transport.sh dns's dispatch), so its QUIC is probed the way it will ride. The old anchors' form was asked
-		# before (s.151): with none laid (paused after a failure) there was no probe at all, and an untunneled resolver was asked past the
-		# carrier the rewire then puts it back into (review s.151 r2 L2, r3 L4).
-		# ON A RUNG (the QUIC level moved the old resolver's proxy below) the new resolver is asked too, but its silence refuses nothing:
-		# it STAYS on that rung, the screen's «QUIC до резолвера не проходит» now said of the resolver that was asked (review s.151 r3 M1);
-		# it answers — it goes up to QUIC. Refusing there brought the old one back on QUIC its path cuts, and the ladder fell again inside
-		# the CGI — the house without names for half a minute (r2 M1). The ladder's state of both levels is saved first: a rollback gives
-		# the old resolver ITS rungs back (r3 L1).
-		_qform=''; _qrung=0
-		case "$(doh_proto)" in doq|doh3)
-			if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
-				[ "$(doh_proto_now)" != "$(doh_proto)" ] && _qrung=1
-				_qform=$(doh_rewire_form)
-			fi ;;
-		esac
-		doh_lv_save
-		# put_resolver <dir> — the new resolver's files into <dir>: a snapshot for the precheck, then the state itself. Своё — тремя
-		# файлами разом: URL (DoH), имя (SNI для DoT; пусто у литерала) и якоря.
-		put_resolver() {
-			echo "$r" > "$1/.doh-resolver"
-			[ "$r" = nextdns ] && echo "$nid" > "$1/.doh-nextdns-id"
-			if [ "$r" = custom ]; then
-				echo "$cu" > "$1/.doh-custom-url"
-				echo "$cs" > "$1/.doh-custom-sni"
-				echo "$cips" > "$1/.doh-custom-ips"
-				if [ -n "$cdp" ]; then echo "$cdp" > "$1/.doh-custom-dot-port"; else rm -f "$1/.doh-custom-dot-port" 2>/dev/null; fi
-			fi
-			return 0
-		}
-		# Under DoQ/DoH3 the new resolver's QUIC handshake first, from THIS router (s.151): silent — refused before ANYTHING changes.
-		# ASKED FROM A SNAPSHOT (review s.153 r1 B3): the current `.doh-*` + the new resolver's files, read in a subshell (doh-lib reads
-		# every path at call time). The state, the old proxy and its anchors stay as they are through the precheck — the old resolver
-		# keeps answering the house (s.151 r2 L3: torn down before it, its proxy rode without anchors for the precheck's seconds), and a
-		# CGI killed in it (uhttpd, a closed tab) leaves the old state whole: no orphaned anchors under the new resolver's files.
-		# Not in_dir: its EXIT trap would replace drop_switch's.
-		_qok=1
-		if [ -n "$_qform" ]; then
-			_rsnap="/tmp/enodia-cgi-in.$$"; rm -rf "$_rsnap" 2>/dev/null
-			( umask 077; mkdir "$_rsnap" ) 2>/dev/null || fail "не удалось создать временный каталог"
-			trap 'drop_switch; rm -rf "$_rsnap"' EXIT
-			cp -p "$ENODIA_STATE"/.doh-* "$_rsnap/" 2>/dev/null
-			put_resolver "$_rsnap"
-			if ( ENODIA_STATE="$_rsnap"; doh_wire_via "$(doh_proto)" "$_qform" ); then
-				[ "$_qrung" = 1 ] && doh_lv_forget quic        # answers here: up from the old resolver's rung
-			elif [ "$_qrung" = 0 ]; then
-				_qok=0                                       # silent where QUIC passes: refused, nothing changed
-			fi                                               # silent on a rung: stays on it
-			rm -rf "$_rsnap" 2>/dev/null
-		fi
-		if [ "$_qok" = 0 ]; then
-			doh_lv_drop
-			# «возвращён custom» человеку ничего не говорит, когда прежний тоже был своим.
-			pname="$prev"; [ "$prev" = custom ] && pname="прежний адрес"
-			fail "резолвер $r не отвечает по $(doh_proto_label "$(doh_proto)") — возвращён $pname"
-		fi
-		# Вердикт «853 этим путём закрыт» был про ПРЕЖНИЙ резолвер: новый обязан сперва попробовать DoT. The QUIC rung stays (above).
-		if [ "$_qrung" = 1 ]; then doh_lv_forget dot; else command -v doh_fb_forget >/dev/null 2>&1 && doh_fb_forget; fi
-		# Teardown правил СТАРОГО резолвера ДО записи нового: правила снимаются по ТЕКУЩЕМУ содержимому файлов (.doh-custom-ips и
-		# прочих) — переписать их раньше значило бы оставить марку/RETURN прежних адресов висеть в mangle навсегда.
-		doh_resolver_mark del; doh_resolver_bypass del
-		put_resolver "$ENODIA_STATE"
-		# Под новый резолвер: DoH активен (тумблер ИЛИ авто держит DNS) → перезапустить прокси + переиграть
-		# DNS (добавит марку/RETURN :443 НОВОГО резолвера). Выключен → просто персист, применится при включении.
-		if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
-			doh_restart
-			sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-			# ФУНКЦИОНАЛЬНАЯ ПРОБА нового резолвера: dnsmasq уже смотрит на прокси с НОВЫМ URL — не
-			# отвечает (недостижим/заблокирован ISP/битый NextDNS-ID) ⇒ вернуть ПРЕЖНИЙ резолвер, DNS
-			# всего дома не рвём (симметрия авто-режима doh_apply_dns, только откат на резолвер, не на plain).
-			# Заодно проба ГРЕЕТ TCP+TLS+HTTP/2 первого запроса — без неё пару секунд после смены клиенты
-			# ловили «Try again» (та же грабля, что при включении тумблера, см. doh_apply_dns).
-			# 4 попытки, а не дефолтные 2: холодная сессия к новому резолверу бывает медленной
-			# (таймаут+перебор anycast-IP), а ложный откат выглядит как «резолвер не работает».
-			# ПЕРВЫМ — указатель dnsmasq на прокси (у владельца, doh_upstream_set): ручной режим с 31.08 сам проверяет имена и при
-			# отказе откатывает DNS на путь плагина, и проба имён через ТОТ DNS проходит — «ок» при мёртвом новом резолвере, без
-			# возврата прежнего и с паузой 15 минут (ревью ветки fix/dot-tails, круг 2).
-			if ! doh_upstream_set || ! doh_probe 4; then
-				doh_resolver_mark del; doh_resolver_bypass del
-				# Переезд, если он случился на попытке НОВОГО резолвера, — вердикт о нём, а не о прежнем: прежнему возвращаем ЕГО лестницу
-				# из снимка (обе ступени и сроки), а не забытую: иначе он вернулся бы на DoH с экраном «DoT не проходит», хотя его DoT
-				# работал, или поднялся бы на QUIC, который его путь режет (review s.151 r3 L1).
-				doh_lv_restore
-				echo "$prev" > "$ENODIA_STATE/.doh-resolver"
-				if [ -n "$prevnid" ]; then echo "$prevnid" > "$ENODIA_STATE/.doh-nextdns-id"; else rm -f "$ENODIA_STATE/.doh-nextdns-id" 2>/dev/null; fi
-				# Своё возвращаем ЦЕЛИКОМ, включая якоря: прежний резолвер тоже мог быть своим, и
-				# полуоткат (имя старое, адреса новые) оставил бы правила на чужих IP.
-				if [ -n "$prevcu" ]; then
-					echo "$prevcu" > "$ENODIA_STATE/.doh-custom-url"; echo "$prevcs" > "$ENODIA_STATE/.doh-custom-sni"
-					echo "$prevcips" > "$ENODIA_STATE/.doh-custom-ips"
-					if [ -n "$prevcdp" ]; then echo "$prevcdp" > "$ENODIA_STATE/.doh-custom-dot-port"; else rm -f "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null; fi
-				else
-					rm -f "$ENODIA_STATE/.doh-custom-url" "$ENODIA_STATE/.doh-custom-sni" "$ENODIA_STATE/.doh-custom-ips" "$ENODIA_STATE/.doh-custom-dot-port" 2>/dev/null
-				fi
-				doh_restart
-				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-				# ПРИЧИНА, а не «не отвечает». Отказ по сертификату выглядит для человека так же
-				# («не работает»), но чинится совсем иначе — и такой отказ бывает ПЛАВАЮЩИМ: на
-				# железе 14.08.2026 dns.comss.one по DoH прошёл 2 раза из 3, а по DoT — всегда.
-				# Единственный, кто знает правду, — лог демона; ловим сигнатуру mbedTLS в свежем
-				# хвосте (лог мы только что переписали рестартом, старое сюда не попадёт).
-				why=""
-				[ -z "$why" ] && grep -q 'BADCERT_CN_MISMATCH' /tmp/enodia-doh.log 2>/dev/null && \
-					why=" (сертификат резолвера не принят; у этого адреса такое бывает через раз — попробуйте протокол DoT)"
-				[ -z "$why" ] && grep -q 'BADCERT' /tmp/enodia-doh.log 2>/dev/null && \
-					why=" (сертификат резолвера не прошёл проверку)"
-				# «возвращён custom» человеку ничего не говорит, когда прежний тоже был своим.
-				pname="$prev"; [ "$prev" = custom ] && pname="прежний адрес"
-				fail "резолвер $r не отвечает$why — возвращён $pname"
-			fi
-		fi
-		doh_lv_drop
-		printf '{"ok":true,"code":0,"msg":"Резолвер шифрованного DNS: %s%s"}\n' "$r" "$(dot_fb_tail)"; exit 0 ;;
-
-	# --- Протокол шифрованного DNS: doh (HTTPS/:443) | dot (TLS/:853, наш dot-proxy). Зеркало
-	# set_doh_resolver: teardown обоих портов (del в либе proto-agnostic), персист, при активном
-	# DNS — перезапуск под новый бинарь + функциональная проба с откатом на прежний протокол.
-	set_doh_proto)
-		[ -f "$ENODIA_DIR/doh-lib.sh" ] || fail "doh-lib.sh не установлен (обновите панель)"
-		ENODIA_DIR="$ENODIA_DIR"; . "$ENODIA_DIR/doh-lib.sh"
-		dns_rewire_hold   # чужая операция — отказ, тик сторожа — подождать; дальше под своим локом
-		# Digits stay: `a-z` alone turned «doh3» into «doh» — the repeated-DoH branch answered ok and DoH3 could never be chosen
-		# (AX3600, 1.3.0-dev.9, 20.10.2026; the class is held by dev/sanitize-case-test.py).
-		v=$(field value | tr -cd 'a-z0-9')
-		case "$v" in doh|dot|odoh|doq|doh3) : ;; *) fail "ожидается doh|dot|odoh|doq|doh3" ;; esac
-		prev=$(doh_proto)
-		if [ "$v" = "$prev" ]; then
-			# ПОВТОРНЫЙ ВЫБОР DoT, ПОКА РОУТЕР ШИФРУЕТ ПО DoH (переезд порта), — просьба «проверь DoT СЕЙЧАС», а не пустой клик:
-			# иначе человеку, починившему путь (сменил выход, провайдер открыл 853), оставалось ждать сверку сторожа до часа.
-			# Тот же ход, что у включения тумблера: забыть вердикт, поднять прокси под DoT, переиграть DNS — а решит проба
-			# имён в doh_apply_dns (не пошли — doh_dot_rescue переедет обратно, и хвост ответа это скажет).
-			# То же для ODoH на откате «DoH напрямую к цели»: повторный клик — «проверь ретрансляторы сейчас».
-			if [ "$v" = odoh ] && [ "$(doh_proto_now)" = doh ] && \
-			   { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; }; then
-				doh_odoh_forget; doh_resolver_mark del; doh_resolver_bypass del; doh_restart
-				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-				doh_upstream_set || fail "Ни один ретранслятор не ответил, и DoH к цели тоже — вернул прежний DNS. Роутер проверит снова сам."
-			fi
-			if [ "$v" = dot ] && command -v doh_dot_forget >/dev/null 2>&1 && \
-			   { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; } && doh_dot_forget; then
-				doh_resolver_mark del; doh_resolver_bypass del; doh_restart
-				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-				# ИТОГ — ПО ФАКТУ (указатель dnsmasq на прокси — у владельца, doh_upstream_set), а не бодрым «ок»: не пошли ни DoT, ни
-				# DoH — DNS откатан на прежний путь и стоит пауза, а тост говорил «Протокол шифрованного DNS: dot» (ревью ветки, круг 1).
-				doh_upstream_set || fail "Резолвер не ответил ни по DoT, ни по DoH — вернул прежний DNS. Роутер проверит снова сам."
-			fi
-			# DoQ/DoH3 on a rung below (the QUIC level of the ladder): the repeated choice is «check it NOW» — the same move as DoT's.
-			case "$v" in doq|doh3)
-				if [ "$(doh_proto_now)" != "$v" ] && { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; }; then
-					# The handshake FIRST, the way the proxy travels (review s.151 r2 M3): forgetting the rung restarts the proxy on QUIC, and a
-					# path that still cuts it cost the whole house its names for the ladder's fall — on every click. The watchdog asks so too.
-					doh_wire_via "$v" "$(doh_rewire_form)" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")"
-					if doh_lv_forget quic; then
-						doh_resolver_mark del; doh_resolver_bypass del; doh_restart
-						sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-						doh_upstream_set || fail "Резолвер не ответил ни по $(doh_proto_label "$v"), ни по протоколам ниже — вернул прежний DNS. Роутер проверит снова сам."
-					fi
-				fi ;;
-			esac
-			printf '{"ok":true,"code":0,"msg":"Протокол шифрованного DNS: %s%s"}\n' "$v" "$(dot_fb_tail)"; exit 0
-		fi
-		# DoQ/DoH3 — their own component (the QUIC program); the own resolver needs a NAME. Both said BEFORE the switch: else doh_start
-		# would quietly not rise, the probe fail, and the person see a rollback instead of the reason.
-		case "$v" in doq|doh3)
-			[ -x "$QUIC_BIN" ] || fail "для $(doh_proto_label "$v") нужен компонент «DoQ и DoH3» — установите его в «Компонентах»"
-			doh_quic_can "$v" || fail "у своего резолвера указан IP — для $(doh_proto_label "$v") нужно ИМЯ (сертификат проверяется по имени)" ;;
-		esac
-		[ -x "$(doh_bin_for "$v")" ] || fail "бинарь для $v не установлен — нажмите «Установить» в карточке"
-		# ODoH умеет только новая сборка программы DoH (наш патч): прежняя ключа -O не знает и не стартует. Говорим ДО переключения.
-		[ "$v" = odoh ] && ! doh_odoh_capable && fail "программа DoH не умеет ODoH — обновите её в «Компонентах» (шифрованный DNS)"
-		# Свой резолвер, введённый ГОЛЫМ IP,c DoT несовместим (в SNI нечего предъявить, а `-s`
-		# обязателен). Сказать это ДО переключения — иначе doh_start молча не поднимется, проба
-		# провалится и человек увидит откат вместо причины.
-		[ "$v" = dot ] && [ "$(doh_resolver_name)" = custom ] && [ -z "$(dot_resolver_sni custom)" ] && \
-			fail "у своего резолвера указан IP — для DoT нужно ИМЯ (или оставьте DoH)"
-		# DOES QUIC ANSWER HERE — asked of THIS router's path before anything changes (s.151): whether a resolver answers DoQ/DoH3 depends
-		# on the country and the ISP. The handshake probe the ladder uses (doh_wire_ok: the program's `-Q`, in the form the resolver's
-		# anchors travel), one ceiling for all addresses — seconds, where a switch to a silent QUIC resolver fell down its rungs inside the
-		# CGI for minutes (review s.150 R3-5). Asked only when the anchors' form is known: without anchors (paused after a failure, the
-		# old protocol's program missing) the probe would ride another way than the proxy will (review s.151 r2 L2, L4) — the switch's
-		# own ladder answers then. Off — nothing travels: the choice is stored and asked on switching on, by the ladder.
-		# THE GATE IS THE INTENT, the restart's own question after the write below: «encryption on» (or the auto mode holding DNS) —
-		# doh_enabled asked here, before the write, is about the OLD protocol's program; with it missing (only «DoQ и DoH3» installed)
-		# the precheck was skipped and the proxy then rose on a silent QUIC (review s.151 r2 L4). THE FORM is the one the rewire lays
-		# (doh_rewire_form) — no anchors (paused, the old program missing) or an untunneled resolver no longer skip or misroute it.
-		case "$v" in doq|doh3)
-			if doh_on_intent || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
-				doh_wire_via "$v" "$(doh_rewire_form)" || fail "Резолвер не ответил по $(doh_proto_label "$v") — остался $(doh_proto_label "$(doh_proto_now)")"
-			fi ;;
-		esac
-		doh_resolver_mark del; doh_resolver_bypass del
-		echo "$v" > "$ENODIA_STATE/.doh-proto"
-		# Новый выбор человека — прежний вердикт о порте забыт: выбранный DoT сперва пробуем честно, а не
-		# продолжаем шифровать по DoH, куда его увела прошлая проверка (doh-lib.sh::doh_dot_fallback).
-		command -v doh_fb_forget >/dev/null 2>&1 && doh_fb_forget
-		command -v doh_odoh_forget >/dev/null 2>&1 && doh_odoh_forget
-		if doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; then
-			doh_restart
-			# DID THE QUIC PROGRAM COME UP — asked NOW, while it is knowable: a failed rewire below stops the proxy (doh_apply_fail →
-			# doh_dns_bailout), and asked after it every silent resolver read «the program did not start» (review s.150, round 2).
-			_pup=1; case "$v" in doq|doh3) doh_wait_listen 15 || _pup=0 ;; esac
-			sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-			# Попыток больше дефолта: у DoT холодный старт стоит 3 с таймаута на IP + 3 с backoff,
-			# и одиночная проба ложно объявляла «протокол не заработал» (железо 2026-07-27).
-			# Указатель на прокси — первым (разбор у set_doh_resolver: проба через откатанный DNS плагина проходит).
-			# ODoH, ответивший ТОЛЬКО откатом «DoH напрямую к цели» (ретрансляторы молчат), — не заработавший выбор: сохрани мы его, сторож
-			# пробовал бы вернуться на ODoH под домом раз за разом (ревью с.145, круг 1). Проверка — по стампу отката у владельца.
-			_odfb=0; [ "$v" = odoh ] && [ -f "${DOH_ODOH_FALLBACK:-/nonexistent}" ] && _odfb=1
-			if ! doh_upstream_set || ! doh_probe 4 || [ "$_odfb" = 1 ]; then
-				# WHY, asked before the rollback restarts the proxy: for DoQ/DoH3 a program that never came up is not «the resolver is silent»
-				# (the rungs below run the OTHER programs; a QUIC block alone keeps the choice on a rung and does not end here) — review s.150.
-				_pwhy='резолвер не отвечает; :853 может резать провайдер'
-				case "$v" in doq|doh3)
-					if [ "$_pup" = 1 ]; then _pwhy='резолвер не отвечает ни по нему, ни по протоколам ниже'
-					else _pwhy='программа DoQ и DoH3 не запустилась на роутере'; fi ;;
-				esac
-				doh_resolver_mark del; doh_resolver_bypass del
-				echo "$prev" > "$ENODIA_STATE/.doh-proto"
-				command -v doh_odoh_forget >/dev/null 2>&1 && doh_odoh_forget
-				doh_restart
-				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-				# The pair is chosen on the ODoH pane, which shows only once ODoH is selected — with the default pair dead that was a
-				# dead end (review s.147). With encryption off the choice is only saved, so the way out is named here.
-				[ "$v" = odoh ] && fail "ретрансляторы ODoH не ответили — возвращён $prev. Выбрать другую пару: выключите «Шифровать всегда» и «Само, когда туннеля нет», выберите ODoH и пару, затем включите их снова."
-				fail "протокол $v не заработал ($_pwhy) — возвращён $prev"
-			fi
-		fi
-		printf '{"ok":true,"code":0,"msg":"Протокол шифрованного DNS: %s%s"}\n' "$v" "$(dot_fb_tail)"; exit 0 ;;
-
-	# --- ODoH: цель и ретранслятор (doh-lib.sh, блок «OBLIVIOUS DoH»). Зеркало set_doh_resolver: разбор и якоря своих имён — ДО
-	# единой правки (пока DNS держит прежний путь), пара одного владельца — отказ, teardown правил по СТАРЫМ адресам, запись,
-	# при активном ODoH — перезапуск и проба имён с откатом на прежнюю пару. ODoH не выбран — просто персист, применится при выборе.
-	set_odoh)
-		[ -f "$ENODIA_DIR/doh-lib.sh" ] || fail "doh-lib.sh не установлен (обновите панель)"
-		ENODIA_DIR="$ENODIA_DIR"; . "$ENODIA_DIR/doh-lib.sh"
-		command -v doh_odoh_target >/dev/null 2>&1 || fail "библиотека DoH старше ODoH (обновите панель)"
-		dns_rewire_hold
-		t=$(field target | tr -cd 'a-z0-9'); r=$(field relay | tr -cd 'a-z0-9')
-		{ [ "$t" = custom ] || [ -n "$(doh_tab "$DOH_ODOH_TARGETS" "$t" 5)" ]; } || fail "неизвестная цель"
-		{ [ "$r" = auto ] || [ "$r" = custom ] || [ -n "$(doh_tab "$DOH_ODOH_RELAYS" "$r" 5)" ]; } || fail "неизвестный ретранслятор"
-		ct=''; cr=''
-		if [ "$t" = custom ]; then
-			ct=$(doh_odoh_parse_url "$(urldecode "$(field custom_target | cut -c1-900)" | cut -c1-300)" target) || \
-				fail "адрес цели не подходит: ждём https://имя/путь — без порта и не IP"
-		fi
-		if [ "$r" = custom ]; then
-			cr=$(doh_odoh_parse_url "$(urldecode "$(field custom_relay | cut -c1-900)" | cut -c1-300)" relay) || \
-				fail "адрес ретранслятора не подходит: ждём https://имя/путь — без порта и не IP"
-		fi
-		# URL пары, как она встанет (для проверки владельцев): цель и каждый ретранслятор списка.
-		turl=$ct; [ -n "$turl" ] || turl=$(doh_tab "$DOH_ODOH_TARGETS" "$t" 5)
-		if [ "$r" = custom ]; then rurls=$cr; elif [ "$r" = auto ]; then rurls=$(for k in $(doh_tab_keys "$DOH_ODOH_RELAYS"); do doh_tab "$DOH_ODOH_RELAYS" "$k" 5; done); else rurls=$(doh_tab "$DOH_ODOH_RELAYS" "$r" 5); fi
-		for ru in $rurls; do
-			doh_odoh_same_owner "$turl" "$ru" && fail "цель и ретранслятор у одного владельца ($(doh_url_host "$ru")): он увидит и адрес, и вопросы — выберите другой ретранслятор"
-		done
-		# Якоря СВОИХ имён — сейчас, пока DNS ещё работает: после переключения резолвить было бы нечем. Пусто — отказ (без якорей в
-		# прямом режиме запросы к ним ушли бы под десинк). Каталожные считает перерезолв (стартовые — в таблице).
-		newips=$(cat "$ENODIA_STATE/.doh-odoh-ips" 2>/dev/null)
-		for cu in $ct $cr; do
-			ch=$(doh_url_host "$cu")
-			ci=$(doh_anchor_ips "$ch" | tr '\n' ' ' | sed 's/ $//')
-			[ -n "$ci" ] || fail "не удалось узнать адреса $ch — проверьте имя (сейчас DNS ещё работает через прежний путь)"
-			newips=$(printf '%s\n%s %s\n' "$(printf '%s\n' "$newips" | awk -v h="$ch" '($1 "") != (h "")')" "$ch" "$ci" | grep -v '^$' | sort -u)
-		done
-		# Прежнее — для отката.
-		pt=$(cat "$ENODIA_STATE/.doh-odoh-target" 2>/dev/null); pr=$(cat "$ENODIA_STATE/.doh-odoh-relay" 2>/dev/null)
-		pct=$(cat "$ENODIA_STATE/.doh-odoh-custom-target" 2>/dev/null); pcr=$(cat "$ENODIA_STATE/.doh-odoh-custom-relay" 2>/dev/null)
-		pips=$(cat "$ENODIA_STATE/.doh-odoh-ips" 2>/dev/null)
-		odoh_put() {   # <цель> <ретранслятор> <свой адрес цели> <свой ретранслятора> <якоря>
-			echo "$1" > "$ENODIA_STATE/.doh-odoh-target"; echo "$2" > "$ENODIA_STATE/.doh-odoh-relay"
-			if [ -n "$3" ]; then echo "$3" > "$ENODIA_STATE/.doh-odoh-custom-target"; else rm -f "$ENODIA_STATE/.doh-odoh-custom-target" 2>/dev/null; fi
-			if [ -n "$4" ]; then echo "$4" > "$ENODIA_STATE/.doh-odoh-custom-relay"; else rm -f "$ENODIA_STATE/.doh-odoh-custom-relay" 2>/dev/null; fi
-			if [ -n "$5" ]; then printf '%s\n' "$5" > "$ENODIA_STATE/.doh-odoh-ips"; else rm -f "$ENODIA_STATE/.doh-odoh-ips" 2>/dev/null; fi
-		}
-		active=0
-		[ "$(doh_proto)" = odoh ] && { doh_enabled || { command -v doh_auto_active >/dev/null 2>&1 && doh_auto_active; }; } && active=1
-		# Teardown по СТАРЫМ адресам — до записи (правила снимаются по текущему файлу якорей и текущей паре).
-		[ "$active" = 1 ] && { doh_resolver_mark del; doh_resolver_bypass del; }
-		# A catalog choice keeps the person's own address for later (the DoH resolver's custom URL is kept the same way): which one
-		# is used is said by .doh-odoh-target/relay, and «своё» chosen again shows it instead of an empty field (review s.147).
-		odoh_put "$t" "$r" "${ct:-$pct}" "${cr:-$pcr}" "$newips"
-		doh_odoh_forget   # новое намерение: прежние вердикты лестницы были про другую пару
-		if [ "$active" = 1 ]; then
-			doh_restart
-			sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-			# Пара, ответившая ТОЛЬКО откатом (DoH к цели), — не работающая пара: ODoH через неё не идёт (ревью с.145, круг 1).
-			if ! doh_upstream_set || ! doh_probe 4 || [ -f "$DOH_ODOH_FALLBACK" ]; then
-				doh_resolver_mark del; doh_resolver_bypass del
-				doh_odoh_forget
-				odoh_put "$pt" "$pr" "$pct" "$pcr" "$pips"
-				doh_restart
-				sh "$ENODIA_DIR/transport.sh" dns >/dev/null 2>&1
-				fail "ODoH через эту пару не отвечает — возвращена прежняя"
-			fi
-		fi
-		printf '{"ok":true,"code":0,"msg":"ODoH: цель %s, ретранслятор %s%s"}\n' "$t" "$r" "$(dot_fb_tail)"; exit 0 ;;
+	set_doh_resolver|set_doh_proto|set_odoh) owner_relay doh_edit ;;
 
 	# --- Доустановка бинарей DoH ПО ВОЗДУХУ. Установка с ПК несёт их в payload, но обновившиеся
 	# из панели (apply-scripts тянет только скрипты из манифеста) остаются без бинаря — карточка
@@ -1752,6 +1845,27 @@ case "$act" in
 	# в subs-update.sh, и вторая (браузерная) их копия тасовала серверы по файлам на каждом
 	# ручном обновлении. Необязательная метка = обновить ОДНУ подписку (кнопка ⟳ у неё), без
 	# метки = все (кнопка экрана «Подписки»). Фоном: разбор десятков серверов дольше таймаута CGI.
+	import_sub_body)
+		[ -n "${relay_len:-}" ] || fail "пустой или слишком большой запрос"
+		[ -f "$ENODIA_DIR/subs-import.sh" ] || fail "subs-update.sh не установлен (обновите скрипты роутера)"
+		tag=$(field tag)
+		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
+		grep -q "^$tag$(printf '\t')" "$ENODIA_STATE/.subs" 2>/dev/null || fail "подписка не найдена"
+		in_dir
+		# Stream provider bytes into the importer input file, outside the shell's form buffer.
+		head -c "$relay_len" > "$IN_DIR/body" || fail "не удалось записать"
+		[ "$(wc -c < "$IN_DIR/body")" -eq "$relay_len" ] || fail "подписка недоступна или пустая"
+		cap_run subs-import.sh import-body "$tag" "$IN_DIR/body"; rc=$?
+		. "$ENODIA_DIR/xray-profile-lib.sh"
+		_result=$(printf '%s\n' "$CAP_OUT" | grep '^relay-result' | tail -n1)
+		_msg=$(printf '%s\n' "$_result" | cut -f3- | jtxt 1000)
+		_geo=false; [ "$(printf '%s\n' "$_result" | cut -f2)" != 1 ] || _geo=true
+		_rows=$(printf '%s\n' "$CAP_OUT" | sed -n 's/^  профиль \([0-9][0-9]* пропущен: .*\)$/Профиль Xray №\1/p')
+		printf '{"ok":%s,"code":%s,"geo_notice":%s,"msg":"%s","refused":' \
+			"$([ "$rc" = 0 ] && echo true || echo false)" "$rc" "$_geo" "${_msg:-не удалось запустить обновление}"
+		xp_quote "$_rows"
+		printf '}\n'; exit 0 ;;
+
 	subs_update_now)
 		[ -f "$ENODIA_DIR/subs-update.sh" ] || fail "subs-update.sh не установлен (обновите скрипты роутера)"
 		[ -s "$ENODIA_STATE/.subs" ] || fail "подписок нет — добавьте подписку в списке серверов"
@@ -1959,7 +2073,7 @@ EOF
 			# Берём ТОЛЬКО строки про причину: на успехе cmd_up печатает ещё и cmd_status, а он
 			# в тост не нужен. Причина кладётся в msg, а не в отдельное поле: postAction в панели
 			# показывает msg и в тосте, и в журнале действий, а лишних полей он не читает.
-			why=$(printf '%s\n' "$raw" | grep -E 'резолв|зарезолвил|удал|встан' | tail -2 | jesc 200)
+			why=$(alt_raise_why "$raw")
 			if [ "$rc" = 0 ]; then
 				if [ -n "$why" ]; then
 					printf '{"ok":true,"code":0,"msg":"Xray-конфиг %s активен, несущая перезапущена. %s"}\n' "$name" "$why"
@@ -1967,7 +2081,7 @@ EOF
 					printf '{"ok":true,"code":0,"msg":"Xray-конфиг %s активен, несущая перезапущена"}\n' "$name"
 				fi
 			else
-				printf '{"ok":false,"code":%s,"msg":"Xray-конфиг %s активен, но несущая НЕ поднялась. %s"}\n' "$rc" "$name" "${why:-подробности в логе транспорта}"
+				printf '{"ok":false,"code":%s,"msg":"Xray-конфиг %s активен, но несущая НЕ поднялась. %s"}\n' "$rc" "$_rawgeo" "$name" "${why:-подробности в логе транспорта}"
 			fi
 		elif vpn_is_off; then
 			# ПОЧЕМУ не применилось — вопрос человека, и ответ у двух веток РАЗНЫЙ: «переключись
@@ -1988,7 +2102,7 @@ EOF
 		if [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = hy2 ] && ! vpn_is_off; then
 			sh "$ENODIA_DIR/transport-hy2.sh" down >/dev/null 2>&1
 			cap_run transport-hy2.sh up; rc=$?; raw=$CAP_OUT   # причину не глотаем — зеркало set_xray_server
-			why=$(printf '%s\n' "$raw" | grep -E 'резолв|зарезолвил|удал|встан' | tail -2 | jesc 200)
+			why=$(alt_raise_why "$raw")
 			if [ "$rc" = 0 ]; then
 				if [ -n "$why" ]; then
 					printf '{"ok":true,"code":0,"msg":"Hysteria2-конфиг %s активен, несущая перезапущена. %s"}\n' "$name" "$why"
@@ -2024,9 +2138,9 @@ EOF
 			[ -n "$_dsv" ] && fail "конфиг $name служит дорогой (выход №$_dsv) — сначала переключите дорогу его пассажиров на «напрямую»"
 		fi
 		held_refuse awg "$name"
+		road_delete awg "$name"
 		rm -f "$ENODIA_STATE/configs/$name.conf" || fail "не удалось удалить $name"
 		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del awg "$name" >/dev/null 2>&1   # настоящее имя — вместе с файлом
-		[ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" del awg "$name" >/dev/null 2>&1           # и дорога к серверу (road.sh)
 		[ -f "$ENODIA_DIR/warp.sh" ] && sh "$ENODIA_DIR/warp.sh" prune give >/dev/null 2>&1                # a WARP config takes its registration with it: the record here, the registration at Cloudflare (in the background)
 		printf '{"ok":true,"code":0,"msg":"awg-конфиг %s удалён"}\n' "$name"
 		exit 0 ;;
@@ -2038,7 +2152,8 @@ EOF
 		{ [ "$name" = "$active" ] && [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = xray ]; } \
 			&& fail "это активный конфиг при включённом Xray — сначала переключитесь на другой транспорт"
 		held_refuse xray "$name"
-		rm -f "$ENODIA_STATE/xray-configs/$name.json"
+		road_delete xray "$name"
+		rm -f "$ENODIA_STATE/xray-configs/$name.json" || fail "не удалось удалить конфиг"
 		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del xray "$name" >/dev/null 2>&1
 		[ "$name" = "$active" ] && rm -f "$ENODIA_STATE/.xray-active"
 		printf '{"ok":true,"code":0,"msg":"xray-конфиг %s удалён"}\n' "$name"; exit 0 ;;
@@ -2050,7 +2165,8 @@ EOF
 		{ [ "$name" = "$active" ] && [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = hy2 ]; } \
 			&& fail "это активный конфиг при включённой Hysteria2 — сначала переключитесь на другой транспорт"
 		held_refuse hy2 "$name"
-		rm -f "$ENODIA_STATE/hy2-configs/$name.yaml"
+		road_delete hy2 "$name"
+		rm -f "$ENODIA_STATE/hy2-configs/$name.yaml" || fail "не удалось удалить конфиг"
 		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del hy2 "$name" >/dev/null 2>&1
 		[ "$name" = "$active" ] && rm -f "$ENODIA_STATE/.hy2-active"
 		printf '{"ok":true,"code":0,"msg":"hy2-конфиг %s удалён"}\n' "$name"; exit 0 ;;
@@ -2143,8 +2259,25 @@ EOF
 			*) fail "неизвестный тип (xray/hy2/awg)" ;;
 		esac
 		[ -f "$cfg" ] || fail "нет конфига $name"
-		b=$(base64 < "$cfg" | tr -d '\r\n')
-		printf '{"ok":true,"code":0,"content":"%s"}\n' "$b"; exit 0 ;;
+		exec 3< "$cfg" || fail "нет конфига $name"
+		_view=null; _rev=
+		if [ "$kind" = xray ] && [ -f "$ENODIA_DIR/xray-profile-lib.sh" ]; then
+			. "$ENODIA_DIR/xray-profile-lib.sh"
+			_rev=$(xp_reality_rev /proc/self/fd/3)
+			[ "$(field fp_only)" != 1 ] || { printf '{"ok":true,"fp_rev":"%s"}\n' "$_rev"; exit 0; }
+			_view=$(xp_view /proc/self/fd/3) || _view=null
+		fi
+		b=$(base64 <&3 | tr -d '\r\n')
+		printf '{"ok":true,"code":0,"content":"%s","profile":%s,"fp_rev":"%s"}\n' "$b" "$_view" "$_rev"; exit 0 ;;
+	inspect_xray_raw)
+		[ -f "$ENODIA_DIR/xray-profile-lib.sh" ] || fail "не удалось прочитать конфиг"
+		in_dir
+		urldecode "$(field content)" | base64 -d > "$IN_DIR/config.json" 2>/dev/null || fail "пустой или битый конфиг (base64)"
+		. "$ENODIA_DIR/xray-profile-lib.sh"
+		printf '{"ok":true,"profile":'
+		xp_view "$IN_DIR/config.json"
+		printf '}\n'; exit 0 ;;
+
 	# get_config_info: НЕСЕКРЕТНОЕ из конфига AmneziaWG для экрана сервера. Редактора у AWG нет (`awg setconf` отвергает конфиг
 	# целиком — полуправка оставила бы интерфейс без рукопожатия), но куда он ведёт и задан ли в нём MTU, человек видеть обязан:
 	# у нативного .conf строки MTU нет никогда, и действует общий (карта проекта, «нативный .conf без MTU»). Ключи НЕ отдаём.
@@ -2188,7 +2321,7 @@ EOF
 		at=$(stat -c %Y "$cfg" 2>/dev/null | tr -cd '0-9'); now=$(date +%s 2>/dev/null | tr -cd '0-9')
 		printf '{"ok":true,"code":0,"endpoint":"%s","mtu":%s,"mtu_src":"%s","exits":[%s],"exit_mtu":%s,"exit_mtu_src":"%s","road":"%s","road_mtu":%s,"at":%s,"now":%s}\n' "$ep" "$mtu" "$msrc" "$xs" "$xmtu" "$xsrc" "$road" "${rcap:-null}" "${at:-0}" "${now:-0}"; exit 0 ;;
 	# save_config_raw: пишет ПОЛНЫЙ конфиг (из формы — пересобран фронтом, или сырой текст).
-	# Валидация: xray → JSON через jsonfilter (на роутере есть) + наличие outbound-протокола;
+	# Валидация: xray → тот же санитайзер и проверка Xray, что и при загрузке;
 	# hy2 → наличие server:. Атомарно (.new+mv). Если конфиг активен и транспорт его несёт —
 	# копируем в живой xray.json/hysteria.yaml и перезапускаем несущую (как edit_*_server).
 	save_config_raw)
@@ -2202,20 +2335,27 @@ EOF
 		[ -f "$cfg" ] || fail "нет конфига $name (сначала загрузите)"
 		content=$(urldecode "$(field content)" | base64 -d 2>/dev/null | tr -d '\r')
 		[ -n "$content" ] || fail "пустой или битый конфиг (base64)"
-		printf '%s' "$content" > "$cfg.new" || { rm -f "$cfg.new"; fail "не удалось записать"; }
+		_draft="${cfg%/*}/.enodia-edit.$$"
+		_saved="$_draft"
+		_rawgeo=false
+		(umask 077; printf '%s' "$content" > "$_draft") || { rm -f "$_draft"; fail "не удалось записать"; }
 		if [ "$kind" = xray ]; then
-			if command -v jsonfilter >/dev/null 2>&1; then
-				ov=$(jsonfilter -i "$cfg.new" -e '@.outbounds[*].protocol' 2>/dev/null)
-				[ -n "$ov" ] || { rm -f "$cfg.new"; fail "невалидный JSON (проверьте скобки и запятые)"; }
-				echo "$ov" | grep -qE 'vless|vmess|trojan|shadowsocks' || { rm -f "$cfg.new"; fail "нет outbound-протокола (vless/vmess/trojan/ss)"; }
-			else
-				grep -q '"outbounds"' "$cfg.new" || { rm -f "$cfg.new"; fail "нет outbounds в JSON"; }
-				grep -qE '"protocol"[[:space:]]*:[[:space:]]*"(vless|vmess|trojan|shadowsocks)"' "$cfg.new" || { rm -f "$cfg.new"; fail "нет outbound-протокола"; }
+			. "$ENODIA_DIR/xray-profile-lib.sh"
+			_saved="$_draft.json"
+			if ! xp_prepare "$_draft" "$_saved" "$(bin_path xray)"; then
+				rm -f "$_draft" "$_saved"
+				fail "$XP_REASON"
 			fi
+			rm -f "$_draft"
+			[ "$XP_GEO_REMOVED" != 1 ] || _rawgeo=true
 		else
-			grep -qE '^[[:space:]]*server:' "$cfg.new" || { rm -f "$cfg.new"; fail "нет server: в YAML"; }
+			grep -qE '^[[:space:]]*server:' "$_draft" || { rm -f "$_draft"; fail "нет server: в YAML"; }
 		fi
-		mv "$cfg.new" "$cfg" && chmod 600 "$cfg" || { rm -f "$cfg.new"; fail "не удалось сохранить"; }
+		_expected_rev=$(field expected_rev)
+		if [ "$kind" = xray ] && [ -n "$_expected_rev" ] && [ "$(xp_reality_rev "$cfg")" != "$_expected_rev" ]; then
+			rm -f "$_saved"; fail "Конфиг изменился — проверьте параметры сервера"
+		fi
+		mv "$_saved" "$cfg" && chmod 600 "$cfg" || { rm -f "$_saved"; fail "не удалось сохранить"; }
 		active=$(cat "$act" 2>/dev/null | tr -d ' \r\n')
 		if [ "$name" = "$active" ]; then
 			# Рабочая копия и перезапуск — ПОД ЛОКОМ СМЕНЫ, а «активен ли конфиг» и «чья несущая» перечитываем уже ПОД НИМ (ревью с.97):
@@ -2227,37 +2367,24 @@ EOF
 			hold_switch
 			active=$(cat "$act" 2>/dev/null | tr -d ' \r\n')
 		fi
+		_msg="Конфиг $name сохранён"; rc=0; _ok=true
 		if [ "$name" = "$active" ]; then
 			cp "$cfg" "$live" 2>/dev/null && chmod 600 "$live"
 			# VPN выключен человеком — это СОСТОЯНИЕ (C67): конфиг сохранён и рабочая копия обновлена, а несущую не поднимаем — её
 			# поднимет «Включить VPN» уже с новым конфигом (как set_xray_server/set_hy2_server).
-			if vpn_is_off; then
-				# Обещать «применится при включении» можно, только если включение поднимет ЭТОТ транспорт: активный конфиг Xray при
-				# выбранном AWG включение не тронет (ревью пачки 2, круг 2).
-				if [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')" = "$tname" ]; then
-					printf '{"ok":true,"code":0,"msg":"Конфиг %s сохранён — применится, когда включите VPN"}\n' "$name"
-				else
-					printf '{"ok":true,"code":0,"msg":"Конфиг %s сохранён"}\n' "$name"
-				fi
-				exit 0
-			fi
 			if [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')" = "$tname" ]; then
-				sh "$ENODIA_DIR/$tsh" down >/dev/null 2>&1
-				cap_run "$tsh" up; rc=$?; raw=$CAP_OUT          # причину не глотаем — зеркало set_xray_server
-				why=$(printf '%s\n' "$raw" | grep -E 'резолв|зарезолвил|удал|встан' | tail -2 | jesc 200)
-				if [ "$rc" = 0 ]; then
-					if [ -n "$why" ]; then
-						printf '{"ok":true,"code":0,"msg":"Конфиг %s сохранён, несущая перезапущена. %s"}\n' "$name" "$why"
-					else
-						printf '{"ok":true,"code":0,"msg":"Конфиг %s сохранён, несущая перезапущена"}\n' "$name"
-					fi
+				if vpn_is_off; then
+					_msg="$_msg — применится, когда включите VPN"
 				else
-					printf '{"ok":false,"code":%s,"msg":"Конфиг %s сохранён, но несущая НЕ поднялась. %s"}\n' "$rc" "$name" "${why:-подробности в логе транспорта}"
+					sh "$ENODIA_DIR/$tsh" down >/dev/null 2>&1
+					cap_run "$tsh" up; rc=$?
+					why=$(alt_raise_why "$CAP_OUT")
+					if [ "$rc" = 0 ]; then _msg="$_msg, несущая перезапущена${why:+. $why}"
+					else _ok=false; _msg="$_msg, но несущая НЕ поднялась. ${why:-подробности в логе транспорта}"; fi
 				fi
-				exit 0
 			fi
 		fi
-		printf '{"ok":true,"code":0,"msg":"Конфиг %s сохранён"}\n' "$name"; exit 0 ;;
+		printf '{"ok":%s,"code":%s,"geo_notice":%s,"msg":"%s"}\n' "$_ok" "$rc" "$_rawgeo" "$_msg"; exit 0 ;;
 
 	# --- Загрузка конфига с устройства пользователя (как drag-drop на десктопе). ----
 	# Контент приходит base64-ом в поле content (фронт читает файл FileReader-ом). Тип
@@ -2280,14 +2407,26 @@ EOF
 		# Мягкая валидация по типу — отбить явный мусор/не тот файл.
 		case "$kind" in
 			awg)  printf '%s' "$content" | grep -q '\[Interface\]'        || fail "не похоже на awg-конфиг (нет [Interface])" ;;
-			xray) printf '%s' "$content" | grep -q '"outbounds"'          || fail "не похоже на xray JSON (нет outbounds)" ;;
+			xray) [ -f "$ENODIA_DIR/xray-profile-lib.sh" ] || printf '%s' "$content" | grep -q '"outbounds"' || fail "не похоже на xray JSON (нет outbounds)" ;;
 			hy2)  printf '%s' "$content" | grep -qE '^[[:space:]]*server:' || fail "не похоже на hy2 YAML (нет server:)" ;;
 		esac
 		mkdir -p "$dir" 2>/dev/null
 		dst="$dir/$name.$ext"
 		# Черновик — СВОЙ у процесса и не под маской каталога (`*.conf` и т.п.): две вкладки, загружающие разом, не пишут друг другу.
 		_utmp="$dir/.enodia-up.$$"
+		_ugeo=false
 		printf '%s' "$content" | tr -d '\r' > "$_utmp" 2>/dev/null || { rm -f "$_utmp" 2>/dev/null; fail "не удалось записать файл"; }
+		if [ "$kind" = xray ] && [ -f "$ENODIA_DIR/xray-profile-lib.sh" ]; then
+			. "$ENODIA_DIR/xray-profile-lib.sh"
+			# The pinned loader uses the filename suffix even with a JSON format flag.
+			_up_profile="$_utmp.profile.json"
+			if ! xp_prepare "$_utmp" "$_up_profile" "$(bin_path xray)"; then
+				rm -f "$_utmp" "$_up_profile"
+				fail "$XP_REASON"
+			fi
+			mv -f "$_up_profile" "$_utmp" || { rm -f "$_utmp" "$_up_profile"; fail "не удалось записать профиль Xray"; }
+			[ "$XP_GEO_REMOVED" != 1 ] || _ugeo=true
+		fi
 		# ИМЯ ЗАНЯТО ДРУГИМ КОНФИГОМ (ревью с.95). Файл роутер держит латиницей, и разные серверы сходятся в одно имя («🇸🇬» и «🇸🇬⚡»
 		# у VLESS дают `SG`, «⚡ Fast» и «🚀 Fast» — `Fast`): прежде второй импорт МОЛЧА затирал первый — и его показ тоже. А «заменить» —
 		# это и законное «новые ключи того же сервера», и «второй конфиг того же сервера под доп-выход»: различить их может только человек
@@ -2353,9 +2492,9 @@ EOF
 			fi
 			_unote=$(printf '%s' "$_unote" | jesc 600)
 			if [ -n "$_uw" ]; then
-				printf '{"ok":true,"code":0,"name":"%s","msg":"Конфиг %s сохранён (%s), но имя не записано: %s"}\n' "$name" "$name" "$kind" "$_uw"
+				printf '{"ok":true,"code":0,"name":"%s","geo_notice":%s,"msg":"Конфиг %s сохранён (%s), но имя не записано: %s"}\n' "$name" "$_ugeo" "$name" "$kind" "$_uw"
 			else
-				printf '{"ok":true,"code":0,"name":"%s","msg":"Конфиг %s сохранён (%s) — активируйте в списке серверов%s"}\n' "$name" "$name" "$kind" "$_unote"
+				printf '{"ok":true,"code":0,"name":"%s","geo_notice":%s,"msg":"Конфиг %s сохранён (%s) — активируйте в списке серверов%s"}\n' "$name" "$_ugeo" "$name" "$kind" "$_unote"
 			fi
 		else
 			rm -f "$_utmp" 2>/dev/null
@@ -2514,7 +2653,7 @@ EOF
 	remove_sub)
 		tag=$(field tag)
 		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
-		# КОНФИГИ И КАРТЫ ИМЁН (.sub-names, .sub-picks) снимает ВЛАДЕЛЕЦ — `subs-update.sh drop`, ДО чистки строки .subs (владелец
+		# КОНФИГИ И КАРТЫ ИМЁН (.sub-names) снимает ВЛАДЕЛЕЦ — `subs-update.sh drop`, ДО чистки строки .subs (владелец
 		# файла — длиннейший тег реестра). Здесь жила своя копия со своим списком каталогов: два семейства из трёх, без гарда
 		# «конфиг занят» — удаление подписки уносило и активный конфиг, и тот, на котором стоит выход. Занятые остаются СВОИМИ
 		# конфигами человека (их называет ответ). Отказ владельца — идёт обновление подписок — отказ и здесь: прогон тут же
@@ -2527,9 +2666,9 @@ EOF
 		{ [ -e /tmp/enodia-watchdog.lock ] && [ -n "$_rwp" ] && [ -d "/proc/$_rwp" ]; } && fail "сторож сейчас проверяет туннель — повторите через минуту"
 		hold_switch
 		cap_run subs-update.sh drop "$tag"; rc=$?
-		# The owner refuses for TWO reasons: an Amnezia Premium work runs for the key (code 3) — or its run lock is held (its own
-		# words are a log line, «…выхожу»).
+		# Distinguish a held subscription lock, a Premium job, and a config removal that can be retried.
 		[ "$rc" = 3 ] && fail "идёт работа с Amnezia Premium (страна или новый ключ) — дождитесь её конца и удалите подписку снова"
+		[ "$rc" = 4 ] && fail "не удалось удалить конфиг подписки или снять его дорогу — повторите удаление"
 		[ "$rc" = 0 ] || fail "сейчас идёт обновление подписок — удалите подписку через минуту"
 		# A KEPT server leaves the subscription's namespace: under «sub-<tag>-» a subscription whose tag is a prefix of this one
 		# («test» ⊂ «test-vpn») owned it the moment the line was gone — counted it as its own server, said «исчез из подписки» about
@@ -2847,17 +2986,23 @@ EOF
 			                 *) fail "поле: name|transport|config|fallback" ;;
 			             esac ;;
 		esac ;;
-	# road_set: ДОРОГА К СЕРВЕРУ (road.sh) — пакеты конфига AmneziaWG к его серверу через выход <id> (пусто = напрямую). Проверки
+	# road_set: config's packets to its server go through exit <id> (empty = direct). Проверки
 	# («в один шаг», только включённый AWG-выход) и ответ словами — у владельца; снятие дороги с работающей несущей переподнимает её
 	# (MTU пишет только подъём), поэтому — через run (cap_run), как смена конфига выхода.
-	road_set)
+	road_set|road_set_typed)
+		kind=$(field kind)
+		case "$act:$kind" in
+			road_set:|road_set:awg) kind=awg ;;
+			road_set_typed:xray|road_set_typed:hy2) ;;
+			*) fail "неизвестный вид конфига" ;;
+		esac
 		name=$(urldecode "$(field name)")
 		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя конфига"
 		rid=$(field id); case "$rid" in ''|[2-7]) ;; *) fail "битый номер выхода" ;; esac
 		# Лок смены — как у смены сервера: снятие дороги переподнимает несущую (`transport.sh restart`), а он без лока шёл бы поверх
 		# лестницы сторожа (ревью с.118, круг 2; класс C127).
 		hold_switch
-		run road.sh set awg "$name" "$rid" ;;
+		run road.sh set "$kind" "$name" "$rid" ;;
 	# chebur_*: ВТОРОЕ МНЕНИЕ О БЛОКИРОВКЕ (cheburcheck.sh) — переключатели, запуск проверки, её ответ. Opt-in, по умолчанию выкл:
 	# адрес сервера уходит стороннему российскому сервису, а панель ставят не только в России (решение человека 10.10.2026).
 	# Проверка — фоном у владельца (до ~80 с потока), панель опрашивает chebur_get.
@@ -3394,6 +3539,12 @@ EOF
 		sh "$ENODIA_DIR/gh-update.sh" upd-busy >/dev/null 2>&1 && fail "обновление уже идёт"
 		# Операция с компонентами идёт — обновление заменило бы движок и манифест бинарей под ней (ревью ветки bins-2026-10, круг 3).
 		[ -f "$ENODIA_DIR/packages.sh" ] && sh "$ENODIA_DIR/packages.sh" busy >/dev/null 2>&1 && fail "идёт операция с компонентами — дождитесь её конца"
+		_retry_code=$(field retry_code); _force_arg=
+		case "$_retry_code" in
+			'') ;;
+			*[!0-9]*) fail "неверный код версии для повторной установки" ;;
+			*) _force_arg=--force ;;
+		esac
 		# ИТОГ ПИШЕМ (OK | FAIL), а не «DONE»: экран «Обновление» показывает, чем кончилось, — прежний DONE ставился и на
 		# провале, и «последнее обновление — готово» было бы враньём. Запись атомарная (рядом + `mv`): читатель обрезанного
 		# файла видит «IDLE» (разбор у packages.sh::set_state). Лок в /tmp — примета «идёт» для дампа.
@@ -3403,8 +3554,9 @@ EOF
 		# показал бы этапы прошлого прогона; флаг ENODIA_UPD_PROG=1 отдаётся прогону, и говорят только его писатели (prog-lib.sh).
 		# Флаг — только прогону, чей файл хода начат (каталог наш, 0700): не начат — прогон молчит, экран рисует его по-прежнему.
 		_upf=""; if [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; prog_begin apply && _upf=1; fi
+		_sa=0; [ "$(field snap_ack)" != 1 ] || _sa=1
 		echo RUNNING > "$ENODIA_STATE/.gh-update.state.new" && mv -f "$ENODIA_STATE/.gh-update.state.new" "$ENODIA_STATE/.gh-update.state"
-		spawn_bg /tmp/enodia-gh-update.pid -c "touch /tmp/enodia-gh-update.lock; if ENODIA_UPD_PROG=$_upf sh '$ENODIA_DIR/gh-update.sh' apply >'$ENODIA_STATE/.gh-update.log' 2>&1; then s=OK; else s=FAIL; fi; echo \$s >'$ENODIA_STATE/.gh-update.state.new' && mv -f '$ENODIA_STATE/.gh-update.state.new' '$ENODIA_STATE/.gh-update.state'; rm -f /tmp/enodia-gh-update.lock"
+		spawn_bg /tmp/enodia-gh-update.pid -c "touch /tmp/enodia-gh-update.lock; if PKG_RETRY_CODE=$_retry_code ENODIA_UPD_PROG=$_upf PKG_SNAP_ACK=$_sa sh '$ENODIA_DIR/gh-update.sh' apply $_force_arg >'$ENODIA_STATE/.gh-update.log' 2>&1; then s=OK; else s=FAIL; fi; echo \$s >'$ENODIA_STATE/.gh-update.state.new' && mv -f '$ENODIA_STATE/.gh-update.state.new' '$ENODIA_STATE/.gh-update.state'; rm -f /tmp/enodia-gh-update.lock"
 		# «Примените правила» — больше не совет: установщик новой версии ставит их сам (install.sh, шаг 5b; решение пользователя 30.10.2026).
 		printf '{"ok":true,"code":0,"msg":"Обновление запущено — его ход виден этапами. Страницу можно закрыть: обновление идёт на роутере."}\n'; exit 0 ;;
 	gh_rollback)

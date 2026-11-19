@@ -18,6 +18,7 @@
 #   cfg-names.sh del <вид> <файл>        — снять
 #   cfg-names.sh mv  <вид> <старый> <новый> [имя] — переименование файла: показ едет с ним (имя дано — задать новое)
 #   cfg-names.sh get <вид> <файл>        — имя или пусто
+#   cfg-names.sh display <kind> <file>   — explicit name, subscription remark, or filename
 #   cfg-names.sh list                    — все: `вид/файл⇥имя`
 #   cfg-names.sh json                    — то же картой JSON {"вид/файл":"имя"} (кавычки и косая вычищены разбором)
 #   cfg-names.sh merge <файл>            — влить имена из файла (импорт бэкапа): у своего ключа побеждает файл, прочие остаются
@@ -39,6 +40,11 @@ fi
 key_ok() { printf '%s' "$1" | grep -qE "$KEY_RE"; }
 cmd_list() { lbl_list "$STORE" "$KEY_RE"; }
 cmd_get() { key_ok "$1/$2" || return 1; cmd_list | awk -F"$LBL_TAB" -v k="$1/$2" '$1==k { print $2; exit }'; }
+cmd_display() {
+    _cd_name=$(cmd_get "$1" "$2") || return 1
+    [ -n "$_cd_name" ] || _cd_name=$(awk -F"$LBL_TAB" -v k="$2" '$1==k && $2!="" { print $2; exit }' "$ENODIA_STATE/.sub-names" 2>/dev/null)
+    printf '%s\n' "${_cd_name:-$2}"
+}
 
 # Записать «вид/файл → имя» под локом. Имя, совпавшее с именем файла, — не своё имя: строку снимаем (показ и так тот же).
 put() {   # $1 = вид/файл, $2 = имя (пусто = снять)
@@ -124,7 +130,8 @@ case "$1" in
     del)  key_ok "$2/$3" || exit 1; put "$2/$3" "" ;;
     mv)   shift; cmd_mv "$@" ;;
     get)  cmd_get "$2" "$3" ;;
+    display) cmd_display "$2" "$3" ;;
     list) cmd_list; exit 0 ;;
     json) cmd_json; exit 0 ;;
-    *) echo "usage: $0 set <вид> <файл> <имя> | del <вид> <файл> | mv <вид> <старый> <новый> [имя] | get <вид> <файл> | list | json | merge <файл> | import <файл> <корень архива>"; exit 2 ;;
+    *) echo "usage: $0 set <вид> <файл> <имя> | del <вид> <файл> | mv <вид> <старый> <новый> [имя] | get <вид> <файл> | display <вид> <файл> | list | json | merge <файл> | import <файл> <корень архива>"; exit 2 ;;
 esac

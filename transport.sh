@@ -314,6 +314,7 @@ cmd_up() {
     [ -n "$t" ] || { echo "[transport] транспорт не настроен — поднимать нечего"; return 1; }
     p=$(plugin_for "$t"); [ -f "$p" ] || { echo "[transport] нет плагина для '$t'"; return 1; }
     apply_marking
+    main_road_before_alt "$t"
     sh "$p" up
 }
 
@@ -444,6 +445,7 @@ cmd_switch() {
     apply_marking            # гарантируем ядро (на случай прихода из safety_off, где маркировка снята)
     echo "$new" > "$TRANSPORT_FLAG"
     np=$(plugin_for "$new"); [ -f "$np" ] || { echo "[transport] нет плагина для '$new'"; return 1; }
+    main_road_before_alt "$new"
     if sh "$np" up; then
         vpn_off_won "$new" && return 1
         # «ДОМАШНИЙ ТРАНСПОРТ» ЗАПИСЫВАЕМ ТОЛЬКО ПОСЛЕ УСПЕШНОГО ПОДЪЁМА. Иначе неудачный ручной
@@ -466,6 +468,7 @@ cmd_switch() {
         echo "$cur" > "$TRANSPORT_FLAG"
         # Выключили, пока шёл подъём, — прежнюю не поднимаем вовсе: флаг вернули (намерение для `on`), несущая остаётся снятой.
         if [ ! -f "$ENODIA_STATE/.vpn-off" ]; then
+            main_road_before_alt "$cur"
             cp2=$(plugin_for "$cur"); [ -f "$cp2" ] && sh "$cp2" up >/dev/null 2>&1
         fi
     fi
@@ -581,6 +584,19 @@ cmd_dns() {
 SLOTS_SH="$ENODIA_DIR/slots.sh"
 TAB=$(printf '\t')
 
+main_road_before_alt() {
+    case "$1" in
+        xray|hy2) [ ! -s "$ENODIA_STATE/.cfg-via" ] || road_before_alt "$1" "$(head -n1 "$ENODIA_STATE/.$1-active" 2>/dev/null)" ;;
+    esac
+}
+road_before_alt() (   # only an enabled AWG road, and only when its table is empty
+    [ -s "$ENODIA_STATE/.cfg-via" ] && [ -f "$ENODIA_DIR/road.sh" ] || exit 0
+    _rba_id=$(sh "$ENODIA_DIR/road.sh" eligible "$1" "$2" 2>/dev/null); _rba_peer=$?
+    case "$_rba_id" in [2-7]) ;; *) exit 0 ;; esac
+    [ "$_rba_peer" = 0 ] && ip route show table "100$_rba_id" 2>/dev/null | grep -q '^default ' && exit 0   # not-wan: road table
+    _slot_dispatch slot-up "$_rba_id" >/dev/null 2>&1 || :
+)
+
 # Диспетч верба в плагин транспорта слота БЕЗ переигрыша маркировки (внутренний кирпич:
 # slots-up гоняет его в цикле и переигрывает mark-core ОДИН раз на всех). Код 2 = «плагин
 # слоты не умеет» (Ф0-норма, usage-шум глотаем), 1 = слот не найден/выключен/нет плагина.
@@ -591,6 +607,7 @@ _slot_dispatch() {
     [ -n "$sline" ] || { echo "[transport] нет слота №$sid"; return 1; }
     [ "$(echo "$sline" | cut -f6)" = on ] || { echo "[transport] слот №$sid выключен"; return 1; }
     st=$(echo "$sline" | cut -f3); scfg=$(echo "$sline" | cut -f4)
+    case "$sverb:$st" in slot-up:xray|slot-up:hy2) road_before_alt "$st" "$scfg" ;; esac
     sp=$(plugin_for "$st")
     if [ ! -f "$sp" ]; then
         echo "[transport] нет плагина для '$st'"

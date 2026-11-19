@@ -324,6 +324,17 @@ case "$INSTALL_LANG" in
         ;;
 esac
 
+# Package installs sweep the resident stores under the switch lock. Both
+# entries guard staging here, before inventory or any binary move/start.
+if [ -f "$ENODIA_DIR/gh-update.sh" ]; then
+    if [ -z "$INSTALL_FROM_PKG" ]; then
+        ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" ENODIA_BIN="$ENODIA_BIN" \
+            sh "$ENODIA_DIR/gh-update.sh" bin-purge || :
+    fi
+    ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" ENODIA_BIN="$ENODIA_BIN" \
+        sh "$ENODIA_DIR/gh-update.sh" bin-stage-guard || exit 1
+fi
+
 # Что ставим — AmneziaWG / Xray / оба — по наличию конфигов (+ опц. env INSTALL_PROTO
 # от be7000.ps1). Это снимает ЖЁСТКОЕ требование awg.conf: возможна установка ТОЛЬКО
 # Xray (без AmneziaWG). Гарды [ "$HAVE_AWG" = 1 ] ниже пропускают awg-секции при xray-only.
@@ -615,6 +626,10 @@ if [ -f "$ENODIA_DIR/bin/https-dns-proxy.user" ]; then
     chmod +x "$ENODIA_BIN/https-dns-proxy"
     ok "https-dns-proxy (DoH) установлен"
 fi
+# The one-shot DNS helper belongs to the encrypted-DNS component, not a daemon.
+if [ -f "$ENODIA_DIR/bin/dnsq.user" ]; then
+    mv "$ENODIA_DIR/bin/dnsq.user" "$ENODIA_BIN/dnsq" && chmod +x "$ENODIA_BIN/dnsq"
+fi
 # dot-proxy (DoT) — наш DNS-over-TLS форвардер (RFC 7858), альтернативный ПРОТОКОЛ того же слоя
 # «Шифрованный DNS» (пикер в панели). Статик mbedTLS под обе арки, ~300 КБ, OFF по умолчанию.
 if [ -f "$ENODIA_DIR/bin/dot-proxy.user" ]; then
@@ -656,7 +671,7 @@ fi
 # установке. Отсюда и жалоба «половину пакетов будто не видит». Печатаем ФАКТ, и спрашиваем его у
 # bin_path — он знает про внешний накопитель, поэтому «нет на /data» ≠ «нет вообще».
 _have=""; _miss=""
-for _b in amneziawg-go awg xray hev hysteria byedpi nfqws https-dns-proxy dot-proxy quic-dns-proxy panel-tls dns-filter; do
+for _b in amneziawg-go awg xray hev hysteria byedpi nfqws https-dns-proxy dot-proxy quic-dns-proxy dnsq panel-tls dns-filter; do
     if [ -x "$(bin_path "$_b")" ]; then _have="$_have $_b"; else _miss="$_miss $_b"; fi
 done
 ok "Бинари на роутере:${_have:- (ни одного!)}"

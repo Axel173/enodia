@@ -530,6 +530,9 @@ cmd_hotplug() {
             stub_down
             boot_refresh "$R_DIR"
             export_paths
+            if [ -f "$R_DIR/gh-update.sh" ]; then
+                sh "$R_DIR/gh-update.sh" bin-purge || :
+            fi
             [ -f "$R_DIR/web-ui.sh" ] && sh "$R_DIR/web-ui.sh" start >/dev/null 2>&1
             [ -f "$R_DIR/heal.sh" ] && sh "$R_DIR/heal.sh" >/dev/null 2>&1
         else

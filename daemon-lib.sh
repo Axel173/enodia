@@ -405,3 +405,100 @@ daemon_ram_room() {   # $1 = KB the new daemon takes → 0 room; 1 none (DAEMON_
     DAEMON_RAM_WHY="доступно $(( _drm / 1024 )) МБ, нужно $(( ($1 + DAEMON_RAM_RESERVE_KB) / 1024 ))"
     return 1
 }
+
+# A listening SOCKS port precedes the first observatory round. Retry actual
+# egress while THIS process is in its bounded first-probe window. A usable fallback
+# can finish immediately; no fixed sleep can guess when probes finish.
+# Linux /proc starttime uses USER_HZ=100 on all supported router architectures.
+XRAY_EGRESS_TIMEOUT=8   # one egress attempt, shared by readiness and health
+daemon_xray_ready() {
+    command -v xp_pool >/dev/null 2>&1 || return 0
+    xp_pool "$2" || return 0
+    command -v uptime_s >/dev/null 2>&1 || {
+        if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
+    }
+    command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
+    _dxr_pid=$(cat "$1" 2>/dev/null | tr -cd '0-9')
+    [ -n "$_dxr_pid" ] && [ -r "/proc/$_dxr_pid/stat" ] || return 1
+    _dxr_start=$(awk '{print $22}' "/proc/$_dxr_pid/stat")
+    _dxr_mark="$1.pool-ready"
+    _dxr_mp=''; _dxr_ms=''; _dxr_end=''
+    if [ -r "$_dxr_mark" ]; then read -r _dxr_mp _dxr_ms _dxr_end < "$_dxr_mark" || true; fi
+    if [ "$_dxr_mp" != "$_dxr_pid" ] || [ "$_dxr_ms" != "$_dxr_start" ]; then
+        _dxr_end=$(( $(uptime_s)+30 ))
+        if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi
+        command -v lbl_commit_out >/dev/null 2>&1 || return 1
+        lbl_commit_out "$_dxr_mark" printf '%s %s %s\n' "$_dxr_pid" "$_dxr_start" "$_dxr_end" || return 1
+    fi
+    [ "$_dxr_end" != ready ] || return 0
+    case "$_dxr_end" in ''|*[!0-9]*) return 1 ;; esac
+    daemon_step_init
+    while :; do
+        pid_runs "$_dxr_pid" 'xray' || { DAEMON_WAIT_WHY='xray exited during pool warm-up'; return 1; }
+        _dxr_timeout=$((_dxr_end - $(uptime_s)))
+        [ "$_dxr_timeout" -gt 0 ] || break
+        [ "$_dxr_timeout" -le "$XRAY_EGRESS_TIMEOUT" ] || _dxr_timeout=$XRAY_EGRESS_TIMEOUT
+        _dxr_ip=$(IP_PROBE_END="$_dxr_end" probe_ext_ip "--socks5-hostname 127.0.0.1:$3" "$_dxr_timeout")
+        if [ -n "$_dxr_ip" ]; then
+            lbl_commit_out "$_dxr_mark" printf '%s %s ready\n' "$_dxr_pid" "$_dxr_start" || return 1
+            DAEMON_WAIT_WHY=''; return 0
+        fi
+        [ "$(uptime_s)" -lt "$_dxr_end" ] || break
+        daemon_step
+    done
+    DAEMON_WAIT_WHY='pool has no usable egress after bounded observatory warm-up'
+    return 1
+}
+# A diagnostic keeps PID start identity when stopping its own detached work.
+proc_start_id() {
+	case "$1" in ''|*[!0-9]*|0|1) return 1 ;; esac
+	awk '{ sub(/^.*\) /, ""); if ($1 != "Z" && NF >= 20) print $20 }' "/proc/$1/stat" 2>/dev/null
+}
+
+proc_ref_alive() { [ -n "$2" ] && [ "$(proc_start_id "$1")" = "$2" ]; }
+proc_ref_tree_kill() (
+	proc_ref_alive "$1" "$2" || exit 0
+	_prtk_root=$1; _prtk_ref=$2; _prtk_seen=''; _prtk_round=0
+	while proc_ref_alive "$_prtk_root" "$_prtk_ref" && [ "$_prtk_round" -lt 8 ]; do
+		_prtk_new=0
+		for _prtk_p in $(proc_tree "$_prtk_root"); do
+			case " $_prtk_seen " in *" $_prtk_p:"*) continue ;; esac
+			_prtk_s=$(proc_start_id "$_prtk_p"); [ -n "$_prtk_s" ] || continue
+			proc_ref_alive "$_prtk_p" "$_prtk_s" && kill -STOP "$_prtk_p" 2>/dev/null
+			_prtk_seen="$_prtk_seen $_prtk_p:$_prtk_s"; _prtk_new=1
+		done
+		[ "$_prtk_new" = 1 ] || break
+		_prtk_round=$((_prtk_round + 1))
+	done
+	for _prtk_r in $_prtk_seen; do
+		_prtk_p=${_prtk_r%:*}; _prtk_s=${_prtk_r#*:}
+		if proc_ref_alive "$_prtk_p" "$_prtk_s"; then kill -TERM "$_prtk_p" 2>/dev/null; kill -CONT "$_prtk_p" 2>/dev/null; fi
+	done
+	sleep 1
+	for _prtk_r in $_prtk_seen; do
+		_prtk_p=${_prtk_r%:*}; _prtk_s=${_prtk_r#*:}
+		proc_ref_alive "$_prtk_p" "$_prtk_s" && kill -KILL "$_prtk_p" 2>/dev/null
+	done
+	exit 0
+)
+# Compare sets: a userspace WireGuard daemon can enumerate peers in any order.
+awg_peers_match() {   # awg binary, interface, config; 2 if live peers cannot be read
+    local _ap_expected _ap_live
+    [ -n "$1" ] || return 0
+    _ap_expected=$(sed -n 's/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*//p' "$3" 2>/dev/null | sed 's/#.*//' | tr -d ' \t\r' | sort -u)
+    [ -n "$_ap_expected" ] || return 0
+    _ap_live=$("$1" show "$2" peers 2>/dev/null) || return 2
+    _ap_live=$(printf '%s\n' "$_ap_live" | tr -d ' \t\r' | sort -u)
+    [ -n "$_ap_live" ] || return 2
+    [ "$_ap_live" = "$_ap_expected" ]
+}
+
+carrier_endpoint() {   # slot ID or empty for main, IPv4 rows, [typed key], [held IPv4 rows], [dial names]
+    [ -f "$APPLY_BYPASS" ] || return 0
+    if [ -n "$1" ]; then
+        sh "$APPLY_BYPASS" endpoint-slot-set "$@" >/dev/null
+    else
+        shift
+        sh "$APPLY_BYPASS" endpoint-set "$@" >/dev/null
+    fi
+}

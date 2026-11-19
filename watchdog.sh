@@ -576,22 +576,23 @@ slot_young() {   # $1 = id → 0 when the daemon of its carrier is younger than 
 }
 # ROADS («дорога к серверу», road.sh): a carrier whose packets to its server ride another exit. While that road is down, the
 # rider's silence says nothing about its server — no reup, no failover, no probe of the server, no «server is dead» mail; the
-# road is an exit like any other and this sweep heals it, the rider follows. The map is read ONCE per tick (forks) and comes from
-# the REGISTRY (`road.sh carriers`), not from the rules: an exit this sweep took down loses its endpoint store, and `want` would
-# forget its road — the next tick probed it as a dead server with a backoff up to 30 min (review s.118).
-# ONCE — so the answer comes in a VARIABLE (`_rof`), not on stdout: asked as `$(road_of …)` the map was loaded inside the
-# subshell, the mark «loaded» died with it, and `road.sh carriers` was forked again for every exit of the sweep (review s.123, r.4).
-ROADS_LOADED=0; ROADS=""
+# road is an exit like any other and the slot sweep heals it. Cache the selected riders and their routes for the tick; a failed
+# raise invalidates both the map and the road's probe. A cold carrier has a selection even without an endpoint publication.
+ROADS_LOADED=0; ROADS=""; ROAD_STALE=""
 ROAD_FO=/tmp/enodia-road-failopen   # прямой режим поставлен из-за ЛЕЖАЩЕЙ ДОРОГИ (не сервера): ожила — переподъём, а не перебор
-road_of() {   # $1 = main | <exit id> → _rof: the id of the exit it rides, or empty
-    _rof=""
+road_of() {   # main | exit id → road id, selected rider key, whether the peer is stale
+    _rof=""; _rof_key=""; _rof_stale=0
     if [ "$ROADS_LOADED" = 0 ]; then
         ROADS_LOADED=1
-        [ -f "$ENODIA_DIR/road.sh" ] && [ -s "$ENODIA_STATE/.cfg-via" ] && ROADS=$(sh "$ENODIA_DIR/road.sh" carriers 2>/dev/null)
+        ROADS=""
+        [ -f "$ENODIA_DIR/road.sh" ] && [ -s "$ENODIA_STATE/.cfg-via" ] && ROADS=$(sh "$ENODIA_DIR/road.sh" carriers watchdog 2>/dev/null)
+        ROAD_STALE=" $(printf '%s\n' "$ROADS" | awk -F"$TAB" '$4==1 && !seen[$2]++ { printf "%s ",$2 }')"
     fi
     [ -n "$ROADS" ] || return 0
     case "$1" in main) _rok=main ;; *) _rok="s$1" ;; esac
-    _rof=$(printf '%s\n' "$ROADS" | awk -F"$TAB" -v c="$_rok" '$1==c { print $2; exit }')
+    IFS="$TAB" read -r _rof _rof_key _rof_stale <<EOF
+$(printf '%s\n' "$ROADS" | awk -F"$TAB" -v c="$_rok" '$1==c { sub(/^[^\t]*\t/, ""); print; exit }')
+EOF
     return 0
 }
 # A YOUNG HANDSHAKE IS NOT A ROAD THAT CARRIES. The rider and the road renew their handshakes each on its own clock (about every two
@@ -635,6 +636,47 @@ road_down() {   # $1 = the road exit's id ; $2 = probe → 0 when its carrier is
     if road_silent "$1"; then ROAD_PV="$ROAD_PV$1:s "; : > "$ROAD_SILENT.$1"; return 0; fi
     ROAD_PV="$ROAD_PV$1:c "
     return 1
+}
+rider_road_gate() {   # rider tag, link|probe, [fresh]; true when failure belongs to its road
+    [ "$3" != fresh ] || ROADS_LOADED=0
+    road_of "$1"
+    [ -n "$_rof" ] || return 1
+    if [ "$1" != main ]; then
+        case "$ROAD_YOUNG" in *" $_rof "*) return 2 ;; esac
+    fi
+    if [ "$3" = fresh ]; then
+        for _rpg in c s; do
+            _rpt=" $_rof:$_rpg "
+            case "$ROAD_PV" in *"$_rpt"*) ROAD_PV="${ROAD_PV%%"$_rpt"*} ${ROAD_PV#*"$_rpt"}" ;; esac
+        done
+    fi
+    [ "$_rof_stale" = 1 ] || road_down "$_rof" "$2"
+}
+main_road_episode() {
+    _wrfo=0; _road_episode=""
+    [ -z "$_rof" ] || _road_episode="$_rof ${_rof_key:-$TRANSPORT}"
+    [ -f "$ROAD_FO" ] || return 0
+    if [ -n "$_road_episode" ] && [ "$(cat "$ROAD_FO" 2>/dev/null)" = "$_road_episode" ]; then _wrfo=1
+    else rm -f "$ROAD_FO"; fi
+}
+alt_road_failed() {
+    _wroad=$_rof; main_road_episode
+    off_bail "проверки дороги $TRANSPORT"
+    if [ "$_wrfo" = 1 ]; then ensure_direct_mode "$TRANSPORT"; return; fi
+    wd_switch_take "снятие $TRANSPORT при отказе дороги"
+    sh "$TRANSPORT_SH" down "$TRANSPORT" >>"$LOG" 2>&1
+    off_bail "снятия $TRANSPORT при отказе дороги"
+    echo FAILOPEN > "$STATE"; echo FAILED > "$XSTATE"
+    printf '%s\n' "$_road_episode" > "$ROAD_FO"
+    wd_switch_drop
+    log "$TLABEL: не отвечает дорога через выход №$_wroad → прямой режим, без смены сервера"
+    if [ "$NF_LANG" = en ]; then
+        failopen_mail "BE7000: the road to the VPN server is down, direct mode" \
+            "$TLABEL uses exit #$_wroad to reach its server. The router switched to direct mode and will retry the same server when the exit works again."
+    else
+        failopen_mail "BE7000: дорога к серверу VPN не отвечает, прямой режим" \
+            "$TLABEL едет через выход №$_wroad. Роутер перешёл в прямой режим и вернёт тот же сервер, когда выход заработает."
+    fi
 }
 # A SILENT WARP ROAD: THE ROUTER RE-PICKS ITS PORT ITSELF. «Handshake passes, data is cut» is how an ISP cuts WARP on a port — and
 # the cure is known: another port («Подобрать порт заново», warp.sh repick — the ports are tried under a throwaway registration,
@@ -755,10 +797,26 @@ road_silent_own() {   # $1 = id ; $2 = cfg ; $3 = fallback ; $4 = transport ; $5
 # The exit's road is down: its live carrier goes down as usual (else its groups' traffic would stand in a dead tunnel) and the reason
 # named is the road — no probe of its server, no return backoff (it would count the idle time of somebody else's exit).
 slot_road_lies() {   # $1 = id ; $2 = cfg ; $3 = fallback ; $4 = the exit's transport ; $5 = the road exit's id
-    ip link show "awg$1" >/dev/null 2>&1 || return 0
-    log "slot-health: awg-выход №$1 едет по дороге (выход №$5), а она лежит → гашу несущую → fallback=$3; сервер не сужу"
+    case "$4" in
+        awg) ip link show "awg$1" >/dev/null 2>&1 || return 0 ;;
+        xray|hy2)
+            # The first down also repairs fallback rules when hev already lost its interface.
+            [ -f "$SLOT_DOWN.$1" ] && ! ip link show "xtun$1" >/dev/null 2>&1 && return 0 ;;
+    esac
+    log "slot-health: $4-выход №$1 едет по дороге (выход №$5), а она лежит → гашу несущую → fallback=$3; сервер не сужу"
     [ -f "$TRANSPORT_SH" ] && sh "$TRANSPORT_SH" slot-down "$1" >>"$LOG" 2>&1
     slot_boot_window || slot_fail_event "$1" "$2" "$3" "road:$5" "$4"
+}
+# A settling road postpones judgment. A down road takes its rider to fallback.
+slot_road_gate() {
+    rider_road_gate "$sid" "${1:-link}" "$2"; _srg_rc=$?
+    _sroad=$_rof
+    case "$_srg_rc" in
+        0) slot_road_lies "$sid" "$scfg" "$sfb" "$st" "$_sroad" ;;
+        2) log "slot-health: $st-выход №$sid ($scfg): его дорогу (выход №$_sroad) судить рано — вердикт следующим тиком" ;;
+        *) return 1 ;;
+    esac
+    return 0
 }
 # ОКНО БУТА: судить доп-выход ещё рано. Тик со СНЯТЫМ грейсом доходит до свипа на 60–120-й секунде
 # (раскладка `bins`: несущие слотов только что подняли — heal или мы сами), а egress-проба идёт по
@@ -767,24 +825,35 @@ slot_road_lies() {   # $1 = id ; $2 = cfg ; $3 = fallback ; $4 = the exit's tran
 # часовым троттлом на КАЖДОМ буте. Поднять — поднимаем (это и есть польза раннего тика), а вердикт
 # откладываем до первого честного тика после грейса (ревью 06.09.2026).
 slot_boot_window() { [ "$(up_secs)" -lt "$BOOT_GRACE" ]; }
-# IS THE HOME SERVER BACK (the return home of mode «home») — by ICMP: cheap, and the working reserve is not touched. AN AMNEZIA PREMIUM
-# home — by a probe through its own key: Amnezia's relay answers neither ICMP nor any TCP port (walk 14.10.2026), and the return
-# never fired while the background job had laid out a key that carried (review s.136 r2, M1). The probe is a throwaway interface
-# (transport-awg.sh try, by the config's road), never on a key a live interface holds (slots.sh key-holder … live).
-home_alive() {   # $1 = home config name, $2 = its endpoint address
-    if [ -f "$ENODIA_DIR/premium.sh" ] && sh "$ENODIA_DIR/premium.sh" is "$1" </dev/null >/dev/null 2>&1; then
+# A prospective home may have no live endpoint publication yet. Ask for its own typed road row before taking down the reserve.
+home_road() {   # kind, the config selected for the next raise
+    [ -n "$2" ] && [ -s "$ENODIA_STATE/.cfg-via" ] && [ -f "$ENODIA_DIR/road.sh" ] || return 0
+    sh "$ENODIA_DIR/road.sh" get "$1" "$2" 2>/dev/null </dev/null
+}
+home_road_wait() {   # road ID, log prefix
+    case "$1" in [2-7]) ;; *) return 1 ;; esac
+    if road_down "$1" probe || ! ip route show table "100$1" 2>/dev/null | grep -q '^default '; then   # not-wan: the road exit's table
+        log "$2: жду дорогу через выход №$1"
+        return 0
+    fi
+    return 1
+}
+# ICMP is cheap for a direct AWG home. A routed or Premium home needs egress through its own key on a throwaway interface:
+# the direct path may be blocked and Premium relays do not answer ICMP. slots.sh guards keys held by a live interface.
+home_alive() {   # config name, endpoint address, [required road ID]
+    if [ -n "${3:-}" ] || { [ -f "$ENODIA_DIR/premium.sh" ] && sh "$ENODIA_DIR/premium.sh" is "$1" </dev/null >/dev/null 2>&1; }; then
         [ -f "$ENODIA_DIR/transport-awg.sh" ] || return 1
         if [ -f "$ENODIA_DIR/slots.sh" ] && sh "$ENODIA_DIR/slots.sh" key-holder "$1" none live >/dev/null 2>&1 </dev/null; then return 1; fi
-        TRY_ROAD=$1 sh "$ENODIA_DIR/transport-awg.sh" try "$CONFIGS_DIR/$1.conf" https://1.1.1.1/cdn-cgi/trace 10 2>/dev/null </dev/null | grep -q '^ip='
+        TRY_REQUIRE_ROAD=${3:-} TRY_ROAD=$1 sh "$ENODIA_DIR/transport-awg.sh" try "$CONFIGS_DIR/$1.conf" https://1.1.1.1/cdn-cgi/trace 10 2>/dev/null </dev/null | grep -q '^ip='
         return $?
     fi
     ping -c 1 -W 2 "$2" >/dev/null 2>&1
 }
-# home_back <home> <endpoint> — 0: the home answers, go back now. Not yet — a Premium home gets its kick (premium_kick: a new key in
+# home_back <home> <endpoint> [road] — 0: the home answers, go back now. Not yet — a Premium home gets its kick (premium_kick: a new key in
 # the background, laid out once it carries; its own PM_REFRESH_GAP): the only other kick is the tick where the home died, and that
 # tick steps onto a reserve — a kick that did not land there (a key slower than 4 min, «another Amnezia work», the API down) was never
 # repeated, and the return probed a superseded key for good (review s.136 r3, M1). premium_kick returns at once for any other name.
-home_back() { home_alive "$1" "$2" && return 0; premium_kick "$1"; return 1; }
+home_back() { home_alive "$1" "$2" "${3:-}" && return 0; premium_kick "$1"; return 1; }
 # AMNEZIA PREMIUM — A NEW KEY IN THE BACKGROUND, NEVER IN THE TICK (the user's decisions 14.10.2026: «a fresh config of a silent
 # Premium server», then — after the walk measured a fresh key carrying only ~2 min after issue, and one assigned server pair never —
 # «in the background, on standby»). The refresh used to run INSIDE the tick: the API without a time budget while the home had no
@@ -1005,6 +1074,10 @@ slot_awg_return() {   # $1=id $2=cfg $3=fallback $4=транспорт выхо�
         log "slot-health: выход №$1 выключили или сменили, пока шла проба возврата — вердикта нет"
         return 0
     fi
+    if rider_road_gate "$1" probe fresh; then
+        slot_fail_event "$1" "$2" "$3" "road:$_rof" "$4"
+        return 0
+    fi
     case "$_srr" in
         3) ;;                           # ключ занят живым держателем: сервер ни при чём, письма нет, пауза растёт
         4) slot_fail_event "$1" "$2" "$3" nocarrier "$4" ;;   # несущая не встала: сервер не судили — и письмо говорит это
@@ -1165,12 +1238,15 @@ EOF
             # случай: демон упал/socks умолк), не вышло -> гасим -> fallback-политика.
             # Перебора РЕЗЕРВОВ у слота нет by design (v1, дизайн §«Отказ слота»).
             [ -f "$TRANSPORT_SH" ] || continue
+            slot_road_gate && continue
             slot_retry_wait "$sid" "$st" && ! ip link show "xtun$sid" >/dev/null 2>&1 && continue    # снят (мёртвый путь через hev или сервер) — ждём паузу, пока его не подняли (как у byedpi выше)
             sh "$TRANSPORT_SH" slot-health "$sid" >>"$LOG" 2>&1; _rc=$?
             [ "$_rc" = 0 ] && { rm -f "$SLOT_RETRY.$sid"; slot_back_event "$sid" "$scfg"; continue; }   # выход жив
             [ "$_rc" = 2 ] && continue                  # плагин старой версии (дрейф деплоя) — судить не по чем, не трогаем
             [ "$_rc" = 5 ] && { slot_hevpath_down "$sid" "$scfg" "$sfb" "$st"; continue; }   # сервер жив, путь через hev мёртв
             [ "$_rc" = 4 ] && continue                  # путь через hev мёртв, но идёт смена транспорта — не судили (ни «жив», ни «упал»)
+            slot_road_gate probe && continue
+            case "$ROAD_BACK" in *" $_sroad "*) continue ;; esac
             log "slot-health: $st-выход №$sid ($scfg) не отвечает -> переподнимаю на месте"
             _rc=1
             if sh "$TRANSPORT_SH" slot-up "$sid" >>"$LOG" 2>&1; then sh "$TRANSPORT_SH" slot-health "$sid" >>"$LOG" 2>&1; _rc=$?; fi
@@ -1182,6 +1258,8 @@ EOF
                 log "slot-health: $st-выход №$sid переподнят; путь клиентов через hev судить сейчас нельзя (смена транспорта) — следующим тиком"
             elif [ "$_rc" = 5 ]; then
                 slot_hevpath_down "$sid" "$scfg" "$sfb" "$st"
+            elif slot_road_gate probe fresh; then
+                continue
             elif slot_boot_window; then
                 log "slot-health: $st-выход №$sid ещё не отвечает, но идёт бут (outbound холодный) — вердикт откладываю до тика после грейса"
             else
@@ -1209,26 +1287,12 @@ EOF
             else ROAD_YOUNG="$ROAD_YOUNG$sid "; fi
             continue
         fi
-        # Выход едет по ДОРОГЕ (road.sh), а она лежит: молчание его сервера о сервере ничего не говорит. Пробу сервера не гоняем
-        # (провалится заведомо и раскрутит паузу), живую несущую гасим как обычно — иначе трафик его групп стоял бы в мёртвом
-        # туннеле, — а причиной называем дорогу. Дорога — тоже выход этого свипа, её поднимает своя строка; ожила — этот выход
-        # вернётся обычной пробой возврата (паузу не взводим: она отсчитывалась бы от простоя чужого выхода).
-        road_of "$sid"; _sroad=$_rof
-        # ITS ROAD IS SECONDS OLD AND HAS NOT SHAKEN HANDS YET, OR A WARP JOB IS RESTARTING IT (the road's own line said so a
-        # moment ago — the roads go first): by its handshake such a road reads «down», and the rider — a LIVE one, when the
-        # road was merely restarted under it — was taken down with «не отвечает дорога» while the road itself was spared
-        # (review s.128). No verdict on the rider either, and no return probe through a road that has not been asked: the
-        # next tick sees both.
-        if [ -n "$_sroad" ]; then
-            case "$ROAD_YOUNG" in *" $_sroad "*)
-                log "slot-health: awg-выход №$sid ($scfg): его дорогу (выход №$_sroad) судить рано — поднята секунды назад или с её конфигом идёт работа WARP; не сужу ни её, ни сервер, вердикт следующим тиком"
-                continue ;;
-            esac
-        fi
-        if [ -n "$_sroad" ] && road_down "$_sroad"; then
-            slot_road_lies "$sid" "$scfg" "$sfb" "$st" "$_sroad"
-            continue
-        fi
+        slot_road_gate && continue
+        case "$ROAD_STALE" in *" $sid "*)
+            if sh "$TRANSPORT_SH" slot-up "$sid" >>"$LOG" 2>&1; then ROAD_BACK="$ROAD_BACK$sid "; fi
+            ROADS_LOADED=0
+            continue ;;
+        esac
         if ! ip link show "$sif" >/dev/null 2>&1; then
             # несущая исчезла (демон упал). fallback=main требует ip rule -> table 1000, но mark-core
             # ставил её на 100N при живой несущей; пустая 100N проваливает трафик в main=НАПРЯМУЮ,
@@ -1249,7 +1313,8 @@ EOF
             # a backoff after the road came back (review s.123, round 4; «handshake passes, data is cut» is the measured WARP
             # failure on a filtering ISP — a steady state there, not a two-minute window). The road is asked by the result first
             # — only when the probe would really run now (no boot window, no backoff in flight): otherwise it costs nothing.
-            if [ -n "$_sroad" ] && ! slot_boot_window && ! slot_retry_wait "$sid" "$st" && road_down "$_sroad" probe; then
+            if ! slot_boot_window && ! slot_retry_wait "$sid" "$st" && rider_road_gate "$sid" probe; then
+                _sroad=$_rof
                 # A line in the log and the mail — once per episode (the log lives in RAM and nobody rotates it): an exit taken
                 # down a tick ago is declared already, one that fell by itself is not.
                 [ -f "$SLOT_DOWN.$sid" ] || log "slot-health: awg-выход №$sid снят, а его дорога (выход №$_sroad) рукопожатие держит, но ничего не везёт → возврат не пробую, сервер не сужу"
@@ -1327,10 +1392,7 @@ EOF
         fi
         # THE EXIT IS SILENT WHILE ITS ROAD'S HANDSHAKE IS STILL YOUNG (the check above let it through): before blaming the server
         # the road is asked by the result (road_down … probe) — the verdict and the words are those of a road that is down.
-        if [ -n "$_sroad" ] && road_down "$_sroad" probe; then
-            slot_road_lies "$sid" "$scfg" "$sfb" "$st" "$_sroad"
-            continue
-        fi
+        slot_road_gate probe && continue
         # несущая поднята, но handshake мёртв (сервер слота лёг) → трафик группы блэкхолит в дохлый
         # туннель. Гасим несущую (transport.sh slot-down: down awgN + mark-core -> fallback).
         # В БУТ-ОКНЕ ДЕЛАЕМ БЕЗОПАСНУЮ ПОЛОВИНУ, А НЕ НИЧЕГО (ревью 3, 06.09.2026). Прежняя правка
@@ -2288,7 +2350,7 @@ health_back() { fo_backoff_reset; wan_out_clear; vpn_ok_quiet; }
 off_retry_same() {
     _ors=$(fo_retry); [ "$_ors" -gt "$TUNNEL_RETRY_MAX" ] && _ors=$TUNNEL_RETRY_MAX
     _orl=$(( _ors - $(stamp_age "$FAILOVER_STAMP") ))
-    if [ "$_orl" -gt 0 ]; then
+    if [ "${1:-}" != road ] && [ "$_orl" -gt 0 ]; then
         log "$TRANSPORT режим=off: прямой режим (тот же сервер — снова через $(( (_orl + 59) / 60 )) мин)"
         return 0
     fi
@@ -2327,6 +2389,12 @@ off_retry_same() {
     sh "$TRANSPORT_SH" down "$TRANSPORT" >>"$LOG" 2>&1
     wd_switch_drop
     echo FAILED > "$XSTATE"
+    if rider_road_gate main probe fresh; then
+        main_road_episode
+        printf '%s\n' "$_road_episode" > "$ROAD_FO"
+        return 0
+    fi
+    rm -f "$ROAD_FO"
     fo_backoff_bump "$TUNNEL_RETRY_MAX"
     log "$TRANSPORT режим=off: тот же сервер не везёт → прямой режим"
     return 0
@@ -2935,6 +3003,7 @@ fi
 # это жаловались: «выключаю zapret, а он воскресает»). Слот-свипы и DoH за finish() остаются:
 # «Шифрованный DNS» живёт и без VPN, а слоты свои правила потеряли вместе с `off`.
 if [ -f "$ENODIA_STATE/.vpn-off" ]; then TRANSPORT_OK=0; fi
+[ ! -f "$ENODIA_STATE/.vpn-off" ] || rm -f "$ROAD_FO"
 
 # --- mipctld-guard: наши MARK+ACCEPT должны стоять ВЫШЕ miwifi/NFQUEUE ---
 # ГРАБЛЯ (тестер, 12.07.2026 — [[mipctld-nfqueue-fwmark-split]]): стоковый mipctld инспектирует
@@ -3000,6 +3069,7 @@ fi
 if [ "$TRANSPORT_OK" = 0 ]; then nonvpn_rules_sweep; finish; fi
 
 TRANSPORT=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
+[ ! -f "$ROAD_FO" ] || { road_of main; main_road_episode; }
 if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; then
     TLABEL=$(transport_label "$TRANSPORT")
     xcur=HEALTHY; [ -f "$XSTATE" ] && xcur=$(cat "$XSTATE")
@@ -3032,6 +3102,7 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
         if [ "$(cat "$STATE" 2>/dev/null)" = FAILOPEN ] && { carrier_seen "$TRANSPORT" || [ -f "$VPN_DOWN_EP" ]; }; then _xback=1; fi
         carrier_seen_mark "$TRANSPORT"; carrier_tries_reset "$TRANSPORT"
         if [ "$xcur" != "HEALTHY" ]; then echo HEALTHY > "$XSTATE"; episode_reset; log "$TRANSPORT health: ок"; fi
+        rm -f "$ROAD_FO"
         doh_follow_carrier ok       # несущая везёт ⇒ резолвер можно вернуть в туннель
         health_back   # бэкофф перебора, эпизоды «интернета нет» и (продержавшись FAILOPEN_STABLE) «прямого режима» закрыты
         # STATE обратно в NORMAL, если несущую подняли МИМО watchdog (типичный boot-race:
@@ -3077,6 +3148,8 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
         # троттл FAILBACK_INTERVAL. transport_home пуст → не трогаем (юзер не задавал).
         if fo_home_transport_back "$TRANSPORT" \
            && [ "$(stamp_age "$FAILBACK_STAMP")" -ge "$FAILBACK_INTERVAL" ]; then
+            home_cfg=$(cat "$ACTIVE_NAME" 2>/dev/null | tr -d ' \r\n')
+            home_road_wait "$(home_road awg "$home_cfg")" home-transport && finish
             ahs=$($WG show awg0 latest-handshakes 2>/dev/null | awk 'NR==1{print $2}')
             case "$ahs" in ''|*[!0-9]*) ahs=0 ;; esac
             if [ "$ahs" -gt 0 ] && awg_hs_alive "$(age_since "$ahs")"; then
@@ -3089,7 +3162,7 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
             else
                 # The warm awg0 is silent: an Amnezia Premium home gets its kick here too — a new key laid out under this transport
                 # raises the warm reserve on it (subs-update.sh refresh_awg), and the handshake above can come back (review s.136 r3, M1).
-                premium_kick "$(cat "$ACTIVE_NAME" 2>/dev/null | tr -d ' \r\n')"
+                premium_kick "$home_cfg"
             fi
         fi
         finish
@@ -3150,6 +3223,12 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
     # перебор резервов хоронил бы живые серверы один за другим (после первой удачи — no-op).
     clock_tick_sync
 
+    # A failed alternate carrier can still have a healthy server. The slot
+    # sweep owns recovery of its AWG road, just as for an AWG rider.
+    if rider_road_gate main probe; then alt_road_failed; finish; fi
+    main_road_episode
+    if [ "$_wrfo" = 1 ]; then off_retry_same road; finish; fi
+
     # --- НЕСУЩУЮ В ЭТУ ЗАГРУЗКУ НЕ ПОДНИМАЛИ НИ РАЗУ: это НЕЗАВЕРШЁННЫЙ СТАРТ, а не падение ---
     # ЗАЧЕМ ОТДЕЛЬНАЯ ВЕТКА, если лестница ниже тоже кончается подъёмом. Лестница — это ответ на
     # вопрос «что делать, когда ЭТО СЛОМАЛОСЬ»: она жжёт эпизод, перебирает серверы и в конце
@@ -3196,8 +3275,9 @@ if [ -n "$TRANSPORT" ] && [ "$TRANSPORT" != "awg" ] && [ -f "$TRANSPORT_SH" ]; t
             wd_switch_take "подъём $TRANSPORT"
             carrier_tries_add "$TRANSPORT"
             log "$TRANSPORT: несущую в эту загрузку не поднимали ни разу (heal не смог — бинарь/накопитель приехали позже) → поднимаю, попытка $((_cnt + 1)) из $CARRIER_UP_TRIES"
-            sh "$TRANSPORT_SH" up "$TRANSPORT" >>"$LOG" 2>&1
+            sh "$TRANSPORT_SH" up "$TRANSPORT" >>"$LOG" 2>&1; _startup_rc=$?
             wd_switch_drop
+            if [ "$_startup_rc" != 0 ] && rider_road_gate main probe fresh; then alt_road_failed; fi
             finish
         fi
         # СКАЗАТЬ ОДИН РАЗ. Счётчик здесь уже не про попытки, а про «сообщили»: перешагиваем
@@ -3817,13 +3897,13 @@ if [ "$age" -ge "$HS_DEAD" ]; then
     # же дороге не поедет тоже). Делаем только fail-open — прямой режим, иначе сайты из списков стояли бы в мёртвом туннеле, — и
     # ждём дорогу: это выход, его чинит свип в finish (там же письмо о нём, с перечнем тех, кто по нему едет). Дорога ожила —
     # рукопожатие вернётся, и ветка «VPS жив» вернёт туннель штатно.
-    road_of main; _wroad=$_rof
-    if [ -n "$_wroad" ] && road_down "$_wroad" probe; then
+    if rider_road_gate main probe; then
+        _wroad=$_rof; main_road_episode
+        printf '%s\n' "$_road_episode" > "$ROAD_FO"
         if [ "$cur" != "FAILOPEN" ]; then
             log "handshake ${age}с, но сервер едет по дороге (выход №$_wroad), а она лежит → прямой режим; сервер не переключаю — сперва дорога"
             [ -f "$SWITCH_VPN" ] && sh "$SWITCH_VPN" safety-off >>"$LOG" 2>&1
             echo "FAILOPEN" > "$STATE"
-            echo "$_wroad" > "$ROAD_FO"
             active=$(cat "$ACTIVE_NAME" 2>/dev/null)
             if [ "$NF_LANG" = en ]; then
                 failopen_mail "BE7000: the road to the VPN server is down, direct mode" \
@@ -3865,8 +3945,8 @@ back up; once it answers, the VPN returns by itself and a second email arrives."
     # штамп ниже): удался — вернёт ветка «VPS жив», нет — это уже честная авария сервера, и прямой режим возвращаем сами (ниже).
     # Вне FAILOPEN отметка — след прежнего эпизода (ушли иначе: другой транспорт, ручная смена): снимаем, чтобы не подарила переподъём
     # чужому прямому режиму.
-    _wrfo=0; [ "$cur" = "FAILOPEN" ] && [ -f "$ROAD_FO" ] && _wrfo=1
-    [ "$cur" = "FAILOPEN" ] || rm -f "$ROAD_FO" 2>/dev/null
+    main_road_episode
+    [ "$cur" = FAILOPEN ] || _wrfo=0
     if { [ "$cur" != "FAILOPEN" ] || [ "$_wrfo" = 1 ]; } && [ -f "$ENODIA_STATE/awg.conf" ] && [ -f "$TRANSPORT_SH" ] \
        && { [ "$_wrfo" = 1 ] || [ "$(stamp_age "$REUP_STAMP")" -ge "$REUP_RETRY" ]; }; then
         wd_switch_take "переподъём awg0"   # ДО отметки: при ручной смене попытка не потрачена
@@ -3893,6 +3973,13 @@ back up; once it answers, the VPN returns by itself and a second email arrives."
             esac
             i=$((i + 1))
         done
+        if rider_road_gate main probe fresh; then
+            main_road_episode
+            printf '%s\n' "$_road_episode" > "$ROAD_FO"
+            [ -f "$SWITCH_VPN" ] && sh "$SWITCH_VPN" safety-off >>"$LOG" 2>&1
+            echo FAILOPEN > "$STATE"
+            finish
+        fi
         log "reup не помог (handshake так и не пришёл) — иду по лестнице failover"
         # ПРЯМОЙ РЕЖИМ БЫЛ — ВЕРНУТЬ ЕГО: `up awg` вернул маршрут в awg0, ip rule метки и туннельный DNS, а ветка «уже FAILOPEN» ниже
         # прямой режим считает настоящим и safety-off не зовёт — дом ехал бы в мёртвый туннель (без DoH — и без имён вовсе), пока
@@ -4058,6 +4145,11 @@ elif awg_hs_alive "$age"; then
         home_t=$(transport_home)
         if fo_home_transport_back awg \
            && [ "$(stamp_age "$FAILBACK_STAMP")" -ge "$FAILBACK_INTERVAL" ]; then
+            case "$home_t" in
+                xray|hy2)
+                    home_cfg=$(head -n1 "$ENODIA_STATE/.$home_t-active" 2>/dev/null)
+                    home_road_wait "$(home_road "$home_t" "$home_cfg")" home-transport && finish ;;
+            esac
             # ===== home-транспорт = tunnel (xray/hy2), а мы на awg (после cross) → вернуться на него =====
             # Reality/маскирующиеся туннели НЕ отвечают на ICMP и неотличимы по TCP (под HTTPS)
             # → «ожил ли сервер» надёжно проверяется ТОЛЬКО подъёмом транспорта + egress-пробой.
@@ -4088,9 +4180,11 @@ elif awg_hs_alive "$age"; then
             active=$(cat "$ACTIVE_NAME" 2>/dev/null)
             if fo_awg_server_away \
                && [ "$(stamp_age "$FAILBACK_STAMP")" -ge "$FAILBACK_INTERVAL" ]; then
+                home_via=$(home_road awg "$home")
+                home_road_wait "$home_via" home-failback && finish
                 date +%s > "$FAILBACK_STAMP"
                 ep=$(grep -E '^Endpoint' "$CONFIGS_DIR/$home.conf" 2>/dev/null | head -1 | awk -F'= *' '{print $2}' | sed 's/:[0-9]*$//' | tr -d ' ')
-                if [ -n "$ep" ] && home_back "$home" "$ep"; then
+                if [ -n "$ep" ] && home_back "$home" "$ep" "$home_via"; then
                     log "home-failback: основной '$home' (endpoint $ep) ожил → возврат"
                     # Вернулись ли — по ФАКТУ `.active`, а не по попытке: пинг домашний принял, а рукопожатия
                     # не дал — switch-vpn откатывается на резерв сам (и пишет своё событие об откате).

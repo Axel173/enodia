@@ -459,24 +459,21 @@ for _tkf in "$DS/tasks"/t*.task; do
 	tk_n=$((tk_n+1)); _tki=${_tkf##*/}; _tki=${_tki%.task}
 	case "$(tail -n 1 "/tmp/enodia-tasks/$_tki.hist" 2>/dev/null | cut -f6)" in err|killed|cut|nodir) tk_bad=$((tk_bad+1)) ;; esac
 done
-# THE ROAD OF THE MAIN SERVER (road.sh): its packets to the server ride another exit — the header says so («через WARP») and the facts
-# ribbon gets a chip (the user's request, BE7000 10.10.2026: nothing on the overview told the server rides a road but MTU 1188). The
-# answer is road.sh's (`carrier main`: the registry, an EFFECTIVE road only, empty under `.vpn-off`); the exit's name goes as stored
-# (base64, the panel decodes it like every exit's name), «is it WARP» — warp.sh's list by the exit's config. No store ⇒ no fork: most
-# routers have no road at all, and this file is polled every 10 s.
-# `road_up` — the road's exit CARRIES (up|idle of `slots.sh state`, the same kernel facts as the «выход не работает» pill). A road
-# that is set but down leaves the server's packets going directly (fail-open): «через WARP» was then said of packets that did not
-# ride it (review s.122). No state line for the exit — nothing is claimed (true).
-road_id=""; road_nb=""; road_w=false; road_up=true
-if [ "$t" = awg ] && [ -s "$DS/.cfg-via" ] && [ -f "$D/road.sh" ]; then
-	road_id=$(sh "$D/road.sh" carrier main 2>/dev/null | tr -cd '2-7' | cut -c1)
+# The road owner reads destination rules and usable tables independently of the saved choice.
+road_id=""; road_nb=""; road_w=false; road_up=true; road_configured=""
+if [ "$voff" = 0 ] && [ -f "$D/road.sh" ] &&
+	{ [ -s "$DS/.cfg-via" ] || ip rule show 2>/dev/null | grep -q '^8[2-7]:'; }; then
+	road_id=$(sh "$D/road.sh" main-path "$t" "$cfg_file" 2>/dev/null | grep -m1 '^[2-7]$')
+	if [ -s "$DS/.cfg-via" ] && [ -n "$cfg_file" ]; then
+		road_configured=$(sh "$D/road.sh" get "$t" "$cfg_file" 2>/dev/null | grep -m1 '^[2-7]$')
+	fi
+	if [ -z "$road_id" ] && [ -n "$road_configured" ]; then road_id=$road_configured; road_up=false; fi
 	if [ -n "$road_id" ] && [ -f "$D/slots.sh" ]; then
-		case "$(printf '%s\n' "$ex_states" | awk -F'\t' -v i="$road_id" '$1 == i { print $2; exit }')" in ''|up|idle) ;; *) road_up=false ;; esac
 		_rdl=$(sh "$D/slots.sh" show "$road_id" 2>/dev/null)
 		road_nb=$(printf '%s' "$_rdl" | cut -f2 | tr -cd 'A-Za-z0-9+/=')
 		_rdc=$(printf '%s' "$_rdl" | cut -f4)
 		if [ -n "$_rdc" ] && [ -f "$D/warp.sh" ] && sh "$D/warp.sh" list 2>/dev/null | cut -f1 | grep -qxF "$_rdc"; then road_w=true; fi
 	fi
 fi
-printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"road":"%s","road_name_b64":"%s","road_warp":%s,"road_up":%s,"tasks_n":%s,"tasks_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s}\n' \
-	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$road_id" "$road_nb" "$road_w" "$road_up" "$tk_n" "$tk_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now"
+printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"road":"%s","road_name_b64":"%s","road_warp":%s,"road_up":%s,"road_configured":"%s","tasks_n":%s,"tasks_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s}\n' \
+	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$road_id" "$road_nb" "$road_w" "$road_up" "$road_configured" "$tk_n" "$tk_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now"

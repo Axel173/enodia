@@ -925,11 +925,11 @@ EOF
 		"$on" "$live" "$inst" "$zbin" "$nfq" "$back" "$aj" "$dj" "$isdef" "$scj" "$cj" "$pj" "$ist" "$imsg"
 }
 
-# read_subs_last — отметка последнего прогона подписок (.subs-last = «ts⇥ok|fail⇥сводка») в
+# read_subs_last — отметка последнего прогона подписок (.subs-last = «ts⇥ok|fail⇥сводка⇥geo») в
 # sl_ts/sl_ok/sl_msg. ОДНА копия разбора на два потребителя (экран «Подписки» + прогресс
 # кнопки ⟳): вторая копия неизбежно разъехалась бы по эскейпу кавычек.
 read_subs_last() {
-	sl_ts=0; sl_ok=false; sl_msg=""
+	sl_ts=0; sl_ok=false; sl_msg=""; sl_geo=false
 	[ -s "$DS/.subs-last" ] || return 0
 	TAB=$(printf '\t')
 	sl_ts=$(cut -d"$TAB" -f1 "$DS/.subs-last" 2>/dev/null | tr -cd '0-9')
@@ -938,7 +938,8 @@ read_subs_last() {
 	# `jtxt`, а не `jesc`: в сводке — МЕТКИ подписок, то есть данные, и `jesc` вырезал бы из «Speed [50m]» «код цвета» `[50m`
 	# (разбор — в шапке json-lib.sh; ревью приёмки, круг 1). Перевод строки в конце записи — вон ДО jtxt: тот делает из него пробел,
 	# и сводка уходила бы с пробелом на конце (круг 2); хвостового пробела самого писателя нет — его снимает sub_sum_cut (круг 3).
-	sl_msg=$(cut -d"$TAB" -f3- "$DS/.subs-last" 2>/dev/null | tr -d '\n' | jtxt 1000)
+	sl_msg=$(cut -d"$TAB" -f3 "$DS/.subs-last" 2>/dev/null | tr -d '\n' | jtxt 1000)
+	[ "$(cut -d"$TAB" -f4 "$DS/.subs-last" 2>/dev/null)" != 1 ] || sl_geo=true
 	[ -n "$sl_ts" ] || sl_ts=0
 	# Возраст считает РОУТЕР: обе точки отсчёта из одних часов, поэтому разность честна даже при
 	# несинхронизированных часах (RTC нет). Панель считала его от `Date.now()` браузера — при этом
@@ -961,7 +962,7 @@ emit_subs_run() {
 	p=$(cat /tmp/enodia-subs-update.lock/pid 2>/dev/null | tr -cd '0-9')
 	[ -n "$p" ] && [ -d "/proc/$p" ] && run=true
 	read_subs_last
-	printf '{"running":%s,"ts":%s,"ok":%s,"msg":"%s"}\n' "$run" "${sl_ts:-0}" "$sl_ok" "$sl_msg"
+	printf '{"running":%s,"ts":%s,"ok":%s,"msg":"%s","geo_notice":%s}\n' "$run" "${sl_ts:-0}" "$sl_ok" "$sl_msg" "$sl_geo"
 }
 
 # --- КАРТОЧКА «ПОДПИСКИ»: сколько ещё работает каждая. Три источника в одном ответе: реестр
@@ -1108,7 +1109,7 @@ emit_prefs() {
 	case "$ui" in off|6h|12h|weekly) : ;; *) ui=daily ;; esac
 	# Автообновление ПОДПИСОК (headless, subs-update.sh по cron). Дефолт off: на прежних
 	# установках подписки обновлялись только из панели, менять это молча нельзя. Плюс отметка
-	# последнего прогона (.subs-last = «ts⇥ok|fail⇥сводка») — панель показывает «обновлено N назад».
+	# последнего прогона (.subs-last = «ts⇥ok|fail⇥сводка⇥geo») — панель показывает «обновлено N назад».
 	# [ -f ] перед чтением: без него на установке БЕЗ маркера busybox пишет «can't open …» в
 	# stderr (в лог uhttpd) на каждый опрос настроек — шум, который потом ищут как ошибку.
 	si=off; [ -f "$DS/.subs-interval" ] && si=$(tr -cd 'a-z0-9' < "$DS/.subs-interval" 2>/dev/null)
@@ -1369,12 +1370,18 @@ emit_checks() {
 	if [ -f "$F" ]; then
 		TAB=$(printf '\t')
 		chb_on=0; [ -f "$DS/.chebur" ] && chb_on=1
-		while IFS="$TAB" read -r key st ms method cdn mbps kind ts tms via dms chb ncmp; do
+		while IFS="$TAB" read -r key st ms method cdn mbps kind ts tms via dms chb ncmp reason; do
 			case "$key" in 'awg|'*|'xray|'*|'hy2|'*) : ;; *) continue ;; esac
 			msj=$ms;   case "$msj" in ''|*[!0-9]*) msj=null ;; esac
 			mbj=$mbps; case "$mbj" in ''|*[!0-9.]*) mbj=null ;; esac
 			case "$cdn" in 1) cdj=true ;; *) cdj=false ;; esac
 			case "$st" in ok) stj=ok ;; blk) stj=blk ;; *) stj=dead ;; esac
+			# Discard old DNS diagnoses, which could also describe a hostname.
+			case "$st:$reason" in
+				inapplicable:ipv6_unreachable) stj=inapplicable; msj=null; mbj=null ;;
+				inapplicable:*|unknown:*) continue ;;
+				*) reason="" ;;
+			esac
 			tmj=$tms;  case "$tmj" in ''|*[!0-9]*) tmj=null ;; esac
 			dmj=$dms;  case "$dmj" in ''|*[!0-9]*) dmj=null ;; esac
 			case "$via" in [2-7]) ;; *) via="" ;; esac
@@ -1385,8 +1392,8 @@ emit_checks() {
 			case "$method" in *[!A-Za-z0-9:._-]*|'') method="-" ;; esac
 			case "$ncmp" in 1) ncj=true ;; *) ncj=false ;; esac
 			[ "$first" = 1 ] || printf ','; first=0
-			printf '"%s":{"st":"%s","ms":%s,"method":"%s","cdn":%s,"mbps":%s,"kind":"%s","ts":%s,"tms":%s,"via":"%s","dms":%s,"chb":"%s","ncmp":%s}' \
-				"$key" "$stj" "$msj" "$method" "$cdj" "$mbj" "$kj" "$ts" "$tmj" "$via" "$dmj" "$chb" "$ncj"
+			printf '"%s":{"st":"%s","ms":%s,"method":"%s","cdn":%s,"mbps":%s,"kind":"%s","ts":%s,"tms":%s,"via":"%s","dms":%s,"chb":"%s","ncmp":%s,"reason":"%s"}' \
+				"$key" "$stj" "$msj" "$method" "$cdj" "$mbj" "$kj" "$ts" "$tmj" "$via" "$dmj" "$chb" "$ncj" "$reason"
 		done < "$F"
 	fi
 	printf '}\n'
@@ -1406,6 +1413,14 @@ tasks_relay() {   # tasks_relay <verb> [args] — the owner's JSON, or a refusal
 }
 
 case "$sec" in
+	dns_scan)
+		# A separate, bounded progress reader; this never starts network checks.
+		if [ -f "$D/dns-scan.sh" ]; then
+			si=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep '^id=' | head -1 | cut -d= -f2)
+			case "$si" in *[!a-f0-9]*) printf '{"error":"bad job id"}\n'; exit 0 ;; esac
+			[ -z "$si" ] || [ "${#si}" = 16 ] || { printf '{"error":"bad job id"}\n'; exit 0; }
+			sh "$D/dns-scan.sh" status "$si"
+		else printf '{"engine":false,"state":"idle","cells":[]}\n'; fi ;;
 	devices)  emit_devices ;;
 	checks)   emit_checks ;;
 	# Only what holds no secrets is read here: the list (names, schedules, statuses) and the schedule preview. A script's body,

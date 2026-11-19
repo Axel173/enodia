@@ -124,6 +124,7 @@ if ! command -v ct_flush >/dev/null 2>&1; then
     ct_flush_dst() { [ -n "$1" ] && conntrack -D -d    "$1" >/dev/null 2>&1; return 0; }
 fi
 EXCLUDE_CHAIN=VPN_EXCLUDE
+ENDPOINT_CHAIN=VPN_ENDPOINT
 STORE_IPS="$ENODIA_STATE/.bypass-ips"
 STORE_DST="$ENODIA_STATE/.bypass-dst"
 STORE_IFS="$ENODIA_STATE/.bypass-ifaces"
@@ -363,6 +364,7 @@ ensure_chain() {
         iptables -t mangle -I PREROUTING 1 -j "$EXCLUDE_CHAIN"
     iptables -t mangle -D OUTPUT -j "$EXCLUDE_CHAIN" 2>/dev/null
     iptables -t mangle -I OUTPUT 1 -j "$EXCLUDE_CHAIN"
+    ensure_endpoint_chain || return 1
     ensure_prerouting_order
 }
 
@@ -553,7 +555,7 @@ if_change_live() {
     for _ici in $(printf '%s\n' "$_icd" | sed -n 's/.*--physdev-in \([A-Za-z0-9_.-]*\).*/\1/p'); do
         [ -d "/sys/class/net/$_ici" ] && return 0
     done
-    printf '%s\n' "$_icd" | grep -v -e '--physdev-in' -e ' -j RETURN' -e '^-N ' | grep -q .
+    printf '%s\n' "$_icd" | grep -v -e '--physdev-in' -e ' -j RETURN' -e '^-N ' -e " -j $ENDPOINT_CHAIN" | grep -q .
 }
 guest_rule_add() {
     ip rule show | grep -q "from $GUEST_SUBNET lookup main" || \
@@ -573,103 +575,143 @@ allow_sync() {
 
 # Road rules («дорога к серверу», road.sh) are DERIVED from the endpoint stores: whoever changes a store rebuilds them, so a
 # carrier riding another exit gets its `to <server> lookup 100N` the moment its endpoint is known, and loses it with it.
-road_wire() { [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" wire >/dev/null 2>&1; return 0; }
+road_wire() {
+    [ -f "$ENODIA_DIR/road.sh" ] || return 0
+    sh "$ENODIA_DIR/road.sh" wire >&2
+}
 
 # --- endpoint активной несущей мимо VPN (анти-петля, см. шапку про .endpoint-bypass) ---
-# Replace-семантика: храним ОДИН IP (endpoint активной несущей). Зовётся из
+# Replace-семантика: храним IP endpoints активной несущей. Зовётся из
 # transport-*.sh up (а switch-vpn делегирует в transport-awg up -> покрыты и смена
 # страны/конфига, и failover, и кросс-смена транспорта). Пустой $1 = снять исключение.
-endpoint_set() {   # $1 = IPv4 endpoint'а (пусто = снять)
-    ensure_chain
-    new="$1"
-    # Снять прежний авто-endpoint — КРОМЕ совпадающего с новым и КРОМЕ адреса, чей ACCEPT
-    # принадлежит не нам. Арбитр общий с семьёй слотов (_ep_needed_elsewhere): раньше здесь
-    # проверялся только юзер-вырез .bypass-dst, и если ОДИН и тот же VPS несёт основную несущую и
-    # доп-выход (частый случай — сервер один, конфигов два), смена основного сервера снимала
-    # правило вместе с анти-петлёй СЛОТА: его endpoint снова попадал под маркировку, и хендшейк
-    # уезжал в туннель. Симптом тот же, что в [[endpoint-in-iplist-loop]], только у доп-выхода.
-    if [ -f "$STORE_EP" ]; then
-        while IFS= read -r old; do
-            [ -z "$old" ] && continue
-            [ "$old" = "$new" ] && continue
-            _ep_needed_elsewhere "$old" "$STORE_EP" && continue
-            rule_del_dst "$old"
-        done < "$STORE_EP"
-    fi
-    : > "$STORE_EP"
-    [ -z "$new" ] && { road_wire; echo "[apply-bypass] endpoint-исключение снято"; return 0; }
-    # строго IPv4 — в VPN_EXCLUDE кладём только числовой адрес (не имя: iptables -d
-    # с именем резолвит ОДИН раз и может уйти в дохлый туннель; имя резолвит несущая).
-    echo "$new" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || {
-        road_wire; echo "[apply-bypass] endpoint '$new' не IPv4 — пропуск"; return 0; }
-    echo "$new" > "$STORE_EP"
-    rule_add_dst "$new"
-    allow_sync
-    ct_flush_dst "$new"                              # сбросить уже зациклившиеся сессии к VPS
-    road_wire
-    echo "[apply-bypass] endpoint $new -> мимо VPN (анти-петля)"
+# Stores are the only endpoint truth. A separate chain avoids shared kernel-rule
+# ownership with user destinations. Every writer and replay uses one mutex and
+# rebuilds the union; SIGKILL needs no remembered old set or compensation log.
+ensure_endpoint_chain() {
+    iptables -t mangle -L "$ENDPOINT_CHAIN" -n >/dev/null 2>&1 || iptables -t mangle -N "$ENDPOINT_CHAIN" || return 1
+    iptables -t mangle -C "$EXCLUDE_CHAIN" -j "$ENDPOINT_CHAIN" 2>/dev/null || iptables -t mangle -I "$EXCLUDE_CHAIN" 1 -j "$ENDPOINT_CHAIN"
 }
-
-# --- endpoint ДОП-ВЫХОДА (слота) мимо VPN (анти-петля, мульти-транспорт Ф2) --------------
-# endpoint_set выше хранит РОВНО один IP (основной несущей). У доп-выходов (slots.sh) СВОЯ
-# несущая awgN/xtunN с СВОИМ endpoint'ом VPS — его тоже надо вывести из-под маркировки (иначе
-# router-локальные UDP к этому VPS, если его IP ∈ iplist_set/слот-сете, завернутся в туннель =
-# петля, ровно как у основного, [[endpoint-in-iplist-loop]]). Но затирать основной .endpoint-bypass
-# нельзя — поэтому per-slot store `.endpoint-bypass-s<id>` и АДДИТИВНОЕ правило. Правило (ACCEPT в
-# VPN_EXCLUDE) по dst-IP то же самое, что у основного — снимаем СТАРЫЙ endpoint слота только если он
-# больше НИГДЕ не нужен (ни основному, ни другому слоту, ни юзер-вырезу .bypass-dst), иначе оборвём
-# чужую анти-петлю. Зовёт transport-*.sh slot-up/slot-down (авто, как endpoint-set у основного).
-STORE_EP_SLOT_PREFIX="$ENODIA_STATE/.endpoint-bypass-s"
-
-# Нужен ли этот IP-endpoint ещё где-то (кроме store $2) — тогда его ACCEPT-правило НЕ снимаем.
-_ep_needed_elsewhere() {   # $1=ip  $2=свой store (исключить из проверки)
-    # ONE kernel rule, TWO spellings of one address: a person's rule is stored as typed, and `1.2.3.4/32` is `-d 1.2.3.4` to
-    # iptables. Compared bare, a carrier leaving the server took the person's `/32` rule out of the kernel (the line stayed in
-    # the panel with no effect), and a person removing their rule took a carrier's anti-loop (see dst_user_gone). The person's
-    # own verbs remove BOTH spellings from the store first (dst_store_del), so the `/32` line below speaks to the carriers.
-    _ip="${1%/32}"; _self="$2"
-    # `$_self` исключаем и для ОСНОВНОГО store: арбитром пользуется и endpoint_set, а без этой
-    # проверки он всегда находил бы адрес «нужным» в собственном файле и не снимал бы правило НИКОГДА.
-    [ "$STORE_EP" != "$_self" ] && grep -qxF "$_ip" "$STORE_EP" 2>/dev/null && return 0   # основной endpoint
-    grep -qxF "$_ip" "$STORE_DST" 2>/dev/null && return 0     # осознанный юзер-вырез «мимо VPN»
-    grep -qxF "$_ip/32" "$STORE_DST" 2>/dev/null && return 0  # …the same address, typed with its mask
-    # Every exit's store that EXISTS (glob, not an id list: a list of ids dropped exits 5..7, and the
-    # rule of a VPS shared with exit 6 was removed on the main server's failover — review s.106).
-    for _f in "${STORE_EP_SLOT_PREFIX}"*; do
-        [ -f "$_f" ] && [ "$_f" != "$_self" ] || continue
-        grep -qxF "$_ip" "$_f" 2>/dev/null && return 0        # endpoint другого слота
+endpoint_union() {
+    _epu_all=''
+    for _epu_file in "$STORE_EP" "${STORE_EP_SLOT_PREFIX}"[2-7]; do
+        [ -f "$_epu_file" ] && [ ! -L "$_epu_file" ] || continue
+        _epu_part=$(cat "$_epu_file") || return 1
+        _epu_all="$_epu_all
+$_epu_part"
     done
-    return 1
+    printf '%s\n' "$_epu_all" | lbl_endpoint_ips | sed '/^$/d' | sort -u
 }
-# A PERSON'S «мимо VPN» rule goes away ($1 — the address as stored, its store line already removed): the kernel rule goes with it
-# unless a carrier's endpoint is the same address — that ACCEPT is then the carrier's anti-loop too, the rule is ONE. Removed
-# blindly, the carrier's own packets to its server were marked into the tunnel again (the loop of [[endpoint-in-iplist-loop]])
-# until the next raise. The panel makes the coincidence ordinary: «пускать этот WARP из дома напрямую» writes such a rule for a
-# Cloudflare address, and the router's own WARP exit may sit on that very address.
-dst_user_gone() { _ep_needed_elsewhere "$1" "" || rule_del_dst "$1"; }
-
-endpoint_slot_set() {   # $1 = id слота (2..7); $2 = IPv4 endpoint'а (пусто = снять)
-    ensure_chain
-    _sid="$1"; new="$2"
-    case "$_sid" in [2-7]) ;; *) echo "[apply-bypass] endpoint-slot: id = 2..7"; return 1 ;; esac
-    store="${STORE_EP_SLOT_PREFIX}${_sid}"
-    # снять прежний endpoint этого слота (если он есть, отличается от нового и больше нигде не нужен)
-    if [ -f "$store" ]; then
-        old=$(head -1 "$store" 2>/dev/null | tr -d ' \r\n')
-        if [ -n "$old" ] && [ "$old" != "$new" ]; then
-            _ep_needed_elsewhere "$old" "$store" || rule_del_dst "$old"
+endpoint_lock_run() {
+    (
+        # Reuse the project's dead-holder admission, including death before pid
+        # publication. A live writer serializes store rename AND kernel rebuild.
+        command -v lbl_lock_take >/dev/null 2>&1 || return 1
+        if ! command -v pid_runs >/dev/null 2>&1; then
+            [ -f "$ENODIA_DIR/daemon-lib.sh" ] || return 1
+            . "$ENODIA_DIR/daemon-lib.sh"
         fi
-    fi
-    : > "$store"
-    if [ -z "$new" ]; then rm -f "$store"; road_wire; echo "[apply-bypass] endpoint слота №$_sid снят"; return 0; fi
-    echo "$new" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || {
-        rm -f "$store"; road_wire; echo "[apply-bypass] endpoint слота №$_sid '$new' не IPv4 — пропуск"; return 0; }
-    echo "$new" > "$store"
-    rule_add_dst "$new"
+        _epl_lock="$ENODIA_STATE/.endpoint-reconcile.lock"
+        lbl_lock_take "$_epl_lock" 'apply-bypass.sh' || return 1
+        trap 'lbl_lock_drop "$_epl_lock"' EXIT
+        trap 'exit 1' HUP INT TERM
+        "$@"
+    )
+}
+endpoint_rebuild() {
+    endpoint_cleanup
+    _epb_union=$(endpoint_union) || return 1
+    for _epb_ip in $_epb_union; do
+        echo "$_epb_ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+    done
+    ensure_chain || return 1
+    iptables -t mangle -F "$ENDPOINT_CHAIN" || return 1
+    for _epb_ip in $_epb_union; do
+        # Reset a preceding device/port mark, then terminate mangle traversal.
+        # Never leave a MARK without its ACCEPT after a completed reconcile.
+        iptables -t mangle -A "$ENDPOINT_CHAIN" -d "$_epb_ip" -j MARK --set-mark 0x0 || return 1
+        iptables -t mangle -A "$ENDPOINT_CHAIN" -d "$_epb_ip" -j ACCEPT || return 1
+    done
+    # Migration from the former shared inline rules is itself repeatable after
+    # interruption. Preserve user-owned hosts (/32 alias included) and subnets.
+    _epb_legacy=$(iptables -t mangle -S "$EXCLUDE_CHAIN" 2>/dev/null | sed -n "s/^-A $EXCLUDE_CHAIN -d \([0-9.]*\)\(\/32\)\{0,1\} -j ACCEPT$/\1/p")
+    for _epb_ip in $_epb_legacy; do
+        grep -qxF "$_epb_ip" "$STORE_DST" 2>/dev/null && continue
+        grep -qxF "$_epb_ip/32" "$STORE_DST" 2>/dev/null && continue
+        iptables -t mangle -D "$EXCLUDE_CHAIN" -d "$_epb_ip" -j ACCEPT || return 1
+    done
+    return 0
+}
+endpoint_reconcile() { endpoint_lock_run endpoint_rebuild; }
+endpoint_replay() {
+    endpoint_reconcile && road_wire
+}
+endpoint_write() {
+    _epw_store=$1; _epw_new=$2
+    [ -z "${3:-}" ] || lbl_cfg_key "$3" || return 1
+    for _epw_ip in $_epw_new ${4:-}; do
+        echo "$_epw_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+    done
+    _epw_new=$(printf '%s\n' "$_epw_new" | tr ' \t\r' '\n\n\n' | sed '/^$/d' | sort -u)
+    _epw_hold=
+    [ -z "${4:-}" ] || _epw_hold=$(printf '%s\n' "$4" | tr ' \t\r' '\n\n\n' | awk -v ips="$_epw_new" '
+        BEGIN {n=split(ips,a,"\n"); for(i=1;i<=n;i++) seen[a[i]]=1} NF && !seen[$0]++')
+    lbl_commit_out_as "$ENODIA_STATE/.endpoint-write-${_epw_store##*/}.$$.new" "$_epw_store" endpoint_text "$_epw_new" "${3:-}" "$_epw_hold" "${5:-}" || return 1
+    endpoint_rebuild || return 1
+    for _epw_ip in $_epw_new $_epw_hold; do ct_flush_dst "$_epw_ip"; done
     allow_sync
-    ct_flush_dst "$new"
-    road_wire
-    echo "[apply-bypass] endpoint слота №$_sid $new -> мимо VPN (анти-петля)"
+    road_wire || return 1
+    echo "[apply-bypass] endpoint set updated"
+}
+endpoint_replace() { endpoint_lock_run endpoint_write "$@"; }
+endpoint_cleanup() {
+    # Reap only this owner's abandoned write names, including the old format.
+    # A live writer (or an unrecognized name/link) is never cleanup input.
+    for _epc_file in "$ENODIA_STATE"/.endpoint-write-.endpoint-bypass.*.new "$ENODIA_STATE"/.endpoint-write-.endpoint-bypass-s[2-7].*.new "$STORE_EP".*.new "${STORE_EP_SLOT_PREFIX}"[2-7].*.new; do
+        [ -f "$_epc_file" ] && [ ! -L "$_epc_file" ] || continue
+        _epc_base=${_epc_file%.new}; _epc_pid=${_epc_base##*.}
+        case "$_epc_pid" in ''|*[!0-9]*|0) continue ;; esac
+        case "${_epc_base%.*}" in
+            "$ENODIA_STATE/.endpoint-write-.endpoint-bypass"|"$ENODIA_STATE/".endpoint-write-.endpoint-bypass-s[2-7]|"$STORE_EP"|"${STORE_EP_SLOT_PREFIX}"[2-7]) ;;
+            *) continue ;;
+        esac
+        kill -0 "$_epc_pid" 2>/dev/null || rm -f "$_epc_file"
+    done
+}
+endpoint_text() {   # current IPv4 rows, owner key, held exclusions during startup, dial names
+    [ -n "$1$3" ] || return 0
+    [ -z "$1" ] || printf '%s\n' "$1" || return 1
+    [ -z "$2" ] || printf 'key=%s\n' "$2" || return 1
+    [ -z "$3" ] || printf '%s\n' "$3" || return 1
+    while IFS= read -r _ept_host; do
+        case "$_ept_host" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+        case "$_ept_host" in *[!0-9.]*) ;; *) continue ;; esac
+        printf 'host=%s\n' "$_ept_host" || return 1
+    done <<EOF
+$4
+EOF
+}
+endpoint_set() { endpoint_replace "$STORE_EP" "$@"; }
+
+# Slots publish through the same store transaction and derived chain as main.
+STORE_EP_SLOT_PREFIX="$ENODIA_STATE/.endpoint-bypass-s"
+# User destination rules have their own ownership; endpoint rules cannot be
+# removed by a user edit, even when their address is the same.
+dst_user_gone() { rule_del_dst "$1"; }
+
+endpoint_slot_set() {
+    case "$1" in [2-7]) ;; *) return 1 ;; esac
+    _ep_slot=$1; shift
+    endpoint_replace "${STORE_EP_SLOT_PREFIX}$_ep_slot" "$@"
+}
+
+endpoint_mv() {   # metadata only; the rename caller moves road intent separately
+    lbl_cfg_key "$1" && lbl_cfg_key "$2" || return 1
+    for _epm in "$STORE_EP" "${STORE_EP_SLOT_PREFIX}"[2-7]; do
+        grep -qxF "key=$1" "$_epm" 2>/dev/null || continue
+        lbl_commit_out_as "$ENODIA_STATE/.endpoint-write-${_epm##*/}.$$.new" "$_epm" \
+            sed "s|^key=.*|key=$2|" "$_epm" || return 1
+    done
+    return 0
 }
 
 # --- VPN_FORCE: «целиком через VPN» (см. шапку про force) -------------------
@@ -1188,22 +1230,10 @@ apply_all() {
     for _s in $BYPASS_SETS; do rule_add_set_dst "$_s"; done
     # endpoint активной несущей (анти-петля) — переиграть на boot/repair ДО подъёма
     # несущей (несущая потом сама обновит через transport-*.sh up endpoint-set).
-    ep=""
-    if [ -s "$STORE_EP" ]; then
-        ep=$(head -1 "$STORE_EP" | tr -d ' \r\n')
-        [ -n "$ep" ] && rule_add_dst "$ep"
-    fi
-    # endpoint'ы доп-выходов (слотов) — тоже анти-петля, аддитивно (см. endpoint_slot_set). На
-    # boot их обычно переигрывает slot-up (heal 5.13b), но repair/standalone apply зовут и нас —
-    # держим правила и здесь (идемпотентно). Store остаётся только у живших слотов.
-    eps=""
-    for _f in "${STORE_EP_SLOT_PREFIX}"*; do   # stores that exist, whatever the id (see _ep_needed_elsewhere)
-        [ -s "$_f" ] || continue
-        _e=$(head -1 "$_f" | tr -d ' \r\n')
-        [ -n "$_e" ] && { rule_add_dst "$_e"; eps="$eps${eps:+,}$_e"; }
-    done
-    road_wire   # дороги к серверам — следом за эндпоинтами (boot/repair: ip rule пережил fw3 reload, но не ребут)
-    echo "[apply-bypass] восстановлено: ip=$n_ip, dst=$n_dst, vpn-dst=$n_vdst, iface=$n_if, guest=$g, endpoint=${ep:-нет}${eps:+, слот-endpoint=$eps}"
+    _apply_endpoint=0
+    endpoint_replay || _apply_endpoint=$?
+    ep=$(lbl_endpoint_ips "$STORE_EP"); eps=""
+    [ "$_apply_endpoint" != 0 ] || echo "[apply-bypass] восстановлено: ip=$n_ip, dst=$n_dst, vpn-dst=$n_vdst, iface=$n_if, guest=$g, endpoint=${ep:-нет}${eps:+, слот-endpoint=$eps}"
     # «целиком через VPN» (force) — отдельная цепочка VPN_FORCE
     rebuild_force
     # правила по портам — отдельная цепочка VPN_PORTS, ВЫШЕ вырезов (см. блок PORTS_CHAIN).
@@ -1217,7 +1247,8 @@ apply_all() {
     rebuild_dev
     # устройства «целиком в десинк» — обе половины режима: ACCEPT в VPN_EXCLUDE (прямой путь) и
     # NFQUEUE по источнику у zapret.sh. Идут ПОСЛЕ ensure_chain выше — цепочка вырезов уже есть.
-    rebuild_desync
+    rebuild_desync || return $?
+    return "$_apply_endpoint"
 }
 
 case "$1" in
@@ -1249,8 +1280,10 @@ case "$1" in
     add-vpn-dst) [ -z "$2" ] && { echo "нужен CIDR"; exit 1; }; dst_ok "$2" || { echo "нужен IPv4 или CIDR"; exit 1; }
         dst_store_del "$STORE_DST" "$2"; dst_user_gone "$2"; dst_store_add "$STORE_VPN_DST" "$2"; vpn_dst_add "$2"; conntrack_flush; echo "dst $2 -> хранилище + в VPN" ;;
     del-vpn-dst) [ -z "$2" ] && { echo "нужен CIDR"; exit 1; }; dst_store_del "$STORE_VPN_DST" "$2"; vpn_dst_del "$2"; conntrack_flush; echo "dst $2 убран из хранилища (правила нет)" ;;
-    endpoint-set) endpoint_set "$2" ;;   # IP endpoint'а несущей мимо VPN (пусто = снять); зовёт transport-*.sh up
-    endpoint-slot-set) endpoint_slot_set "$2" "$3" ;;   # <id> <IP|""> endpoint доп-выхода мимо VPN (авто из transport-*.sh slot-up)
+    endpoint-reconcile) endpoint_reconcile ;;
+    endpoint-set) shift; endpoint_set "$@" ;;   # IP endpoint'а несущей мимо VPN (пусто = снять); зовёт transport-*.sh up
+    endpoint-slot-set) shift; endpoint_slot_set "$@" ;;   # <id> <IP|""> endpoint доп-выхода мимо VPN (авто из transport-*.sh slot-up)
+    endpoint-mv) endpoint_lock_run endpoint_mv "$2" "$3" ;;
     # Панель шлёт ИМЯ ИНТЕРФЕЙСА (оно у неё под рукой и валидируется в cgi-bin/action), а в
     # хранилище ложится имя СЕТИ — перевод делает эта, единственная владеющая хранилищем сторона.
     # Прежнюю строку-имя-интерфейса снимаем: иначе на одну сеть накопились бы две записи.

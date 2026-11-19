@@ -116,6 +116,7 @@ SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                            
 # EXCLUDE: .tasks-off — the «off» form of THIS router's crontab (tasks.sh): it describes the plain lines written into this file,
 #          and carried to another router or back in time it would remove or disable what is not there (review s.106, round 3)
 # EXCLUDE: .srv-checks — кэш проверок серверов, протухает за минуты
+# EXCLUDE: .sub-fallbacks — obsolete derived diagnostics from earlier importers
 # EXCLUDE: .stock-backup-off — the stock settings backup turned off on THIS router (stock-backup.sh): a fact about this router's
 #          flash and its stock flag; carried to another router it would make heal turn off a copy nobody there chose to lose
 # EXCLUDE: .chebur .chebur-auto — «второе мнение» шлёт адрес сервера стороннему российскому сервису: включает человек на ЭТОМ роутере, архив — нет
@@ -143,6 +144,8 @@ SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                            
 # EXCLUDE: .zapret-cats .zapret-cats.migrated — мёртвый файл и его надгробие, см. комментарий выше
 # EXCLUDE: .iplist.snapshot .iplist.count — производные наполнения tunnel-cidr
 # EXCLUDE: .endpoint-bypass .endpoint-bypass-s* — авто-категория адресов эндпоинта, ставит сам плагин
+# EXCLUDE: .endpoint-reconcile.lock — derived endpoint writer admission, never settings
+# EXCLUDE: .endpoint-write-* — abandoned endpoint writer temps; never settings or replay owners
 # EXCLUDE: .last.bak.conf .last.bak.name — рабочие маркеры автооткла switch-vpn
 # EXCLUDE: .subs-last — отметка времени последней закачки подписок
 # EXCLUDE: .sub-info — что подписка сообщила о СЕБЕ (остаток трафика, срок): это учёт ПРОВАЙДЕРА
@@ -312,6 +315,18 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	# Копируем ТОЛЬКО известные имена (из кода). Файл -> заменяем; каталог -> вливаем содержимое.
 	restored=0
+	_road_drops=""; _road_lang=ru
+	if [ -f "$ENODIA_DIR/nf-i18n.sh" ]; then . "$ENODIA_DIR/nf-i18n.sh"; _road_lang=$(nf_lang); fi
+	# Compare peers and publish exits/roads before copying configs, so a refused registry can be retried.
+	if [ -f "$ENODIA_DIR/road.sh" ] && { [ -f "$tmp/.slots" ] || [ -f "$tmp/.cfg-via" ] || [ -d "$tmp/configs" ] || [ -d "$tmp/xray-configs" ] || [ -d "$tmp/hy2-configs" ]; }; then
+		if ! _road_drops=$(sh "$ENODIA_DIR/road.sh" import "$tmp" 2>/dev/null); then
+			rm -rf "$tmp"
+			[ "$_road_lang" != en ] || fail "Roads and exits were only partially restored. Retry the import."
+			fail "Не удалось полностью восстановить дороги и выходы. Повторите импорт."
+		fi
+		[ ! -f "$tmp/.slots" ] || restored=$((restored+1))
+		[ ! -f "$tmp/.cfg-via" ] || restored=$((restored+1))
+	fi
 	# The router's registry (tag⇥link) BEFORE the archive lays its own: `.sub-client` after the loop keeps the lines of the
 	# subscriptions an older archive brings back unchanged.
 	if [ -f "$ENODIA_STATE/.subs" ]; then cut -f1,2 "$ENODIA_STATE/.subs" > "$tmp/.subs-was" 2>/dev/null; else : > "$tmp/.subs-was"; fi
@@ -363,8 +378,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			if [ "$_any" = 1 ]; then restored=$((restored+1)); fi
 		elif [ "$f" = .cfg-names ] && [ -f "$ENODIA_DIR/cfg-names.sh" ]; then
 			continue   # имена конфигов — ПОСЛЕ цикла, когда каталоги конфигов уже влиты (владелец сверяет с ними)
-		elif [ "$f" = .cfg-via ] && [ -f "$ENODIA_DIR/road.sh" ]; then
-			continue   # дороги конфигов — так же, ПОСЛЕ цикла (road.sh import сверяет с привезённым)
+		elif { [ "$f" = .cfg-via ] || [ "$f" = .slots ]; } && [ -f "$ENODIA_DIR/road.sh" ]; then
+			continue   # restored together by the road and slot owners above
 		elif [ "$f" = .warp-reg ] && [ -f "$ENODIA_DIR/warp.sh" ]; then
 			continue   # the records of WARP registrations — AFTER the loop too (warp.sh import merges by key and prunes)
 		else
@@ -379,10 +394,6 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# прежний сервер с тем же файлом (ревью с.96, круг 2). Архив без конфигов и без имён («без ключей») — не трогаем ничего.
 	if [ -f "$ENODIA_DIR/cfg-names.sh" ] && { [ -f "$tmp/.cfg-names" ] || [ -d "$tmp/configs" ] || [ -d "$tmp/xray-configs" ] || [ -d "$tmp/hy2-configs" ]; }; then
 		sh "$ENODIA_DIR/cfg-names.sh" import "$tmp/.cfg-names" "$tmp" >/dev/null 2>&1 && [ -f "$tmp/.cfg-names" ] && restored=$((restored+1))
-	fi
-	# ДОРОГИ КОНФИГОВ (road.sh import) — то же правило, только AmneziaWG (дорога есть лишь у него).
-	if [ -f "$ENODIA_DIR/road.sh" ] && { [ -f "$tmp/.cfg-via" ] || [ -d "$tmp/configs" ]; }; then
-		sh "$ENODIA_DIR/road.sh" import "$tmp/.cfg-via" "$tmp" >/dev/null 2>&1 && [ -f "$tmp/.cfg-via" ] && restored=$((restored+1))
 	fi
 	# WARP REGISTRATIONS (warp.sh import) — keyed by the config's key: the archive's records join the router's, and a record whose
 	# config is not here (neither brought nor kept) is dropped. An archive without configs and without records touches nothing.
@@ -533,6 +544,7 @@ fi
 #     ramfs — без переигрыша dnsmasq о них не узнает до ближайшего ребута, и восстановленные
 #     правила по адресам поехали бы вместе с адресами. `norestart` — общий рестарт идёт шагом 6.
 [ -f ./dhcp-static.sh ] && [ -s "$ENODIA_STATE/.dhcp-static" ] && sh ./dhcp-static.sh apply norestart >/dev/null 2>&1
+[ ! -f ./doh-lib.sh ] || ( . ./doh-lib.sh; doh_reconcile_retired )
 # 6. Рестарт dnsmasq — через агрегатор ipset=-строк, он же единственная точка рестарта для
 #    подсистем. groups/geo зовут его сами внутри apply, здесь он финал и страховка.
 #    ПОСЛЕ 5c: zapret-dom кладёт свои ipset=-строки, и до рестарта они не действуют.
@@ -612,6 +624,19 @@ RESTORE
 	# Каждое предупреждение — и в общую фразу тоста (`msg`, её читает панель старше поля), и ОТДЕЛЬНОЙ строкой списка
 	# `warns`: экран «Бэкап» рисует их пунктами, а резать фразу обратно по точкам значило бы гадать (в причинах есть «»).
 	_w() { _warn="$_warn $1"; _wj="$_wj${_wj:+,}\"$(printf '%s' "$1" | jesc 600)\""; }
+	while IFS="$(printf '\t')" read -r _road_key _road_id; do
+		case "$_road_id" in [2-7]) ;; *) continue ;; esac
+		_road_file=${_road_key#*/}
+		_road_name=$(sh "$ENODIA_DIR/cfg-names.sh" display "${_road_key%%/*}" "$_road_file" 2>/dev/null) || _road_name=''
+		_road_name=${_road_name:-$_road_file}
+		if [ "$_road_lang" = en ]; then
+			_w "Road for $_road_name was removed: exit #$_road_id changed — select it again"
+		else
+			_w "Дорога для $_road_name снята: выход №$_road_id сменился — назначьте заново"
+		fi
+	done <<EOF
+$_road_drops
+EOF
 	if [ -f "$ENODIA_DIR/transport.sh" ]; then _hasorc=1; _ready=$(sh "$ENODIA_DIR/transport.sh" list 2>/dev/null); fi
 	# Причину называем РАЗНУЮ: «нет компонента» лечится кнопкой, «ядро не умеет NFQUEUE» не лечится
 	# ничем. Отсутствие самого zapret.sh — это ПЕРВОЕ, а не второе: код 127 от `sh` не означает

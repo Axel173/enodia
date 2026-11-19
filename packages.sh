@@ -107,7 +107,7 @@ pkg_label()  { case "$1" in
 pkg_own()    { case "$1" in
         awg) echo "amneziawg-go awg" ;; xray) echo "xray" ;; hy2) echo "hysteria" ;;
         byedpi) echo "byedpi" ;; zapret) echo "nfqws" ;;
-        doh) echo "https-dns-proxy dot-proxy" ;; quic) echo "quic-dns-proxy" ;; tls) echo "panel-tls" ;; filter) echo "dns-filter" ;;
+        doh) echo "https-dns-proxy dot-proxy dnsq" ;; quic) echo "quic-dns-proxy" ;; tls) echo "panel-tls" ;; filter) echo "dns-filter" ;;
     esac; }
 # ОБЩИЕ бинари: нужны связке, но принадлежат не ей (ref-count при удалении).
 pkg_shared() { case "$1" in xray|hy2|byedpi) echo "hev" ;; esac; }
@@ -930,6 +930,12 @@ plan_calc() {       # $1 = ставим, $2 = снимаем
             P_OK=0
         fi
     fi
+    # Unknown weights cannot authorize installation or retirement. Seal the
+    # same verdict for the panel, plan-ok and cmd_apply before any action.
+    if [ "$P_UNK" = 1 ]; then
+        P_ERR="$P_ERR Неизвестен размер файлов для этого роутера. Обновите систему."
+        P_OK=0
+    fi
 }
 
 # Что МОЖНО снять, чтобы освободить место (панель показывает это списком «сними лишнее»).
@@ -1116,6 +1122,9 @@ do_install() {      # $1 = связка
 
 cmd_apply() {
     : > "$LOG"; set_state RUNNING
+    if [ -f "$GH" ]; then
+        sh "$GH" bin-purge >>"$LOG" 2>&1 || :
+    fi
     # «Чья операция» — сразу, до расчёта плана (он читает бинари и стоит секунды). Третье поле («из них обновления») знает только
     # план; его уже записал CGI для ЭТОЙ ЖЕ операции (pkg_bg) — сохраняем, а не затираем: панель рисует карточку «Идёт установка»
     # именно в это окно, и прежняя запись двумя полями называла обновление «Поставить» (замер BE7000 29.09.2026).

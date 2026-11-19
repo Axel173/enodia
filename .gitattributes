@@ -3,11 +3,16 @@
 # Эти правила гарантируют LF независимо от глобального core.autocrlf на машине,
 # поэтому при редактировании и заливке (WinSCP/base64) скрипты не сломаются.
 *.sh                  text eol=lf
+dev/nfq/include/sys/queue.h text eol=lf
+# The dnsq build verifies the vendored changelog by its upstream byte hash.
+dev/doh/vendor/monocypher/CHANGELOG.md text eol=lf
 *.conf                text eol=lf
 web/cgi-bin/*         text eol=lf
 web/htmlwrap          text eol=lf
 *.yaml                text eol=lf
 *.yml                 text eol=lf
+# The byte-identity oracle must survive a Windows checkout unchanged.
+dev/fixtures/subs-profile-single.golden.json text eol=lf
 notify.conf.example   text eol=lf
 iplist.conf.example   text eol=lf
 awg.conf.example      text eol=lf

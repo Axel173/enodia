@@ -25,7 +25,9 @@ without OpenWrt. Blocked sites go through your VPN server (AmneziaWG, Xray, Hyst
   Wi-Fi networks.
 - Several VPN protocols and up to six additional exits through other servers.
 - Subscriptions: Xray, Hysteria2, AmneziaWG and WireGuard servers from one link (3x-ui included), updated on a
-  schedule. Any saved server can be handed back by the panel — as a link, a QR code or a file.
+  schedule. Xray profiles preserve the provider's outbounds, their order, routing and balancers. The panel shows why an individual
+  profile was refused and continues importing. Pool tests wait for usable egress. The panel exports pools as complete JSON
+  and individual servers as links, QR codes or files.
 - An Amnezia Premium key goes where a subscription link goes: the router takes the configs of the countries you pick
   from Amnezia by itself (AmneziaWG or VLESS) and holds one place of the subscription for all of them. A new key takes
   its place only once it carries; a server that went silent is moved to the reserve, and the watchdog takes it a new key in
@@ -38,6 +40,10 @@ without OpenWrt. Blocked sites go through your VPN server (AmneziaWG, Xray, Hyst
   the ISP starts cutting WARP's port, the watchdog picks another one by itself.
 - Home access: the router works as an AmneziaWG server, a phone connects with a QR code.
 - Encrypted DNS (DoH, DoT, DoQ and DoH3 over QUIC, and ODoH — through a relay: the resolver never learns whose questions they are), ad blocking, panel login with two-factor authentication.
+- Catalogue DNS checks over DoH, DoT, DoQ and DoH3: directly and through the current tunnel, with latency and failure reasons.
+  Checks leave DNS unchanged; with encryption enabled, “Use” applies your choice with a fresh check and rolls back
+  on failure. Active auto-DNS also applies your choice immediately with the same check and rollback.
+  When both encryption and auto-DNS are inactive, the choice is saved until encryption is enabled.
 - Watchdog: restarts the tunnel, switches to a backup server, emails you about failures.
 - Access schedules for children and consoles: when a device may go online, a daily minute limit and «limited»
   windows — the chosen categories (social networks, messengers, video, games, any pool of the geo catalogue, own sites and

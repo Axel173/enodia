@@ -139,6 +139,18 @@ _slots_write() {   # $1 = id ; [$2..$6 = name_b64 transport config fallback en]
     [ -s "$SLOTS_FILE" ] || rm -f "$SLOTS_FILE"
 }
 
+# A settings restore compares against the registry the road owner inspected before publishing any road changes.
+cmd_restore_registry() {   # staged registry, previous contents
+    [ -f "$1" ] && [ "$#" = 2 ] || return 1
+    slots_lock_take || return 1
+    _srr_now=""; _srr_rc=1
+    if { [ ! -e "$SLOTS_FILE" ] || _srr_now=$(cat "$SLOTS_FILE"); } && [ "$_srr_now" = "$2" ]; then
+        lbl_commit_out "$SLOTS_FILE" cat "$1" && _srr_rc=0
+    fi
+    slots_lock_drop
+    return "$_srr_rc"
+}
+
 # carriers — какие ТРАНСПОРТЫ несут доп-выходы (уникальные значения 3-й колонки, по слову в строке).
 # ЗАЧЕМ вербом: это единственный ответ на вопрос «можно ли сносить бинарь транспорта», а спрашивают
 # его РАЗНЫЕ подсистемы (установщик в purge-alt, движок компонентов packages.sh). Берём ВСЕ строки,
@@ -440,10 +452,15 @@ cmd_list_json() {
                 else [ "$_krix" = 1 ] || { _kri=$(key_rows intent); _krix=1; }; _kr=$_kri; fi
                 _kcl=$(awg_ids "$AWG_CONFIGS/$cfg.conf" | key_match "$_kr" "s$id" | head -n1 | cut -f2)
             fi
-            _rdr=''; [ -n "$_rdl" ] && _rdr=$(printf '%s\n' "$_rdl" | awk -F"$TAB" -v i="$id" '$2 == i { sub(/^[a-z0-9]*\//, "", $1); printf "%s\"%s\"", (c++ ? "," : ""), $1 }')
+            # Old panels prefix every rider with awg/. Keep their original list alongside the typed keys.
+            _rdr=''; _rlegacy=''
+            if [ -n "$_rdl" ]; then
+                _rdr=$(printf '%s\n' "$_rdl" | awk -F"$TAB" -v i="$id" '$2 == i { printf "%s\"%s\"", (c++ ? "," : ""), $1 }')
+                _rlegacy=$(printf '%s\n' "$_rdl" | awk -F"$TAB" -v i="$id" '$2 == i && $1 ~ /^awg\// { printf "%s\"%s\"", (c++ ? "," : ""), substr($1,5) }')
+            fi
             _wp=false; if [ "$t" = awg ] && [ -n "$_wpl" ] && printf '%s\n' "$_wpl" | grep -qxF -- "$cfg"; then _wp=true; fi
-            printf '{"id":%s,"name_b64":"%s","transport":"%s","config":"%s","fallback":"%s","enabled":%s,"state":"%s","groups":%s,"geo":%s,"geo_keys":[%s],"key_clash":"%s","riders":[%s],"warp":%s}' \
-                "$id" "$nb" "$t" "$cfg" "$fb" "$([ "$en" = on ] && echo true || echo false)" "$_st" "$_bc" "$_be" "$_bk" "$_kcl" "$_rdr" "$_wp"
+            printf '{"id":%s,"name_b64":"%s","transport":"%s","config":"%s","fallback":"%s","enabled":%s,"state":"%s","groups":%s,"geo":%s,"geo_keys":[%s],"key_clash":"%s","riders":[%s],"road_riders":[%s],"warp":%s}' \
+                "$id" "$nb" "$t" "$cfg" "$fb" "$([ "$en" = on ] && echo true || echo false)" "$_st" "$_bc" "$_be" "$_bk" "$_kcl" "$_rlegacy" "$_rdr" "$_wp"
         done < "$SLOTS_FILE"
     fi
     # Транспорты, готовые нести ДОП-ВЫХОД, — от ОРКЕСТРАТОРА (`transport.sh slot-list`),
@@ -677,9 +694,14 @@ slot_ram_guard() {   # $1 = transport
 # silently goes direct to its blocked address. Refusal in words with the riders named; the panel's door leads to them.
 slot_road_guard() {   # $1 = id, $2 = what the person tried (words)
     [ -f "$ENODIA_DIR/road.sh" ] || return 0
-    _srr=$(sh "$ENODIA_DIR/road.sh" riders "$1" 2>/dev/null | sed 's#^[a-z0-9]*/##' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+    _srr=$(_sr_sep=''; sh "$ENODIA_DIR/road.sh" riders "$1" 2>/dev/null | while IFS= read -r _sr_key; do
+        _sr_file=${_sr_key#*/}
+        _sr_name=$(sh "$ENODIA_DIR/cfg-names.sh" display "${_sr_key%%/*}" "$_sr_file" 2>/dev/null) || _sr_name=''
+        printf '%s%s' "$_sr_sep" "${_sr_name:-$_sr_file}"
+        _sr_sep=', '
+    done)
     [ -n "$_srr" ] || return 0
-    echo "[slots] выход №$1 служит дорогой к серверу ($_srr) — сначала переключите их дорогу на «напрямую», потом $2"
+    printf '%s\n' "[slots] выход №$1 служит дорогой к серверу ($_srr) — сначала переключите их дорогу на «напрямую», потом $2"
     return 1
 }
 
@@ -788,14 +810,11 @@ cmd_set() {
     if [ "$field" = transport ] && [ "$old_en" = on ]; then
         case "$(echo "$line" | cut -f3)" in xray|hy2) ;; *) slot_ram_guard "$old_t" || return 1 ;; esac
     fi
-    if [ "$field" = config ] && [ -f "$ENODIA_DIR/road.sh" ] && [ -n "$(sh "$ENODIA_DIR/road.sh" get awg "$old_cfg" 2>/dev/null)" ]; then
+    if [ "$field" = config ] && [ -f "$ENODIA_DIR/road.sh" ] && [ -n "$(sh "$ENODIA_DIR/road.sh" get "$old_t" "$old_cfg" 2>/dev/null)" ]; then
         slot_road_guard "$id" "ставьте ему конфиг, который сам едет по дороге" || return 1
     fi
-    # The new config goes to the server of one of this road's riders — its own packets to that server would go into itself (road.sh
-    # would silently drop the rule, and the rider would go direct to the blocked address): a refusal in words instead.
-    if [ "$field" = config ] && [ -f "$ENODIA_DIR/road.sh" ]; then
-        _scl=$(sh "$ENODIA_DIR/road.sh" clash "$id" "$old_cfg" 2>/dev/null)
-        [ -z "$_scl" ] || { echo "[slots] выход №$id служит дорогой серверу $_scl, а новый конфиг идёт к тому же серверу — его пакеты к серверу пошли бы сами в себя; выберите конфиг к другому серверу"; return 1; }
+    if [ "$field" = config ] && [ "$old_t" = awg ]; then
+        slot_road_clash "$id" "$old_cfg" || return 1
     fi
     # Несущая ВКЛЮЧЁННОГО выхода уже поднята по СТАРЫМ (транспорт, конфиг) — одной записи в реестр
     # мало: демон продолжил бы ходить прежним сервером («сменил сервер, а выход тот же»), а смена
@@ -913,6 +932,11 @@ slot_deactivate() {
     echo "[slots] выход №$1 не снят — настройки сохранены, повторите операцию"
     return 1
 }
+slot_road_clash() {
+    [ -f "$ENODIA_DIR/road.sh" ] || return 0
+    _scl=$(sh "$ENODIA_DIR/road.sh" clash "$1" "$2" 2>/dev/null)
+    [ -z "$_scl" ] || { echo "[slots] выход №$1 служит дорогой, а новый конфиг идёт к серверу $_scl, который уже едет по дороге — выберите конфиг к другому серверу"; return 1; }
+}
 slot_activate() {
     id="$1"
     if [ -f "$ENODIA_DIR/transport.sh" ]; then sh "$ENODIA_DIR/transport.sh" slot-up "$id" >/dev/null 2>&1
@@ -930,6 +954,7 @@ cmd_toggle() {
         # — та же точка назначения, что add/set, и отказывает той же причиной, не трогая реестр.
         _tl=$(slot_line "$id")
         slot_key_guard "$(printf '%s' "$_tl" | cut -f3)" "$(printf '%s' "$_tl" | cut -f4)" "$id" || return 1
+        if [ "$(printf '%s' "$_tl" | cut -f3)" = awg ]; then slot_road_clash "$id" "$(printf '%s' "$_tl" | cut -f4)" || return 1; fi
         # Already on (a second tab): its daemon runs and is counted in the memory already — no second admission.
         if [ "$(printf '%s' "$_tl" | cut -f6)" != on ]; then slot_ram_guard "$(printf '%s' "$_tl" | cut -f3)" || return 1; fi
         # Порядок: сперва пишем on (диспетч slot-up в плагин ТРЕБУЕТ включённый слот —
@@ -1011,6 +1036,7 @@ case "$1" in
     carriers)     cmd_carriers ;;
     configs)      cmd_configs "$2" ;;
     show)         slot_line "$2" ;;
+    restore-registry) shift; cmd_restore_registry "$@" ;;
     domains)      cmd_domains "$2" "$3" ;;
     route)        cmd_route "$2" "$3" ;;
     add)          cmd_add "$2" "$3" "$4" "$5" ;;

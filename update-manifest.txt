@@ -54,6 +54,7 @@ ipt-lib.sh
 # «прежний фиксированный срок» — то есть ровно тот дефект, из-за которого на медленном
 # накопителе исправный xray объявлялся мёртвым (замер 448 КБ/с: 8-МБ бинарь читается 18 с).
 daemon-lib.sh
+xray-profile-lib.sh
 # «Текст роутера → строка внутри JSON» (jesc/jtrim) — сорсят cgi-bin/{action,data,2fa} и web-ui.sh.
 # Без файла у каждого срабатывает шим «как было раньше»: панель работает, но длинное русское
 # сообщение снова обрывается посреди буквы.
@@ -224,6 +225,7 @@ access-sched.sh
 # Headless-обновление подписок (cron) + общий слой подписок: их зовут update-sched.sh (job subs)
 # и cgi-bin/action (fetch_sub делегирует закачку — одна копия гарда/gzip-детекта).
 subs-update.sh
+subs-import.sh
 subs-lib.sh
 # «Доступ домой» (роутер как VPN-сервер, awgs0): секции heal.sh/vpn-toggle repair зовут его
 # только при флаге server/.on, панель — только при наличии файла. Ключи пиров лежат в server/
@@ -257,3 +259,5 @@ web/assets/icons.woff2
 # имя постоянное, значит новое начертание доедет только полной переустановкой с ПК.
 web/assets/inter-latin.woff2
 web/assets/inter-cyrillic.woff2
+dns-scan.sh
+dns-probe-lib.sh

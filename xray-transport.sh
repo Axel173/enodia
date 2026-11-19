@@ -140,98 +140,26 @@ command -v nf_lang >/dev/null 2>&1 || nf_lang() { echo ru; }
 # чем поднимается egress, и тик в этом зазоре красил живой канал в SUSPECT. Шим = прежнее
 # поведение (грейса нет). [[watchdog-clock-step-false-death]]
 if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
+command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
 command -v carrier_up_mark >/dev/null 2>&1 || carrier_up_mark() { return 0; }
-# Имя/IP сервера ИЗ АУТБАУНДА xray.json (vless vnext.address / vmess / ss servers). НЕ «первый
-# address во всём файле»: dns/routing-секция тоже содержит "address" (напр. "dns":{"servers":
-# [{"address":"8.8.8.8"}]}), и если она идёт РАНЬШЕ outbounds — старый парс брал DNS-резолвер
-# → seed не ставился, реальный сервер резолвился через ещё-не-поднятый туннель (бутстрап-FATAL),
-# а exclude_endpoint исключал НЕ ТОТ IP → реальный endpoint оставался в iplist_set = петля.
-# Сужаем до части файла ПОСЛЕ "outbounds" (конфиг сводим в одну строку — работает и для
-# мультистрочного, и для минифицированного JSON). Нет "outbounds" → фолбэк на прежнее поведение.
-# $1 — файл конфига (деф. боевой $XRAY_JSON); параметр нужен доп-выходам (Ф3): у слота свой
-# xray-s<id>.json, а парс сервера обязан быть ОДНОЙ реализацией (иначе копия разойдётся —
-# ровно тот случай, из-за которого resolve_ipv4 вынесен в dns-lib.sh).
-xray_server_host() {
-    # A CHAIN (`dialerProxy`, Amnezia Premium's VLESS: relay → exit) — the router dials the chain's LAST hop, the relay; the first
-    # address in the file is the EXIT, reached through the relay. The anti-loop and the seed taken by it guarded the wrong address.
-    if xray_chain_at "${1:-$XRAY_JSON}"; then
-        _xsh=$(xray_ob_val "${1:-$XRAY_JSON}" "$XRAY_HOP" address)
-        [ -z "$_xsh" ] || { printf '%s\n' "$_xsh"; return 0; }
-    fi
-    { tr -d '\r\n' < "${1:-$XRAY_JSON}" 2>/dev/null; } \
-        | sed 's/.*"outbounds"/"outbounds"/' \
-        | grep -o '"address"[[:space:]]*:[[:space:]]*"[^"]*"' \
-        | head -1 \
-        | sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/'
-}
-# xray_chain_at <config> — the default outbound (the first) dials through `dialerProxy`: follow the tags to the outbound that dials
-# by itself → its index in XRAY_HOP. Code 1 — no chain (the old parse answers), no jsonfilter, a tag that names nothing, deeper
-# than four hops (a loop). Indices, not `outbounds[*].tag`: an outbound without a tag would shift the lines.
-xray_chain_at() {
-    command -v jsonfilter >/dev/null 2>&1 || return 1
-    _xcd=$(jsonfilter -i "$1" -e '@.outbounds[0].streamSettings.sockopt.dialerProxy' 2>/dev/null)
-    [ -n "$_xcd" ] || return 1
-    _xcn=$(jsonfilter -i "$1" -e '@.outbounds[*].protocol' 2>/dev/null | wc -l)
-    _xch=0
-    while [ -n "$_xcd" ]; do
-        _xch=$((_xch+1)); [ "$_xch" -le 4 ] || return 1
-        XRAY_HOP=""; _xcj=0
-        while [ "$_xcj" -lt "$_xcn" ]; do
-            [ "$(jsonfilter -i "$1" -e "@.outbounds[$_xcj].tag" 2>/dev/null)" = "$_xcd" ] && { XRAY_HOP=$_xcj; break; }
-            _xcj=$((_xcj+1))
-        done
-        [ -n "$XRAY_HOP" ] || return 1
-        _xcd=$(jsonfilter -i "$1" -e "@.outbounds[$XRAY_HOP].streamSettings.sockopt.dialerProxy" 2>/dev/null)
-    done
-    return 0
-}
-# xray_ob_val <config> <index> <address|port> — the server field of outbound <index>: vnext (vless/vmess), servers (trojan/ss), or
-# the flat form of newer configs (`settings.address`).
-xray_ob_val() {
-    for _xop in "settings.vnext[0].$3" "settings.servers[0].$3" "settings.$3"; do
-        _xov=$(jsonfilter -i "$1" -e "@.outbounds[$2].$_xop" 2>/dev/null | head -n 1)
-        [ -z "$_xov" ] || { printf '%s' "$_xov"; return 0; }
-    done
-    return 1
-}
-# The server the router DIALS, for readers outside the plugin (cgi-bin/ping asks only for a chain): «host⇥port».
-cmd_endpoint() {
-    [ -f "$1" ] || return 1
-    _xeh=$(xray_server_host "$1"); [ -n "$_xeh" ] || return 1
-    _xep=""
-    if xray_chain_at "$1"; then _xep=$(xray_ob_val "$1" "$XRAY_HOP" port | tr -cd '0-9'); fi
-    printf '%s\t%s\n' "$_xeh" "$_xep"
-}
-# Кладёт ответ для server-host в ЛОКАЛЬНЫЙ dnsmasq (address=/host/IP) — демон резолвит
-# имя сам, мгновенно локально, не уходя в ещё-не-поднятый туннель. Конфиг НЕ трогаем
-# (имя остаётся; SNI берётся из него же). $SEED_CONF — изолированный файл. Возврат 1 =
-# не зарезолвили -> честно не поднимаемся (иначе xray молча падал бы dial-ом).
-# Сам сев (резолв + address=/host/IP + перезапуск dnsmasq + ожидание ответа) живёт в
-# dns-lib.sh::seed_host_dns — ОДНОЙ копией на xray/hy2 и их доп-выходы (у слота свой seed-файл).
+# Whole-profile readers share the importer's endpoint schema.
+if [ -f "$ENODIA_DIR/xray-profile-lib.sh" ]; then . "$ENODIA_DIR/xray-profile-lib.sh"; fi
+command -v xp_pool >/dev/null 2>&1 || xp_pool() { return 1; }
+command -v daemon_xray_ready >/dev/null 2>&1 || daemon_xray_ready() { return 0; }
+# Bypass, seeding and the road all read the same endpoint set.
+xray_server_host() { xp_members "${1:-$XRAY_JSON}" hosts; }
+cmd_endpoint() { [ -f "$1" ] && xp_members "$1" endpoints; }
+xray_dns_available() { [ -n "$(xp_members "$1" usable)" ]; }
 seed_server_dns() {
-    [ -s "$XRAY_JSON" ] || { log "нет $XRAY_JSON"; return 1; }
-    _h=$(xray_server_host)
-    [ -n "$_h" ] || { log "не нашёл address в $XRAY_JSON"; return 1; }
-    seed_host_dns "$_h" "$SEED_CONF"
+    _xsd_hosts=$(xray_server_host "${1:-$XRAY_JSON}")
+    [ -n "$_xsd_hosts" ] || { log "не найден адрес прокси-сервера"; return 1; }
+    seed_hosts_dns "$_xsd_hosts" "${2-$SEED_CONF}" "${3:-}"
 }
-
-# ---- анти-петля: endpoint своего VPS мимо маркировки ----------------------
-# IP endpoint'а xray-сервера: сперва из сида (точный IP, который пойдёт в dial),
-# фолбэк — address из конфига, если он сразу IP. Только IPv4 (iplist_set = cidr4).
-# $1 — seed-файл (деф. боевой), $2 — конфиг (деф. боевой): параметры для доп-выходов (Ф3).
-xray_endpoint_ip() {
-    _ip=$(sed -n 's%^address=/[^/]*/%%p' "${1:-$SEED_CONF}" 2>/dev/null | head -1)
-    [ -n "$_ip" ] && { echo "$_ip"; return 0; }
-    _h=$(xray_server_host "${2:-$XRAY_JSON}")
-    echo "$_h" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' && echo "$_h"
-}
+xray_endpoint_ip() { xp_members "${2:-$XRAY_JSON}" ips "${1:-$SEED_CONF}"; }
 # Исключить endpoint xray-сервера из маркировки (иначе свои же пакеты к VPS, если его
 # IP в iplist_set, заворачиваются в xtun = петля). Зовём ДО постановки default->xtun.
 exclude_endpoint() {
-    ep=$(xray_endpoint_ip)
-    [ -n "$ep" ] || { log "endpoint xray не определён — пропуск анти-петли"; return 0; }
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-set "$ep" >/dev/null 2>&1
-    log "endpoint $ep исключён из маркировки (анти-петля)"
+    xray_endpoints ready ''
 }
 
 # ---- DNS ------------------------------------------------------------------
@@ -264,75 +192,48 @@ set_direct_dns() {
     dns_upstream_put "$DNS1" "$DNS2"
 }
 
-# Погасить access-лог в УЖЕ ЛЕЖАЩЕМ конфиге. ЗАЧЕМ отдельным шагом, а не только в генераторах
-# (panel.js/subs-update.sh уже пишут "none"): конфиг живёт на /data и переживает обновление
-# скриптов — у того, кто установился раньше, внутри остаётся путь /tmp/xray-access.log, и демон
-# продолжает лить в ОЗУ ~15 МБ/сут (замер 29.08.2026: 5.5 МБ за 9 ч). Правим ЖИВОЙ конфиг перед
-# каждым стартом: место единственное, через которое проходят все пути подъёма (boot, switch,
-# failover, смена сервера). Идемпотентно И ДЁШЕВО: без совпадения файла не касаемся вовсе —
-# /data смонтирован sync, лишняя запись тут стоит износа флеша. Пишем через `cat >`, а не mv:
-# у конфига права 600, а mv принёс бы права ВРЕМЕННОГО файла.
-access_off() {   # $1 = json-конфиг xray; $2 = "keep" — накопленный лог НЕ удалять (демон может быть жив)
+# Apply the profile owner's log boundary before any main-daemon launch.
+access_off() {   # <config> [owned SOCKS port]
     ACCESS_FIXED=0
-    [ -f "$1" ] || return 0
-    _aold=$(sed -n 's#.*"access"[[:space:]]*:[[:space:]]*"\(/tmp/[^"]*\)".*#\1#p' "$1" 2>/dev/null | head -n1)
-    if [ -z "$_aold" ]; then
-        # NO `access` KEY AT ALL — xray then writes the access log to STDOUT, and spawn_xray captures stdout into its log in RAM:
-        # the same ~15 MB a day (Amnezia Premium's VLESS configs come so; an uploaded JSON may). The key goes into `log` (made if
-        # absent) on the config's one-line text; written only when jsonfilter reads the result back as `none` — a shape this sed
-        # does not foresee is left alone, not broken. A path elsewhere or "none" is not ours to change.
-        grep -q '"access"' "$1" 2>/dev/null && return 0
-        command -v jsonfilter >/dev/null 2>&1 || return 0
-        ( umask 077; tr -d '\r\n' < "$1" | sed '
-            /"log"[[:space:]]*:[[:space:]]*{[[:space:]]*}/ { s/"log"[[:space:]]*:[[:space:]]*{[[:space:]]*}/"log":{"access":"none"}/; b; }
-            /"log"[[:space:]]*:[[:space:]]*{/ { s/"log"[[:space:]]*:[[:space:]]*{/"log":{"access":"none",/; b; }
-            s/^[[:space:]]*{/{"log":{"access":"none"},/' > "$1.acc" ) 2>/dev/null
-        if [ "$(jsonfilter -i "$1.acc" -e '@.log.access' 2>/dev/null)" = none ] && ( umask 077; lbl_commit_out "$1" cat "$1.acc" ) 2>/dev/null; then
-            ACCESS_FIXED=1
-            log "в конфиге $(basename "$1") погашен access-лог xray (ключа не было — лог шёл в stdout, в ОЗУ)"
-        fi
-        rm -f "$1.acc" 2>/dev/null
-        return 0
-    fi
-    # umask в ПОДОБОЛОЧКЕ: у конфига права 600, потому что в нём креды сервера, и временная
-    # копия обязана быть такой же. Перенаправление создаёт файл ДО того, как успел бы сработать
-    # chmod, — значит право отбирать надо ЗАРАНЕЕ, а не после.
-    ( umask 077; sed 's#\("access"[[:space:]]*:[[:space:]]*\)"/tmp/[^"]*"#\1"none"#' "$1" > "$1.acc" ) 2>/dev/null
-    if [ -s "$1.acc" ] && ( umask 077; lbl_commit_out "$1" cat "$1.acc" ) 2>/dev/null; then
-        ACCESS_FIXED=1
-        log "в конфиге $(basename "$1") погашен access-лог xray ($_aold рос в ОЗУ)"
-        # Накопленное освобождаем ЗДЕСЬ ЖЕ, но ТОЛЬКО ПОСЛЕ удачной правки: демон в этот момент
-        # не жив (нас зовут только из spawn_xray). Правка не удалась — файл ОСТАВЛЯЕМ: он ещё
-        # нужен демону, который сейчас поднимется со СТАРЫМ конфигом и продолжит в него писать.
-        # …А из access-purge (обновление кода) демон КАК РАЗ ЖИВ и пишет в этот файл: удалить его
-        # там значило бы отобрать inode у живого писателя — место не вернулось бы, а лог рос бы
-        # НЕВИДИМЫМ. Поэтому такой вызывающий просит "keep" и чистит лог сам, когда демон умрёт.
-        [ "$2" = keep ] || rm -f "$_aold" 2>/dev/null
-    fi
-    rm -f "$1.acc" 2>/dev/null
+    [ -f "$1" ] || return 1
+    _a_config=$(xp_runtime "$1" "${2:-}" "$XRAY_LOG") || return 1
+    [ -n "$_a_config" ] || return 1
+    [ "$_a_config" != "$(cat "$1")" ] || return 0
+    ( umask 077; lbl_commit_out "$1" printf '%s\n' "$_a_config" ) || return 1
+    ACCESS_FIXED=1
+}
+
+# The only reserved legacy access path. Check live descriptors before unlink
+# so upgrade-time purge can leave a running predecessor's log alone.
+access_retire() {
+    _art=/tmp/xray-access.log
+    [ -f "$_art" ] && [ ! -L "$_art" ] || return 0
+    _ari=$(stat -c '%d:%i' "$_art" 2>/dev/null) || return 0
+    stat -L -c '%d:%i' /proc/[0-9]*/fd/* 2>/dev/null | grep -Fxq "$_ari" && return 0
+    rm -f "$_art" 2>/dev/null || :
+}
+access_retire_after_start() {
+    [ -n "${ENODIA_SWITCH_HOLDER:-}" ] &&
+        [ "$(cat "$SWITCH_LOCK" 2>/dev/null)" = "$ENODIA_SWITCH_HOLDER" ] && access_retire
     return 0
 }
 
-# Прогнать access_off по ВСЕМУ, что лежит: активный конфиг + весь каталог xray-configs/.
-# ЗАЧЕМ отдельным вербом, если spawn_xray и так лечит активный: конфиги живут на /data и
-# переживают обновление кода, а лечится РОВНО тот, который сейчас поднимают. У тестера с
-# подпиской их 137, и путь /tmp/xray-access.log лежал во ВСЕХ (замер 31.08.2026) — значит
-# при каждом failover-переборе кандидат приезжал с путём и лечился уже на месте, лишней
-# записью на смонтированный sync-ом флеш, а любой НОВЫЙ путь подъёма, забывший позвать
-# access_off, снова потёк бы в ОЗУ по 15 МБ/сут. Дешевле починить хранилище один раз.
-# Зовут нас те, кто раскладывает код: install.sh (ПК/мастер) и gh-update.sh после удачного
-# apply-scripts (обновление из панели) — больше некому, обновление пофайловое и install.sh
-# по нему не приезжает. Демон при этом МОЖЕТ БЫТЬ ЖИВ ⇒ "keep": накопленный лог не трогаем.
 cmd_access_purge() {
+    # A caller already holding the switch lock can run the migration directly.
+    if [ -z "${ENODIA_SWITCH_HOLDER:-}" ] ||
+        [ "$(cat "$SWITCH_LOCK" 2>/dev/null)" != "$ENODIA_SWITCH_HOLDER" ]; then
+        command -v switch_hold >/dev/null 2>&1 && switch_hold "$SWITCH_LOCK" 3 || return 0
+        trap 'rm -f "$SWITCH_LOCK"' EXIT
+        trap 'exit 1' HUP INT TERM
+    fi
     _apn=0; _apt=0
     for _apf in "$XRAY_JSON" "$ENODIA_STATE"/xray-configs/*.json; do
-        [ -f "$_apf" ] || continue          # пустой каталог ⇒ glob приедет литералом
+        [ -f "$_apf" ] && [ ! -L "$_apf" ] || continue
         _apt=$((_apt+1))
-        access_off "$_apf" keep
-        if [ "$ACCESS_FIXED" = 1 ]; then _apn=$((_apn+1)); fi
+        if access_off "$_apf" && [ "$ACCESS_FIXED" = 1 ]; then _apn=$((_apn+1)); fi
     done
+    access_retire
     log "access-purge: просмотрено конфигов $_apt, вычищено $_apn"
-    return 0
 }
 
 # ---- демоны ---------------------------------------------------------------
@@ -353,11 +254,61 @@ xray_go_cap() {
     [ -n "$_xgc" ] && printf 'env %s ' "$_xgc"
     return 0
 }
+# Endpoint lifecycle belongs to startup, not its callers. Every terminal state
+# replaces the complete set: ready=current, stopped/failed=empty. A failed main
+# raise from another transport restores that still-active carrier's set.
+xray_endpoints() {   # begin|stage|ready|abort|clear <slot id, empty for main>
+    _xet_event=$1; _xet_slot=$2; _xet_key=""; _xet_hold=""; _xet_hosts=""
+    case "$_xet_event" in
+        begin)
+            _xet_record=$(cat "$ENODIA_STATE/.endpoint-bypass${2:+-s$2}" 2>/dev/null)
+            _xet_before=$(printf '%s\n' "$_xet_record" | lbl_endpoint_ips)
+            _xet_fallback=''; _xet_old_key=''; _xet_old_hosts=''
+            if [ -z "$2" ] && [ "$(cat "$TRANSPORT_FLAG" 2>/dev/null)" != xray ]; then
+                _xet_fallback=$_xet_before
+                _xet_old_key=$(printf '%s\n' "$_xet_record" | lbl_endpoint_key)
+                _xet_old_hosts=$(printf '%s\n' "$_xet_record" | lbl_endpoint_hosts)
+            fi
+            return 0 ;;
+        stage|ready)
+            if [ -n "$2" ]; then
+                _xet_new=$(xray_endpoint_ip "$(slot_seed "$2")" "$(slot_conf "$2")")
+                _xet_hosts=$(xray_server_host "$(slot_conf "$2")")
+                _xet_key=${3:-${_xer_config:-}}
+            else
+                _xet_new=$(xray_endpoint_ip)
+                _xet_hosts=$(xray_server_host)
+                _xet_key=$(head -n1 "$ENODIA_STATE/.xray-active" 2>/dev/null)
+            fi
+            _xet_key=${_xet_key:+xray/$_xet_key}
+            [ "$_xet_event" != stage ] || _xet_hold=${_xet_before:-} ;;
+        abort) _xet_new=${_xet_fallback:-}; _xet_key=${_xet_old_key:-}; _xet_hosts=${_xet_old_hosts:-} ;;
+        clear) _xet_new='' ;;
+        *) return 1 ;;
+    esac
+    carrier_endpoint "$_xet_slot" "$_xet_new" "$_xet_key" "$_xet_hold" "$_xet_hosts"
+}
+
+xray_endpoint_run() {   # <slot> <stop function> <start function> [args...]
+    _xer_slot=$1; _xer_stop=$2; shift 2
+    _xer_config=${3:-}
+    xray_endpoints begin "$_xer_slot" || return 1
+    "$@"; _xer_rc=$?
+    if [ "$_xer_rc" = 0 ]; then
+        xray_endpoints ready "$_xer_slot" && return 0
+        _xer_rc=1
+    fi
+    "$_xer_stop" ${_xer_slot:+"$_xer_slot"}
+    xray_endpoints abort "$_xer_slot"
+    return "$_xer_rc"
+}
 spawn_xray() {
     daemon_log_fresh "$XRAY_LOG"
-    access_off "$XRAY_JSON"                # старый конфиг мог нести /tmp/xray-access.log
-    seed_server_dns || return 1            # посеять server-host->IP в локальный dnsmasq; 1 = не зарезолвили
-    start-stop-daemon -S -b -m -p "$XRAY_PID" -x /bin/sh -- -c "exec $(xray_go_cap)'$XRAY' run -c '$XRAY_JSON' >>'$XRAY_LOG' 2>&1"
+    access_off "$XRAY_JSON" "$SOCKS_PORT" || return 1
+    XRAY_OWNS_SEED=1
+    [ "${1:-}" = seeded ] || seed_server_dns || return 1
+    xray_endpoints stage '' || return 1
+    start-stop-daemon -S -b -m -p "$XRAY_PID" -x /bin/sh -- -c "XRAY_LOCATION_ASSET='$(xp_asset_dir "$XRAY")' exec $(xray_go_cap)'$XRAY' run -c '$XRAY_JSON' >>'$XRAY_LOG' 2>&1"
 }
 
 # Освободить socks-порт, если его держит ЧУЖОЙ процесс. ЗАЧЕМ: xray и hysteria
@@ -377,6 +328,9 @@ free_foreign_socks() {
     i=0; while [ $i -lt 5 ]; do netstat -ltn 2>/dev/null | grep -q "$SOCKS_ADDR:$SOCKS_PORT" || break; sleep 1; i=$((i+1)); done
 }
 start_daemons() {
+    xray_endpoint_run '' stop_daemons start_daemons_impl
+}
+start_daemons_impl() {
     [ -x "$XRAY" ] || { log "НЕТ бинаря $XRAY — поставьте его в панели: «Компоненты»"; return 1; }
     [ -x "$HEV" ]  || { log "НЕТ бинаря $HEV"; return 1; }
     [ -s "$XRAY_JSON" ] || { log "НЕТ конфига $XRAY_JSON — добавьте xray-конфиг (меню)"; return 1; }
@@ -393,7 +347,9 @@ start_daemons() {
         log "xray не слушает $SOCKS_PORT: $DAEMON_WAIT_WHY. Лог:"; tail -n 15 "$XRAY_LOG" 2>/dev/null
         return 1
     fi
+    daemon_xray_ready "$XRAY_PID" "$XRAY_JSON" "$SOCKS_PORT" || { log "$DAEMON_WAIT_WHY"; return 1; }
     socks_ours || { log "socks $SOCKS_PORT держит ЧУЖОЙ демон — наш xray не забиндил (несущую поверх чужого socks не поднимаю)"; return 1; }
+    access_retire_after_start
     if ! proc_alive "$HEV_PID"; then
         log "запускаю hev (tun2socks)…"
         start-stop-daemon -S -b -m -p "$HEV_PID" -x "$HEV" -- "$HEV_YAML"
@@ -401,6 +357,12 @@ start_daemons() {
     daemon_wait_dev "$HEV_PID" hev 6 "$TUN" || {
         log "tun $TUN не создан: $DAEMON_WAIT_WHY. Лог hev:"; tail -n 15 "$HEV_LOG" 2>/dev/null; return 1; }
     return 0
+}
+stop_xray() {
+    start-stop-daemon -K -p "$XRAY_PID" 2>/dev/null
+    rm -f "$XRAY_PID" "$XRAY_PID.pool-ready" 2>/dev/null
+    seed_host_retire "$SEED_CONF" "${_xfr_retire:-}"
+    xray_endpoints clear ''
 }
 stop_daemons() {
     # hev — с ожиданием смерти (slot-tun-lib.sh::hev_stop): за `down` в смене транспорта и в перезапуске сразу идёт `up` с новым hev
@@ -411,20 +373,34 @@ stop_daemons() {
     # Пидфайлы чистим СРАЗУ (как slot_stop_daemons/slot_hev_down): busybox start-stop-daemon -K
     # их не убирает, а по stale-пидфайлу proc_alive рано или поздно попадёт в ПЕРЕИСПОЛЬЗОВАННЫЙ
     # системой pid и решит «демон жив» — start_daemons его тогда не поднимет, а несущей нет.
-    rm -f "$HEV_PID" "$XRAY_PID" 2>/dev/null
+    rm -f "$HEV_PID" "$XRAY_PID" "$XRAY_PID.pool-ready" 2>/dev/null
+    if [ "${XRAY_OWNS_SEED:-}" = 1 ] || [ "$(cat "$TRANSPORT_FLAG" 2>/dev/null)" = xray ] || [ "${1:-}" = defer ]; then
+        seed_host_retire "$SEED_CONF" "${1:-}"
+    fi
+    xray_endpoints clear ''
 }
 
 # Перезапустить ТОЛЬКО xray с текущим $XRAY_JSON (hev/xtun не трогаем — тот же
 # socks-порт). Для перебора xray-резервов: меняем конфиг и поднимаем xray заново.
 # Возврат: 0 — socks снова слушает; 1 — не поднялся; 2 — server-host НЕ РЕЗОЛВИТСЯ (несущую при
 # этом НЕ трогали, см. ниже) — код нужен cmd_failover, чтобы отличить «сервер мёртв» от «DNS мёртв».
-restart_xray() {
-    # Резолв кандидата ДО остановки живого демона. ЗАЧЕМ: seed_host_dns ретраит до 6 раз (десятки
-    # секунд), и всё это время старый xray был бы уже убит — маркированный трафик в чёрную дыру
-    # РАДИ КАНДИДАТА, который может вовсе не подняться. Порядок «убить → резолвить» стоил юзеру
-    # (лог 01.08.2026) минут мигания «интернет есть/нет» на каждом проходе пула. Повторный
-    # seed_server_dns внутри spawn_xray бесплатен — сев идемпотентен (dns-lib.sh).
-    seed_server_dns || { log "restart_xray: server-host не резолвится — несущую не трогаю"; return 2; }
+restart_xray() {   # [config, name (empty if restored), seed retire mode]
+    # Resolve the candidate without changing the live road inputs. Publish
+    # the resolved rows only after the old daemon has stopped.
+    local _xfr_rows="" _xfr_retire=${3:-}
+    if [ "$#" -gt 0 ]; then
+        set -- "$1" "$2"
+        _xfr_rows=$(seed_server_dns "$1" "") && [ -n "$_xfr_rows" ]
+    else
+        seed_server_dns
+    fi || {
+        log "restart_xray: server-host не резолвится — несущую не трогаю"
+        proc_alive "$XRAY_PID" || xray_endpoints clear ''
+        return 2
+    }
+    xray_endpoint_run '' stop_xray restart_xray_impl "$@" "$_xfr_rows"
+}
+restart_xray_impl() {
     # ГОНКА РЕСТАРТА (поймана на ciadpi слота, dev43; здесь ТОТ ЖЕ класс). Демон умирает по
     # SIGTERM не мгновенно, а бинд отпускает ещё позже. Прежний порядок «убить → подождать
     # освобождения порта (4 с) → спавнить → порт слушает = успех» давал ЛОЖНЫЙ УСПЕХ двумя путями:
@@ -436,11 +412,20 @@ restart_xray() {
     # порта (своего пидфайла уже нет ⇒ он «чужой»), спавним, успех = «слушает И это НАШ pid».
     start-stop-daemon -K -p "$XRAY_PID" 2>/dev/null
     i=0; while [ $i -lt 6 ] && proc_alive "$XRAY_PID"; do sleep 1; i=$((i+1)); done
-    rm -f "$XRAY_PID" 2>/dev/null
+    rm -f "$XRAY_PID" "$XRAY_PID.pool-ready" 2>/dev/null
     free_foreign_socks
-    spawn_xray || { log "restart_xray: резолв server-host не удался"; return 1; }
+    if [ "$#" -eq 3 ]; then
+        if [ -n "$2" ]; then
+            ( umask 077; lbl_commit_out "$XRAY_JSON" cat "$1" ) || return 1
+            printf '%s\n' "$2" > "$ENODIA_STATE/.xray-active" || return 1
+        fi
+        seed_server_dns "$XRAY_JSON" "$SEED_CONF" "$3" || return 1
+    fi
+    spawn_xray seeded || { log "restart_xray: резолв server-host не удался"; return 1; }
     daemon_wait_port "$XRAY_PID" xray 8 "$SOCKS_ADDR" "$SOCKS_PORT" || { log "restart_xray: $DAEMON_WAIT_WHY"; return 1; }
-    socks_ours
+    daemon_xray_ready "$XRAY_PID" "$XRAY_JSON" "$SOCKS_PORT" || return 1
+    socks_ours || return 1
+    access_retire_after_start
 }
 
 # health с прогревочным повтором: ПО ОДНОМУ на кандидата, и не больше XRAY_WARM_TRIES на прогон.
@@ -493,6 +478,7 @@ cmd_failover() {
     # Уже здоров? Ни чинить, ни перебирать нечего (watchdog иногда зовёт failover после разовой
     # осечки, которая уже сама прошла) — не трогаем рабочий транспорт.
     if cmd_health; then log "xray-failover: транспорт уже здоров — нечего делать"; return 0; fi
+    local DNS_SEED_DEADLINE=$(($(uptime_s) + 12))
 
     # ФАЗА 0 — ПОЧИНКА ОБЩЕЙ НЕСУЩЕЙ, а НЕ перебор серверов. hev (tun2socks/xtun) и socks 10808
     # ОБЩИЕ для всех xray-конфигов: если умер hev/сокет, health не пройдёт НИ ОДИН сервер (проба
@@ -519,7 +505,7 @@ cmd_failover() {
         log "xray-failover: починка несущей не помогла — перехожу к перебору серверов"
     fi
 
-    tried=""; dns_dead=0; _xfwl=0
+    tried=""; dns_dead=0; _xfwl=0; _xfr_touched=0
     # АПЛИНК ПРОПАЛ ПОСРЕДИ ПЕРЕБОРА — дальше перебирать незачем: недостижим ЛЮБОЙ сервер, а свип у подписок идёт десятками
     # конфигов (BE7000 02.10.2026: ~70 кандидатов, 20 минут при лёгшем провайдере). Спрашиваем после КАЖДОГО промаха —
     # при живом WAN проба стоит доли секунды против ~17 с на кандидата. Но ТОЛЬКО если аплинк был жив НА СТАРТЕ: молчит проба
@@ -529,7 +515,10 @@ cmd_failover() {
     command -v wan_probe_ok >/dev/null 2>&1 && command -v wan_recheck >/dev/null 2>&1 && wan_probe_ok && _xfw=1
     for f in "$ENODIA_STATE"/xray-configs/*.json; do
         [ -f "$f" ] || continue
-        [ -e "$SWITCH_LOCK" ] && { log "xray-failover: ручной switch (lock) в процессе — прерываю перебор"; return 1; }
+        if [ -e "$SWITCH_LOCK" ]; then
+            [ "$_xfr_touched" = 0 ] || seed_dns_reload_pending
+            log "xray-failover: ручной switch (lock) в процессе — прерываю перебор"; return 1
+        fi
         # VPN выключили вручную посреди перебора — дальше не пробуем: каждый кандидат поднимал бы демон при «выключенном» VPN.
         # Конфиг возвращаем исходный (ниже), демон не поднимаем; поднятое снимет обёртка верба (carrier_run).
         carrier_barred && { log "xray-failover: VPN выключили вручную — прерываю перебор"; break; }
@@ -539,22 +528,18 @@ cmd_failover() {
         # upstream dnsmasq заперт в снятой несущей, WAN-DoH тоже промолчал. Пробовать такого
         # кандидата = 6 ретраев резолва впустую (ровно из этого складывались «минуты мигания»).
         # А вот кандидат по ГОЛОМУ IP резолва не требует — его перебор продолжаем.
-        if [ "$dns_dead" = 1 ] && ! is_ipv4 "$(xray_server_host "$f")"; then
+        if [ "$dns_dead" = 1 ] && ! xray_dns_available "$f"; then
             log "xray-failover: пропускаю $name — сервер задан именем, а DNS сейчас мёртв"
             continue
         fi
         log "xray-failover: пробую $name…"
-        # Провал cp (нет места на /data, битый файл) НЕ должен переписывать .xray-active: реестр
-        # соврал бы про активный сервер, а поднимался бы прежний конфиг.
-        cp "$f" "$XRAY_JSON" || { log "xray-failover: не удалось положить конфиг $name — пропускаю"; continue; }
-        chmod 600 "$XRAY_JSON"
-        echo "$name" > "$ENODIA_STATE/.xray-active"
-        restart_xray; rc=$?
+        restart_xray "$f" "$name" defer; rc=$?
+        [ "$rc" = 2 ] || _xfr_touched=1
         [ "$rc" = 2 ] && { dns_dead=1; log "xray-failover: $name не резолвится — DNS мёртв (upstream заперт в несущей)"; }
         if [ "$rc" = 0 ] && health_warm; then
-            exclude_endpoint        # анти-петля: endpoint нового резерва мимо маркировки
+            seed_dns_reload_pending   # A literal winner can have no new seed to publish.
             ct_flush_route "$FWMARK" "$TABLE"
-            ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" 8)
+            ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" "$XRAY_EGRESS_TIMEOUT")
             log "xray-failover OK: встал на $name (egress ${ip:-?})"
             if [ "$(nf_lang)" = en ]; then
                 notify_event "xray-failover-ok" 1800 "BE7000: Xray failover -> $name" \
@@ -579,11 +564,14 @@ xray-конфиг: $name — VPN снова работает. Внешний IP:
     # Ни один резерв не встал. Если мы что-то пробовали (xray.json уже перезаписан
     # дохлым кандидатом) — вернём исходный активный, чтобы down/мониторинг шли по нему.
     # Если резервов не было вовсе ($tried пуст) — xray.json не трогали, рестарт не нужен.
-    if [ -n "$tried" ] && [ -n "$cur" ] && [ -f "$ENODIA_STATE/xray-configs/$cur.json" ]; then
-        cp "$ENODIA_STATE/xray-configs/$cur.json" "$XRAY_JSON" && chmod 600 "$XRAY_JSON"
-        echo "$cur" > "$ENODIA_STATE/.xray-active"
-        carrier_barred || restart_xray || true
+    if [ "$_xfr_touched" = 1 ] && [ -n "$cur" ] && [ -f "$ENODIA_STATE/xray-configs/$cur.json" ]; then
+        f="$ENODIA_STATE/xray-configs/$cur.json"
+        # Restore the selection before DNS can refuse a restart. B's publication still owns its live route.
+        if ( umask 077; lbl_commit_out "$XRAY_JSON" cat "$f" ) && printf '%s\n' "$cur" > "$ENODIA_STATE/.xray-active"; then
+            carrier_barred || restart_xray "$XRAY_JSON" ''
+        fi
     fi
+    [ "$_xfr_touched" = 0 ] || seed_dns_reload_pending
     carrier_barred && { log "xray-failover: перебор прерван — VPN выключен вручную, несущую не поднимаю"; return 1; }
     # Формулировка РАЗНАЯ на два разных исхода. «FAIL: ни один резерв не поднялся (пробовал: нет)»
     # обвиняло перебор там, где перебирать было нечего: у человека ОДИН сервер, и в логе каждые
@@ -614,10 +602,8 @@ apply_xray_routing() {
 cmd_up() {
     if ! start_daemons; then
         log "запуск не удался — остаюсь на awg"
-        stop_daemons
         return 1
     fi
-    exclude_endpoint        # анти-петля: endpoint мимо маркировки ДО постановки default->xtun
     apply_xray_routing
     set_xray_dns
     echo xray > "$TRANSPORT_FLAG"
@@ -639,11 +625,10 @@ cmd_down() {
     # это забота ОРКЕСТРАТОРА (transport.sh switch <name>). stop_daemons удаляет xtun -> его
     # default в table $TABLE исчезает с устройством -> fwmark-трафик уходит в main (ПРЯМОЙ).
     # DNS -> публичный напрямую (туннеля нет). Маркировку (mark-core) НЕ трогаем — общая.
-    stop_daemons
+    stop_daemons defer
     iptables -D FORWARD -o "$TUN" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -i "$TUN" -j ACCEPT 2>/dev/null
     ip route flush table "$TABLE" 2>/dev/null || true
-    seed_host_clear "$SEED_CONF"           # снять сид server-host — ОБЕ копии, /etc и живую /tmp; снятое отмечено ⇒ set_direct_dns ниже перезапустит dnsmasq и при том же upstream
     set_direct_dns
     rm -f /tmp/enodia-watchdog.xstate /tmp/enodia-failover-episode 2>/dev/null
     ct_flush
@@ -656,6 +641,9 @@ cmd_status() {
     t=; [ -f "$TRANSPORT_FLAG" ] && t=$(cat "$TRANSPORT_FLAG")
     echo "=== транспорт: ${t:-(флаг пуст — транспорт не выбран)} ==="
     echo "--- default в table $TABLE ---"; ip route show table "$TABLE" 2>/dev/null | grep default   # raw-print: сырой вывод человеку в `status`, вердикта тут нет
+    if xp_pool "$XRAY_JSON"; then
+        echo "profile: $(xp_members "$XRAY_JSON" endpoints | wc -l) proxy endpoints (health is SOCKS egress)"
+    fi
     echo "--- демоны ---"
     proc_alive "$XRAY_PID" && echo "xray: pid $(cat $XRAY_PID) жив" || echo "xray: не запущен"
     proc_alive "$HEV_PID"  && echo "hev:  pid $(cat $HEV_PID) жив"  || echo "hev:  не запущен"
@@ -663,7 +651,9 @@ cmd_status() {
     echo "--- socks $SOCKS_PORT ---"; netstat -ltn 2>/dev/null | grep "$SOCKS_PORT" || echo "не слушает"
     if [ "$t" = xray ]; then
         echo "--- egress через xray socks ---"
-        probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" 8; echo
+        if daemon_xray_ready "$XRAY_PID" "$XRAY_JSON" "$SOCKS_PORT"; then
+            probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" 8; echo
+        else echo "$DAEMON_WAIT_WHY"; fi
     fi
     echo "--- awg0 (тёплый резерв) ---"; ip link show awg0 >/dev/null 2>&1 && echo "поднят" || echo "нет"
 }
@@ -675,8 +665,9 @@ cmd_health() {
     proc_alive "$XRAY_PID" || { log "health: xray не жив"; return 1; }
     proc_alive "$HEV_PID"  || { log "health: hev не жив"; return 1; }
     ip link show "$TUN" >/dev/null 2>&1 || { log "health: нет $TUN"; return 1; }
+    daemon_xray_ready "$XRAY_PID" "$XRAY_JSON" "$SOCKS_PORT" || return 1
     # проба реального выхода через прокси (детектит смерть VPS / блок Reality)
-    ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" 8)
+    ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$SOCKS_PORT" "$XRAY_EGRESS_TIMEOUT")
     [ -n "$ip" ] || { log "health: проба egress пуста"; return 1; }
     # Сервер жив — а путь КЛИЕНТОВ (TUN → hev → socks)? Мимо hev проба выше не видит залипшего hev (разбор и лечение —
     # slot-tun-lib.sh::hev_path_check). Нет функции (старый слой) — как раньше.
@@ -727,53 +718,50 @@ slot_seed()     { echo "/etc/dnsmasq.d/02-altserver-s$1.conf"; }
 slot_gen_conf() {   # $1 = id ; $2 = имя конфига ; 0 = готов
     _id="$1"; _src=$(slot_srcconf "$2"); _dst=$(slot_conf "$_id"); _port=$(slot_socks_port "$_id")
     [ -s "$_src" ] || { log "слот №$_id: нет конфига $_src"; return 1; }
-    sed -e "s/\"port\"[[:space:]]*:[[:space:]]*10808/\"port\": $_port/" \
-        -e "s#/tmp/xray-access.log#none#g" \
-        -e "s#/tmp/xray\.log#$(slot_xray_log "$_id")#g" \
-        "$_src" > "$_dst" 2>/dev/null
+    xp_runtime "$_src" "$_port" "$(slot_xray_log "$_id")" > "$_dst" 2>/dev/null || return 1
     [ -s "$_dst" ] || { log "слот №$_id: не удалось подготовить конфиг"; return 1; }
     chmod 600 "$_dst" 2>/dev/null
-    # Порт обязан реально попасть в конфиг: конфиг с чужим (10808) инбаундом увёл бы слот на
-    # ОСНОВНОЙ socks — трафик выхода пошёл бы через основной сервер, а панель рапортовала «ок».
-    grep -q "$_port" "$_dst" || { log "слот №$_id: в конфиге не найден socks-инбаунд 10808 — не могу выделить порт слоту"; return 1; }
+
     return 0
 }
 
 slot_start_daemons() {   # $1 = id ; $2 = имя конфига
+    xray_endpoint_run "$1" slot_stop_daemons slot_start_daemons_impl "$1" "$2"
+}
+slot_start_daemons_impl() {   # $1 = id ; $2 = config name
     [ -x "$XRAY" ] || { log "слот №$1: НЕТ бинаря $XRAY"; return 1; }
     [ -x "$HEV" ]  || { log "слот №$1: НЕТ бинаря hev"; return 1; }
     _id="$1"; _port=$(slot_socks_port "$_id")
-    slot_gen_conf "$_id" "$2" || return 1
-    _h=$(xray_server_host "$(slot_conf "$_id")")
-    [ -n "$_h" ] || { log "слот №$_id: не нашёл address в конфиге"; return 1; }
-    seed_host_dns "$_h" "$(slot_seed "$_id")" || return 1     # без резолва демон упал бы dial-ом
+    # A warm process still dials the runtime profile it started with.
+    if ! proc_alive "$(slot_xray_pid "$_id")"; then slot_gen_conf "$_id" "$2" || return 1; fi
+    seed_server_dns "$(slot_conf "$_id")" "$(slot_seed "$_id")" || return 1
+    xray_endpoints stage "$_id" || return 1
     slot_free_socks "$_id" "$(slot_xray_pid "$_id")"
     if ! proc_alive "$(slot_xray_pid "$_id")"; then
         log "слот №$_id: запускаю xray на socks :$_port (конфиг $2)…"
         daemon_log_fresh "$(slot_xray_log "$_id")"
-        start-stop-daemon -S -b -m -p "$(slot_xray_pid "$_id")" -x /bin/sh -- -c "exec $(xray_go_cap)'$XRAY' run -c '$(slot_conf "$_id")' >>'$(slot_xray_log "$_id")' 2>&1"
+        start-stop-daemon -S -b -m -p "$(slot_xray_pid "$_id")" -x /bin/sh -- -c "XRAY_LOCATION_ASSET='$(xp_asset_dir "$XRAY")' exec $(xray_go_cap)'$XRAY' run -c '$(slot_conf "$_id")' >>'$(slot_xray_log "$_id")' 2>&1" || return 1
     fi
     if ! slot_wait_socks "$_port" "$(slot_xray_pid "$_id")" xray; then
         log "слот №$_id: xray не слушает :$_port ($DAEMON_WAIT_WHY). Лог:"; tail -n 15 "$(slot_xray_log "$_id")" 2>/dev/null
         return 1
     fi
+    daemon_xray_ready "$(slot_xray_pid "$_id")" "$(slot_conf "$_id")" "$_port" || return 1
     slot_hev_up "$_id"          # hev + ожидание xtunN (общий слой)
 }
 slot_stop_daemons() {   # $1 = id
     _id="$1"
     slot_hev_down "$_id"
     start-stop-daemon -K -p "$(slot_xray_pid "$_id")" 2>/dev/null
-    rm -f "$(slot_xray_pid "$_id")" 2>/dev/null
+    rm -f "$(slot_xray_pid "$_id")" "$(slot_xray_pid "$_id").pool-ready" 2>/dev/null
+    seed_host_retire "$(slot_seed "$_id")"
+    xray_endpoints clear "$_id"
 }
 
 # Анти-петля выхода: IP сервера слота — мимо маркировки (иначе свои же пакеты к VPS, если его
 # IP в iplist_set/слот-сете, завернутся в туннель = петля). Аддитивный per-slot стор (Ф2).
 slot_exclude_endpoint() {   # $1 = id
-    _id="$1"
-    _ep=$(xray_endpoint_ip "$(slot_seed "$_id")" "$(slot_conf "$_id")")
-    [ -n "$_ep" ] || { log "слот №$_id: endpoint не определён — пропуск анти-петли"; return 0; }
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "$_ep" >/dev/null 2>&1
-    log "слот №$_id: endpoint $_ep исключён из маркировки (анти-петля)"
+    xray_endpoints ready "$1"
 }
 
 # Контракт слота (transport.sh _slot_dispatch): slot-up <id> <cfg> / slot-down <id> /
@@ -784,10 +772,8 @@ cmd_slot_up() {   # $1 = id ; $2 = имя конфига
     [ -n "$_cfg" ] && [ "$_cfg" != "-" ] || { log "слот №$_id: не задан конфиг сервера"; return 1; }
     if ! slot_start_daemons "$_id" "$_cfg"; then
         log "слот №$_id: xray-несущая не поднялась -> выход живёт по fallback-политике (mark-core)"
-        slot_stop_daemons "$_id"
         return 1
     fi
-    slot_exclude_endpoint "$_id"    # ДО постановки default->xtunN
     slot_apply_routing "$_id"
     ct_flush_slot "$_id"   # only this exit's flows (ct-lib.sh)
     log "слот №$_id: xray-несущая $(slot_tun "$_id") в table $(slot_table "$_id") (конфиг $_cfg)"
@@ -798,14 +784,7 @@ cmd_slot_down() {   # $1 = id
     case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     slot_remove_routing "$_id"
     slot_stop_daemons "$_id"
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1   # снять анти-петлю слота
     rm -f "$(slot_hev_yaml "$_id")" "$(slot_conf "$_id")" 2>/dev/null
-    # Сид сервера слота больше не нужен: убираем ОБЕ копии файла и перечитываем dnsmasq (HUP
-    # конфиг НЕ перечитывает — без рестарта address=/host/IP жил бы до рестарта демона).
-    if seed_host_clear "$(slot_seed "$_id")"; then
-        /etc/init.d/dnsmasq restart >/dev/null 2>&1 || killall -HUP dnsmasq 2>/dev/null
-        rm -f "${DNS_RELOAD_MARK:-/tmp/enodia-dns-reload}" 2>/dev/null   # перезапустили сами — отметка снятого сида исполнена
-    fi
     ct_flush_slot "$_id"
     log "слот №$_id: xray-несущая снята"
     return 0
@@ -818,7 +797,8 @@ cmd_slot_health() {   # $1 = id
     proc_alive "$(slot_xray_pid "$_id")" || { log "слот №$_id health: xray не жив"; return 1; }
     proc_alive "$(slot_hev_pid "$_id")"  || { log "слот №$_id health: hev не жив"; return 1; }
     ip link show "$(slot_tun "$_id")" >/dev/null 2>&1 || { log "слот №$_id health: нет $(slot_tun "$_id")"; return 1; }
-    _ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$(slot_socks_port "$_id")" 8)
+    daemon_xray_ready "$(slot_xray_pid "$_id")" "$(slot_conf "$_id")" "$(slot_socks_port "$_id")" || return 1
+    _ip=$(probe_ext_ip "--socks5-hostname $SOCKS_ADDR:$(slot_socks_port "$_id")" "$XRAY_EGRESS_TIMEOUT")
     [ -n "$_ip" ] || { log "слот №$_id health: проба egress пуста"; return 1; }
     # Сервер жив — а путь клиентов выхода через его hev? (slot-tun-lib.sh::slot_hev_path_check; нет функции — как раньше)
     command -v slot_hev_path_check >/dev/null 2>&1 || return 0
@@ -838,6 +818,15 @@ case "$1" in
     dns)      if carrier_barred; then set_direct_dns; else set_xray_dns; fi ;;
     access-purge) cmd_access_purge ;;  # разовая чистка ХРАНИЛИЩА конфигов от пути access-лога (зовут install.sh и gh-update.sh)
     endpoint) cmd_endpoint "$2" ;;    # «host⇥port» the router dials for config $2 (a chain's relay) — cgi-bin/ping
+    # The server list's rows cache (xray-profile-lib.sh::xp_meta_rows) filled ahead of the first «Серверы»: heal starts it in the
+    # background after a boot and an update (RAM is empty, a new library is a new key) — else that first list waits ~0.3 s a profile.
+    # ONE FILL AT A TIME IS THE VERB'S OWN: boot heal and a replay can both start it before either writes a pidfile (review 2;
+    # round 1 found the pidfile check blind too). A live holder — this one gives up after the lock's few seconds of asking.
+    meta-warm) _mwl=${XP_META_WARM_LOCK:-/tmp/enodia-xray-meta-warm.lock}
+               lbl_lock_take "$_mwl" 'xray-transport\.sh meta-warm' || exit 0
+               trap 'lbl_lock_drop "$_mwl"' EXIT; trap 'exit 1' HUP INT TERM PIPE
+               set --; for _mw in "$ENODIA_STATE"/xray-configs/*.json; do [ -f "$_mw" ] && set -- "$@" "$_mw"; done
+               xp_meta_rows "$@" >/dev/null ;;
     # Слот-вербы ОПЦИОНАЛЬНЫ по контракту: нет слот-слоя → код 2 «не умею» (оркестратор оставит
     # выход на fallback), а не тихая смерть шелла на провалившемся `.`.
     slot-up)     slot_lib_ok || exit 2; carrier_run cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф3): 2-й xray + hev + xtunN в table 100N

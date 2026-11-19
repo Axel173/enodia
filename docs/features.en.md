@@ -33,7 +33,8 @@ Xray, Hysteria2 and AmneziaWG servers are added from one subscription link (3x-u
 schedule. An **Amnezia Premium** key goes in the same place: the router takes the configs of the countries you pick by
 itself. The panel hands any saved server back — as a link, a QR code or a file. If a provider gives the subscription
 only to a particular app (Happ, for example) and counts devices, the router presents itself as that app and sends its
-own device ID (HWID) — set per subscription.
+own device ID (HWID) — set per subscription. An Xray profile with several servers and a balancer works whole, as in
+the app.
 
 ## Watchdog
 
@@ -50,6 +51,8 @@ travelling, over mobile internet.
 
 - **Encrypted DNS:** DoH, DoT, DoQ and DoH3 (over QUIC) and ODoH — through a relay, so the resolver never learns whose
   questions they are.
+- **Resolver check:** on a button press the router checks the listed resolvers directly and through the tunnel, shows
+  the reply time or the reason for a failure, and switches to the one you pick with a re-check and a rollback.
 - **Who asks DNS past the router:** the panel shows the devices that ask another DNS directly, and says when the router
   itself hands them another address over DHCP. Such queries are not encrypted by the router, skip the domain rules and ad
   blocking, and the ISP can substitute their answers.

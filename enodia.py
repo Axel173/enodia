@@ -42,7 +42,7 @@ from collections import namedtuple
 
 # Версия PC-стороны проекта. Держится В СИНХРОНЕ с `version` в pyproject.toml и requirements.txt
 # (копии сознательные — uv-путь и pip-путь; разъезд ловит C35). См. CHANGELOG.md.
-PROJECT_VERSION = "1.3.5"
+PROJECT_VERSION = "1.3.6"
 
 # --- Зависимость paramiko (in-process SSH) — с авто-доустановкой ---
 # paramiko ОБЯЗАТЕЛЕН (in-process SSH). Если его нет — НЕ падаем молча с кодом 1: на
@@ -340,6 +340,7 @@ BIN_NAMES = (
     # DNS» (пикер DoH/DoT в панели). Наш код (dev/dot), статик mbedTLS под обе арки (~300 КБ),
     # ноль version-skew по построению. Тоже чистая опция.
     "dot-proxy.user",
+    "dnsq.user",
     # quic-dns-proxy — DNS over QUIC and DNS over HTTP/3 (our code, dev/quic; static wolfSSL + ngtcp2 + nghttp3, both arches,
     # ~350 KB): the QUIC protocols of «Шифрованный DNS», its own component. An option too, OFF by default.
     "quic-dns-proxy.user",
@@ -352,15 +353,15 @@ BIN_NAMES = (
     # An option too: runs only while some device is limited.
     "dns-filter.user",
 )
-# Бинари собраны под ДВЕ арки и лежат в bin/<арка>/ (плоского bin/*.user больше нет).
-# Значение = (e_machine, EI_CLASS) из ELF-заголовка — по ним же опознаём роутер.
-#   arm64 — BE7000/BE10000 (aarch64);  armv7 — BE3600 (32-битный userspace).
-# На роутер набор всегда льётся в ПЛОСКИЙ $ENODIA_DIR/bin/ ⇒ install.sh про арки
-# не знает, его гард bin_arch_matches остаётся независимой страховкой.
+# Three bin sets. ELF resolves the userspace ISA; only detect_router_arch refines
+# ARM32 by CPU features. Duplicate EM_ARM entries are artifact identities, never
+# a first-match detector. install.sh verifies all staged bytes before using them.
 BIN_ARCHES = {
     "arm64": (0xB7, 2),   # EM_AARCH64, ELFCLASS64
     "armv7": (0x28, 1),   # EM_ARM,     ELFCLASS32
+    "armv7sf": (0x28, 1), # Same userspace ISA, software floating point
 }
+BIN_ARCH_LABELS = {"arm64": "ARM64", "armv7": "ARMv7", "armv7sf": "ARMv7 (soft-float)"}
 DEFAULT_ARCH = "arm64"
 
 # БУТСТРАП-НАБОР: единственные бинари, которые ПК везёт с собой. Всё остальное (xray 8 МБ,
@@ -427,6 +428,19 @@ def package_member(name):
         return None
 
 
+def package_arch_supported(arch):
+    if arch != "armv7sf":
+        return True
+    manifest = (package_member("bin-manifest.txt") or b"").splitlines()
+    return any(len(row) == 5 and row[1] == b"armv7sf" for row in
+               (line.split(b"\t") for line in manifest if not line.startswith(b"#")))
+
+
+def package_arch_reason():
+    return L("Выбранный пакет не поддерживает armv7sf: этому роутеру нужны бинарные файлы без VFP.",
+             "The selected package does not support armv7sf. This router needs binaries that do not require VFP.")
+
+
 def bootstrap_files(arch):
     """(ready, skipped) бутстрап-трио арки рядом со скриптом: ready — {имя.user: путь} тех, что ТА ЖЕ сборка, что знает манифест
     ставящегося пакета (он под подписью и едет на роутер); skipped — {имя.user: "missing" | "other"}. Другую сборку НЕ везём (ревью
@@ -460,7 +474,7 @@ def bootstrap_verdict(arch):
     """([(уровень, текст)], есть_битые) — что установка скажет про бутстрап-трио арки перед заливкой; уровень — warn|err|ok.
     Функцией, а не телом установки: порядок проверок держит стенд (dev/release-build-test.py, круг 3 ревью ветки релиза)."""
     want_machine, want_class = BIN_ARCHES[arch]
-    label = "ARM64" if arch == "arm64" else "ARMv7"
+    label = BIN_ARCH_LABELS[arch]
     bmap = bin_files(arch)
     _ready, skip = bootstrap_files(arch)
     out, bad = [], False
@@ -604,9 +618,23 @@ def detect_router_arch(router):
     if len(raw) < 20 or raw[:4] != b"\x7fELF":
         return None
     machine = raw[18] | (raw[19] << 8)
-    for slug, (want_machine, want_class) in BIN_ARCHES.items():
-        if machine == want_machine and raw[4] == want_class:
-            return slug
+    if (machine, raw[4]) == BIN_ARCHES["arm64"]:
+        return "arm64"
+    if (machine, raw[4]) == BIN_ARCHES["armv7"]:
+        # Keep this refinement in the sole PC selector. A failed or incomplete
+        # cpuinfo read preserves armv7; mixed CPUs require the software path.
+        try:
+            result = router.run("cat /proc/cpuinfo 2>/dev/null", silent=True)
+            if result.code != 0:
+                return "armv7"
+            cpuinfo = result.out
+            features = re.findall(r"^\s*features[ \t]*:[ \t]*([^\r\n]*)", cpuinfo, re.I | re.M)
+            if features and all(f.split() for f in features):
+                if any(not set(f.lower().split()) & {"vfp", "vfpv3", "vfpv3d16", "vfpv4"} for f in features):
+                    return "armv7sf"
+        except Exception:
+            pass
+        return "armv7"
     return None
 
 # keyring: один service/account на проект (на Windows = Credential Manager = DPAPI).
@@ -1364,7 +1392,7 @@ def test_router_reachable(host):
 # Приложение: состояние + действия + меню
 # ============================================================
 class App:
-    def __init__(self, force_install=False, force_manage=False):
+    def __init__(self, force_install=False, force_manage=False, no_rollback=False):
         self.router_ip = DEFAULT_ROUTER_IP
         self.lan_subnet = DEFAULT_LAN_SUBNET
         self.awg_state = "INSTALLED"   # INSTALLED | FRESH | UNKNOWN
@@ -1373,6 +1401,7 @@ class App:
         self.last_verify_carrier_up = False  # итог _verify_install: несущая поднялась?
         self.force_install = force_install
         self.force_manage = force_manage
+        self.no_rollback = no_rollback
         self._bin_arch = None          # кэш арки роутера (см. bin_arch)
         self._paths = None             # кэш АКТИВНЫХ каталогов роутера (см. router_paths)
         self.router = Router(self.router_ip, password_provider=self.ensure_password)
@@ -2532,9 +2561,10 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
         # месте, упал install.sh; прочее — ничего не заменено или прежний набор возвращён.
         # self._inst_rc: None — исход неизвестен (установщик жив после потолка или роутер не ответил): трогать нельзя ничего.
         D, S, B = self.install_dirs()
+        snap_ack = "PKG_SNAP_ACK=1 " if self.no_rollback else ""
         res = self.run_followed(
             f"ENODIA_DIR={_shq(D)} ENODIA_STATE={_shq(S)} ENODIA_BIN={_shq(B)} ENODIA_BOOT={ENODIA_BOOT} "
-            f"INSTALL_LANG={WIZARD_LANG} PKG_INSTALL_VERBOSE=1 sh {PKG_TMP}/root/pkg-install.sh install {PKG_TMP}/root",
+            f"INSTALL_LANG={WIZARD_LANG} PKG_INSTALL_VERBOSE=1 {snap_ack}sh {PKG_TMP}/root/pkg-install.sh install {PKG_TMP}/root",
             f"{PKG_TMP}/run.pid", f"{PKG_TMP}/run.log", PKG_INSTALL_WAIT, rcf=f"{PKG_TMP}/run.rc")
         self._inst_rc = res["rc"]
         if res["started"] is False:          # роутер ответил: не запущен (None — исход неизвестен, ниже: ничего не трогаем)
@@ -2730,6 +2760,7 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
         done, stage = self.install_panel()
         if not done:
             err({"preflight": "Pre-flight не прошёл -- установка отменена",
+                 "arch": package_arch_reason(),
                  "upload": "Загрузка файлов сорвалась — на роутере остались прежние версии",
                  "installer": "Инсталлер упал — смотрите вывод выше и меню «Диагностика»",
                  "running": "Установка на роутере ещё идёт — не прерываю; проверьте снова через пару минут"}[stage])
@@ -2751,6 +2782,8 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
         (консоль — confirm, мастер — экраном), а решение «место впритык» приезжает готовым."""
         if not self.preflight(tight_ok=tight_ok):
             return False, "preflight"
+        if not package_arch_supported(self.bin_arch()):
+            return False, "arch"
         if not self._upload_all_files():
             self._upload_undo()
             return False, "upload"
@@ -3395,9 +3428,10 @@ def parse_args(argv):
         elif a in CLI_FLAGS:
             pass          # «текстовое меню»: мастер уже отсечён в wants_wizard, здесь флаг лишь известен
         elif a in ("-h", "--help"):
-            print("Использование: python enodia.py [--cli|--install|--manage]")
+            print("Использование: python enodia.py [--cli|--install [--no-rollback]|--manage]")
             print("  без аргументов  — мастер установки в браузере (то же, что --wizard)")
             print("  --cli           — текстовое меню: диагностика и служебные операции")
+            print("  --no-rollback   — с --install на тесном флеше удалить прежнюю точку отката и не создавать новую")
             sys.exit(0)
     return force_install, force_manage
 
@@ -3544,8 +3578,8 @@ def run_check_archive(argv):
                 bad.append(L(f"{rel} — нет в манифесте пакета", f"{rel} is not in the package manifest"))
     for arch in BIN_ARCHES:
         for rel in bin_files(arch).values():
-            if rel.split("/")[-1] in BOOTSTRAP_BINS and not os.path.isfile(os.path.join(SCRIPT_DIR, rel)):
-                bad.append(L(f"нет бутстрап-бинаря {rel}", f"bootstrap binary {rel} is missing"))
+            if rel not in known and bm is not None:
+                bad.append(L(f"нет строки манифеста {rel}", f"manifest row {rel} is missing"))
     if bad:
         for b in bad:
             print("[FAIL] " + b)
@@ -3650,6 +3684,7 @@ WIZARD_MODELS = {
     "RD15":  "Xiaomi BE3600 2.5G",
     "RN06":  "Xiaomi BE3600 2.5G",
     "RD16":  "Xiaomi BE3600 1G",
+    "RD18":  "Xiaomi BE5000",
     "R3600": "Xiaomi AX3600",
 }
 
@@ -4081,7 +4116,7 @@ def wizard_facts(app, state):
         "ip": app.router_ip,
         "model": probe.get("model", ""), "known": bool(probe.get("known")),
         "firmware": probe.get("firmware", ""),
-        "arch": arch, "arch_label": "ARM64" if arch == "arm64" else "ARMv7",
+        "arch": arch, "arch_label": BIN_ARCH_LABELS[arch],
         "space": verdict, "free_kb": free, "payload_kb": total, "peak_kb": biggest,
         "reserve_kb": reserve,
         # Имя тома — от роутера (OURMP, его же кладёт show_router_resources выше). Без него
@@ -4172,6 +4207,7 @@ def wizard_install(app, tight_ok):
         return {"ok": False, "stage": stage, "error": {
             "preflight": L("Проверка перед установкой не прошла — установка не начиналась",
                            "The pre-install checks did not pass — the installation never started"),
+            "arch": package_arch_reason(),
             "upload": L("Заливка файлов сорвалась — на роутере остались прежние версии",
                         "The upload failed — the router keeps the previous versions"),
             "installer": L("Установщик на роутере вернул ошибку",
@@ -5292,7 +5328,8 @@ def main():
     _enable_ansi()
     logdbg("=== старт: " + _env_banner() + " ===")
     force_install, force_manage = parse_args(sys.argv[1:])
-    app = App(force_install=force_install, force_manage=force_manage)
+    app = App(force_install=force_install, force_manage=force_manage,
+              no_rollback=force_install and "--no-rollback" in sys.argv[1:])
     try:
         app.run()
     finally:

@@ -91,6 +91,29 @@ dom_ok() {
 # несущая честно не встанет и watchdog уйдёт на резерв. Провайдеры травят блок-домены, а не
 # произвольные VPS. Если понадобится доверенный резолв — добавлять DoH-first ОТДЕЛЬНОЙ
 # функцией для конкретного вызова, а не менять порядок здесь (сломает время failover).
+# Whole-profile seeds share a monotonic deadline. Scalar callers keep their
+# existing resolver timeouts when there is no deadline.
+if ! command -v uptime_s >/dev/null 2>&1 && [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
+command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
+_dns_time_left() {
+    _dt_max=$1
+    if [ -n "${DNS_SEED_DEADLINE:-}" ]; then
+        _dt_now=$(uptime_s)
+        [ "$_dt_now" -ne 999999999 ] || return 1
+        _dt_left=$((DNS_SEED_DEADLINE - _dt_now))
+        [ "$_dt_left" -gt 0 ] || return 1
+        [ "$_dt_left" -ge "$_dt_max" ] || _dt_max=$_dt_left
+    fi
+    printf '%s\n' "$_dt_max"
+}
+_dns_seed_curl() {
+    _dsc_max=$1; shift
+    if [ -n "${DNS_SEED_DEADLINE:-}" ]; then
+        _dsc_max=$(_dns_time_left "$_dsc_max") || return 28
+        set -- "$@" --max-time "$_dsc_max"
+    fi
+    curl "$@"
+}
 resolve_ipv4() {
     _h="$1"
     # 1) системный резолвер (dnsmasq) — работает, когда его upstream жив.
@@ -102,7 +125,8 @@ resolve_ipv4() {
     # цикла seed_host_dns до шести раз ⇒ безграничное ожидание здесь и есть та самая «минута».
     # 2 с достаточно: живой dnsmasq отвечает за миллисекунды, а обрезанный промах доберёт DoH-проход
     # через WAN (0 с на замере) — тем же ответом, только быстрее.
-    _ip=$(timeout -t "${RESOLVE_NS_TIMEOUT:-2}" nslookup "$_h" 2>/dev/null | awk '/^Name:/{f=1;next} f&&/Address/{x=$NF; if(x ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/){print x; exit}}')
+    _rip_wait=$(_dns_time_left "${RESOLVE_NS_TIMEOUT:-2}") || return 1
+    _ip=$(timeout -t "$_rip_wait" nslookup "$_h" 2>/dev/null | awk '/^Name:/{f=1;next} f&&/Address/{x=$NF; if(x ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/){print x; exit}}')
     [ -n "$_ip" ] && { echo "$_ip"; return 0; }
     # 2+3) DoH: сперва через WAN, потом как есть — порядок и обоснование внутри doh_ips.
     _ip=$(doh_ips "$_h" "" | head -1)
@@ -213,7 +237,7 @@ curl_ca_opt() {   # $1 = URL пробы; $2… = доп-аргументы curl 
     # Судим по ЛЮБОМУ валидному HTTP-коду: 400/404 значит, что TLS уже прошёл.
     for _cca in $CURL_CA_CANDIDATES; do
         [ -s "$_cca" ] || continue
-        _ccc=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$_cca" --connect-timeout 5 --max-time 10 "$@" "$_ccu" 2>/dev/null)
+        _ccc=$(_dns_seed_curl 10 -s -o /dev/null -w '%{http_code}' --cacert "$_cca" --connect-timeout 5 --max-time 10 "$@" "$_ccu" 2>/dev/null)
         _ccr=$?
         case "$_ccc" in
             # rc=60 = «этот бандл не подошёл» ⇒ есть смысл в следующем. ЛЮБАЯ ДРУГАЯ осечка
@@ -245,7 +269,7 @@ _dnslib_doh_all() {
         # соединении), а это присваивание из $() и есть та самая последняя команда, о которой речь
         # выше. Без него под `set -e` подоболочка умирала бы на ПЕРВОМ промахе: второй резолвер
         # (8.8.8.8) не пробовался бы вовсе, а наружу уходил бы код curl вместо наших 1/2.
-        _dda_b=$(curl -s --connect-timeout 3 --max-time 8 $2 "$_dq?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null || true)
+        _dda_b=$(_dns_seed_curl 8 -s --connect-timeout 3 --max-time 8 $2 "$_dq?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null || true)
         # СТРОГИЙ ПРОХОД НЕ ОТВЕТИЛ — идём ступенями, теряя проверку КАК МОЖНО ПОЗЖЕ.
         # Замерено на AX3600 (ядро 4.4): оба резолвера дают rc=60 «unable to get local issuer
         # certificate», `doh_ips ya.ru` возвращает ПУСТО. Отказывал резолвер ровно там, ради чего
@@ -261,11 +285,11 @@ _dnslib_doh_all() {
             *'"Status"'*) ;;
             *) _dda_ca=$(curl_ca_opt "$_dq?name=$1&type=A")
                if [ -n "$_dda_ca" ]; then
-                   _dda_b=$(curl -s $_dda_ca --connect-timeout 3 --max-time 8 $2 "$_dq?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null || true)
+                   _dda_b=$(_dns_seed_curl 8 -s $_dda_ca --connect-timeout 3 --max-time 8 $2 "$_dq?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null || true)
                fi
                case "$_dda_b" in
                    *'"Status"'*) ;;
-                   *) _dda_b=$(curl -sk --connect-timeout 3 --max-time 8 $2 "$_dq?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null || true) ;;
+                   *) _dda_b=$(_dns_seed_curl 8 -sk --connect-timeout 3 --max-time 8 $2 "$_dq?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null || true) ;;
                esac ;;
         esac
         case "$_dda_b" in *'"Status"'*) _dda_ans=1 ;; esac
@@ -278,6 +302,34 @@ _dnslib_doh_all() {
 
 # is_ipv4 <строка> — «это уже голый IPv4?» (тогда резолвить нечего).
 is_ipv4() { echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+
+# Read only IPv4 rows published for the daemon's actual server host.
+seed_pin_names() {   # own legacy seed and the current IPv4 rows of its publication
+    _spn_ips=" $(printf '%s' "$2" | tr '\n' ' ') "
+    awk -F/ -v ips="$_spn_ips" '$1=="address=" && index(ips," " $3 " ") {print $2}' "$1" 2>/dev/null
+    awk -v ips="$_spn_ips" -v tag="${1##*/}" '$3=="#" && $4=="awg-seed" && $5==tag && index(ips," " $1 " ") {print $2}' "$SEED_HOSTS" 2>/dev/null
+}
+seed_ipv4_rows() {   # host [seed file] [shared]
+    if is_ipv4 "$1"; then [ "${3:-}" = pins ] || printf '%s\n' "$1"; return 0; fi
+    if [ -n "${2:-}" ]; then
+        awk -F/ -v h="$1" '$1=="address=" && ($2 "")==(h "") && $3 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $3}' "$2" 2>/dev/null
+    fi
+    # Alternate carriers publish to a common hosts file. A peer's pin for the
+    # same name is also a possible dial target, even after our own reseed.
+    if [ -n "${3:-}" ]; then
+        awk -v h="$1" '
+            BEGIN { h=tolower(h); sub(/\.$/, "", h) }
+            $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $3=="#" && $4=="awg-seed" &&
+            $5 ~ /^02-altserver(-s[2-7])?\.conf$/ {
+                name=tolower($2); sub(/\.$/, "", name); if (name==h) print $1
+            }' "$SEED_HOSTS" 2>/dev/null
+    fi
+}
+
+hy2_conf_host() {
+    _hch=$(grep -E '^[[:space:]]*server:' "$1" 2>/dev/null | head -1 | sed 's/^[[:space:]]*server:[[:space:]]*//; s/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')
+    printf '%s\n' "${_hch%:*}"
+}
 
 # conf_dns <WireGuard/AmneziaWG config> — THE RESOLVER THE CONFIG NAMES: the first value of its `DNS =` line that is an IPv4
 # address; nothing — the line is absent or names no address. THE ONLY READER of that line (the carrier, the switch; awg_setup.sh
@@ -434,7 +486,25 @@ seed_host_clear() {
     return $_sc_hit
 }
 
-seed_host_dns() {   # $1 = host ; $2 = seed-файл
+seed_dns_reload() {   # optional command prefix, e.g. timeout -t 5
+    if "$@" /etc/init.d/dnsmasq restart >/dev/null 2>&1; then
+        rm -f "$DNS_RELOAD_MARK" 2>/dev/null
+    else
+        killall -HUP dnsmasq 2>/dev/null
+    fi
+    return 0
+}
+seed_dns_reload_pending() {
+    [ ! -e "$DNS_RELOAD_MARK" ] || seed_dns_reload
+}
+seed_host_retire() {   # seed file; "defer" leaves dnsmasq reload to the next DNS owner
+    if seed_host_clear "$1" && [ "${2:-}" != defer ]; then
+        seed_dns_reload
+    fi
+    return 0
+}
+
+seed_host_dns() {   # $1 = host ; $2 = seed-файл ; $3 = pre-resolved IPv4 (optional)
     _sh_host="$1"; _sh_file="$2"
     [ -n "$_sh_host" ] && [ -n "$_sh_file" ] || return 1
     if is_ipv4 "$_sh_host"; then
@@ -443,23 +513,8 @@ seed_host_dns() {   # $1 = host ; $2 = seed-файл
     # Прошлый рабочий адрес читаем ДО цикла: он решает, сколько ждать сеть. Есть кэш — ждём две
     # попытки и поднимаемся на нём (несущая живёт, резолв догоним на следующем подъёме); нет кэша —
     # прежние шесть ожиданий и честный отказ, потому что подставить нечего.
-    _sh_ip=""; _sh_n=0; _sh_from_cache=0
-    _sh_cached=$(seed_cache_get "$_sh_host")
-    while [ "$_sh_n" -lt "$SEED_TRIES" ]; do
-        _sh_ip=$(resolve_ipv4 "$_sh_host"); [ -n "$_sh_ip" ] && break
-        _sh_n=$((_sh_n+1))
-        if [ -n "$_sh_cached" ] && [ "$_sh_n" -ge "$SEED_TRIES_CACHED" ]; then
-            _sh_ip="$_sh_cached"; _sh_from_cache=1
-            _dnslib_log "резолв '$_sh_host' не удался ($_sh_n) → поднимаюсь на ПРОШЛОМ рабочем адресе $_sh_ip (кэш)"
-            break
-        fi
-        _dnslib_log "резолв server-host '$_sh_host' попытка $_sh_n не удалась — повтор через 2с…"; sleep 2
-    done
-    [ -n "$_sh_ip" ] || { _dnslib_log "НЕ зарезолвил server-host '$_sh_host' за $SEED_TRIES попыток → несущая не встанет (честно)"; return 1; }
-    is_ipv4 "$_sh_ip" || { _dnslib_log "резолв вернул не-IP '$_sh_ip' — не сею"; return 1; }
-    # Свежий резолв запоминаем; адрес из кэша (и повтор того же значения) НЕ переписываем — /data
-    # это флеш, а зовут нас на каждый подъём несущей.
-    if [ "$_sh_from_cache" = 0 ] && [ "$_sh_ip" != "$_sh_cached" ]; then seed_cache_put "$_sh_host" "$_sh_ip"; fi
+    _sh_ip=${3:-}
+    [ -n "$_sh_ip" ] || seed_resolve_host "$_sh_host" || return 1
     # /etc/hosts — ДО быстрого выхода ниже: именно эта строка и разрывает круг «DNS через несущую,
     # несущая через DNS» (разбор в шапке блока). Идемпотентна ⇒ на горячем пути бесплатна.
     seed_hosts_put "$_sh_host" "$_sh_ip" "$_sh_file"
@@ -484,7 +539,7 @@ seed_host_dns() {   # $1 = host ; $2 = seed-файл
     mkdir -p /etc/dnsmasq.d
     printf '%s\n' "$_sh_want" > "$_sh_file"
     if [ -n "$_sh_live" ]; then mkdir -p /tmp/dnsmasq.d 2>/dev/null; printf '%s\n' "$_sh_want" > "$_sh_live"; fi
-    /etc/init.d/dnsmasq restart >/dev/null 2>&1 || killall -HUP dnsmasq 2>/dev/null
+    seed_dns_reload
     _sh_k=0                                            # дождаться, что dnsmasq реально отдаёт сид (до старта демона)
     while [ "$_sh_k" -lt 6 ]; do
         timeout -t "${RESOLVE_NS_TIMEOUT:-2}" nslookup "$_sh_host" 127.0.0.1 2>/dev/null | awk '/^Name:/{f=1;next} f&&/Address/{print $NF}' | grep -qx "$_sh_ip" && break
@@ -547,3 +602,97 @@ dnsmasq_conf_files() {
 # его префиксом; иначе просто на stdout. Не заводим здесь собственный формат — сообщения о
 # севе исторически шли в лог плагина, и диагностика их там ищет.
 _dnslib_log() { if command -v log >/dev/null 2>&1; then log "$@"; else echo "[dns-lib] $*"; fi; }
+
+# Shared retry/cache policy for scalar and whole-profile server seeds.
+seed_resolve_host() {
+    _sh_host=$1
+    _sh_ip=""; _sh_n=0; _sh_from_cache=0
+    _sh_cached=$(seed_cache_get "$_sh_host")
+    while [ "$_sh_n" -lt "$SEED_TRIES" ]; do
+        _sh_ip=$(resolve_ipv4 "$_sh_host"); [ -n "$_sh_ip" ] && break
+        _sh_n=$((_sh_n+1))
+        if [ -n "$_sh_cached" ] && [ "$_sh_n" -ge "$SEED_TRIES_CACHED" ]; then
+            _sh_ip="$_sh_cached"; _sh_from_cache=1
+            _dnslib_log "резолв '$_sh_host' не удался ($_sh_n) → поднимаюсь на ПРОШЛОМ рабочем адресе $_sh_ip (кэш)"
+            break
+        fi
+        _dnslib_log "резолв server-host '$_sh_host' попытка $_sh_n не удалась — повтор через 2с…"; sleep 2
+    done
+    [ -n "$_sh_ip" ] || { _dnslib_log "НЕ зарезолвил server-host '$_sh_host' за $SEED_TRIES попыток → несущая не встанет (честно)"; return 1; }
+    is_ipv4 "$_sh_ip" || { _dnslib_log "резолв вернул не-IP '$_sh_ip' — не сею"; return 1; }
+    # Свежий резолв запоминаем; адрес из кэша (и повтор того же значения) НЕ переписываем — /data
+    # это флеш, а зовут нас на каждый подъём несущей.
+    if [ "$_sh_from_cache" = 0 ] && [ "$_sh_ip" != "$_sh_cached" ]; then seed_cache_put "$_sh_host" "$_sh_ip"; fi
+}
+
+# An empty seed path returns resolved rows without publishing; pass those rows
+# back as the third argument to publish them after retiring the old daemon.
+# seed_hosts_dns <newline-separated hosts> <seed file> [resolved rows]
+# and one DNS reload. Repeated scalar setters would erase earlier pool members.
+seed_hosts_dns() (
+    _shs_hosts=$1; _shs_file=$2; _shs_uncached=''; _shs_cached=''
+    # A failover sweep shares this lookup/verification deadline across all
+    # candidates. Standalone starts get their own budget. A complete cached
+    # set can still be published (and reloaded) after the deadline.
+    DNS_SEED_DEADLINE=${DNS_SEED_DEADLINE:-$(($(uptime_s) + 12))}
+    _shs_rows=${3:-}
+    if [ -z "$_shs_rows" ]; then _shs_rows=$(
+        for _shs_host in $_shs_hosts; do
+            if is_ipv4 "$_shs_host"; then printf '%s\n' literal; continue; fi
+            case "$_shs_host" in *:*) printf '%s\n' literal; continue ;; esac
+            dom_ok "$_shs_host" || continue
+            _shs_ip=$(seed_cache_get "$_shs_host")
+            if is_ipv4 "$_shs_ip"; then
+                printf '%s %s\n' "$_shs_host" "$_shs_ip"
+                _shs_cached="$_shs_cached $_shs_host"
+            else
+                _shs_uncached="$_shs_uncached $_shs_host"
+            fi
+        done
+        for _shs_host in $_shs_uncached $_shs_cached; do
+            _dns_time_left 1 >/dev/null || break
+            _shs_ip=$(resolve_ipv4 "$_shs_host")
+            is_ipv4 "$_shs_ip" || continue
+            seed_cache_put "$_shs_host" "$_shs_ip"
+            printf '%s %s\n' "$_shs_host" "$_shs_ip"
+        done
+    ); fi
+    [ -n "$_shs_rows" ] || return 1
+    [ -n "$_shs_file" ] || { printf '%s\n' "$_shs_rows"; return 0; }
+    _shs_tag=$(_seed_tag "$_shs_file")
+    _shs_rows=$(printf '%s\n' "$_shs_rows" | awk 'NF==2 {ip[$1]=$2} END {for(h in ip) print h,ip[h]}' | sort)
+    _shs_conf=$(printf '%s\n' "$_shs_rows" | awk 'NF==2 {printf "address=/%s/%s\n",$1,$2}')
+    _shs_lines=$(printf '%s\n' "$_shs_rows" | awk -v tag="$_shs_tag" 'NF==2 {printf "%s\t%s\t%s\n",$2,$1,tag}')
+    [ -n "$_shs_conf" ] || { seed_host_clear "$_shs_file"; return 0; }
+    _shs_live=$(_seed_live "$_shs_file")
+    mkdir -p "${_shs_file%/*}" || return 1
+    if [ -n "$_shs_live" ]; then mkdir -p "${_shs_live%/*}" || return 1; fi
+    [ -f "$SEED_HOSTS" ] || : > "$SEED_HOSTS" || return 1
+    _shs_changed=0
+    [ "$(grep -F "$_shs_tag" "$SEED_HOSTS" 2>/dev/null)" = "$_shs_lines" ] || {
+        lbl_commit_out_as "$SEED_HOSTS.enodiatmp" "$SEED_HOSTS" _seed_hosts_text "$_shs_tag" "$_shs_lines" || return 1
+        _shs_changed=1
+    }
+    if [ "$(cat "$_shs_file" 2>/dev/null)" != "$_shs_conf" ]; then
+        lbl_commit_out "$_shs_file" printf '%s\n' "$_shs_conf" || return 1
+        _shs_changed=1
+    fi
+    if [ -n "$_shs_live" ] && [ "$(cat "$_shs_live" 2>/dev/null)" != "$_shs_conf" ]; then
+        lbl_commit_out "$_shs_live" printf '%s\n' "$_shs_conf" || return 1
+        _shs_changed=1
+    fi
+    # As with the scalar API, identical files alone do not prove dnsmasq loaded
+    # them. A stale resolver gets one reload of the complete set, not N reloads.
+    if [ "$_shs_changed" = 0 ]; then
+        for _shs_row in $_shs_conf; do
+            _shs_wait=$(_dns_time_left "${RESOLVE_NS_TIMEOUT:-2}") || break
+            _shs_check_host=${_shs_row#address=/}; _shs_check_host=${_shs_check_host%/*}
+            _shs_check_ip=${_shs_row##*/}
+            if ! ns_ips "$_shs_check_host" "$_shs_wait" | grep -qxF "$_shs_check_ip"; then _shs_changed=1; break; fi
+        done
+    fi
+    if [ "$_shs_changed" = 1 ]; then
+        seed_dns_reload timeout -t 5
+    fi
+    return 0
+)

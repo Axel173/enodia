@@ -22,8 +22,29 @@
 #   lbl_grep <grep args…>                   — grep for lbl_commit_out: «nothing selected» is not a failure
 #   lbl_without <file> <pattern> [line]     — a producer: the file without the pattern's lines, then the line
 LBL_TAB=$(printf '\t')
+LBL_CFG_KEY_RE='^(awg|xray|hy2)/[A-Za-z0-9_.-]+$'
+lbl_cfg_key() {
+    case "$1" in *"$LBL_NL"*) return 1 ;; esac
+    printf '%s' "$1" | grep -qE "$LBL_CFG_KEY_RE"
+}
+lbl_endpoint_key() { sed -n 's/^key=//p' "$@" 2>/dev/null; }
+lbl_endpoint_hosts() { sed -n 's/^host=//p' "$@" 2>/dev/null; }
+lbl_endpoint_ips() { sed '/^key=/d; /^host=/d' "$@" 2>/dev/null; }
 LBL_NL='
 '
+
+XT_ROAD_LOCK=/tmp/enodia-xray-test.road
+TRY_LOCK=/tmp/enodia-awg-try.lock
+TRY_LOCK_HOLDERS='transport-awg\.sh|road\.sh'
+lbl_lock_live() {   # A missing PID can be a holder still publishing it.
+    _lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9')
+    [ -n "$_lp" ] || { sleep 1; _lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9'); }
+    pid_runs "$_lp" "$2"
+}
+lbl_rule_sweep() {
+    _lrs_n=$(ip rule show 2>/dev/null | grep -c "^$1:")
+    while [ "$_lrs_n" -gt 0 ] && ip rule del pref "$@" 2>/dev/null; do _lrs_n=$((_lrs_n - 1)); done
+}
 
 # Лок-КАТАЛОГ (mkdir атомарен) с ПИДом. Протух — если держателя нет: пид мёртв ИЛИ уже чужой (пиды переиспользуются, а лок в
 # /tmp живёт до ребута), либо пида нет дольше, чем живой держатель пишет его (миг после mkdir): держатель умер между mkdir и
@@ -84,7 +105,7 @@ lbl_merge() {
 # local line of a key the archive brought is dropped even when the archive has none (it described the replaced file — the
 # same review, round 2); other local lines stay. Owners: cfg-names.sh (config names) and road.sh (config roads). No lock here:
 # the caller holds its own.
-lbl_import() {   # $1 = store, $2 = archive's file (may be absent), $3 = brought keys, $4 = key regex
+lbl_import() {   # store, archive file (may be absent), brought keys, key regex
     _lbia=""
     if [ -f "$2" ]; then
         while IFS= read -r _lbir || [ -n "$_lbir" ]; do

@@ -134,7 +134,7 @@ SET_PREFIXES="enodia_ iplist_ grp_ geo_ zapret_ blocklist_ xiaomi_"
 # переживший демон будет уже нечем.
 DAEMON_DIRS="$ENODIA_DIR $ENODIA_BIN"
 [ "${BIN_DIR:-$ENODIA_BIN}" != "$ENODIA_BIN" ] && DAEMON_DIRS="$DAEMON_DIRS $BIN_DIR"
-DAEMONS="amneziawg-go xray hysteria byedpi hev nfqws https-dns-proxy dot-proxy quic-dns-proxy dns-filter"
+DAEMONS="amneziawg-go xray hysteria byedpi hev nfqws https-dns-proxy dot-proxy quic-dns-proxy dnsq dns-filter"
 # panel-tls — инфраструктура ПАНЕЛИ, а не VPN. `deactivate` обещает «панель работает», а вход в
 # неё мог идти по HTTPS: убив терминатор, мы рвём сессию человеку ровно в тот момент, когда он
 # нажал кнопку, и вернёт его только cron `web-ui.sh start` (до 5 минут). На `purge` панель и так
@@ -517,6 +517,9 @@ daemons_pids() {      # $1 = дополнительные демоны (толь
 #     Себя и родителя не трогаем: `deactivate` бежит из $ENODIA_DIR и попал бы под свой же критерий.
 #     Шаг стоит ПЕРВЫМ, до снятия правил: задача, убитая позже, успела бы их переиграть.
 step_jobs() {
+    if [ -f "$ENODIA_DIR/dns-scan.sh" ]; then
+        sh "$ENODIA_DIR/dns-scan.sh" teardown || return 1
+    fi
     _n=0
     for _pp in /proc/[0-9]*; do
         _jp=${_pp#/proc/}
@@ -988,6 +991,9 @@ step_store() {
 #    проверяется здесь автоматически, отдельного перечня заводить не нужно.
 step_verify() {      # $1 = дополнительные демоны (как у step_daemons) ; $2 = keep → см. CRON_PANEL
     _left=""
+    if [ -f "$ENODIA_DIR/dns-scan.sh" ]; then
+        sh "$ENODIA_DIR/dns-scan.sh" verify || _left="$_left dns-scan"
+    fi
     # Цепочки. Код `-C`/`-L` у iptables трёхзначен (грабля проекта): 0 = цепочка есть, 1 = нет,
     # прочее (4 = xtables-лок) = «не смог проверить» — и молчать об этом нельзя, иначе занятый
     # лок читался бы как «всё чисто». `-w 5` даёт шанс дождаться лока прежде, чем сдаться.
@@ -1125,7 +1131,7 @@ cmd_deactivate() {
     # «Включить VPN» телефон домой больше не заходил (ревью шага 6d, круг 3).
     _srv_on=0; if [ -f "$ENODIA_STATE/server/.on" ] || [ -f "$ENODIA_STATE/server/.on-deact" ]; then _srv_on=1; fi
     log "=== ДЕАКТИВАЦИЯ: снимаю обвязку VPN, файлы и настройки ОСТАВЛЯЮ ==="
-    step_jobs           # ПЕРВЫМ: фоновая задача, убитая позже, успела бы переиграть снятое
+    step_jobs || { set_state FAIL; return 1; }           # ПЕРВЫМ: фоновая задача, убитая позже, успела бы переиграть снятое
     step_rules
     # Намерение — ПОД ДРУГИМ ИМЕНЕМ (`server/.on-deact`): под `.on` его видят сторож и heal, и первое же горячее подключение
     # накопителя (hotplug-tick → тик сторожа, в `full` — heal целиком) поднимало сервер с портом наружу на роутере, про который экран
@@ -1178,7 +1184,7 @@ cmd_purge() {
     : > "$REPORT"
     set_state RUNNING
     log "=== ПОЛНОЕ УДАЛЕНИЕ: обвязка + панель + файлы ==="
-    step_jobs           # ПЕРВЫМ: иначе доживающая задача пересоздаёт сеты и сниппеты ПОСЛЕ нас
+    step_jobs || { set_state FAIL; return 1; }           # ПЕРВЫМ: иначе доживающая задача пересоздаёт сеты и сниппеты ПОСЛЕ нас
     step_rules
     step_sweep          # то, что владелец не снял (его может не быть — ранние версии)
     step_daemons "$DAEMONS_PURGE"
@@ -1201,7 +1207,7 @@ cmd_purge() {
     # это время волен открыть гео-экран или «Обновить списки», и CGI родит фоновый прогон уже
     # ПОСЛЕ первой зачистки. Итог был бы ровно тот, что чинит этот шаг: задача переживает удаление
     # и пересоздаёт сеты и сниппеты. Здесь панель уже мертва — породить новое некому.
-    step_jobs
+    step_jobs || { set_state FAIL; return 1; }
     step_store
     # RAM-след — ПОСЛЕДНИМ из чисток и обязательно ПОСЛЕ step_panel: пидфайл панели лежит в /tmp,
     # и снеси мы его раньше, `web-ui.sh stop` не нашёл бы, кого гасить, — uhttpd пережил бы

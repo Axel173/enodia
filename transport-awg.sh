@@ -147,7 +147,8 @@ awg_endpoint_ip() {
 exclude_endpoint() {
     ep=$(awg_endpoint_ip)
     [ -n "$ep" ] || { log "endpoint awg не определён — пропуск анти-петли"; return 0; }
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-set "$ep" >/dev/null 2>&1
+    _aek=$(head -n1 "$ENODIA_STATE/.active" 2>/dev/null)
+    carrier_endpoint '' "$ep" "${_aek:+awg/$_aek}"
     log "endpoint $ep исключён из маркировки (анти-петля)"
 }
 
@@ -200,13 +201,7 @@ FW3_WIPED=0
 carrier_matches_conf() { carrier_keys_match && carrier_endpoint_fresh; }
 carrier_keys_match() {
     _cmw=$(wg_bin); [ -n "$_cmw" ] || return 0          # сверять нечем — прежнее поведение
-    # Пиров бывает несколько, а порядок их у userspace-демона случаен (обход Go-map): «последний в файле ↔ первый у демона» давал
-    # ложное «другой сервер» и пересоздание с firewall reload (ревью 28.09.2026, круг 2) ⇒ КАЖДЫЙ пир демона обязан быть в конфиге.
-    _cmk=$(sed -n 's/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*//p' "$ACTIVE_CONF" 2>/dev/null | sed "s/#.*//" | tr -d ' \t\r')
-    [ -n "$_cmk" ] || return 0                          # в конфиге нет ключа пира — не судим
-    _cml=$("$_cmw" show "$IFACE" peers 2>/dev/null | tr -d ' \t\r')
-    [ -n "$_cml" ] || return 0                          # демон ещё не сконфигурен — обычный путь
-    for _cmx in $_cml; do printf '%s\n' "$_cmk" | grep -qxF -e "$_cmx" || return 1; done
+    awg_peers_match "$_cmw" "$IFACE" "$ACTIVE_CONF" || { [ "$?" = 2 ]; return; }
     # Пир тот же — а СВОЙ ключ? Два клиента ОДНОГО сервера (два конфига с одним пиром) отличаются только им: без этой сверки
     # тёплый awg0 на ключе A переживал переход на конфиг B, `.active` = B, а сессию держал A — и выход на A получал отказ
     # «ключ занят основным», которого человек не видит (ревью 27.09.2026). Нет строки в конфиге или демон ключа не назвал —
@@ -444,13 +439,26 @@ slot_keepalive() {   # $1 = iface
 # later, with the next handshake. The return probe (cmd_slot_probe), which has always ordered it this way, carried at once: the
 # server riding that road shook hands 2 s after the road was back. The carrier did not come up — the anti-loop is removed: an exit's
 # address in the store means «its carrier is up» (road.sh derives its rules from it).
+slot_road_wire() {
+    [ -f "$ENODIA_DIR/road.sh" ] || return 0
+    sh "$ENODIA_DIR/road.sh" wire || sh "$ENODIA_DIR/road.sh" mtu-fix
+}
 slot_carrier_up() {   # $1 = id ; $2 = cfg ; SLOT_FRESH=1 — the daemon was started by this call (a warm one is 0)
     _id="$1"; _cfg="$2"; _if=$(slot_iface "$_id"); SLOT_FRESH=0
-    if ip link show "$_if" >/dev/null 2>&1; then ip link set "$_if" up 2>/dev/null; slot_keepalive "$_if"; slot_exclude_endpoint "$_id"; return 0; fi
+    if ip link show "$_if" >/dev/null 2>&1; then
+        if awg_peers_match "$(wg_bin)" "$_if" "$(slot_src "$_cfg")"; then
+            ip link set "$_if" up 2>/dev/null
+            slot_keepalive "$_if"
+            slot_exclude_endpoint "$_id" "$_cfg"
+            return 0
+        fi
+        cmd_slot_down "$_id"
+        ip link show "$_if" >/dev/null 2>&1 && return 1
+    fi
     _am=$(slot_carrier_conf "$_id" "$_cfg") || return 1
-    slot_exclude_endpoint "$_id"                # the anti-loop BEFORE the first packet (see the header)
+    slot_exclude_endpoint "$_id" "$_cfg"                # the anti-loop BEFORE the first packet (see the header)
     slot_carrier_start "$_id" "$_am" && { SLOT_FRESH=1; return 0; }
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1
+    carrier_endpoint "$_id" ""   # withdraw the failed cold publication
     return 1
 }
 # Собрать ifconf выхода из его конфига: печатает "ADDRESS<TAB>MTU" (вывод slot_gen_conf), 1 — поднимать нечего (причина
@@ -499,11 +507,11 @@ ifconf_ep_host() { grep -E '^[[:space:]]*Endpoint' "$1" 2>/dev/null | head -1 | 
 
 # Вывести endpoint слота из-под маркировки (анти-петля). Берём IP из СГЕНЕРИРОВАННОГО ifconf (там
 # Endpoint уже подставлен как IP). Аддитивно, не затирая основной endpoint-bypass (apply-bypass).
-slot_exclude_endpoint() {   # $1 = id
+slot_exclude_endpoint() {   # $1 = id, $2 = config
     _id="$1"
     _ep=$(ifconf_ep_host "$(slot_ifconf "$_id")")
     if echo "$_ep" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-        [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "$_ep" >/dev/null 2>&1
+        carrier_endpoint "$_id" "$_ep" "${2:+awg/$2}"
         log "слот №$_id: endpoint $_ep исключён из маркировки (анти-петля)"
     else
         log "слот №$_id: endpoint не IPv4/не определён — пропуск анти-петли"
@@ -585,7 +593,7 @@ cmd_slot_up() {   # $1 = id, $2 = cfg
     slot_apply_routing "$_id"
     # The road's MTU ceiling (road.sh): mtu-fix ran at the anti-loop — BEFORE the interface; an exit that itself rides a road would
     # keep its MTU above the road's ceiling. The return probe has the same line.
-    [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" mtu-fix >/dev/null 2>&1
+    slot_road_wire >/dev/null 2>&1
     [ "$SLOT_FRESH" = 1 ] && slot_wait_hs "$(slot_iface "$_id")"
     ct_flush_slot "$_id"   # only this exit's flows (ct-lib.sh): a global flush tore the whole house on every flap
     log "слот №$_id: awg-несущая $(slot_iface "$_id") в table $(slot_table "$_id") (конфиг $_cfg)"
@@ -596,7 +604,7 @@ cmd_slot_down() {   # $1 = id
     case "$_id" in [2-7]) ;; *) log "слот: id = 2..7"; return 1 ;; esac
     _if=$(slot_iface "$_id")
     slot_remove_routing "$_id"
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1   # снять анти-петлю слота
+    carrier_endpoint "$_id" ""
     awg_kill_daemon "$_if"                      # гасим демон (владелец TUN) — TUN уходит следом
     ip link del "$_if" 2>/dev/null              # cleanup, если TUN пережил демон
     ct_flush_slot "$_id"
@@ -639,7 +647,7 @@ cmd_slot_probe() {   # $1 = id, $2 = cfg
     fi
     _am=$(slot_carrier_conf "$_id" "$_cfg") || return 4
     slot_reg_is "$_id" "$_cfg" || return 6       # выключили/сменили, пока тик шёл к нам — ничего не поднимаем
-    slot_exclude_endpoint "$_id"                # проба: анти-петля ДО первого пакета (см. шапку)
+    slot_exclude_endpoint "$_id" "$_cfg"                # проба: анти-петля ДО первого пакета (см. шапку)
     _spr=4; _spp=""
     # Пока собирали конфиг (резолв Endpoint — секунды), выход могла поднять панель: slot_carrier_start первым делом гасит демон на
     # awgN — чужой, — так что ещё раз спрашиваем, прежде чем стартовать (ревью с.96, круг 3).
@@ -664,7 +672,7 @@ cmd_slot_probe() {   # $1 = id, $2 = cfg
                 slot_apply_routing "$_id"
                 # Потолок MTU дороги (road.sh): mtu-fix бежал при анти-петле — ДО интерфейса, и вернувшийся выход ехал бы по WARP 1280
                 # со своими 1376 (ревью с.118, круг 2). slot-up does the same: its anti-loop also goes in before the first packet.
-                [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" mtu-fix >/dev/null 2>&1
+                slot_road_wire >/dev/null 2>&1
                 ct_flush_slot "$_id"
                 log "слот №$_id: сервер ответил за ${_w}с — awg-несущая $_if снова в table $(slot_table "$_id") (конфиг $_cfg)"
                 return 0
@@ -694,7 +702,7 @@ cmd_slot_probe() {   # $1 = id, $2 = cfg
     fi
     awg_kill_daemon "$_if"
     ip link del "$_if" 2>/dev/null
-    [ -f "$APPLY_BYPASS" ] && sh "$APPLY_BYPASS" endpoint-slot-set "$_id" "" >/dev/null 2>&1   # проба не удалась: анти-петлю снять
+    carrier_endpoint "$_id" ""   # withdraw the failed return probe publication
     return "$_spr"
 }
 
@@ -716,7 +724,6 @@ cmd_slot_probe() {   # $1 = id, $2 = cfg
 # (road.sh's pref 82–87 — per address, whichever config) wins over the config's own: a live carrier to that address rides it.
 TRY_IF=awgt0
 TRY_PREF=51
-TRY_LOCK=/tmp/enodia-awg-try.lock
 # The config copy with the private key lives in a PRIVATE directory made by THIS run (mkdir fails on anything already there — a
 # planted file or symlink): a fixed path in shared /tmp would be truncated and written in place with ITS owner and mode (review
 # s.118). RAM, 700, removed by the cleanup.
@@ -734,10 +741,21 @@ try_clean() {
 # L2). Its table empty (the road exit is down) — the carrier goes direct, and so does the probe. $1 — the address; sets _ttab only
 # when such a rule stands.
 try_road_tab() {
-    _trk=$(ip rule show 2>/dev/null | awk -v a="$1" '{ p = $1; sub(/:$/, "", p) } p ~ /^8[2-7]$/ { for (i = 2; i < NF; i++) if ($i == "to" && $(i + 1) == a) { for (j = i; j < NF; j++) if ($j == "lookup") { print $(j + 1); exit } } }')   # not-wan: road.sh's own rules
+    [ -f "$ENODIA_DIR/road.sh" ] || return 0
+    _trk=$(sh "$ENODIA_DIR/road.sh" installed </dev/null | awk -v a="$1" '$2==a { print $3; exit }')
     case "$_trk" in
-        100[2-7]) if [ -n "$(ip route show table "$_trk" 2>/dev/null | head -n 1)" ]; then _ttab=$_trk; else _ttab=main; fi ;;   # not-wan: the road exit's own table
+        100[2-7]) if try_road_live "$_trk"; then _ttab=$_trk; else _ttab=main; fi ;;
     esac
+}
+try_road_live() { ip route show table "$1" 2>/dev/null | grep -q '^default '; }   # not-wan: the road exit's own table
+try_road_verified() {
+    case "$_ttab" in 100[2-7]) ;; *) return 1 ;; esac
+    try_road_live "$_ttab" || return 1
+    ip route get "$_tep" 2>/dev/null | awk -v dev="awg${_ttab#100}" 'NR==1 { for (i=1; i<NF; i++) if ($i=="dev" && $(i+1)==dev) ok=1 } END { exit !ok }'   # not-wan: the probe's server
+}
+try_request() {
+    # shellcheck disable=SC2086
+    curl -s $_tca --interface "$TRY_IF" --connect-timeout 6 --max-time "${2:-10}" "$1" 2>/dev/null
 }
 # A KILLED probe's traces (`ip rule add` doesn't dedupe): under the lock no other probe lives, so EVERY pref-51 rule is one — by
 # whatever address and table (a road's too) — left by SIGKILL or the OOM killer, the EXIT trap never ran. try-each's servers are
@@ -752,7 +770,7 @@ cmd_try() {   # $1 = путь конфига ; $2 = URL ; $3 = потолок з
     [ -f "$1" ] && [ -n "$2" ] || { log >&2 "проба: нужны конфиг и URL"; return 4; }
     [ -x "$ENODIA_BIN/amneziawg-go" ] && [ -x "$ENODIA_BIN/awg" ] || { log >&2 "проба: нет программ AmneziaWG"; return 4; }
     command -v lbl_lock_take >/dev/null 2>&1 || { log >&2 "проба: нет label-lib.sh — обновите скрипты"; return 4; }
-    lbl_lock_take "$TRY_LOCK" 'transport-awg\.sh' || { log >&2 "проба: идёт другая проба"; return 5; }
+    lbl_lock_take "$TRY_LOCK" "$TRY_LOCK_HOLDERS" || { log >&2 "проба: идёт другая проба"; return 5; }
     _tep=""; _tdir=0; _ttab=main; try_rules_sweep
     trap try_clean EXIT
     trap 'exit 1' INT TERM HUP PIPE
@@ -768,21 +786,31 @@ cmd_try() {   # $1 = путь конфига ; $2 = URL ; $3 = потолок з
     if [ -n "${TRY_ROAD:-}" ] && [ -f "$ENODIA_DIR/road.sh" ]; then
         _trv=$(sh "$ENODIA_DIR/road.sh" get awg "$TRY_ROAD" 2>/dev/null </dev/null | tr -cd '2-7' | cut -c1)
         _trc=$(sh "$ENODIA_DIR/road.sh" mtu-cap awg "$TRY_ROAD" 2>/dev/null </dev/null | tr -cd '0-9')
-        if [ -n "$_trv" ] && [ -n "$_trc" ] && [ -n "$(ip route show table "$(slot_table "$_trv")" 2>/dev/null | head -n 1)" ]; then   # not-wan: the road exit's own table (100N), not the uplink
+        if [ -n "$_trv" ] && [ -n "$_trc" ] && try_road_live "$(slot_table "$_trv")"; then
             _ttab=$(slot_table "$_trv")
         fi
     fi
     try_road_tab "$_tep"
+    # An automatic return needs a working road. The shared address can still be on the reserve's road until the switch.
+    if [ -n "${TRY_REQUIRE_ROAD:-}" ] && [ "$_ttab" = main ]; then
+        _tep=""; return 1
+    fi
     # A rider's MTU ceiling — the config's own road's (road.sh mtu-cap), when that is the road taken.
     if [ "$_ttab" != main ] && [ -n "$_trc" ] && [ "$_ttab" = "$(slot_table "${_trv:-0}")" ]; then
         _tmu=$(printf '%s' "$_tam" | cut -f2); [ -n "$_tmu" ] || _tmu=$AWG_MTU_DEFAULT
         [ "$_tmu" -gt "$_trc" ] 2>/dev/null && _tam=$(printf '%s\t%s' "$(printf '%s' "$_tam" | cut -f1)" "$_trc")
     fi
     try_rule_put || return 4
+    [ -z "${TRY_REQUIRE_ROAD:-}" ] || try_road_verified || return 1
     awg_if_start "$TRY_IF" "$TRY_CONF" "$_tam" "проба" >&2 || return 4
     _tca=$(curl_ca_opt "$2" --interface "$TRY_IF")   # the CA probe — by the probe's own path, not the default route
-    # shellcheck disable=SC2086
-    curl -s $_tca --interface "$TRY_IF" --connect-timeout 6 --max-time "${3:-10}" "$2" 2>/dev/null || return 1
+    if [ -n "${TRY_REQUIRE_ROAD:-}" ]; then
+        _trbody=$(try_request "$2" "${3:-}") || return 1
+        try_road_verified || return 1
+        printf '%s\n' "$_trbody"
+    else
+        try_request "$2" "${3:-}" || return 1
+    fi
     # THE TUNNEL'S OWN DELAY (TRY_MS=1 — cgi-bin/ping, an Amnezia Premium server whose relay answers no ping): a TCP connect to the
     # URL's host through the same interface, AFTER the request above — the handshake is done by then, and the number is the path's,
     # not the handshake's. One line `try_ms=<ms>` after the body; nothing when it did not connect.
@@ -822,7 +850,7 @@ cmd_try_each() {   # $1 = URL ; $2 = потолок запроса, с ; $3 = st
     # для устройства» clicked right after the screen opened was refused (AX3600 30.10.2026, the panel walk of 1.3.5-dev.2).
     daemon_step_init
     _tlw=$(uptime_s)
-    while ! lbl_lock_take "$TRY_LOCK" 'transport-awg\.sh'; do
+    while ! lbl_lock_take "$TRY_LOCK" "$TRY_LOCK_HOLDERS"; do
         [ $(( $(uptime_s) - _tlw )) -lt "${TRY_LOCK_WAIT:-40}" ] 2>/dev/null || { log >&2 "проба: идёт другая проба"; return 5; }
     done
     _tep=""; _tdir=0; _ttab=main; try_rules_sweep

@@ -161,6 +161,19 @@ fs_line()    { df -k "$(fs_anchor "$1")" 2>/dev/null | tail -1 | awk '{for(i=NF;
 fs_free_b()  { _fsb=$(fs_line "$1" | awk '{printf "%.0f", $2*1024}'); case "$_fsb" in ''|*[!0-9]*) _fsb=0 ;; esac; printf '%s' "$_fsb"; }
 fs_total_b() { _fst=$(fs_line "$1" | awk '{printf "%.0f", $1*1024}'); case "$_fst" in ''|*[!0-9]*) _fst=0 ;; esac; printf '%s' "$_fst"; }
 fs_mount()   { _fsm=$(fs_line "$1"); printf '%s' "${_fsm#* * }"; }
+fs_same_volume() {
+    _fsv=$(fs_mount "$1")
+    [ -n "$_fsv" ] && [ "$_fsv" = "$(fs_mount "$2")" ]
+}
+
+# A resident volume with at most sixteen maintenance reserves, or below its reserve, is tight.
+# State on a drive and unknown df data keep the normal rotation.
+data_flash_tight() {
+    _dft=$(fs_total_b "$ENODIA_BOOT")
+    [ "$_dft" -gt 0 ] || return 1
+    fs_same_volume "$1" "$ENODIA_BOOT" || return 1
+    [ "$_dft" -le $((DATA_RESERVE_B * 16)) ] || [ "$(fs_free_b "$ENODIA_BOOT")" -lt "$DATA_RESERVE_B" ]
+}
 
 # Раскладка хранилища: <store>/.enodia-bin-store (сентинел) + <store>/bin/<имя>.
 #
@@ -348,6 +361,51 @@ bin_prune() {
     fi
     unset _bd
     return 0                    # best-effort: под set -e чистка не имеет права ронять вызывающего
+}
+
+# The manifest owner supplies the closed list of program names and a byte verdict.
+# Look at both copies: bin_path would hide the flash copy behind a USB executable.
+store_purge_dir() {   # $1 = owned bin directory, $2 = keep callback, then names
+    [ -d "$1" ] || return 0
+    [ ! -L "$1" ] || { echo "soft-float: linked bin directory skipped: $1" >&2; return 1; }
+    _spd_dir=$1; _spd_keep=$2; shift 2
+    for _spd_name do
+        _spd_path="$_spd_dir/$_spd_name"
+        if [ ! -L "$_spd_path" ]; then
+            [ -f "$_spd_path" ] || continue
+            if "$_spd_keep" "$_spd_name" "$_spd_path"; then continue
+            elif [ "$?" != 1 ]; then
+                echo "soft-float: cannot read digest: $_spd_path" >&2; return 1
+            fi
+        fi
+        rm -f "$_spd_path" || return 1
+        echo "soft-float: removed incompatible binary: $_spd_path"
+        _sp_changed=1
+    done
+}
+
+store_purge_bins() {   # optional USB root about to be admitted; otherwise sweep the current layout
+    _sp_root=$1; shift
+    _sp_changed=0; _sp_rc=0
+    if [ -z "$_sp_root" ]; then
+        # In full layout the resident bin directory itself is on the store.
+        if [ "${ENODIA_DIR##*/}" = enodia ] && [ "$ENODIA_BIN" = "${ENODIA_DIR%/*}/bin" ]; then
+            _sp_root=${ENODIA_BIN%/*}
+        else
+            store_purge_dir "$ENODIA_BIN" "$@" || _sp_rc=1
+            _sp_root=$STORE_DIR
+        fi
+    fi
+    if [ -n "$_sp_root" ]; then
+        if [ ! -L "$_sp_root" ] && store_is_ours "$_sp_root"; then
+            store_purge_dir "$_sp_root/bin" "$@" || _sp_rc=1
+        else
+            echo "soft-float: purge skipped (storage ownership unconfirmed): $_sp_root" >&2
+            _sp_rc=1
+        fi
+    fi
+    [ "$_sp_changed" = 0 ] || sync 2>/dev/null
+    return "$_sp_rc"
 }
 
 # bin_install <откуда> <имя> — положить бинарь на его место одним движением (mv + exec-бит +

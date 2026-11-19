@@ -11,6 +11,7 @@
 # install <корень>`, окружение ENODIA_DIR/STATE/BIN/BOOT экспортировано, вывод — журнал, код 0 = успех.
 # Необязательное PKG_NEED_PRIOR=1 (апдейтер ставит его с 30.09.2026; прежний — нет, и тогда всё как раньше): пустой каталог кода
 # у обновления — аномалия, а не свежая установка, ⇒ отказ.
+# PKG_SNAP_ACK=1 consents to an update without a rollback point on tight flash.
 # Коды НЕ-успеха различают, ЧТО ОСТАЛОСЬ на роутере (их читает установка с ПК — чем убирать за собой; апдейтеру хватает «не 0»):
 #   3 — файлы новой версии уже на месте, упал install.sh (снимать каталоги нельзя: он мог завести cron; лечит повтор);
 #   прочие — ничего не заменено либо прежний набор возвращён (у свежей — снято положенное).
@@ -22,6 +23,7 @@
 #      ДО замены: пропало питание посреди замены — снимок уже на диске, откат доступен после ребута. Прежний
 #      снимок снимается только ПОСЛЕ удачной замены, что-то поменявшей: неудача и «та же версия» точку отката не трогают,
 #      а если набор не меняется вовсе (сухая сверка pi_changed), снимок не снимается — флеш не пишем.
+#      With consent on tight flash, the private self-restore copy stays in RAM and old public points are removed.
 #   3. ЗАМЕНА по файлу: копия рядом (`.new`) + `mv` (атомарно для каждого файла), одинаковые не
 #      пишем вовсе (/data смонтирован sync — лишняя запись = износ флеша), web/index.html — ПОСЛЕДНИМ
 #      (он ссылается на panel.* по `?v=`, и новая страница без новых ассетов — битая панель).
@@ -60,6 +62,7 @@ SUMS=.pkg-sums
 # Снимки — в НАСТРОЙКАХ, а не в каталоге кода: каталог кода и есть то, что мы заменяем. Имя с
 # точкой — как у прежних снимков пофайлового апдейтера (его знают clean.sh и «Место и накопитель»).
 SNAP_DIR="$ENODIA_STATE/.gh-backup"
+RAM_ONLY=0       # consented tight-flash update: private self-restore only
 # Снимок ОДИН: откат умеет только к последнему, а снимок — уже сжатый tar.gz, и флеш (UBIFS) его не дожмёт.
 LEGACY_SNAP="$ENODIA_DIR/.gh-backup"      # снимки пофайлового апдейтера: по 3 МБ несжатыми, откат к ним не умеем
 INST_LOG="$ENODIA_STATE/.gh-update-install.log"   # вывод install.sh последнего обновления/отката (разбор у pi_run_installer)
@@ -127,7 +130,16 @@ pi_free_kb() {
 }
 
 LOCK_MINE=0
-pi_unlock() { [ "$LOCK_MINE" = 1 ] && rm -f "$SWITCH_LOCK" 2>/dev/null; LOCK_MINE=0; return 0; }
+DL_HOLD_MINE=0
+pi_unlock() {
+    # A signal can arrive during switch_hold's recheck or just after it unlinks the lock.
+    if [ "$LOCK_MINE" = 1 ] ||
+        { [ "$DL_HOLD_MINE" = 1 ] && [ "$(cat "$SWITCH_LOCK" 2>/dev/null)" = "$$" ]; }; then
+        rm -f "$SWITCH_LOCK" 2>/dev/null
+    fi
+    LOCK_MINE=0; DL_HOLD_MINE=0
+    return 0
+}
 pi_cleanup() {
     pi_unlock
     [ -n "$T" ] && rm -rf "$T" 2>/dev/null
@@ -140,7 +152,7 @@ pi_cleanup() {
 # файлов без cron и панели). Обрыв канала — не повод бросать работу: PIPE и HUP ГЛУШИМ (строки журнала просто не дойдут; глушение
 # наследуют и tar/cp/install.sh), а явное прерывание (INT/TERM) посреди замены возвращает снимок — смешанного набора после нас нет.
 pi_on_signal() {
-    if [ "$PHASE" = swap ]; then stop "прервано посреди замены — возвращаю прежний набор"; pi_restore; fi
+    if [ "$PHASE" = swap ]; then stop "прервано посреди замены — возвращаю прежний набор"; pi_restore_swap; fi
     pi_cleanup
     exit 1
 }
@@ -257,13 +269,55 @@ pi_have() {
     done < "$T/old"
     return 0
 }
+pi_cache_bins() {
+    # ВЕРСИИ СТОЯЩИХ БИНАРЕЙ — ПОКА МАНИФЕСТ ПРЕЖНИЙ (ревью ветки релиза, круг 2): новый пакет может везти новые сборки,
+    # и после замены стоящая законно не совпадёт с его манифестом. «Прежнюю подписанную сборку» от «правили/побился»
+    # отличает только память «этот хеш совпадал с манифестом» (кэш .bin-sha, gh-update.sh::verify_scan) — пишет её
+    # bin-status ПРЕЖНЕГО кода, его и спрашиваем. Только чтение файлов и кэш, без сети; сбой — не повод не обновляться.
+    if [ -f "$ENODIA_DIR/gh-update.sh" ]; then sh "$ENODIA_DIR/gh-update.sh" bin-status >/dev/null 2>&1 || true; fi
+}
+
+pi_snap_tight() (
+    [ -r "$SRC/store-lib.sh" ] && . "$SRC/store-lib.sh" && data_flash_tight "$SNAP_DIR"
+)
+
+pi_archive_names() { ls -1 "$SNAP_DIR" 2>/dev/null | grep '^[0-9]\{8\}-[0-9]\{6\}\.tar\.gz$'; }
+
+# Credit only allocated blocks that unlinking these archives can release on the code volume.
+pi_reclaim_kb() (
+    . "$SRC/store-lib.sh"
+    fs_same_volume "$SNAP_DIR" "$ENODIA_DIR" || return 0
+    pi_archive_names | while IFS= read -r _par; do
+        _par="$SNAP_DIR/$_par"
+        [ -f "$_par" ] && [ ! -L "$_par" ] && stat -c '%h %b %B' "$_par" 2>/dev/null
+    done | awk '$1 == 1 {bytes += $2*$3} END {printf "%.0f", int(bytes/1024)}'
+)
+
+# Budget the uncompressed tar plus per-file headers/long names and gzip overhead.
+# Check after unpacking the package and leave 16 MiB of physical headroom on 128 MiB routers.
+pi_ram_ok() {
+    _prneed=$(while IFS= read -r _prfile; do
+        stat -c %s "$ENODIA_DIR/$_prfile" || printf 'unknown\n'
+    done < "$T/have" | awk '/^[0-9]+$/ { kb += int(($1+1023)/1024) + 12; next }
+        { bad=1 } END { if (!bad && NR) printf "%.0f", kb*1.01+64 }')
+    _prtmp=$(pi_free_kb "$T")
+    _prmem=$(awk '/^MemAvailable:/ {avail=$2} /^MemFree:/ {free=$2}
+        END {print avail == "" ? free : avail}' /proc/meminfo)
+    case "$_prneed:$_prtmp:$_prmem" in *[!0-9:]*|:*|*::*|*:) ;;
+        *) [ "$_prtmp" -ge "$_prneed" ] && [ "$_prmem" -ge "$((_prneed + 16384))" ] && return 0 ;;
+    esac
+    stop "не хватает ОЗУ или места в /tmp для временной копии — освободите память и повторите"
+    return 1
+}
+
 # Кладёт путь снимка в SNAP.
-pi_snapshot() {    # $1 = куда (файл) · $2 = quiet (провал без строки СТОП — вызывающий попробует ещё раз)
+pi_snapshot() {    # $1 = destination file · $2 = quiet (caller retries) or ram (check capacity first)
     pi_have
     [ -s "$T/have" ] || { stop "на роутере не нашлось ни одного файла установленного набора — снимать нечего"; return 1; }
     # Суммы установленного пакета едут в снимке: откат обязан вернуть и их, иначе «Целостность» сверяла бы
     # возвращённый набор с суммами того, от которого откатились.
     [ -f "$ENODIA_DIR/$SUMS" ] && printf '%s\n' "$SUMS" >> "$T/have"
+    if [ "$2" = ram ]; then pi_ram_ok || return 1; fi
     mkdir -p "$(dirname "$1")" 2>/dev/null
     if ! tar -czf "$1.part" -C "$ENODIA_DIR" -T "$T/have" 2>/dev/null || [ ! -s "$1.part" ]; then
         rm -f "$1.part"
@@ -283,14 +337,16 @@ pi_rotate() {
     [ -d "$SNAP_DIR" ] || return 0
     # Недописанный снимок (питание пропало или `kill -9` посреди tar) — ~1 МБ на флеше навсегда: регулярка ниже его не видит, а
     # clean.sh в каталог снимков не заглядывает (ревью ветки, круг 2). Лок установки держим мы — чужого `.part` здесь быть не может.
-    rm -f "$SNAP_DIR"/*.tar.gz.part 2>/dev/null
-    ls -1 "$SNAP_DIR" 2>/dev/null | grep '^[0-9]\{8\}-[0-9]\{6\}\.tar\.gz$' > "$T/snaps" || true
+    _prc=0
+    rm -f "$SNAP_DIR"/*.tar.gz.part 2>/dev/null || _prc=1
+    pi_archive_names > "$T/snaps" || true
     while IFS= read -r _s || [ -n "$_s" ]; do
         [ -n "$_s" ] || continue
         [ "$SNAP_DIR/$_s" = "$1" ] && continue
-        rm -f "$SNAP_DIR/$_s" && log "снят прежний снимок: ${_s%.tar.gz}"
+        if rm -f "$SNAP_DIR/$_s"; then log "снят прежний снимок: ${_s%.tar.gz}"
+        else _prc=1; fi
     done < "$T/snaps"
-    return 0
+    return "$_prc"
 }
 
 # Изменит ли установка ХОТЬ ЧТО-ТО? Та же сверка, что у замены (cmp по файлу) и у удалений (старый манифест против нового), —
@@ -336,6 +392,16 @@ pi_restore() {
     fi
     stop "снимок вернуть НЕ удалось — набор файлов смешанный; повторите обновление или переустановите с компьютера"
     return 1
+}
+
+# Keep the public recovery point if self-restore failed or if it is the only point after main's rotation retry.
+pi_restore_swap() {
+    trap '' INT TERM
+    PHASE=""
+    pi_restore || return 1
+    [ "$MODE" = install ] && [ "$FRESH" = 0 ] && [ "$RAM_ONLY" = 0 ] || return 0
+    if [ "$ROTATED" = 1 ]; then log "прежние снимки сняты ради места — точка отката: этот набор (${SNAP##*/})"
+    else rm -f "$_psn" 2>/dev/null; fi
 }
 
 # --- 3–4. замена и удаление ---------------------------------------------------------------------------
@@ -397,6 +463,10 @@ pi_space_ok() {
         [ "$_sz" -gt "$_pb" ] && _pb=$_sz
     done < "$T/new"
     _pneed=$((_pb / 1024 + MINFREE_KB))
+    if [ "$_pf" -lt "$_pneed" ] && [ "$1" = 1 ]; then
+        _pcredit=$(pi_reclaim_kb)
+        [ "$((_pf + ${_pcredit:-0}))" -ge "$_pneed" ] && return 0
+    fi
     if [ "$_pf" -lt "$_pneed" ]; then
         stop "на томе кода свободно ${_pf} КБ, нужно ≥ ${_pneed} — освободите место («Роутер» → «Место и накопитель») и повторите"
         return 1
@@ -436,15 +506,31 @@ cmd_install() {
     pi_check_src || return 1
     _nn=$(pi_name "$SRC/VERSION"); _nc=$(pi_code "$SRC/VERSION")
     _on=$(pi_name "$ENODIA_DIR/VERSION"); _oc=$(pi_code "$ENODIA_DIR/VERSION")
+    # The installed version could have changed while the updater was staging the package.
+    if [ -n "$PKG_RETRY_CODE" ] && [ "$PKG_RETRY_CODE" != "$_oc" ]; then
+        stop "версия для повторной установки изменилась — проверьте обновления снова"; return 1
+    fi
     prog_ver "${_on:-?}" "${_oc:-0}" "${_nn:-?}" "${_nc:-0}"
     if [ -n "$_oc" ]; then
         log "ставлю ${_nn:-?} (код ${_nc:-?}) поверх ${_on:-?} (код ${_oc:-?})"
     else
         log "ставлю ${_nn:-?} (код ${_nc:-?}) — прежней версии на роутере нет"
     fi
-    pi_space_ok || return 1
+    if [ "$MODE" = install ]; then
+        pi_have
+        if [ -s "$T/have" ]; then
+            if ! pi_changed; then NOSNAP=1
+            elif [ "$PKG_SNAP_ACK" = 1 ] && pi_snap_tight; then RAM_ONLY=1
+            fi
+        fi
+    fi
+    # Equal files skip the adjacent copies that the largest-file gate budgets for.
+    [ "$NOSNAP" = 1 ] || pi_space_ok "$RAM_ONLY" || return 1
     prog_stage snap
     if [ "$MODE" = rollback ]; then
+        if [ -f "$ENODIA_DIR/gh-update.sh" ] && [ "$(sh "$ENODIA_DIR/gh-update.sh" bin-arch)" = armv7sf ]; then
+            sh "$ENODIA_DIR/gh-update.sh" bin-status >/dev/null 2>&1 || true
+        fi
         # Снимок текущего — только для самовозврата, в ОЗУ: сохранять его незачем, а ротация унесла
         # бы тот самый снимок, к которому откатываемся.
         pi_snapshot "$T/cur.tar.gz" || return 1
@@ -452,7 +538,6 @@ cmd_install() {
         # Снимки пофайлового апдейтера — несжатые копии по ~3 МБ в каталоге кода, откатывать к ним
         # новый путь не умеет. Убираем ДО снимка: на 20-МБ флеше это и есть место под него.
         if [ -d "$LEGACY_SNAP" ]; then rm -rf "$LEGACY_SNAP" && log "сняты снимки прежнего апдейтера ($LEGACY_SNAP)"; fi
-        pi_have
         if [ ! -s "$T/have" ]; then
             # ОБНОВЛЕНИЕ, НЕ НАШЕДШЕЕ НАБОРА, — АНОМАЛИЯ, а не свежая установка (ревью ветки, круг 1): каталог кода мог уехать
             # на накопитель, пока апдейтер качал пакет, — и мы поставили бы вторую, пустую систему на флеш. Свежую установку
@@ -474,16 +559,15 @@ cmd_install() {
             # Прежние снимки (от удалённой системы) не трогаем: не наш набор — не наше решение.
             FRESH=1
             log "свежая установка: прежнего набора нет — снимать нечего, отката у неё не будет"
-        elif ! pi_changed; then
-            NOSNAP=1
+        elif [ "$NOSNAP" = 1 ]; then
             prog_flag same
             log "набор не изменился — снимок не нужен, точка отката прежняя"
+        elif [ "$RAM_ONLY" = 1 ]; then
+            pi_cache_bins
+            prog_flag ram
+            pi_snapshot "$T/cur.tar.gz" ram || return 1
         else
-            # ВЕРСИИ СТОЯЩИХ БИНАРЕЙ — ПОКА МАНИФЕСТ ПРЕЖНИЙ (ревью ветки релиза, круг 2): новый пакет может везти новые сборки,
-            # и после замены стоящая законно не совпадёт с его манифестом. «Прежнюю подписанную сборку» от «правили/побился»
-            # отличает только память «этот хеш совпадал с манифестом» (кэш .bin-sha, gh-update.sh::verify_scan) — пишет её
-            # bin-status ПРЕЖНЕГО кода, его и спрашиваем. Только чтение файлов и кэш, без сети; сбой — не повод не обновляться.
-            if [ -f "$ENODIA_DIR/gh-update.sh" ]; then sh "$ENODIA_DIR/gh-update.sh" bin-status >/dev/null 2>&1 || true; fi
+            pi_cache_bins
             mkdir -p "$SNAP_DIR" 2>/dev/null; chmod 700 "$SNAP_DIR" 2>/dev/null
             _pff=$(pi_free_kb "$SNAP_DIR"); case "$_pff" in ''|*[!0-9]*) _pff="" ;; esac
             if [ -n "$_pff" ] && [ "$_pff" -lt "$MINFREE_KB" ]; then
@@ -513,24 +597,38 @@ cmd_install() {
             log "снимок для отката: ${SNAP##*/}"
         fi
     fi
-    pi_lock
+    if [ "$RAM_ONLY" = 1 ]; then
+        # The carrier owner checks for a live watchdog or heal before and after taking the swap lock.
+        if ! { command -v switch_hold >/dev/null 2>&1 && switch_hold "$SWITCH_LOCK" "$LOCK_WAIT"; }; then
+            stop "не удалось взять лок смены транспорта — повторите обновление позже"
+            return 1
+        fi
+        mkdir -p "$SNAP_DIR" 2>/dev/null; chmod 700 "$SNAP_DIR" 2>/dev/null
+        # Record the reason before unlinking. Status only uses it when no archive exists.
+        if ! touch "$SNAP_DIR/.tight-flash" || ! pi_rotate ""; then
+            stop "не удалось снять прежние точки отката — обновление отменено"
+            return 1
+        fi
+        pi_space_ok || return 1
+    else
+        pi_lock
+    fi
     # Без снимка (набор не менялся) возвращать нечем — и незачем: замена свелась бы к правам. Сбой в такой замене — гонка с чужой
     # записью, и честнее сказать о ней, чем «вернуть» несуществующий снимок.
     [ "$NOSNAP" = 1 ] || PHASE=swap
     if ! pi_swap; then
-        [ "$NOSNAP" = 1 ] || pi_restore
+        [ "$NOSNAP" = 1 ] || pi_restore_swap
         PHASE=""
         pi_unlock
-        # Возвращён прежний набор — новый снимок равен ему; точка отката остаётся прежней. Кроме случая, когда прежние снимки
-        # сняты ради места: тогда новый — единственная точка отката (он и есть возвращённый набор).
-        if [ "$MODE" != rollback ] && [ "$FRESH" = 0 ] && [ "$NOSNAP" = 0 ]; then
-            if [ "$ROTATED" = 1 ]; then log "прежние снимки сняты ради места — точка отката: этот набор (${SNAP##*/})"
-            else rm -f "$_psn" 2>/dev/null; fi
-        fi
         return 1
     fi
+    # Sweep the resident stores under the switch lock with the new manifest.
+    # Replay must run even after a read error. install.sh guards staging itself.
+    if [ -f "$ENODIA_DIR/gh-update.sh" ]; then
+        sh "$ENODIA_DIR/gh-update.sh" bin-purge || :
+    fi
     pi_unlock
-    if [ "$MODE" != rollback ] && [ "$FRESH" = 0 ] && [ "$NOSNAP" = 0 ]; then
+    if [ "$MODE" != rollback ] && [ "$FRESH" = 0 ] && [ "$NOSNAP" = 0 ] && [ "$RAM_ONLY" = 0 ]; then
         if [ "$NREP" = 0 ] && [ "$NDEL" = 0 ] && [ "$ROTATED" = 0 ]; then
             # Сухая сверка сказала «изменится», а замена не тронула ничего — кто-то успел положить те же файлы: снимок лишний.
             rm -f "$_psn" 2>/dev/null; SNAP=""
@@ -538,6 +636,7 @@ cmd_install() {
             log "набор не изменился — точка отката прежняя"
         else
             pi_rotate "$_psn"
+            [ ! -e "$SNAP_DIR/.tight-flash" ] || rm -f "$SNAP_DIR/.tight-flash"
         fi
     fi
     # Суммы нового набора — из пакета (pkg-sums.txt) или из снимка (.pkg-sums); источник без них (установка с ПК в
@@ -556,7 +655,7 @@ cmd_install() {
     PHASE=""
     prog_stage apply      # the new version's installer: the rules with the new code, then the replay of the settings
     if ! pi_run_installer; then
-        if [ "$FRESH" = 1 ]; then
+        if [ "$FRESH" = 1 ] || [ "$RAM_ONLY" = 1 ]; then
             stop "установщик версии ${_nn:-?} кончился ошибкой — файлы уже на месте; повторите установку"
         else
             stop "установщик версии ${_nn:-?} кончился ошибкой — файлы уже этой версии; повторите или откатитесь к снимку"
@@ -567,6 +666,8 @@ cmd_install() {
         log "готово: работает ${_nn:-?} (код ${_nc:-?}). Правила примените: «Починить правила» или перезагрузка"
     elif [ "$FRESH" = 1 ]; then
         log "готово: ${_nn:-?} (код ${_nc:-?}) поставлен с нуля, файлов $NREP"
+    elif [ "$RAM_ONLY" = 1 ]; then
+        log "готово: ${_nn:-?} (код ${_nc:-?}), заменено $NREP, удалено $NDEL; откат недоступен — мало места на флеше"
     elif [ -z "$SNAP" ]; then
         log "готово: ${_nn:-?} (код ${_nc:-?}): набор не изменился, точка отката прежняя"
     else

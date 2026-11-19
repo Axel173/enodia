@@ -298,6 +298,33 @@ dns_now() {
 	printf 'src=%s\naddr=%s\nvia=%s\n' "$_dnsrc" "$_dnadr" "$_dnvia"
 }
 
+# Match the running proxy's launch arguments against the saved catalogue entry.
+# A changed preference or a protocol fallback cannot claim the row on its own.
+doh_live_catalog_key() (
+	doh_running || exit 1
+	_dlc_pid=$(cat "$DOH_PID" 2>/dev/null)
+	case "$_dlc_pid" in ''|*[!0-9]*) exit 1 ;; esac
+	_dlc_key=$(doh_eff); _dlc_proto=$1
+	case "$_dlc_key" in custom|nextdns|odoh) exit 1 ;; esac
+	_dlc_args=$(tr '\000' '\n' < "/proc/$_dlc_pid/cmdline") || exit 1
+	_dlc_arg() { printf '%s\n' "$_dlc_args" | awk -v opt="$1" '$0==opt { if (getline) print; exit }'; }
+	case "$_dlc_proto" in
+		doh)
+			_dlc_spec=$(doh_resolver_spec "$_dlc_key")
+			[ -n "$_dlc_spec" ] && [ "$(_dlc_arg -r)" = "${_dlc_spec%%$(printf '\t')*}" ] || exit 1 ;;
+		dot|doq|doh3)
+			[ "$(_dlc_arg -r)" = "$(doh_resolver_ips "$_dlc_key" | tr ' ' ',')" ] &&
+			[ "$(_dlc_arg -s)" = "$(doh_proto_sni "$_dlc_proto" "$_dlc_key")" ] &&
+			[ "$(_dlc_arg -P)" = "$(doh_proto_port "$_dlc_proto" "$_dlc_key")" ] || exit 1
+			case "$_dlc_proto" in
+				doq) [ "$(_dlc_arg -m)" = doq ] || exit 1 ;;
+				doh3) [ "$(_dlc_arg -m)" = h3 ] && [ "$(_dlc_arg -u)" = "$(doh_quic_path "$_dlc_key")" ] || exit 1 ;;
+			esac ;;
+		*) exit 1 ;;
+	esac
+	printf '%s\n' "$_dlc_key"
+)
+
 # АВТО-РЕЖИМ: в прямых режимах (byedpi/zapret/fail-open) туннеля НЕТ ⇒ dnsmasq форвардит на
 # 1.1.1.1/8.8.8.8 ОТКРЫТЫМ UDP:53 — ровно там, где агрессивный ISP спуфит/травит DNS. В
 # tunnel-режимах DNS и так спрятан в туннеле, авто там не нужен (не трогаем проверенный путь).
@@ -338,7 +365,7 @@ doh_want()        { doh_enabled || doh_auto_active; }
 #   (dev/quic/quic-probe-router.sh MEASURED), not the product's.
 # ЯКОРЯ — адреса, на которых стоят правила резолвера и куда doh_pin_hosts прибивает его имя (c-ares читает /etc/hosts
 # раньше DNS): у резолвера по ИМЕНИ прокси ходит ровно туда. BOOTSTRAP поэтому почти не спрашивается, но обязан отвечать
-# ОБЫЧНЫМ :53: у резолверов «только DoH/DoT» (Wikimedia, Mullvad, Applied Privacy) их собственный адрес на :53 молчит
+# ОБЫЧНЫМ :53: у резолверов «только DoH/DoT» (Wikimedia, Applied Privacy) их собственный адрес на :53 молчит
 # (замер 16.10.2026, заметки разработки «ODoH-дизайн» §1) — им bootstrap 1.1.1.1.
 # NextDNS и `custom` — строки с особым полем (профиль / свой адрес), их разбирают функции ниже. `custom` — СВОЙ резолвер:
 # адрес вводит человек, мы за него не ручаемся; он намеренно ПОСЛЕДНИЙ и намеренно НЕ пресет — рекомендовать чужой
@@ -350,7 +377,6 @@ quad9|Quad9 (9.9.9.9)||CH|https://dns.quad9.net/dns-query|9.9.9.9 149.112.112.11
 adguard|AdGuard DNS||CY|https://dns.adguard-dns.com/dns-query|94.140.14.14 94.140.15.15|dns.adguard-dns.com|94.140.14.14
 controld|Control D||CA|https://freedns.controld.com/p0|76.76.2.11|p0.freedns.controld.com|1.1.1.1
 dnssb|DNS.SB|xTom|DE|https://doh.dns.sb/dns-query|185.222.222.222 45.11.45.11|dot.sb|185.222.222.222
-mullvad|Mullvad DNS||SE|https://dns.mullvad.net/dns-query|194.242.2.2|dns.mullvad.net|1.1.1.1
 wikimedia|Wikimedia DNS||US|https://wikimedia-dns.org/dns-query|185.71.138.138|wikimedia-dns.org|1.1.1.1
 dns4eu|DNS4EU|Whalebone|CZ|https://unfiltered.joindns4.eu/dns-query|86.54.11.100 86.54.11.200|unfiltered.joindns4.eu|86.54.11.100
 opendns|OpenDNS|Cisco|US|https://doh.opendns.com/dns-query|208.67.222.222 208.67.220.220|dns.opendns.com|208.67.222.222
@@ -434,6 +460,16 @@ doh_custom_host() { cat "$ENODIA_STATE/.doh-custom-sni" 2>/dev/null | tr -d ' \r
 doh_resolver_name() {
 	n=$(cat "$ENODIA_STATE/.doh-resolver" 2>/dev/null)
 	case " $(doh_resolver_list) " in *" $n "*) echo "$n" ;; *) echo cloudflare ;; esac
+}
+
+# A retired catalogue key still reads as the default in the panel.
+doh_retired_resolver() {
+	[ -s "$ENODIA_STATE/.doh-resolver" ] && doh_enabled && [ "$(doh_proto)" != odoh ] &&
+		[ "$(cat "$ENODIA_STATE/.doh-resolver")" != "$(doh_resolver_name)" ]
+}
+doh_reconcile_retired() {
+	doh_retired_resolver && ! doh_live_catalog_key "$(doh_proto_now)" >/dev/null || return 0
+	sh "$ENODIA_DIR/transport.sh" dns
 }
 
 # echo "<DoH-URL>\t<bootstrap-IP>" для текущего (или заданного $1) резолвера. Bootstrap = сервер,
@@ -2440,6 +2476,9 @@ doh_apply_dns() {
 		rm -f "$DOH_UNTUNNELED" "$DOH_RETUNNEL_STAMP" 2>/dev/null   # DoH выключен ⇒ и «уведён» не про что
 		return 1
 	fi
+	if doh_retired_resolver && doh_running && ! doh_live_catalog_key "$(doh_proto_now)" >/dev/null; then
+		doh_stop
+	fi
 	# Мы и есть перепроводка: пауза после прошлой неудачи (DOH_BAIL_STAMP) своё отслужила — провал ниже поставит её заново.
 	rm -f "$DOH_BAIL_STAMP" 2>/dev/null
 	# ВЕРДИКТ ПЕРЕЕЗДА — ПРО ПУТЬ (DOH_DOT_PATH): перепроводка на другой путь (сменили транспорт, авто-режим в прямом режиме)
@@ -2666,3 +2705,92 @@ case "$0" in
 		esac
 		;;
 esac
+
+# Read-only catalogue inputs for explicit DNS diagnostics. Never call a DNS setter.
+doh_probe_hash() (
+	[ "$#" -le 1 ] || return 1
+	if command -v sha256sum >/dev/null 2>&1; then
+		_dph_output=$(sha256sum "$@" 2>/dev/null) || return 1
+		_dph_value=${_dph_output%% *}
+	else
+		_dph_output=$(openssl dgst -sha256 "$@" 2>/dev/null) || return 1
+		_dph_value=${_dph_output##*=}
+		while :; do case "$_dph_value" in ' '*) _dph_value=${_dph_value# } ;; *) break ;; esac; done
+	fi
+	# A single digest needs no filter subprocesses. Reject extra records and the
+	# digest command's failure instead of accepting the first line of a pipeline.
+	case "$_dph_output" in *'
+'*) return 1 ;; esac
+	[ "${#_dph_value}" = 64 ] || return 1
+	case "$_dph_value" in *[!a-f0-9]*) return 1 ;; esac
+	printf '%s\n' "$_dph_value"
+)
+
+doh_probe_descriptor() (
+	_ddesc_key=${1:-$(doh_eff)}; _ddesc_proto=${2:-$(doh_proto)}
+	case "$_ddesc_proto" in doh|dot|doq|doh3) ;; *) return 2 ;; esac
+	case "$_ddesc_key" in ''|*[!A-Za-z0-9_-]*) return 2 ;; esac
+	_ddesc_path=''
+	_ddesc_schema=1
+	case "$_ddesc_key" in custom|saved|odoh) return 2 ;; esac
+	{
+		case " $(doh_resolver_list) " in *" $_ddesc_key "*) ;; *) return 2 ;; esac
+		if [ "$_ddesc_key" = nextdns ]; then
+			_ddesc_id=$(cat "$ENODIA_STATE/.doh-nextdns-id" 2>/dev/null | tr -cd 'a-f0-9')
+			[ "${#_ddesc_id}" = 6 ] || return 3
+		fi
+		_ddesc_spec=$(doh_resolver_spec "$_ddesc_key")
+		_ddesc_url=${_ddesc_spec%%$(printf '\t')*}; _ddesc_boot=${_ddesc_spec#*$(printf '\t')}
+		_ddesc_ips=$(doh_resolver_ips "$_ddesc_key")
+		_ddesc_sni=$(doh_proto_sni "$_ddesc_proto" "$_ddesc_key")
+		_ddesc_port=$(doh_proto_port "$_ddesc_proto" "$_ddesc_key")
+		[ "$_ddesc_proto" != doh3 ] || _ddesc_path=$(doh_quic_path "$_ddesc_key")
+	}
+	case "$_ddesc_port" in ''|*[!0-9]*) return 3 ;; esac
+	[ "${#_ddesc_port}" -le 5 ] && [ "$_ddesc_port" -ge 1 ] && [ "$_ddesc_port" -le 65535 ] || return 3
+	case "$_ddesc_proto" in dot|doq|doh3) [ -n "$_ddesc_sni" ] || return 4 ;; esac
+	_ddesc_ips=$(doh_probe_ipv4s "$_ddesc_ips") || return 3
+	_ddesc_binary=$(doh_bin_for "$_ddesc_proto"); _ddesc_installed=0; _ddesc_binary_sha=''
+	if [ -x "$_ddesc_binary" ] && [ -r "$_ddesc_binary" ]; then
+		_ddesc_installed=1; _ddesc_binary_sha=$(doh_probe_hash "$_ddesc_binary") || return 1
+		[ "${#_ddesc_binary_sha}" = 64 ] || return 1
+	fi
+	_ddesc_ca=$(doh_ca_file 2>/dev/null) || _ddesc_ca=''
+	_ddesc_ca_present=0; _ddesc_ca_sha=''
+	if [ -n "$_ddesc_ca" ] && [ -s "$_ddesc_ca" ] && [ -r "$_ddesc_ca" ]; then
+		_ddesc_ca_present=1; _ddesc_ca_sha=$(doh_probe_hash "$_ddesc_ca") || return 1
+		[ "${#_ddesc_ca_sha}" = 64 ] || return 1
+	fi
+	_ddesc_nl='
+'; _ddesc_cr=$(printf '\r'); _ddesc_tab=$(printf '\t')
+	_dpe_emit() {
+		case "$2" in *"$_ddesc_nl"*|*"$_ddesc_cr"*|*"$_ddesc_tab"*) return 1 ;; esac
+		printf '%s=%s\n' "$1" "$2"
+	}
+	_ddesc_text=$(
+		_dpe_emit schema "$_ddesc_schema" && _dpe_emit key "$_ddesc_key" && _dpe_emit proto "$_ddesc_proto" &&
+		_dpe_emit url "$_ddesc_url" && _dpe_emit path "$_ddesc_path" && _dpe_emit ips "$_ddesc_ips" && _dpe_emit sni "$_ddesc_sni" &&
+		_dpe_emit port "$_ddesc_port" && _dpe_emit l4 "$(doh_wire_l4 "$_ddesc_proto")" &&
+		_dpe_emit bootstrap "$_ddesc_boot" &&
+		_dpe_emit binary "$_ddesc_binary" && _dpe_emit installed "$_ddesc_installed" && _dpe_emit binary_sha256 "$_ddesc_binary_sha" &&
+		_dpe_emit ca "$_ddesc_ca" && _dpe_emit ca_present "$_ddesc_ca_present" && _dpe_emit ca_sha256 "$_ddesc_ca_sha" || exit 1
+	) || return 1
+	_ddesc_sig=$(printf '%s\n' "$_ddesc_text" | doh_probe_hash) || return 1
+	[ "${#_ddesc_sig}" = 64 ] || return 1
+	printf '%s\nsig=%s\n' "$_ddesc_text" "$_ddesc_sig"
+)
+
+doh_probe_ipv4s() {
+	printf '%s\n' "$1" | awk '
+		NR != 1 || NF < 1 || NF > 4 { exit 1 }
+		{ out = ""
+		  for (i = 1; i <= NF; i++) {
+			if ($i !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) exit 1
+			n = split($i, a, "."); if (n != 4) exit 1
+			for (j = 1; j <= 4; j++) if (length(a[j]) > 3 || a[j] + 0 > 255 || a[j] ~ /^0[0-9]/) exit 1
+			if (out != "") out = out " "
+			out = out $i
+		  }
+		  valid = 1 }
+		END { if (NR == 1 && valid) print out }'
+}

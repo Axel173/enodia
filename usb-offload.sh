@@ -206,7 +206,14 @@ du_b() {
 # ОТВЕРГНУТЬ (каталог без сентинела, флешку выдернули между проверкой и записью). Молчаливый
 # rc=0 в этом месте означал бы «хранилище есть» при BIN_DIR = резидентный каталог — то самое
 # состояние, в котором переезд превращается в удаление (см. move_verified).
+store_purge_arrival() {
+    [ -f "$ENODIA_DIR/gh-update.sh" ] || return 0
+    sh "$ENODIA_DIR/gh-update.sh" bin-purge store "$1"
+    case "$?" in 0|2) return 0 ;; *) return 1 ;; esac
+}
+
 mark_write() {
+    store_purge_arrival "$1" || return 1
     printf '%s\n' "$1" > "$STORE_MARK"
     if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
     store_ready
@@ -673,6 +680,8 @@ store_rejected() {
 # Код 0 = хранилище доступно, 1 = нет (в т.ч. «оффлоад не включали» — самый частый случай).
 cmd_mount_ensure() {
     [ -f "$STORE_MARK" ] || return 1        # маркера нет ⇒ накопитель не наш сценарий, no-op
+    # A store already resolved at its recorded path has no admission to gate.
+    if store_ready && [ -f "$MISS_STAMP" ]; then store_purge_arrival "$STORE_DIR" || :; fi
     store_ready && { rm -f "$MISS_STAMP" 2>/dev/null; resolve_dups; seen_note; return 0; }   # уже на месте
     # Сам ПОИСК носителя живёт в mount-lib.sh — его же зовёт резидентный boot.sh. Здесь остаётся
     # то, чего бутстрап не делает: маркер, разбор дублей и сообщения движка.
@@ -783,11 +792,11 @@ cmd_enable() {
         # пошёл бы общим путём и мог сесть на ДРУГОЙ накопитель, оставив прежние бинари сиротами.
         _store=$(find_mounted_store) || _store=""
         if [ -n "$_store" ] && [ -z "$1" ]; then
-            mark_write "$_store"
+            mark_write "$_store" || return 1
             echo "Хранилище: $_store (найдено на накопителе)"
         else
             _store=$(prepare_store "$1") || return 1
-            mark_write "$_store"
+            mark_write "$_store" || return 1
             echo "Хранилище: $_store (создано)"
         fi
         # ГАРД НА ОБЕ ВЕТКИ: маркер записан, но резолвер его ПРИНЯЛ ли? Пока хранилище не

@@ -51,6 +51,7 @@ _ip_from_body() {
 #   tries: 1 (умолчание) — как было; 2 — при пустом ответе добить ВТОРЫМ узлом trace (только с
 #          bind'ом/socks, см. разбор у IP_PROBE_TRACE2). Цена — ещё один timeout, и только на промахе.
 # Порядок попыток: кастомный URL (если задан) → trace 1.1.1.1 → [tries=2] trace 1.0.0.1.
+# IP_PROBE_END (Xray readiness) caps the custom URL's trace fallback at the caller's uptime deadline.
 probe_ext_ip() {
     _pa="$1"; _pt="${2:-7}"; _url="${3:-$IP_PROBE_URL}"; _pn="${4:-1}"
     [ -n "$_url" ] || _url="$IP_PROBE_TRACE"
@@ -58,6 +59,15 @@ probe_ext_ip() {
     _ip=$(_ip_from_body "$_body")
     [ -n "$_ip" ] && { printf '%s' "$_ip"; return 0; }
     if [ "$_url" != "$IP_PROBE_TRACE" ]; then                         # primary был кастомным — добиваем trace'ом
+        if [ -n "${IP_PROBE_END:-}" ]; then
+            if ! command -v uptime_s >/dev/null 2>&1 && [ -n "${ENODIA_DIR:-}" ] && [ -f "$ENODIA_DIR/clock-lib.sh" ]; then
+                . "$ENODIA_DIR/clock-lib.sh"
+            fi
+            command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
+            _ip_left=$((IP_PROBE_END - $(uptime_s)))
+            [ "$_ip_left" -gt 0 ] || return 0
+            [ "$_pt" -le "$_ip_left" ] || _pt=$_ip_left
+        fi
         _body=$(curl -s -k $_pa --max-time "$_pt" "$IP_PROBE_TRACE" 2>/dev/null)
         _ip=$(_ip_from_body "$_body")
         [ -n "$_ip" ] && { printf '%s' "$_ip"; return 0; }
@@ -130,6 +140,43 @@ ip_is_self() {
 wan_iface() {
     ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'
 }
+
+# Only literal IPv6 destinations can get a verdict from a local route rejection.
+ipv6_endpoint_unreachable() (
+    case "$1" in \[*\]) set -- "${1#\[}"; set -- "${1%\]}" ;; esac
+    case "$1" in *[!0-9a-fA-F:.]*) exit 1 ;; *:*) ;; *) exit 1 ;; esac
+    awk -v s="$1" 'BEGIN {
+        if (s ~ /:::/) exit 1
+        if (s ~ /\./) {
+            n=split(s,a,":"); v=a[n]; k=split(v,b,".")
+            if(k!=4) exit 1
+            for(i=1;i<=4;i++) if(b[i] !~ /^[0-9]+$/ || b[i]+0>255) exit 1
+            s=substr(s,1,length(s)-length(v)) "0:0"
+        }
+        t=s; c=gsub(/::/,"X",t); if(c>1 || t ~ /::/) exit 1
+        if(c==0 && (s ~ /^:/ || s ~ /:$/)) exit 1
+        n=split(s,a,":"); groups=0
+        for(i=1;i<=n;i++) if(a[i]!="") {
+            if(length(a[i])>4 || a[i] !~ /^[0-9a-fA-F]+$/) exit 1
+            groups++
+        }
+        if (c ? groups>=8 : groups!=8) exit 1
+        # An IPv4-mapped destination has five zero words, then ffff.
+        pad=8-groups; pos=0
+        for(i=1;i<=n;i++) {
+            if(a[i]=="") { pos+=pad; pad=0; continue }
+            if(++pos==6) exit tolower(a[i])=="ffff"
+            if(a[i] !~ /^0+$/) exit 0
+        }
+    }' || exit 1
+    _v6r=$(LC_ALL=C ip -6 route get "$1" 2>&1)
+    case "${_v6r#ip: }" in
+        prohibit|prohibit\ *|unreachable|unreachable\ *|blackhole|blackhole\ *|\
+        'RTNETLINK answers: Network is unreachable'|'RTNETLINK answers: No route to host'|\
+        'RTNETLINK answers: Permission denied'|'RTNETLINK answers: Communication administratively prohibited') exit 0 ;;
+    esac
+    exit 1
+)
 
 # wan_gateway — адрес шлюза дефолт-маршрута main (`via`), пусто = дефолта нет или он без via
 # (PPPoE/point-to-point). Нужен allowlist'у ipblock (шлюз нельзя дропать), гарду отката

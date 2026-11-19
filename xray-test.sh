@@ -37,6 +37,9 @@ XRAY=$(bin_path xray)
 # time_total (-w), которого probe_ext_ip не отдаёт → берём URL из lib, парс IP инлайн. :- на случай
 # запуска без установленной lib.
 if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
+if [ -f "$ENODIA_DIR/xray-profile-lib.sh" ]; then . "$ENODIA_DIR/xray-profile-lib.sh"; fi
+if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi
+command -v xp_pool >/dev/null 2>&1 || xp_pool() { return 1; }
 IP_PROBE_TRACE="${IP_PROBE_TRACE:-https://1.1.1.1/cdn-cgi/trace}"
 
 # РЕЖИМ: обычный вызов `xray-test.sh <name> [port]` = egress-тест (выход+внешний IP, деф.).
@@ -69,6 +72,7 @@ TOUT=/tmp/enodia-xray-test.$TPORT.out
 TACC=/tmp/xray-test.$TPORT.access.log
 
 TLOCK=/tmp/enodia-xray-test.$TPORT.lock
+_xt_road_lock=0; _xt_rules=0
 
 emit() { printf '%s\n' "$1"; }
 # ЗАМОК ПОРТА — СВОЙ У КАЖДОГО ПОРТА, И ДЕРЖИТ ЕГО ЖИВОЙ ПРОГОН. Прежде второй прогон на том же порту начинал с `cleanup` и
@@ -83,12 +87,53 @@ _lk=0
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\000' ' ' 2>/dev/null < "/proc/$1/cmdline" | grep -qE "$2"; }
 xt_lock() {   # $1 = lock dir, $2 = who may hold it alive (regex, default a test run) → 0 taken (our pid in it); 1 held by a live run
 	mkdir "$1" 2>/dev/null && { echo $$ > "$1/pid"; return 0; }
-	_lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9')
-	[ -n "$_lp" ] || { sleep 1; _lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9'); }
-	if [ -n "$_lp" ] && pid_runs "$_lp" "${2:-xray-test}"; then return 1; fi
+	command -v lbl_lock_live >/dev/null 2>&1 || return 1
+	lbl_lock_live "$1" "${2:-xray-test}" && return 1
 	mv "$1" "$1.stale.$$" 2>/dev/null && rm -rf "$1.stale.$$" 2>/dev/null
 	mkdir "$1" 2>/dev/null && { echo $$ > "$1/pid"; return 0; }
 	return 1
+}
+xt_road_sweep() { lbl_rule_sweep 88 iif lo; }
+xt_road_busy() { emit "{\"ok\":false,\"busy\":true,\"queue\":true,\"msg\":\"$1\"}"; }
+xt_road_valid() {
+	[ "$_xt_rules" = 0 ] || [ "$(ip rule show 2>/dev/null | grep -cE '^88:.* iif lo( |$)')" = "$_xt_rules" ] ||
+		{ xt_road_busy "адрес сервера уже используется работающим выходом"; return 1; }
+}
+xt_road_drop() {
+	[ "$_xt_road_lock" = 1 ] || return 0
+	xt_road_sweep
+	rm -rf "$XT_ROAD_LOCK" 2>/dev/null
+	_xt_road_lock=0
+}
+xt_road_prepare() {
+	[ -f "$ENODIA_DIR/road.sh" ] || return 0
+	_xt_via=''
+	# A published profile already follows the live kernel path.
+	if [ -s "$ENODIA_STATE/.cfg-via" ] && { [ "$src" != "$ENODIA_STATE/xray-configs/$name.json" ] ||
+	    [ "$(lbl_endpoint_key "$ENODIA_STATE/.endpoint-bypass")" != "xray/$name" ]; }; then
+		_xt_via=$(sh "$ENODIA_DIR/road.sh" get xray "$name")
+	fi
+	if [ -z "$_xt_via" ]; then
+		if ip rule show 2>/dev/null | grep -q '^88:'; then
+			xt_lock "$XT_ROAD_LOCK" || return 3
+			_xt_road_lock=1
+			xt_road_drop
+		fi
+		return 0
+	fi
+	xt_lock "$XT_ROAD_LOCK" || return 3
+	_xt_road_lock=1
+	xt_road_sweep
+	[ ! -f "$ENODIA_DIR/dns-lib.sh" ] || . "$ENODIA_DIR/dns-lib.sh"
+	_xt_ips=$(
+		xp_members "$TCONF" hosts | while IFS= read -r _xt_host; do
+			case "$_xt_host" in *:*) exit 1 ;; esac
+			_xt_addrs=$({ seed_ipv4_rows "$_xt_host" "" shared; case "$_xt_host" in *[!0-9.]*) ns_ips "$_xt_host" 2 ;; esac; } | sort -u)
+			[ -n "$_xt_addrs" ] || exit 1
+			printf '%s\n' "$_xt_addrs"
+		done
+	) && [ -n "$_xt_ips" ] || return 4
+	_xt_rules=$(sh "$ENODIA_DIR/road.sh" probe-wire "xray/$name" $_xt_ips)
 }
 lock_take() { xt_lock "$TLOCK" && _lk=1; }
 # RAM FOR ONE MORE XRAY (BE6500 tester, OOM 24.10.2026: the main xray 68 MB + a server test's own 39 MB on a 393-MB router, and the
@@ -147,12 +192,13 @@ cleanup() {
 			pid_runs "$_xp" xray && { kill -9 "$_xp" 2>/dev/null; daemon_wait_gone "$_xp" 2; }
 		fi
 	fi
-	rm -f "$TPID" "$TCONF" "$TOUT" "$TOUT".* "$TACC" 2>/dev/null
+	rm -f "$TPID" "$TPID.pool-ready" "$TCONF" "$TOUT" "$TOUT".* "$TACC" 2>/dev/null
+	[ "$_xt_fp_level" != info ] || rm -f "$TLOG"
 	return 0
 }
 # Замок снимаем ПОСЛЕДНИМ и только свой: чужой (держатель жив) не наш, и снять его — ровно та гонка, от которой он.
 # Сигнал — выход после уборки: ловушка busybox на сигнале без `exit` вернула бы управление в середину скрипта.
-xt_done() { cleanup; xt_admit_drop; [ "$_lk" = 1 ] && rm -rf "$TLOCK" 2>/dev/null; _lk=0; return 0; }
+xt_done() { cleanup; xt_road_drop; xt_admit_drop; [ "$_lk" = 1 ] && rm -rf "$TLOCK" 2>/dev/null; _lk=0; return 0; }
 trap xt_done EXIT
 trap 'exit 1' INT TERM HUP PIPE
 
@@ -175,6 +221,12 @@ XT_NOBIN='{"ok":false,"nobin":true,"msg":"xray не установлен на р
 lock_take || { emit "{\"ok\":false,\"busy\":true,\"msg\":\"на временном порту $TPORT идёт другая проверка — повторите, когда она кончится\"}"; exit 0; }
 cleanup   # снять возможный прошлый тест (замок наш — значит, прежний держатель мёртв)
 
+# Retry summaries (including the TLS 1.3 refusal) are Info. Enable that level
+# only in an egress check and discard the bounded diagnostic log at teardown.
+_xt_fp= _xt_fp_level= _xt_fp_rev= _xt_fp_class=
+[ "$MODE" = egress ] && _xt_fp=$(xp_reality_fp "$src") && _xt_fp_class=$(xp_reality_class "$_xt_fp") &&
+    _xt_fp_rev=$(xp_reality_rev "$src") && _xt_fp_level=info
+
 # Копия конфига: socks-инбаунд 10808 -> временный $TPORT; лог-пути -> порт-уникальные *-test
 # (не трогаем боевой /tmp/xray.log И не пересекаемся с параллельными тест-инстансами на др. портах).
 # Access-лог гасим ВСЕГДА («none»), даже у СТАРОГО конфига с путём внутри: он пишет каждое
@@ -184,13 +236,13 @@ cleanup   # снять возможный прошлый тест (замок н
 # The copy holds the server's credential (an Amnezia Premium standby key among them, probed every ~15 s for minutes): born closed
 # and new — the caller's umask made it 0644, and a name planted in shared /tmp would be followed by `>` (review s.136 r2, L5).
 ( umask 077; rm -f "$TCONF"; set -C
-  sed -e "s/\"port\"[[:space:]]*:[[:space:]]*10808/\"port\": $TPORT/" \
-      -e "s#/tmp/xray-access.log#none#g" \
-      -e "s#/tmp/xray\.log#$TLOG#g" \
-      "$src" > "$TCONF" ) 2>/dev/null
-[ -s "$TCONF" ] || { emit '{"ok":false,"msg":"не удалось подготовить тест-конфиг"}'; exit 0; }
+  lbl_commit_out "$TCONF" xp_runtime "$src" "$TPORT" "$TLOG" '' "$_xt_fp_level" ) 2>/dev/null
+[ "$?" = 0 ] && [ -s "$TCONF" ] || { emit '{"ok":false,"busy":true,"msg":"не удалось подготовить тест-конфиг"}'; exit 0; }
+[ -z "$_xt_fp_rev" ] || { [ "$_xt_fp_rev" = "$(xp_reality_rev "$src")" ] &&
+    [ "$_xt_fp" = "$(xp_reality_fp "$TCONF")" ]; } || _xt_fp_rev=
 
-: > "$TLOG" 2>/dev/null
+( umask 077; rm -f "$TLOG"; set -C; : > "$TLOG" ) 2>/dev/null ||
+    { emit '{"ok":false,"busy":true,"msg":"не удалось подготовить лог проверки"}'; exit 0; }
 # The same Go heap ceiling as the working xray (owner net-tune.sh, form filtered next to the launch — its reader contract): up to
 # eight tests run side by side, and each took memory with no ceiling (26.10.2026).
 _tgc=$(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLIMIT=[0-9]+MiB$')
@@ -199,18 +251,36 @@ _tgc=$(sh "$ENODIA_DIR/net-tune.sh" memlimit-env 2>/dev/null | grep -E '^GOMEMLI
 xt_admit || { _xm=',"queue":true'; [ "$XT_ADMIT_MEM" = 1 ] && _xm=',"mem":true'; emit "{\"ok\":false,\"busy\":true$_xm,\"msg\":\"$XT_ADMIT_WHY\"}"; exit 0; }
 # A swap that started while this run waited for the admission has ended (it held the admission) — on the new build, or with none.
 [ -x "$XRAY" ] || { emit "$XT_NOBIN"; exit 0; }
-start-stop-daemon -S -b -m -p "$TPID" -x /bin/sh -- -c "exec ${_tgc:+env $_tgc }'$XRAY' run -c '$TCONF' >>'$TLOG' 2>&1"
+xt_road_prepare
+case "$?" in
+	1) emit '{"ok":false,"busy":true,"msg":"дорога к серверу не поднята"}'; exit 0 ;;
+	2) emit '{"ok":false,"busy":true,"msg":"адрес сервера уже используется работающим выходом"}'; exit 0 ;;
+	3) xt_road_busy "идёт другая проверка через дорогу — повторите, когда она кончится"; exit 0 ;;
+	4) emit '{"ok":false,"busy":true,"msg":"для проверки через дорогу не найден IPv4-адрес сервера"}'; exit 0 ;;
+	5) emit '{"ok":false,"busy":true,"msg":"не удалось направить проверку через дорогу"}'; exit 0 ;;
+esac
+start-stop-daemon -S -b -m -p "$TPID" -x /bin/sh -- -c "${_xt_fp_level:+ulimit -f 128 || exit 1; }XRAY_LOCATION_ASSET='$(xp_asset_dir "$XRAY")' exec ${_tgc:+env $_tgc }'$XRAY' run -c '$TCONF' >>'$TLOG' 2>&1"
 
 # Ждём тестовый socks, ПОКА ЖИВ ПРОЦЕСС (daemon-lib.sh). Прежний фиксированный срок делал
 # ровно ту ошибку, ради которой библиотека и заведена: на накопителе бинарь читается дольше,
 # чем мы ждали, и панель говорила «сервер не поднялся» про исправный сервер — с ПУСТЫМ логом,
 # потому что демону нечего было сказать. Пустой лог теперь замещаем причиной отказа.
 if ! daemon_wait_port "$TPID" xray 8 127.0.0.1 "$TPORT"; then
+	xt_road_valid || exit 0
 	err=$(tail -n 4 "$TLOG" 2>/dev/null | tr -d '\r\033' | sed 's/\[[0-9;]*m//g' | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-300)
 	emit "{\"ok\":false,\"msg\":\"xray не поднялся с этим конфигом: ${err:-$DAEMON_WAIT_WHY}\"}"
 	exit 0
 fi
-xt_admit_drop   # loaded and listening: the next test asks the memory left after this one
+# The loader no longer needs admission once listening. Holding it during egress
+# could block the DNS daemon a cold pool needs in order to finish its probes.
+xt_admit_drop
+if command -v daemon_xray_ready >/dev/null 2>&1; then
+    if ! daemon_xray_ready "$TPID" "$TCONF" "$TPORT"; then
+        xt_road_valid || exit 0
+        emit '{"ok":false,"msg":"pool has no usable egress after observatory warm-up"}'
+        exit 0
+    fi
+fi
 
 # SPEED-режим: качаем известный размер через socks конфига (сервер тянет файл из CDN → мерим
 # ПРОПУСКНУЮ способность выхода). speed.cloudflare.com/__down?bytes=N отдаёт ровно N байт (HTTPS,
@@ -244,6 +314,7 @@ if [ "$MODE" = speed ]; then
 	t1=$(date +%s); el=$((t1-t0)); [ "$el" -lt 1 ] && el=1
 	total=$(cat "$TOUT".* 2>/dev/null | awk '{s=s+$1} END{printf "%.0f", s+0}')
 	rm -f "$TOUT".* 2>/dev/null
+	xt_road_valid || exit 0
 	if [ "${total:-0}" -gt 0 ] 2>/dev/null; then
 		mbps=$(awk -v b="$total" -v t="$el" 'BEGIN{ if(t>0) printf "%.1f", b*8/t/1000000 }')
 		emit "{\"ok\":true,\"mbps\":${mbps:-0},\"bytes\":$total,\"streams\":$STREAMS,\"secs\":$el}"
@@ -257,12 +328,13 @@ fi
 # -w добавляет '|<time_total>' в хвост тела trace; IP выдёргиваем из строки `ip=...`. -k: старый
 # OpenSSL к 1.1.1.1 по IP не всегда валиден, из ответа берём лишь IP (не секрет).
 out=$(curl -s -k --max-time 12 --socks5-hostname "127.0.0.1:$TPORT" -w '|%{time_total}' "$IP_PROBE_TRACE" 2>/dev/null)
+xt_road_valid || exit 0
 tt=${out##*|}; body=${out%|*}
 ip=$(printf '%s\n' "$body" | sed -n 's/^ip=\([0-9.]*\).*/\1/p' | head -1)
 if echo "$ip" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
 	ms=$(awk -v t="$tt" 'BEGIN{ if(t+0>0) printf "%.0f", t*1000 }')
 	emit "{\"ok\":true,\"ip\":\"$ip\",\"ms\":${ms:-0}}"
 else
-	emit '{"ok":false,"msg":"нет реального выхода через этот сервер (пинг не значит рабочий)"}'
+	emit "{\"ok\":false,\"msg\":\"нет реального выхода через этот сервер (пинг не значит рабочий)\"$(xp_reality_failure "$_xt_fp" "$_xt_fp_class" "$_xt_fp_rev" "$TLOG")}"
 fi
 exit 0

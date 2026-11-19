@@ -108,7 +108,10 @@ GH_ASSET_HOSTS="release-assets.githubusercontent.com objects.githubusercontent.c
 # соседи). Создаём СРАЗУ: закачку гоняет фоновая подоболочка, каталог обязан быть до неё. Убирает его конец файла, не
 # trap (EXIT срабатывает и в фоновой подоболочке). Не создался — путь под /dev/null: любая запись туда откажет, и
 # проверка, которой нужна времянка, откажет вместе с ней — предсказуемого имени нет.
-GH_TMP=$(mktemp -d /tmp/enodia-gh.XXXXXX 2>/dev/null) || GH_TMP=""
+case "$1" in
+    bin-arch|bin-purge|bin-stage-guard) GH_TMP= ;; # The checks work even with a full /tmp.
+    *) GH_TMP=$(mktemp -d /tmp/enodia-gh.XXXXXX 2>/dev/null) || GH_TMP= ;;
+esac
 [ -n "$GH_TMP" ] || GH_TMP=/dev/null/enodia-gh
 GH_CODE_FILE="$GH_TMP/code"
 gh_code_reset() { : > "$GH_CODE_FILE" 2>/dev/null; }
@@ -500,22 +503,39 @@ sums_load() {
 # тестера 2026-07-15). Опознаём по e_machine (байты 18-19 ELF) заведомо рабочего
 # /bin/busybox, а НЕ по `uname -m`: при 64-битном ядре с 32-битным userspace uname
 # говорит aarch64, но исполнять придётся armv7. Тот же критерий, что у гарда
-# bin_arch_matches в install.sh. `od` в busybox НЕТ (грабля) → dd + cmp с
-# эталоном из printf. Не опознали → пусто, fetch_bin уйдёт на легаси-путь (fail-open).
+# bin_arch_matches в install.sh. Не опознали → пусто, fetch_bin уйдёт на легаси-путь (fail-open).
+# Base64 preserves the NULs in e_machine without a scratch file or an od applet.
+# Downloads retain the historical fallback. Destructive maintenance needs a verdict.
 bin_arch() {
-    [ -r /bin/busybox ] || return 0
-    command -v dd >/dev/null 2>&1 || return 0
-    command -v cmp >/dev/null 2>&1 || return 0
-    _m="$GH_TMP/arch"
-    dd if=/bin/busybox of="$_m" bs=1 skip=18 count=2 2>/dev/null || { rm -f "$_m"; return 0; }
-    printf '\267\000' > "$_m.a64" 2>/dev/null   # 0xB7 0x00 = EM_AARCH64
-    printf '\050\000' > "$_m.a32" 2>/dev/null   # 0x28 0x00 = EM_ARM
-    _r=""
-    if cmp -s "$_m" "$_m.a64"; then _r=arm64
-    elif cmp -s "$_m" "$_m.a32"; then _r=armv7
+    _class=$(dd if=/bin/busybox bs=1 count=5 2>/dev/null | base64)
+    _machine=$(dd if=/bin/busybox bs=1 skip=18 count=2 2>/dev/null | base64)
+    case "$_class:$_machine" in
+        'f0VMRgI=:twA=') echo arm64; return 0 ;;
+        'f0VMRgE=:KAA=') : ;;
+        *) [ "$1" = strict ] || return 0
+           echo 'soft-float: purge skipped (BusyBox ELF architecture unknown)' >&2; return 1 ;;
+    esac
+    _reason=cpuinfo
+    if _cpu=$(cat /proc/cpuinfo 2>/dev/null); then
+        _reason='cpuinfo Features'
+        _ab=$(printf '%s\n' "$_cpu" | awk '
+            BEGIN { seen=0; missing=0; bad=0 }
+            tolower($0) ~ /^[ \t]*features[ \t]*:/ {
+                sub(/^[^:]*:/, ""); $0=tolower($0); seen++
+                if (NF == 0) { bad=1; next }
+                fp=0
+                for (i=1; i<=NF; i++) if ($i ~ /^vfp(v3|v3d16|v4)?$/) fp=1
+                if (!fp) missing=1
+            }
+            END { if (seen && !bad) print (missing ? "armv7sf" : "armv7") }
+        ')
+        if [ -n "$_ab" ]; then echo "$_ab"; return 0; fi
     fi
-    rm -f "$_m" "$_m.a64" "$_m.a32"
-    echo "$_r"
+    if [ "$1" = strict ]; then
+        echo "soft-float: purge skipped ($_reason unavailable or incomplete)" >&2
+        return 1
+    fi
+    echo armv7
 }
 
 # --- МАНИФЕСТ БИНАРЕЙ: сколько займёт, что за версия и КАКИЕ БАЙТЫ ставить -----------
@@ -544,7 +564,7 @@ BM_FILE="$ENODIA_DIR/$BM_REL"
 # 21 КБ arm64). Одна функция, режим параметром — двух копий разбора не заводим.
 bm_field() {
     [ -s "$BM_FILE" ] || return 0
-    # Арку спрашиваем ОДИН раз на срез (`bin_status` кладёт её в BA_VAL): опознание — это dd+cmp по busybox, а срез
+    # Арку спрашиваем ОДИН раз на срез (`bin_status` кладёт её в BA_VAL): опознание читает ELF BusyBox, а срез
     # зовёт bm_field дважды на КАЖДЫЙ бинарь. Присваивание из `$(…)` наружу не возвращается ⇒ память — в вызывающем.
     if [ "$BA_DONE" = 1 ]; then _bf_a=$BA_VAL; else _bf_a=$(bin_arch); fi
     awk -F'\t' -v n="$1" -v c="$2" -v a="$_bf_a" -v m="${3:-max}" '
@@ -592,10 +612,13 @@ local_tag() {
 BS_CACHE="$ENODIA_STATE/.bin-sha"
 # Ключ файла «размер mtime»; пусто — файла нет. Путь — отдельным полем строки кэша.
 bs_key() { stat -c '%s %Y' "$1" 2>/dev/null; }
-# Строка кэша: имя⇥путь⇥ключ⇥sha⇥версия — ОДНА на имя (путь у бинаря один, его даёт bin_path). Атомарно, рядом + `mv`.
+# Строка кэша: имя⇥путь⇥ключ⇥sha⇥версия[⇥armv7sf] — ОДНА на имя. Атомарно, рядом + `mv`.
+# The last field records a digest verified against the soft-float manifest. It survives version changes and moves.
 _bs_text() {   # the cache's new text: the other names' lines, then this name's
     if [ -f "$BS_CACHE" ]; then awk -F'\t' -v n="$1" '$1 != n' "$BS_CACHE" || return 1; fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"
+    _bst_arch=${6:-$(bs_arch_known "$1" "$4")}
+    if [ -n "$_bst_arch" ]; then printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$_bst_arch"
+    else printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"; fi
 }
 bs_put() { lbl_commit_out "$BS_CACHE" _bs_text "$@" 2>/dev/null; return 0; }   # whole or not at all (label-lib.sh; its temp ends in .new — under clean.sh's mask)
 # sha256 стоящего файла: из кэша, если ключ тот же, иначе считаем и запоминаем. Версию при НОВОМ содержимом забываем, а при
@@ -611,15 +634,86 @@ bs_sha() {   # $1 = имя, $2 = путь
 }
 # Версия, запомненная при ЭТОМ хеше (пусто — не знаем).
 bs_ver_known() { awk -F'\t' -v n="$1" -v h="$2" '$1 == n && $4 == h { print $5; exit }' "$BS_CACHE" 2>/dev/null; }
+bs_arch_known() { awk -F'\t' -v n="$1" -v h="$2" '$1 == n && $4 == h && $6 == "armv7sf" { print $6; exit }' "$BS_CACHE" 2>/dev/null; }
 # Запомнить версию при хеше — только если она изменилась (иначе каждый показ экрана писал бы флеш).
 bs_ver_note() {   # $1 = имя, $2 = путь, $3 = sha, $4 = версия
-    [ "$(bs_ver_known "$1" "$3")" = "$4" ] && return 0
-    bs_put "$1" "$2" "$(bs_key "$2")" "$3" "$4"
+    _bvn_arch=; [ "$BA_VAL" = armv7sf ] && _bvn_arch=armv7sf
+    if [ "$(bs_ver_known "$1" "$3")" = "$4" ] &&
+       { [ -z "$_bvn_arch" ] || [ "$(bs_arch_known "$1" "$3")" = "$_bvn_arch" ]; }; then return 0; fi
+    bs_put "$1" "$2" "$(bs_key "$2")" "$3" "$4" "$_bvn_arch"
 }
 # Версия опубликованной сборки с ЭТИМ хешем — своей арки (чужая арка у нас не исполнится); арка не опознана — любой.
 bm_ver_of() {   # $1 = имя, $2 = sha
     [ -s "$BM_FILE" ] || return 0
     awk -F'\t' -v n="$1" -v h="$2" -v a="$BA_VAL" '$1 == n && $5 == h && $4 != "" && (a == "" || $2 == a) { print $4; exit }' "$BM_FILE"
+}
+# 0 = approved bytes, 1 = incompatible, 2 = hash unavailable. Never use the
+# size/mtime cache to decide removal. The tagged cache field proves a past digest.
+bin_sf_keep() {
+    _sf_hash=$(file_sha256 "$2")
+    [ -n "$_sf_hash" ] || return 2
+    [ -n "$(bm_ver_of "$1" "$_sf_hash")" ] || [ "$(bs_arch_known "$1" "$_sf_hash")" = armv7sf ]
+}
+
+bin_sf_names() {
+    awk -F'\t' '$1 ~ /^[a-z0-9][a-z0-9-]*$/ && NF == 5 {
+        names[$1]=1; if ($2=="armv7sf" && $4!="" && length($5)==64 && $5 !~ /[^0-9a-f]/) found=1
+        } END { if (!found) exit 1; for (n in names) print n }' "$BM_FILE" 2>/dev/null ||
+        { log 'soft-float: armv7sf manifest unavailable' >&2; return 1; }
+}
+
+bin_stage_guard() {
+    # An empty staging directory needs no verdict, even during package replay.
+    for _sf_file in "$ENODIA_DIR"/bin/*.user; do
+        if [ -f "$_sf_file" ] || [ -L "$_sf_file" ]; then break; fi
+    done
+    [ -f "$_sf_file" ] || [ -L "$_sf_file" ] || return 0
+    BA_VAL=$(bin_arch strict) || return 0
+    [ "$BA_VAL" = armv7sf ] || return 0
+    BA_DONE=1
+    bin_sf_names >/dev/null || return 1
+    _sf_staged_rc=0
+    for _sf_file in "$ENODIA_DIR"/bin/*.user; do
+        [ -f "$_sf_file" ] || [ -L "$_sf_file" ] || continue
+        _sf_name=${_sf_file##*/}; _sf_name=${_sf_name%.user}
+        _sf_size=$(bm_field "$_sf_name" 3)
+        _sf_want=$(bm_field "$_sf_name" 5)
+        _sf_got=; [ -L "$_sf_file" ] || _sf_got=$(file_sha256 "$_sf_file")
+        if [ "${#_sf_want}" != 64 ] || [ "$_sf_got" != "$_sf_want" ] ||
+           [ "$(wc -c < "$_sf_file" | tr -d ' ')" != "$_sf_size" ]; then
+            if rm -f "$_sf_file"; then
+                log "soft-float: removed incompatible staged binary: ${_sf_file##*/}"
+            else
+                log "soft-float: cannot clear incompatible staged binary: ${_sf_file##*/}" >&2
+                _sf_staged_rc=1
+            fi
+        fi
+    done
+    return "$_sf_staged_rc"
+}
+
+bin_purge() {
+    BA_VAL=$(bin_arch strict) || return 0
+    [ "$BA_VAL" = armv7sf ] || return 0
+    _sf_names=$(bin_sf_names) || return 1
+    [ -f "$ENODIA_DIR/store-lib.sh" ] || { log 'soft-float: purge skipped (store-lib.sh unavailable)'; return 1; }
+    . "$ENODIA_DIR/store-lib.sh"
+    _sf_store=; [ "$1" = store ] && _sf_store=$2
+    store_purge_bins "$_sf_store" bin_sf_keep $_sf_names
+}
+
+bin_purge_report() {
+    if _bpr_out=$(bin_purge "$@" 2>&1); then
+        [ -z "$_bpr_out" ] || log "$_bpr_out"
+        return 0
+    fi
+    log "$_bpr_out" >&2
+    # Keep the last failure for the dump, even when the caller discards output.
+    _bpr_tmp=$(mktemp /tmp/enodia-bin-purge.XXXXXX 2>/dev/null) || return 1
+    _bpr_log=/tmp/enodia-bin-purge.log
+    { printf '[%s] soft-float: bin-purge %s failed\n%s\n' "$(date '+%F %T')" "${1:-resident}" "$_bpr_out" > "$_bpr_tmp" &&
+        [ ! -d "$_bpr_log" ] && mv -f "$_bpr_tmp" "$_bpr_log"; } 2>/dev/null || rm -f "$_bpr_tmp"
+    return 1
 }
 # Где лежат бинари — у владельца ответа (store-lib.sh::bin_path), ОДНИМ заходом в библиотеку на весь срез: «имя путь» построчно.
 bs_paths() {
@@ -650,7 +744,8 @@ bs_stale_pids() {   # $1 = имя, $2 = путь стоящего, $3 = его s
 bs_run_old() { [ -n "$(bs_stale_pids "$1" "$2" "$3" | head -n 1)" ]; }
 # bin-status [имя…] — строка на бинарь: имя⇥состояние⇥стоит⇥доступна⇥работает.
 #   состояние: absent (файла нет) · current (хеш совпал с опубликованной сборкой своей арки) · outdated (манифест знает хеш
-#   своей арки, и он другой — новая сборка приехала с обновлением кода) · unknown (сверять не с чем: в коде нет манифеста);
+#   своей арки, и он другой — новая сборка приехала с обновлением кода)
+#   · unknown (сверять не с чем: в коде нет манифеста);
 #   стоит — версия стоящего, если её удалось узнать; доступна — версия в манифесте; работает — `old`, когда живой процесс
 #   исполняет сборку, которую уже заменили. Без имён — все бинари манифеста.
 # В СЕТЬ НЕ ХОДИТ: манифест лежит в каталоге кода (его зовут синхронно экран «Компоненты», план движка и дамп).
@@ -666,7 +761,8 @@ bin_status() {
         _p=$(bs_pick "$_n")
         _av=$(bm_field "$_n" 4 max)
         if [ -z "$_p" ] || [ ! -f "$_p" ]; then printf '%s\tabsent\t\t%s\t\n' "$_n" "$_av"; continue; fi
-        _h=$(bs_sha "$_n" "$_p"); _st=unknown; _cv=""; _run=""
+        _h=$(bs_sha "$_n" "$_p")
+        _st=unknown; _cv=""; _run=""
         if [ -n "$_h" ]; then
             _cv=$(bm_ver_of "$_n" "$_h")
             if [ -n "$_cv" ]; then
@@ -703,7 +799,8 @@ bs_seed() {   # $1 = имя, $2 = куда легло, $3 = путь по реп
     _bsh=$4; [ -n "$_bsh" ] || _bsh=$(file_sha256 "$2"); [ -n "$_bsh" ] || return 0
     _bsa=""; case "$3" in bin/*/*) _bsa=${3#bin/}; _bsa=${_bsa%%/*} ;; esac
     _bsv=""; [ -s "$BM_FILE" ] && _bsv=$(awk -F'\t' -v n="$1" -v h="$_bsh" -v a="$_bsa" '$1 == n && $5 == h && $4 != "" && (a == "" || $2 == a) { print $4; exit }' "$BM_FILE")
-    bs_put "$1" "$2" "$(bs_key "$2")" "$_bsh" "$_bsv"
+    _bs_as=""; [ "$_bsa" = armv7sf ] && [ -n "$_bsv" ] && _bs_as=armv7sf
+    bs_put "$1" "$2" "$(bs_key "$2")" "$_bsh" "$_bsv" "$_bs_as"
 }
 
 # --- Скачать бинарь bin/<арка>/<name>.user в dst (рабочее имя без .user) с проверкой.
@@ -1153,7 +1250,13 @@ upd_store_busy() {
     return 1
 }
 cmd_apply() {
-    _force="$1"
+    _force=
+    for _opt in "$@"; do
+        case "$_opt" in
+            --force) _force=--force ;;
+            --no-rollback) export PKG_SNAP_ACK=1 ;;
+        esac
+    done
     upd_store_busy apply && return 1
     # The download stage opens with the release description: it is the first network step, and the screen's first line must not
     # wait for the first byte of the package.
@@ -1165,6 +1268,10 @@ cmd_apply() {
             *)    log "[apply] СТОП: ${REL_WHY:-не удалось получить описание релиза с GitHub (нет связи)} — обновление отменено" ;;
         esac
         return 1
+    fi
+    # The panel retries the release the user saw, even if the published release has since changed.
+    if [ -n "$PKG_RETRY_CODE" ] && { [ "$PKG_RETRY_CODE" != "$lc" ] || [ "$PKG_RETRY_CODE" != "$REL_CODE" ]; }; then
+        log "[apply] СТОП: версия для повторной установки изменилась — проверьте обновления снова"; return 1
     fi
     if [ "$_force" != "--force" ] && [ "$REL_CODE" -le "$lc" ]; then
         log "[apply] на GitHub код $REL_CODE <= локального $lc — это даунгрейд, отмена (--force чтобы всё равно)"; return 1
@@ -1222,6 +1329,7 @@ cmd_apply() {
     if [ ! -f "$PKG_TMP/root/pkg-install.sh" ]; then
         log "[apply] СТОП: в пакете нет установщика pkg-install.sh — не ставим"; pkg_cleanup; return 1
     fi
+    pkg_bin_guard "$PKG_TMP/root" apply || { pkg_cleanup; return 1; }
     log "[apply] пакет проверен (подпись, sha256, состав, версия) — передаю установщику из пакета"
     # Установщик ИЗ ПАКЕТА — в этом весь смысл: его правила приехали вместе с кодом. Пути — явно: нас
     # зовут и из CGI, и из cron-бутстрапа, и наследование окружения не должно решать, куда ставить.
@@ -1233,8 +1341,26 @@ cmd_apply() {
     return "$_prc"
 }
 
-# ОТКАТ ЧЕРЕЗ ГРАНИЦУ ФОРМЫ ВХОДА ЗАПРЕЩЁН — разбор внутри rb_guard(), там же и признаки.
-rb_guard() {                     # 0 = откатывать можно; 1 = снимок СТАРЕЕ формы входа
+# Code replacement retains bins. Both apply and rollback must keep the ability
+# to acquire soft-float builds; a package version says nothing about that ability.
+pkg_bin_guard() {                 # $1 = unpacked code, $2 = operation for the log
+    if [ "$(bin_arch)" = armv7sf ]; then
+        if ! awk -F'\t' '$1 !~ /^#/ && NF == 5 && $2 == "armv7sf" { found=1 } END { exit !found }' "$1/bin-manifest.txt" 2>/dev/null ||
+           ! _rga=$(ENODIA_DIR="$1" sh "$1/gh-update.sh" bin-arch 2>/dev/null) ||
+           [ "$_rga" != armv7sf ]; then
+            if [ -f "$ENODIA_DIR/nf-i18n.sh" ]; then . "$ENODIA_DIR/nf-i18n.sh"; fi
+            if command -v nf_lang >/dev/null 2>&1 && [ "$(nf_lang)" = en ]; then
+                log "[$2] STOP: The selected package does not support armv7sf. This router needs binaries that do not require VFP."
+            else
+                log "[$2] СТОП: выбранный пакет не поддерживает armv7sf: этому роутеру нужны бинарные файлы без VFP."
+            fi
+            return 1
+        fi
+    fi
+}
+
+rb_guard() {
+    pkg_bin_guard "$1" rollback || return 1
     # ОТКАТ ЧЕРЕЗ ГРАНИЦУ ФОРМЫ ВХОДА ЗАПРЕЩЁН. Снимок, снятый ДО 03.09.2026, несёт totp.sh, который
     # ещё не знает пароля (`pw_verify` в нём нет), и CGI, у которых гейт был пропуском. Живой uhttpd
     # при этом уже поднят БЕЗ `-c` — то есть сразу после такого отката панель со всеми ДЕЙСТВИЯМИ
@@ -1479,20 +1605,28 @@ cmd_verify_json() {
 # показывает. Пусто — отказа в журнале нет (или журнал прежнего формата).
 upd_why() {
     [ -f "$GH_UPD_LOG" ] || return 0
-    grep -E '^\[(apply|rollback)\] (СТОП:|FAIL |на GitHub нет|на GitHub код|нет снимков|нет .*pkg-install\.sh|не открыть|не создать|снимок СТАРЕЕ)' "$GH_UPD_LOG" 2>/dev/null \
+    grep -E '^\[(apply|rollback)\] (СТОП:|FAIL |на GitHub нет|на GitHub код|нет снимков|нет .*pkg-install\.sh|не открыть|не создать|снимок СТАРЕЕ|STOP:)' "$GH_UPD_LOG" 2>/dev/null \
         | head -n 1 | sed 's/^\[[a-z]*\] //'
 }
 # status-json: версия, источник, снимки отката, последнее обновление журналом.
 # Без сети: экран «Обновление» спрашивает его на каждый показ и раз в две секунды, пока обновление идёт.
-# `rb` — можно ли откатиться к последнему снимку. Гард формы входа (`rb_guard`) судит СОДЕРЖИМОЕ снимка, а снимки пакетного пути
-# снимает только установщик, появившийся позже формы входа, ⇒ у них ответ заведомо «можно»; распаковывать архив на каждый опрос
-# (раз в две секунды) ради заведомого ответа незачем. Сам откат гард всё равно проверяет.
+# `rb` reports snapshot availability without unpacking an archive on every poll.
+# The actual rollback checks login and binary-set compatibility;
+# any refusal reaches the panel through apply.why and the operation log.
 cmd_status_json() {
     _sn=""; _last=""
     for _d in $(snap_list); do
         _sn="$_sn${_sn:+,}\"$(printf '%s' "${_d%.tar.gz}" | jesc 40)\""; _last="$_d"
     done
     _rb=null; [ -n "$_last" ] && _rb=true
+    _snap_status=
+    if ( [ -f "$ENODIA_DIR/store-lib.sh" ] && . "$ENODIA_DIR/store-lib.sh" &&
+        command -v data_flash_tight >/dev/null 2>&1 && data_flash_tight "$SNAP_DIR" ); then
+        _snap_status=',"snap_no_rollback":true'
+    fi
+    if [ "$_rb" = null ] && [ -f "$SNAP_DIR/.tight-flash" ]; then
+        _snap_status=$_snap_status',"rb_reason":"tight_flash"'
+    fi
     _st=$(cat "$GH_UPD_STATE" 2>/dev/null | tr -cd 'A-Z'); [ -n "$_st" ] || _st=IDLE
     _run=false; upd_running && _run=true
     _at=$(stat -c %Y "$GH_UPD_LOG" 2>/dev/null); case "$_at" in ''|*[!0-9]*) _at=0 ;; esac
@@ -1501,6 +1635,7 @@ cmd_status_json() {
     # «откатитесь» тогда унёс бы прошлое УДАЧНОЕ обновление (ревью шага 6c, круг 2). Число — из ПОСЛЕДНЕЙ строки итога.
     _rp=$(grep '^\[\(apply\|rollback\)\] итог: заменено [0-9]' "$GH_UPD_LOG" 2>/dev/null | tail -n 1 | sed 's/.*заменено \([0-9]*\).*/\1/')
     case "$_rp" in ''|*[!0-9]*) _rp=0 ;; esac
+    if grep -q '^\[apply\] СТОП: снимок вернуть НЕ удалось' "$GH_UPD_LOG" 2>/dev/null; then _rp=null; fi
     # THE RUN BY STAGES (`prog`, null — no run the panel started since boot). Its stage left running is judged by the outcome here:
     # running · ended well · ended with a refusal · its holder died (RUNNING without a live holder — a reboot, the OOM killer).
     case "$_run:$_st" in
@@ -1509,9 +1644,9 @@ cmd_status_json() {
         *:FAIL|*:RBFAIL)     _po=fail ;;
         *)                   _po=cut ;;
     esac
-    printf '{"name":"%s","code":%s,"repo":"%s","ref":"%s","snaps":[%s],"rb":%s,"prog":%s,"apply":{"state":"%s","running":%s,"at":%s,"now":%s,"replaced":%s,"why":"%s","log":[' \
+    printf '{"name":"%s","code":%s,"repo":"%s","ref":"%s","snaps":[%s],"rb":%s%s,"prog":%s,"apply":{"state":"%s","running":%s,"at":%s,"now":%s,"replaced":%s,"why":"%s","log":[' \
         "$(printf '%s' "$(local_name)" | jesc 60)" "$(local_code)" "$(printf '%s' "$REPO" | jesc 120)" "$(printf '%s' "$GH_REF" | jesc 60)" \
-        "$_sn" "$_rb" "$(prog_json "$_po")" "$_st" "$_run" "$_at" "$(date +%s)" "$_rp" "$(printf '%s' "$(upd_why)" | jesc 600)"
+        "$_sn" "$_rb" "$_snap_status" "$(prog_json "$_po")" "$_st" "$_run" "$_at" "$(date +%s)" "$_rp" "$(printf '%s' "$(upd_why)" | jesc 600)"
     # Потолок строки 600: причина 429 весит ~310–330 байт (разбор у packages.sh::cmd_op_json).
     [ -f "$GH_UPD_LOG" ] && tail -n 60 "$GH_UPD_LOG" 2>/dev/null | jlines 600
     printf ']}}\n'
@@ -1524,10 +1659,12 @@ case "$1" in
     bin-staged)    cmd_bin_staged ;;
     bin-unstage)   cmd_bin_unstage ;;
     bin-arch)      bin_arch ;;
+    bin-purge)     bin_purge_report "$2" "$3" ;;
+    bin-stage-guard) bin_stage_guard ;;
     check)         cmd_check ;;
     # The stage left running ends with the run (its outcome is the state file the CGI's background node writes after us). Not
     # `exit` here: the cleanup below the `case` (this run's GH_TMP) must still run — `( exit N )` hands the code to `_rc` as it is.
-    apply)         cmd_apply "$2"; _gar=$?; prog_close; ( exit "$_gar" ) ;;
+    apply)         shift; cmd_apply "$@"; _gar=$?; prog_close; ( exit "$_gar" ) ;;
     rollback)      cmd_rollback; _gar=$?; prog_close; ( exit "$_gar" ) ;;
     verify)        cmd_verify "$2" ;;
     check-json)    cmd_check_json ;;
@@ -1547,7 +1684,7 @@ case "$1" in
     # Закачка заранее (движок компонентов, разбор у BIN_PREFETCH): скачать в ОЗУ · убрать скачанное.
     bin-prefetch)  cmd_bin_prefetch "$2" ;;
     bin-unprefetch) cmd_bin_unstage "$BIN_PREFETCH" ;;
-    *) echo "usage: $0 fetch-bin <name> <dst> [minsz] | check | apply [--force] | rollback | verify [путь] | check-json | verify-json | status-json | upd-busy | reachable [path] | bin-manifest | bin-size <имя> [min|max] | bin-ver <имя> | bin-status [имя…] | bin-stale [имя…] | bin-stage <имя> <файл> | bin-staged | bin-unstage | bin-prefetch <имя> | bin-unprefetch | bin-arch"; exit 2 ;;
+    *) echo "usage: $0 fetch-bin <name> <dst> [minsz] | check | apply [--force] [--no-rollback] | rollback | verify [путь] | check-json | verify-json | status-json | upd-busy | reachable [path] | bin-manifest | bin-size <имя> [min|max] | bin-ver <имя> | bin-status [имя…] | bin-stale [имя…] | bin-stage <имя> <файл> | bin-staged | bin-unstage | bin-prefetch <имя> | bin-unprefetch | bin-arch"; exit 2 ;;
 esac
 _rc=$?
 # Кэш сумм — временный (свежий на каждый запуск): протухшая копия молча пропустила бы

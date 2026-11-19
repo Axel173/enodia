@@ -186,7 +186,7 @@ xqver() { grep -E "^[[:space:]]*option $1 " /usr/share/xiaoqiang/xiaoqiang_versi
 # `enodia-restore`, `ussl-dbg`, `xiaomi-bypass`. Логи-то в ОЗУ есть (их знает clean.sh), но в
 # диаг-архив они не попадали ⇒ при разборе чужой аварии не хватало ровно того лога, который
 # описывает восстановление из бэкапа. Проверку «RAM_LOGS ⊆ DUMP_LOGS» делает local/check-consistency.ps1.
-DUMP_LOGS="enodia-startup enodia-watchdog enodia-switch-vpn-setup enodia-transport-awg-setup
+DUMP_LOGS="enodia-startup enodia-bin-purge enodia-watchdog enodia-switch-vpn-setup enodia-transport-awg-setup
 enodia-iplist-update enodia-subs-update enodia-notify enodia-notify-event enodia-hev
 enodia-hysteria enodia-byedpi enodia-byedpi-test-run enodia-byedpi-fetch enodia-zapret-nfqws
 enodia-doh enodia-panel-tls enodia-support enodia-xiaomi-bypass enodia-dnsq enodia-restore
@@ -630,7 +630,6 @@ for _p in "$ENODIA_DIR"/transport-*.sh "$ENODIA_DIR"/xray-transport.sh; do
     sh "$_p" status 2>/dev/null || echo "(status не отработал)"
 done
 [ "$_np" = 0 ] && echo "(плагинов несущих нет — установка до рефактора транспортов)"
-
 sec "OFFLOAD (Qualcomm NSS / SFE / ECM — влияет на conntrack и десинк)"
 found=0
 for k in /sys/kernel/debug/ecm /sys/module/shortcut_fe /sys/module/qca_nss_drv /proc/sys/dev/nss; do
@@ -926,7 +925,6 @@ showmeta "$ENODIA_STATE/.sub-client"  # how each subscription presents itself to
 [ -s "$ENODIA_STATE/.sub-client" ] && awk -F'\t' '$1 ~ /^[a-z0-9-]+$/ && $2 ~ /^[a-z0-9]+$/ { print "sub-client: " $1 " → " $2 ", HWID " ($4 == "1" ? "on (" $6 ")" : "off") }' "$ENODIA_STATE/.sub-client" 2>/dev/null
 showmeta "$ENODIA_STATE/.cfg-names"   # свои имена конфигов (cfg-names.sh): в бэкапе — с конфигами; содержимое — имена человека
 showmeta "$ENODIA_STATE/.cfg-via"     # дороги к серверам (road.sh): конфиг → номер выхода-дороги
-showmeta "$ENODIA_STATE/.sub-picks"
 showmeta "$ENODIA_STATE/premium"      # Amnezia Premium (premium.sh): the router's installation id and the last answers — not read
 # …and what the last Premium work said (no key in it: state, op, the subscription's tag, the words).
 [ -s /tmp/enodia-premium.json ] && echo "premium: $(head -c 400 /tmp/enodia-premium.json)"
@@ -987,7 +985,7 @@ sec "ЛОКИ / СТЕЙТ В /tmp"
 # is dead is no swap — the line shows which one it is.
 for l in enodia-heal.lock enodia-heal.reason enodia-heal.skipped enodia-heal-kick.tries enodia-heal-kick.stamp \
          enodia-heal-kick.said enodia-heal-kick.mailed enodia-heal-kick.cfg enodia-switching.lock enodia-watchdog.lock enodia-watchdog.pid \
-         enodia-watchdog.state enodia-watchdog.xstate enodia-failover.stamp enodia-failover.backoff \
+         enodia-watchdog.state enodia-watchdog.xstate enodia-road-failopen enodia-failover.stamp enodia-failover.backoff \
          enodia-failover-episode enodia-awg0.seen enodia-awg0.firstup \
          enodia-domwarm.stamp enodia-proto-install.lock enodia-byedpi-sweep.lock \
          enodia-subs-update.lock enodia-gh-update.lock enodia-pkg-install.lock enodia-uninstall.mode \
@@ -1114,7 +1112,7 @@ command -v bin_on_store >/dev/null 2>&1 || bin_on_store() { return 1; }
 # накопителем показывает «xray · роутер» и не объясняет НИЧЕГО: читатель решает, что переезд
 # сломался, и лечит здоровое. Шим на старую библиотеку: «не закреплён».
 command -v bin_pinned >/dev/null 2>&1 || bin_pinned() { return 1; }
-DMP_BINS="amneziawg-go awg xray hysteria hev byedpi nfqws https-dns-proxy dot-proxy quic-dns-proxy panel-tls dns-filter"
+DMP_BINS="amneziawg-go awg xray hysteria hev byedpi nfqws https-dns-proxy dot-proxy quic-dns-proxy dnsq panel-tls dns-filter"
 # СВЕЖА ЛИ СБОРКА — вопрос с одним владельцем (gh-update.sh bin-status: sha стоящего против манифеста, без сети). Без него
 # дамп отвечал «какая версия кода», но не «какая сборка бинаря»: жалоба «DoT уводит на DoH» на dot-proxy до 1.2 и после
 # выглядела одинаково. Прежний апдейтер верба не знает — тогда колонки нет, а не выдуманный ответ.
