@@ -4,7 +4,7 @@
 #  GET  ?secrets=0  -> архив ТОЛЬКО поведенческих настроек (флаги, правила, списки, БЕЗ ключей):
 #                      безопаснее шарить, но сервера/ключи не входят.
 #  GET  ?secrets=1  -> ПОЛНЫЙ бэкап (включая awg.conf/configs/*, notify.conf и т.п. — КЛЮЧИ!).
-#  POST (token + content=base64(.tar.gz)) -> импорт: распаковка во временный каталог с
+#  POST .tar.gz with a token (legacy forms also accepted) -> импорт: распаковка во временный каталог с
 #       проверкой путей (запрет '..'/абсолютных), затем whitelist-копирование в $ENODIA_STATE и
 #       apply-bypass apply. Транспорт/несущую НЕ трогает (активация — отдельно в панели).
 #
@@ -102,6 +102,7 @@ SETTINGS="$SETTINGS sched"                                                      
 SETTINGS="$SETTINGS .prefs .panel-layout"                                            # язык, тема, порядок карточек
 SETTINGS="$SETTINGS .traffic-daily"                                                  # история трафика (посуточно)
 SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                                # traffic by device: closed days + the names of devices gone
+SETTINGS="$SETTINGS .stocklogs-mode"                                                # policy only, applied by clean.sh
 # --- ЧТО НЕ ВХОДИТ И ПОЧЕМУ ------------------------------------------------------------------
 # Блок ниже — не комментарий «на память», а ВТОРАЯ ПОЛОВИНА whitelist'а и единственный способ
 # отличить «забыли дописать» от «решили не возить». Формат строки строгий и машиночитаемый:
@@ -115,10 +116,13 @@ SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                            
 # EXCLUDE: .support-key .support-relay — канал «режима поддержки»; импорт не должен его воскрешать
 # EXCLUDE: .tasks-off — the «off» form of THIS router's crontab (tasks.sh): it describes the plain lines written into this file,
 #          and carried to another router or back in time it would remove or disable what is not there (review s.106, round 3)
-# EXCLUDE: .srv-checks — кэш проверок серверов, протухает за минуты
+# EXCLUDE: .srv-checks .srv-checks.d — кэш проверок серверов
 # EXCLUDE: .sub-fallbacks — obsolete derived diagnostics from earlier importers
+# EXCLUDE: .slots-unapplied — outstanding rule publication on this router; restore replays the imported exit settings
+# EXCLUDE: .vpn-deactivated — full deactivation belongs to this router, like its suspended schedules
 # EXCLUDE: .stock-backup-off — the stock settings backup turned off on THIS router (stock-backup.sh): a fact about this router's
 #          flash and its stock flag; carried to another router it would make heal turn off a copy nobody there chose to lose
+# EXCLUDE: .stocklogs-original — this firmware's exact rotation rule, retained locally for restore
 # EXCLUDE: .chebur .chebur-auto — «второе мнение» шлёт адрес сервера стороннему российскому сервису: включает человек на ЭТОМ роутере, архив — нет
 # EXCLUDE: xray-s*.json hysteria-s*.yaml hev-s*.yaml — рабочие конфиги доп-выходов: плагин собирает их из конфига реестра `.slots` на подъёме выхода и снимает на спуске
 # EXCLUDE: awg_setup.log — вывод вендоренного установщика AWG: журнал, а не настройка
@@ -188,7 +192,27 @@ SETTINGS="$SETTINGS .traffic-dev .traffic-dev-hosts"                            
 # taking a second one (its key is in `.subs`, a secret too).
 # .sub-client = how each subscription presents itself to its provider (subs-lib.sh): the app and its HWID — a device identity the
 # provider counts (a restore keeps the router's place instead of taking another slot), so a secret, next to `.subs`.
-SECRETS="awg.conf amnezia_for_awg.conf awg0.conf notify.conf xray.json hysteria.yaml .active .xray-active .hy2-active .transport .subs .sub-names .sub-client .cfg-names .cfg-via .warp-reg .sub-picks configs xray-configs hy2-configs server panel-cert.pem panel-key.pem premium"
+SECRETS="awg.conf amnezia_for_awg.conf awg0.conf notify.conf xray.json hysteria.yaml .active .xray-active .hy2-active .transport .subs .sub-names .sub-client .cfg-names .server-favs .cfg-via .warp-reg .sub-picks configs xray-configs hy2-configs server panel-cert.pem panel-key.pem premium"
+
+# Both directions share a bounded workspace in /tmp on 128 MiB routers. Count the expanded
+# stream without staging a second tar file.
+BACKUP_ARCHIVE_MAX=8388608
+BACKUP_TAR_MAX=33554432
+archive_fits() {
+	[ "$(wc -c < "$1")" -le "$BACKUP_ARCHIVE_MAX" ] &&
+		[ "$(gzip -dc "$1" 2>/dev/null | head -c "$((BACKUP_TAR_MAX+1))" | wc -c)" -le "$BACKUP_TAR_MAX" ]
+}
+BACKUP_LIMIT_MSG='Архив превышает предел: 8 МиБ в файле или 32 МиБ после распаковки.'
+backup_tmp() {
+	# uhttpd can kill a CGI before its exit trap runs. Reclaim only our private workspaces of dead processes.
+	for _bt_dir in /tmp/enodia-restore.[0-9]*.* /tmp/enodia-export.[0-9]*.*; do
+		[ -d "$_bt_dir" ] && [ ! -L "$_bt_dir" ] || continue
+		_bt_pid=${_bt_dir##*enodia-}; _bt_pid=${_bt_pid#*.}; _bt_pid=${_bt_pid%%.*}
+		case "$_bt_pid" in ''|*[!0-9]*) continue ;; esac
+		[ -d "/proc/$_bt_pid" ] || rm -rf "$_bt_dir"
+	done
+	mktemp -d "/tmp/enodia-$1.$$.XXXXXX" 2>/dev/null
+}
 
 if [ "$REQUEST_METHOD" = "POST" ]; then
 	echo "Content-Type: application/json; charset=utf-8"
@@ -196,10 +220,22 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	echo ""
 	fail() { printf '{"ok":false,"msg":"%s"}\n' "$1"; exit 0; }
 
+	# Keep admission from the first body read through publication and apply launch.
+	# A killed CGI releases the kernel lock when its descriptors close.
+	exec 8>>/tmp/enodia-restore.lock
+	flock -n 8 || fail "уже идёт восстановление — дождитесь его конца"
+
 	len=${CONTENT_LENGTH:-0}
 	case "$len" in ''|*[!0-9]*) len=0 ;; esac
-	{ [ "$len" -gt 0 ] && [ "$len" -le 2097152 ]; } || fail "пустой или слишком большой архив (>2 МБ)"
-	body=$(head -c "$len")
+	raw=0
+	if [ "$CONTENT_TYPE" = application/x-enodia-backup ]; then
+		[ "$len" -gt 0 ] || fail 'Архив пуст.'
+		[ "$len" -le "$BACKUP_ARCHIVE_MAX" ] || fail "$BACKUP_LIMIT_MSG"
+		raw=1; body=$QUERY_STRING
+	else
+		{ [ "$len" -gt 0 ] && [ "$len" -le 2097152 ]; } || fail "пустой или слишком большой архив (>2 МБ)"
+		body=$(head -c "$len")
+	fi
 	field() { echo "$body" | tr '&' '\n' | grep "^$1=" | head -1 | cut -d= -f2-; }
 	# Слэш удваиваем ДО подстановки `\xXX`: `printf %b` разворачивает любые escape-последовательности,
 	# а не только наши (разбор — в шапке urldecode у cgi-bin/action). Копия обязана быть побайтово
@@ -218,11 +254,31 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	_rp=$(cat /tmp/enodia-restore-apply.pid 2>/dev/null | tr -d ' \r\n')
 	case "$_rp" in ''|*[!0-9]*) _rp="" ;; esac
 	[ -n "$_rp" ] && pid_runs "$_rp" 'enodia-restore-apply' && fail "применение прошлого импорта ещё идёт — дождитесь его конца"
+	if [ -z "$_rp" ] && [ -f "$ENODIA_DIR/clock-lib.sh" ]; then
+		. "$ENODIA_DIR/clock-lib.sh"
+		read -r _bst _bat 2>/dev/null < /tmp/enodia-restore.state || :
+		[ "$_bst" != RUNNING ] || [ "$(age_since "$_bat")" -gt 5 ] ||
+			fail "применение прошлого импорта ещё идёт — дождитесь его конца"
+	fi
 
-	tmp="/tmp/enodia-restore.$$"
-	rm -rf "$tmp" 2>/dev/null; mkdir -p "$tmp" || fail "нет места в /tmp"
-	urldecode "$(field content)" | base64 -d 2>/dev/null > "$tmp/b.tgz"
-	[ -s "$tmp/b.tgz" ] || { rm -rf "$tmp"; fail "битый или пустой архив (base64)"; }
+	tmp=$(backup_tmp restore) || fail "нет места в /tmp"
+	_restore_switch=/tmp/enodia-switching.lock
+	_restore_carriers=0
+	restore_unlock_carriers() {
+		[ "$_restore_carriers" = 1 ] || return 0
+		[ ! -f "$ENODIA_DIR/subs-import.sh" ] || sh "$ENODIA_DIR/subs-import.sh" restore-unlock "$$" >/dev/null 2>&1
+		rm -f "$_restore_switch"
+		_restore_carriers=0
+	}
+	trap 'restore_unlock_carriers; rm -rf "$tmp"' EXIT
+	trap 'exit 1' HUP INT TERM PIPE
+	if [ "$raw" = 1 ]; then
+		head -c "$len" > "$tmp/b.tgz" && [ "$(wc -c < "$tmp/b.tgz")" -eq "$len" ] || fail 'Архив получен не полностью. Загрузите файл ещё раз.'
+	else
+		urldecode "$(field content)" | base64 -d 2>/dev/null > "$tmp/b.tgz"
+		[ -s "$tmp/b.tgz" ] || fail "битый или пустой архив (base64)"
+	fi
+	archive_fits "$tmp/b.tgz" || fail "$BACKUP_LIMIT_MSG"
 
 	# Анти-traversal: отбраковываем архив, если ХОТЬ одна запись абсолютная или содержит '..'.
 	# ЧЕСТНО ПРО ЭТУ СТРОКУ (замерено на BE7000 23.08.2026, стенд dev/backup-import-test.sh):
@@ -315,17 +371,50 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 
 	# Копируем ТОЛЬКО известные имена (из кода). Файл -> заменяем; каталог -> вливаем содержимое.
 	restored=0
-	_road_drops=""; _road_lang=ru
+	_road_drops=""; _road_lang=ru; _profiles_restored=0; _restore_roads=0
 	if [ -f "$ENODIA_DIR/nf-i18n.sh" ]; then . "$ENODIA_DIR/nf-i18n.sh"; _road_lang=$(nf_lang); fi
-	# Compare peers and publish exits/roads before copying configs, so a refused registry can be retried.
-	if [ -f "$ENODIA_DIR/road.sh" ] && { [ -f "$tmp/.slots" ] || [ -f "$tmp/.cfg-via" ] || [ -d "$tmp/configs" ] || [ -d "$tmp/xray-configs" ] || [ -d "$tmp/hy2-configs" ]; }; then
-		if ! _road_drops=$(sh "$ENODIA_DIR/road.sh" import "$tmp" 2>/dev/null); then
+	if [ -e "$tmp/.slots" ] && ! sh "$ENODIA_DIR/slots.sh" validate-registry "$tmp/.slots" >/dev/null 2>&1; then
+		rm -rf "$tmp"
+		[ "$_road_lang" != en ] || fail "Invalid exit registry in the backup."
+		fail "Некорректный реестр выходов в резервной копии."
+	fi
+	# Restore uses the config deletion lock order. The road and registry
+	# owners pass the subscription lease back to this CGI for the file copy.
+	for _rf in .slots .cfg-via configs xray-configs hy2-configs .subs .sub-names .sub-client .active .xray-active .hy2-active .transport .vpn-off .failover-home .byedpi-args .byedpi-args-s[2-7] .zapret-args awg.conf awg0.conf amnezia_for_awg.conf xray.json hysteria.yaml; do
+		[ -e "$tmp/$_rf" ] || continue
+		if command -v switch_hold >/dev/null 2>&1; then
+			switch_hold "$_restore_switch" 3 || fail 'Идёт смена транспорта или сервера — повторите восстановление.'
+		else
+			( set -C; echo $$ > "$_restore_switch" ) 2>/dev/null || fail 'Идёт смена транспорта или сервера — повторите восстановление.'
+		fi
+		_restore_carriers=1
+		break
+	done
+	_off_before=0; [ ! -f "$ENODIA_STATE/.vpn-off" ] || _off_before=1
+	if [ -f "$ENODIA_DIR/road.sh" ]; then
+		# A target router's saved exits do not make an unrelated archive an exit restore.
+		for _road_item in "$tmp"/.slots "$tmp"/.cfg-via "$tmp"/configs/*.conf "$tmp"/xray-configs/*.json "$tmp"/hy2-configs/*.yaml \
+		    "$tmp"/.byedpi-args "$tmp"/.byedpi-args-s[2-7] "$tmp"/.zapret-args; do
+			[ -f "$_road_item" ] || continue
+			_restore_roads=1
+			if [ -s "$ENODIA_STATE/.slots" ] || [ -f "$tmp/.slots" ]; then _profiles_restored=1; fi
+			break
+		done
+	fi
+	if [ "$_restore_roads" = 1 ]; then
+		if ! _road_drops=$(sh "$ENODIA_DIR/road.sh" import "$tmp" "$$" 2>/dev/null); then
+			restore_unlock_carriers
+			if [ "$_off_before" = 0 ] && [ -f "$ENODIA_STATE/.vpn-off" ]; then
+				sh "$ENODIA_DIR/vpn-toggle.sh" off >/dev/null 2>&1
+			fi
 			rm -rf "$tmp"
 			[ "$_road_lang" != en ] || fail "Roads and exits were only partially restored. Retry the import."
 			fail "Не удалось полностью восстановить дороги и выходы. Повторите импорт."
 		fi
 		[ ! -f "$tmp/.slots" ] || restored=$((restored+1))
 		[ ! -f "$tmp/.cfg-via" ] || restored=$((restored+1))
+	elif [ "$_restore_carriers" = 1 ] && [ -f "$ENODIA_DIR/subs-import.sh" ]; then
+		sh "$ENODIA_DIR/subs-import.sh" restore-lock "$$" || fail 'Идёт обновление подписок — повторите восстановление.'
 	fi
 	# The router's registry (tag⇥link) BEFORE the archive lays its own: `.sub-client` after the loop keeps the lines of the
 	# subscriptions an older archive brings back unchanged.
@@ -354,6 +443,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			fi
 			continue
 		fi
+		case "$f:$_profiles_restored" in
+			configs:1|xray-configs:1|hy2-configs:1|.vpn-off:1|.byedpi-args:1|.byedpi-args-s[2-7]:1|.zapret-args:1)
+				restored=$((restored+1)); continue ;;
+		esac
 		if [ -d "$tmp/$f" ]; then
 			mkdir -p "$ENODIA_STATE/$f" 2>/dev/null
 			# Обычные имена — ОДНИМ `cp` (как было): в xray-configs бывает под сотню файлов, и
@@ -378,8 +471,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 			if [ "$_any" = 1 ]; then restored=$((restored+1)); fi
 		elif [ "$f" = .cfg-names ] && [ -f "$ENODIA_DIR/cfg-names.sh" ]; then
 			continue   # имена конфигов — ПОСЛЕ цикла, когда каталоги конфигов уже влиты (владелец сверяет с ними)
+		elif [ "$f" = .server-favs ]; then
+			continue   # restored by the favourites owner after the server files
 		elif { [ "$f" = .cfg-via ] || [ "$f" = .slots ]; } && [ -f "$ENODIA_DIR/road.sh" ]; then
-			continue   # restored together by the road and slot owners above
+			continue   # restored together by the road and slot owners below
 		elif [ "$f" = .warp-reg ] && [ -f "$ENODIA_DIR/warp.sh" ]; then
 			continue   # the records of WARP registrations — AFTER the loop too (warp.sh import merges by key and prunes)
 		else
@@ -394,6 +489,14 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# прежний сервер с тем же файлом (ревью с.96, круг 2). Архив без конфигов и без имён («без ключей») — не трогаем ничего.
 	if [ -f "$ENODIA_DIR/cfg-names.sh" ] && { [ -f "$tmp/.cfg-names" ] || [ -d "$tmp/configs" ] || [ -d "$tmp/xray-configs" ] || [ -d "$tmp/hy2-configs" ]; }; then
 		sh "$ENODIA_DIR/cfg-names.sh" import "$tmp/.cfg-names" "$tmp" >/dev/null 2>&1 && [ -f "$tmp/.cfg-names" ] && restored=$((restored+1))
+	fi
+	_fav_restore_error=''
+	if [ -f "$tmp/.server-favs" ] || [ -d "$tmp/configs" ] || [ -d "$tmp/xray-configs" ] || [ -d "$tmp/hy2-configs" ]; then
+		if [ -f "$ENODIA_DIR/server-favs.sh" ] && sh "$ENODIA_DIR/server-favs.sh" import "$tmp/.server-favs" "$tmp" >/dev/null 2>&1; then
+			[ ! -f "$tmp/.server-favs" ] || restored=$((restored+1))
+		else
+			_fav_restore_error='Не удалось восстановить избранное. Повторите импорт.'
+		fi
 	fi
 	# WARP REGISTRATIONS (warp.sh import) — keyed by the config's key: the archive's records join the router's, and a record whose
 	# config is not here (neither brought nor kept) is dropped. An archive without configs and without records touches nothing.
@@ -418,7 +521,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	if [ "$restored" -eq 0 ]; then
 		# Отвергнутая пара — тоже причина: «не наш бэкап» про архив, где кроме неё ничего нет, звучал бы как «файл не тот».
 		[ "$_pem" = bad ] && fail "сертификат HTTPS панели в архиве не сходится со своим ключом, а больше восстанавливать нечего"
-		fail "в архиве нет распознанных настроек (не наш бэкап?)"
+		fail "${_fav_restore_error:-в архиве нет распознанных настроек (не наш бэкап?)}"
 	fi
 
 	# Права на секреты (boot/repair-эквивалент). Транспорт не трогаем. Вырезы «мимо VPN» тоже
@@ -433,6 +536,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	# dot-файла): восстановление бэкапа не должно САМО открывать порт роутера в интернет.
 	chmod 700 "$ENODIA_STATE"/server 2>/dev/null; chmod 600 "$ENODIA_STATE"/server/* 2>/dev/null
 	chmod 600 "$ENODIA_STATE"/panel-key.pem 2>/dev/null; chmod 644 "$ENODIA_STATE"/panel-cert.pem 2>/dev/null   # те же, что у tls_ensure_cert
+	restore_unlock_carriers
 	# ПРИМЕНЯЕМ, а не отсылаем к ребуту. Персист восстановлен, но ВСЁ живое состояние эфемерно:
 	# ipset в RAM, dnsmasq-сниппеты в /tmp, а доменные правила панель читает из /etc. Раньше здесь
 	# переигрывались только вырезы, и это было хуже, чем звучало: /etc/dnsmasq.d/enodia-custom.conf
@@ -456,6 +560,11 @@ ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 cd "$ENODIA_DIR" || exit 1
 exec >>/tmp/enodia-restore.log 2>&1
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') применение импортированных настроек ==="
+if [ -f "$ENODIA_STATE/.vpn-deactivated" ]; then
+    echo "VPN деактивирован. Настройки сохранены и будут применены при включении VPN."
+    echo "DONE $(date +%s)" > /tmp/enodia-restore.state.new && mv -f /tmp/enodia-restore.state.new /tmp/enodia-restore.state
+    exit $?
+fi
 # ВЫБРАН ЛИ ТРАНСПОРТ ВООБЩЕ. Установка «только панель» — ШТАТНОЕ первое состояние роутера (и
 # ровно то, в котором чаще всего импортируют бэкап: перенос настроек на новый роутер). До выбора
 # протокола роутер обязан работать КАК СТОК — наших правил в ядре нет вовсе. Импорт настроек не
@@ -519,6 +628,11 @@ fi
 [ -f ./dns-hosts.sh ] && [ -s "$ENODIA_STATE/.dns-hosts" ] && sh ./dns-hosts.sh apply
 [ -f ./dns-split.sh ] && [ -f "$ENODIA_STATE/.split-runet" ] && sh ./dns-split.sh apply
 [ -f ./net-tune.sh ] && sh ./net-tune.sh apply
+# The saved system log policy is independent of the VPN and must be applied on this boot.
+_syslog_failed=0
+if [ -f "$ENODIA_STATE/.stocklogs-mode" ]; then
+    sh ./clean.sh stocklogs-apply || _syslog_failed=1
+fi
 # 5b. Расписание обновлений. Маркеры .update-interval/.subs-interval из архива — это НАМЕРЕНИЕ;
 #     истина для cron наступает только после `update-sched.sh apply`. Без него человек видел в
 #     панели свой интервал, а роутер продолжал жить по установочному расписанию.
@@ -583,10 +697,15 @@ fi
 #     бесплатное взаимное исключение — cron heal бежит раз в минуту и мог бы стартовать второй фетч.
 [ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ] && start-stop-daemon -S -b -m -p /tmp/enodia-geo-update.pid \
     -x /bin/sh -- "$ENODIA_DIR/geo.sh" update >/dev/null 2>&1
+# Replay the opted-in exits after restoring the rule sets. The off flag still bars the main carrier.
+if [ "$VOFF" = 1 ] && [ -f ./slots.sh ] && [ -f ./transport.sh ] && [ -n "$(sh ./slots.sh list-admitted 2>/dev/null)" ]; then
+    sh ./transport.sh slots-up
+fi
 # 10. Сертификат HTTPS панели приехал из архива (`RESTORE_TLS=1` ставит импорт, разбор у сверки пары): терминатор читает его
 #     ТОЛЬКО на старте, и без перезапуска служил бы прежним до ребута, пока на диске лежит новый. Последним: перезапуск рвёт
 #     соединения панели по HTTPS на секунду, а опрос хода применения переживает одиночный отказ (спросит ещё).
 [ "$RESTORE_TLS" = 1 ] && [ -f ./web-ui.sh ] && sh ./web-ui.sh tls-reload
+[ "$_syslog_failed" = 0 ] || exit 1
 echo "=== применение завершено ==="
 # ИТОГ — АТОМАРНО (рядом + `mv`): экран «Бэкап» опрашивает этот файл, и обрезанный `>` в окне записи читался бы как
 # «импорта не было» (C105). Оборвалась цепочка раньше этой строки — файл остаётся RUNNING при мёртвом держателе, и
@@ -604,7 +723,7 @@ RESTORE
 	rm -f /tmp/enodia-restore-apply.pid
 	_rtls=0; [ "$_pem" = live ] && _rtls=1
 	RESTORE_TLS=$_rtls start-stop-daemon -S -b -m -p /tmp/enodia-restore-apply.pid \
-		-x /bin/sh -- /tmp/enodia-restore-apply.sh >/dev/null 2>&1
+		-x /bin/sh -- /tmp/enodia-restore-apply.sh 8>&- >/dev/null 2>&1
 	# ЧТО ИЗ ВОССТАНОВЛЕННОГО ЗДЕСЬ НЕ ЗАРАБОТАЕТ. Бэкап переносит НАМЕРЕНИЕ (какой транспорт, какие
 	# доп-выходы, включён ли шифрованный DNS), а бинарей он не несёт и нести не может — они на два
 	# порядка тяжелее. Импорт на СВЕЖУЮ установку («только панель») и на ДРУГУЮ модель — штатный
@@ -624,6 +743,7 @@ RESTORE
 	# Каждое предупреждение — и в общую фразу тоста (`msg`, её читает панель старше поля), и ОТДЕЛЬНОЙ строкой списка
 	# `warns`: экран «Бэкап» рисует их пунктами, а резать фразу обратно по точкам значило бы гадать (в причинах есть «»).
 	_w() { _warn="$_warn $1"; _wj="$_wj${_wj:+,}\"$(printf '%s' "$1" | jesc 600)\""; }
+	[ -z "$_fav_restore_error" ] || _w "$_fav_restore_error"
 	while IFS="$(printf '\t')" read -r _road_key _road_id; do
 		case "$_road_id" in [2-7]) ;; *) continue ;; esac
 		_road_file=${_road_key#*/}
@@ -768,9 +888,21 @@ if [ -z "$present" ]; then
 	exit 0
 fi
 
+export_refuse() {
+	printf 'Status: %s\nContent-Type: text/plain; charset=utf-8\nCache-Control: no-store\n\n%s\n' "$1" "$2"
+	exit 0
+}
+tmp=$(backup_tmp export) || export_refuse '503 Service Unavailable' 'Не удалось подготовить архив.'
+trap 'rm -rf "$tmp"' EXIT
+# Stop after one extra byte and send headers only after verifying the downloadable file.
+( ( cd "$ENODIA_STATE" && tar -cz $present ) 2>/dev/null; echo "$?" > "$tmp/status" ) |
+	head -c "$((BACKUP_ARCHIVE_MAX+1))" > "$tmp/b.tgz" || export_refuse '503 Service Unavailable' 'Не удалось подготовить архив.'
+archive_fits "$tmp/b.tgz" || export_refuse '413 Content Too Large' "$BACKUP_LIMIT_MSG"
+[ "$(cat "$tmp/status" 2>/dev/null)" = 0 ] && [ -s "$tmp/b.tgz" ] || export_refuse '503 Service Unavailable' 'Не удалось подготовить архив.'
+
 tag=$([ "$withsec" = 1 ] && echo full || echo settings)
 echo "Content-Type: application/gzip"
 echo "Content-Disposition: attachment; filename=enodia-$tag-$ts.tar.gz"
 echo "Cache-Control: no-store"
 echo ""
-( cd "$ENODIA_STATE" && tar -cz $present 2>/dev/null )
+cat "$tmp/b.tgz"

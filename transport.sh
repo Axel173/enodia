@@ -64,9 +64,8 @@ SWITCH_LOCK=/tmp/enodia-switching.lock
 # «бинаря нет» и «бинарь на выдернутой флешке» обязаны читаться ОДИНАКОВО — как «транспорт не
 # готов», после чего работает штатный fail-open. Без накопителя — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
-# An exit's own flows flushed once more after mark-core re-points its rule (slot_reflush below); no library — as before, no flush here.
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
-command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { :; }
+if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$ENODIA_BIN/$1"; }
 
 # Реестр: порядок приоритета и cross-перебора. Порядок = приоритет cross («awg» как
@@ -188,6 +187,26 @@ active() { cat "$TRANSPORT_FLAG" 2>/dev/null | tr -d ' \r\n'; }
 # multi-transport; why only with the config — at cmd_up). Asked by the bring-up and by the restart.
 implied() { _imt=$(active); [ -n "$_imt" ] || { [ -f "$ENODIA_STATE/awg.conf" ] && _imt=awg; }; echo "$_imt"; }
 apply_marking() { [ -f "$MARK_CORE" ] && sh "$MARK_CORE" >/dev/null 2>&1; }
+
+cmd_require_config() {
+    _rct=${1:-$(implied)}
+    # An empty selection after deleting it on a pre-.transport installation still means AWG.
+    [ -n "$_rct" ] || { [ ! -f "$ENODIA_STATE/.active" ] || _rct=awg; }
+    case "$_rct" in
+        awg) _rca=.active; _rcd=configs; _rce=conf; _rcl=awg.conf; _rcn=AmneziaWG ;;
+        xray) _rca=.xray-active; _rcd=xray-configs; _rce=json; _rcl=xray.json; _rcn=Xray ;;
+        hy2) _rca=.hy2-active; _rcd=hy2-configs; _rce=yaml; _rcl=hysteria.yaml; _rcn=Hysteria2 ;;
+        *) return 0 ;;
+    esac
+    _r_name=$(head -n 1 "$ENODIA_STATE/$_rca" 2>/dev/null | tr -d ' \r\n')
+    if [ -n "$_r_name" ]; then
+        [ -s "$ENODIA_STATE/$_rcd/$_r_name.$_rce" ] && [ -s "$ENODIA_STATE/$_rcl" ] && return 0
+    elif [ -s "$ENODIA_STATE/$_rcl" ] && [ ! -f "$ENODIA_STATE/$_rca" ]; then
+        return 0  # A legacy installation with only a working copy.
+    fi
+    echo "Сначала выберите сервер $_rcn в «Соединение → Серверы и конфиги»."
+    return 1
+}
 
 # «ТРАНСПОРТА НЕТ ВООБЩЕ» — состояние установки «только панель»: роутер обычный, наших правил в
 # ядре НЕТ, весь трафик идёт как у стока, а человек добирает протоколы в панели. Отличать его
@@ -311,6 +330,7 @@ cmd_up() {
     # попыткой и строкой ошибки в логе, а человек читал бы про AmneziaWG на роутере, где он
     # ничего, кроме панели, не ставил.
     t="${1:-$(implied)}"
+    cmd_require_config "$t" || return 1
     [ -n "$t" ] || { echo "[transport] транспорт не настроен — поднимать нечего"; return 1; }
     p=$(plugin_for "$t"); [ -f "$p" ] || { echo "[transport] нет плагина для '$t'"; return 1; }
     apply_marking
@@ -368,6 +388,7 @@ vpn_off_won() {
 
 cmd_switch() {
     new="$1"
+    cmd_require_config "$new" || return 1
     # ВТОРОЙ АРГУМЕНТ `--home` = «этот транспорт выбрал ЧЕЛОВЕК». Признак нужен потому, что через
     # switch ходят ДВОЕ: панель (ручной выбор) и сторож (cross-эскалация при аварии). Записывать
     # «домашний транспорт» на КАЖДОМ switch нельзя — авария сделала бы домашним тот, куда нас
@@ -402,6 +423,7 @@ cmd_switch() {
         echo "[transport] VPN выключен вручную — автоматическая смена на '$new' не выполняется"; return 1
     fi
     take_switch_lock         # сторож/heal на время переключения не вмешиваются (см. SWITCH_LOCK)
+    cmd_require_config "$new" || return 1
     cur=$(active)
     # SWITCH_RESTART (verb `restart`): the same transport goes down too, and COLD — its daemon is then started afresh from the
     # installed file. `down` alone is not enough: AmneziaWG keeps its daemon as a warm reserve there (only `cold` kills it; the
@@ -526,9 +548,19 @@ cmd_cold() {
 # один владелец: `ip rule` выходов и основного (mark-core), маршруты в таблицах несущих (плагины, у zapret маршрута нет — его
 # флаг «несёт весь дом»), тёплый резерв awg0 (его гасит `cold`). Своей копии «как выключить» тут нет — только «осталось ли».
 cmd_live() {
-    ip rule show 2>/dev/null | grep -qE 'fwmark 0x[1-7] lookup (1000|100[2-7])' && return 0
-    ip rule show 2>/dev/null | grep -qE '^8[2-7]:' && return 0   # roads to servers (road.sh) — «off» removes them too
-    for _lt in 1000 1002 1003 1004 1005 1006 1007; do [ -n "$(ip route show table "$_lt" 2>/dev/null)" ] && return 0; done   # not-wan: таблицы НЕСУЩИХ, про аплинк отвечает ip-lib.sh
+    # For keepers the settler checks lookups and roads with their owners (slot-off-clean, off-clean).
+    if [ -z "$(sh "$SLOTS_SH" list-admitted off 2>/dev/null)" ]; then
+        ip rule show 2>/dev/null | grep -qE 'fwmark 0x[1-7] lookup (1000|100[2-7])' && return 0
+        ip rule show 2>/dev/null | grep -qE '^8[2-7]:' && return 0
+    fi
+    for _lt in 1000 1002 1003 1004 1005 1006 1007; do
+        _lr=$(ip route show table "$_lt" 2>/dev/null)   # not-wan: owned carrier tables
+        [ -n "$_lr" ] || continue
+        _lid=${_lt#100}
+        slot_kept "$_lid" &&
+            slot_owned_default "$_lid" "$(sh "$SLOTS_SH" show "$_lid" | cut -f3)" && continue
+        return 0
+    done
     ip link show awg0 >/dev/null 2>&1 && return 0
     [ -f "$ENODIA_STATE/.zapret-on" ] && return 0
     return 1
@@ -591,7 +623,7 @@ main_road_before_alt() {
 }
 road_before_alt() (   # only an enabled AWG road, and only when its table is empty
     [ -s "$ENODIA_STATE/.cfg-via" ] && [ -f "$ENODIA_DIR/road.sh" ] || exit 0
-    _rba_id=$(sh "$ENODIA_DIR/road.sh" eligible "$1" "$2" 2>/dev/null); _rba_peer=$?
+    _rba_id=$(sh "$ENODIA_DIR/road.sh" eligible "$1" "$2" "$3" 2>/dev/null); _rba_peer=$?
     case "$_rba_id" in [2-7]) ;; *) exit 0 ;; esac
     [ "$_rba_peer" = 0 ] && ip route show table "100$_rba_id" 2>/dev/null | grep -q '^default ' && exit 0   # not-wan: road table
     _slot_dispatch slot-up "$_rba_id" >/dev/null 2>&1 || :
@@ -602,19 +634,42 @@ road_before_alt() (   # only an enabled AWG road, and only when its table is emp
 # слоты не умеет» (Ф0-норма, usage-шум глотаем), 1 = слот не найден/выключен/нет плагина.
 # On slot-down «no plugin» is 2 as well: a transport this code does not know raised nothing, so there is nothing to take down.
 _slot_dispatch() {
+    if [ -n "$ENODIA_SLOTS_OWNER" ] || [ ! -s "$ENODIA_STATE/.slots" ]; then
+        _slot_dispatch_locked "$@"
+    else
+        sh "$SLOTS_SH" dispatch-carrier "$@"
+    fi
+}
+_slot_dispatch_locked() {
     sverb="$1"; sid="$2"
+    if [ "$sverb" = sweep-end ]; then
+        sh "$ENODIA_DIR/transport-byedpi.sh" "$sverb" "$sid"
+        return $?
+    fi
     sline=$([ -f "$SLOTS_SH" ] && sh "$SLOTS_SH" show "$sid" 2>/dev/null)
     [ -n "$sline" ] || { echo "[transport] нет слота №$sid"; return 1; }
     [ "$(echo "$sline" | cut -f6)" = on ] || { echo "[transport] слот №$sid выключен"; return 1; }
+    if [ "$sverb:$3" = slot-down:preserve-kept ] && slot_kept "$sid"; then return 0; fi
     st=$(echo "$sline" | cut -f3); scfg=$(echo "$sline" | cut -f4)
-    case "$sverb:$st" in slot-up:xray|slot-up:hy2) road_before_alt "$st" "$scfg" ;; esac
+    case "$sverb" in
+        slot-reload|sweep-*) [ "$st" = byedpi ] || return 1 ;;
+    esac
+    case "$sverb" in
+        slot-down) ;;
+        *) slot_admitted "$sid" "$st" || return 1 ;;
+    esac
+    case "$sverb:$st" in slot-up:xray|slot-up:hy2) road_before_alt "$st" "$scfg" "$sid" ;; esac
     sp=$(plugin_for "$st")
     if [ ! -f "$sp" ]; then
         echo "[transport] нет плагина для '$st'"
         [ "$sverb" = slot-down ] && return 2
         return 1
     fi
-    sout=$(sh "$sp" "$sverb" "$sid" "$scfg" 2>&1); src=$?
+    case "$sverb" in
+        sweep-apply) sout=$(sh "$sp" "$sverb" "$3" "$sid" 2>&1) ;;
+        *) sout=$(sh "$sp" "$sverb" "$sid" "$scfg" 2>&1) ;;
+    esac
+    src=$?
     if [ "$src" = 2 ]; then
         echo "[transport] '$st' пока не умеет слоты — выход №$sid живёт по fallback-политике"
     else
@@ -623,11 +678,23 @@ _slot_dispatch() {
     return $src
 }
 
-# The plugin flushed the exit's flows inside its verb, but mark-core moves the exit's `ip rule` only HERE (up → its 100N; down with
-# fallback=main → 1000): connections that made fresh entries in between ride the old way under ECM. One more flush of the exit's
-# own flows after the re-point — scoped, so it costs the house nothing (review s.153 r1; the global flush had the same window).
-cmd_slot_up()   { _slot_dispatch slot-up "$1";   src=$?; apply_marking; ct_flush_slot "$1"; return $src; }
-cmd_slot_down() { _slot_dispatch slot-down "$1"; src=$?; apply_marking; ct_flush_slot "$1"; return $src; }
+# Plugins retire their carrier's flows. Static lookups do not move on a carrier flap.
+apply_slot_marking() { sh "$MARK_CORE" "slot-${1:-repair}" >/dev/null 2>&1; }
+cmd_slot_up()   { _slot_dispatch slot-up "$1";   src=$?; [ "$2" = carrier ] || apply_slot_marking; return $src; }
+cmd_slot_down() { _slot_dispatch slot-down "$1"; src=$?; [ "$2" = carrier ] || apply_slot_marking; return $src; }
+cmd_slot_rebind() {
+    # A tunnel can stay down while its fallback rules apply successfully.
+    _tsr_state=''
+    if [ "$2" = on ]; then
+        if ! slot_admitted "$1"; then _tsr_state=off
+        elif _slot_dispatch slot-up "$1" >/dev/null 2>&1; then _tsr_state=up
+        elif [ "$(sh "$SLOTS_SH" show "$1" | cut -f3)" = zapret ]; then return 1
+        else _tsr_state=down
+        fi
+    fi
+    sh "$MARK_CORE" slot-replay >/dev/null || return 1
+    [ -z "$_tsr_state" ] || printf '%s\n' "$_tsr_state"
+}
 # Здоровье ДОП-ВЫХОДА (Ф3) — БЕЗ переигрыша маркировки, её зовёт watchdog каждый тик. Плагин отвечает 0 = жив / 1 = просел;
 # 2 = «не умеет slot-health» (тогда сторож решает по своим признакам, как для awg/byedpi); 5 = сервер жив, путь через hev мёртв и
 # перезапуск не помог; 4 = путь через hev мёртв, но идёт смена транспорта — не судили. Маршрутов проба не меняет, но
@@ -638,7 +705,7 @@ cmd_slot_health() { _slot_dispatch slot-health "$1"; }
 # лишь при ответе (разбор — transport-awg.sh cmd_slot_probe). Маркировку переигрываем ТОЛЬКО при возврате: неудачная попытка
 # ничего не меняла, а переигрыш на каждой — лишняя работа каждые пару минут. Коды плагина: 0 вернулся · 1 нет ответа · 3 ключ
 # занят · 4 несущая не встала (сервер не судили) · 5 несущая уже есть · 6 выход сменили по ходу · 2 не умеет (альты, старый плагин).
-cmd_slot_probe() { _slot_dispatch slot-probe "$1"; src=$?; [ "$src" = 0 ] && { apply_marking; ct_flush_slot "$1"; }; return $src; }
+cmd_slot_probe() { _slot_dispatch slot-probe "$1"; src=$?; [ "$src" != 0 ] || apply_slot_marking; return $src; }
 
 # ИМЯ НЕСУЩЕЙ ДОП-ВЫХОДА (`awgN` у awg, `xtunN` у альтов, ПУСТО у zapret — своей несущей у десинка
 # нет вовсе). Спрашивает УЧЁТ ТРАФИКА: «сколько прошло через выход №N» считается по счётчикам его
@@ -673,7 +740,7 @@ cmd_slot_age() {
 # loaded only then: this verb runs on every boot and every «Включить VPN», where it would be parsed for nothing.
 cmd_slots_up() {
     [ -f "$SLOTS_SH" ] || return 0
-    sids=$(sh "$SLOTS_SH" list-enabled 2>/dev/null | cut -f1)
+    sids=$(sh "$SLOTS_SH" list-admitted 2>/dev/null | cut -f1)
     [ -n "$sids" ] || return 0
     if [ "${ENODIA_UPD_PROG:-}" = 1 ] && [ -f "$ENODIA_DIR/prog-lib.sh" ]; then . "$ENODIA_DIR/prog-lib.sh"; fi
     command -v prog_sub >/dev/null 2>&1 || { prog_sub() { :; }; prog_now() { :; }; }
@@ -688,7 +755,7 @@ cmd_slots_up() {
         _slot_dispatch slot-up "$sid" && _suk=$((_suk + 1))
         _sun=$((_sun + 1)); prog_sub exits now "$_sun" "$_sum"
     done
-    apply_marking
+    apply_slot_marking replay
     # Done means «each was asked», and the count says how many rose: an exit whose server is down is the watchdog's to bring back,
     # not a failed update — the screen shows «выходы 3 из 4».
     prog_sub exits ok "$_suk" "$_sum"
@@ -707,10 +774,13 @@ cmd_slots_up() {
 # `on` через heal replay (5.13b), тем же путём, что и после перезагрузки.
 cmd_slots_down() {
     [ -f "$SLOTS_SH" ] || return 0
+    if [ "$1" = preserve-kept ] && ! command -v slot_kept >/dev/null 2>&1; then return 1; fi
     sids=$(sh "$SLOTS_SH" list-enabled 2>/dev/null | cut -f1)
     [ -n "$sids" ] || return 0
     _sd_fail=0
-    for sid in $sids; do _slot_dispatch slot-down "$sid" || [ "$?" = 2 ] || _sd_fail=1; done   # 2 = nothing to take down
+    for sid in $sids; do
+        _slot_dispatch slot-down "$sid" "$1" || [ "$?" = 2 ] || _sd_fail=1
+    done
     apply_marking
     return "$_sd_fail"
 }
@@ -722,8 +792,15 @@ cmd_slots_down() {
 # Потребителей в репо не было ни одного. Единственная истина по состоянию выхода — slots.sh.
 
 case "$1" in
+    byedpi-sweep)
+        if [ -n "$3" ]; then _slot_dispatch "$2" "$3" "$4"
+        else sh "$ENODIA_DIR/transport-byedpi.sh" "$2" "$4"; fi ;;
+    slot-ready) slot_ready "$2" ;;
+    slot-reload) _slot_dispatch "$1" "$2" ;;
+    dispatch-held) [ -n "$ENODIA_SLOTS_OWNER" ] || exit 1; shift; _slot_dispatch_locked "$@" ;;
     active)   active; echo ;;
     configured) cmd_configured ;;
+    require-config) cmd_require_config "$2" ;;
     ready)    cmd_ready "$2" ;;
     marking)  cmd_marking "$2" ;;   # машинно: везёт ли транспорт по марке (0 да · 1 нет · 2 старая копия)
     names)    cmd_names ;;
@@ -749,9 +826,11 @@ case "$1" in
     failover) cmd_failover "$2" ;;
     dns)      cmd_dns "$2" ;;
     slots-up) cmd_slots_up ;;
-    slots-down) cmd_slots_down ;;
-    slot-up)   cmd_slot_up "$2" ;;
-    slot-down) cmd_slot_down "$2" ;;
+    slots-down) cmd_slots_down "$2" ;;
+    slot-up)   cmd_slot_up "$2" "$3" ;;
+    slot-down) cmd_slot_down "$2" "$3" ;;
+    slot-rebind) cmd_slot_rebind "$2" "$3" ;;
+    slot-firewall) _slot_dispatch slot-firewall "$2" ;;
     slot-health) cmd_slot_health "$2" ;;
     slot-probe) cmd_slot_probe "$2" ;;   # снятый выход: проба сервера без перепроводки, ответил — вернуть (сторож)
     slot-iface) cmd_slot_iface "$2" ;;   # имя несущей выхода №N (учёт трафика); пусто = считать нечем

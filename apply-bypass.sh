@@ -349,7 +349,7 @@ ensure_prerouting_order() {
         iptables -t mangle -D PREROUTING -j "$_c" 2>/dev/null
         iptables -t mangle -I PREROUTING 1 -j "$_c"
     done
-    ensure_reply_guard
+    ipt_reply_guard 0
 }
 
 # chain VPN_EXCLUDE: создать (если нет) и подцепить в PREROUTING+OUTPUT.
@@ -715,23 +715,6 @@ endpoint_mv() {   # metadata only; the rename caller moves road intent separatel
 }
 
 # --- VPN_FORCE: «целиком через VPN» (см. шапку про force) -------------------
-# reply-guard (dst-LOCAL ACCEPT) обязан стоять ВЫШЕ VPN_FORCE catch-all и MARK-правил.
-# Любая перестановка цепочек ЗАДВИГАЕТ guard (его ставит mark-core поз.1) вниз. Тогда FORCE
-# catch-all (-j MARK на весь форвард в full-tunnel) метит ОТВЕТНЫЙ пакет прямого соединения
-# с dst=WAN-IP (адрес LOCAL) РАНЬШЕ guard → возврат уезжает в туннель = рвётся прямой трафик
-# вырезов/excluded-устройств (ровно та грабля, ради которой guard и вводили, mark-core.sh).
-# Переустанавливаем guard ПЕРВЫМ правилом ПОСЛЕ перестройки порядка (хвост
-# ensure_prerouting_order). Идемпотентно; addrtype как в mark-core (нет модуля → тихо
-# no-op, поведение как без guard).
-# ДУБЛЬ С mark-core.sh — ОСОЗНАННЫЙ (единственный в проекте). Канонический владелец правила и
-# честного сообщения о недоступном addrtype — ядро; здесь ровно две строки, потому что порядок
-# цепочек переигрывается на КАЖДЫЙ ensure_*_chain (десятки раз за один apply), а звать оттуда
-# mark-core значило бы каждый раз перекладывать ВСЮ маркировку. Правка одного — правка обоих.
-ensure_reply_guard() {
-    while iptables -t mangle -D PREROUTING -m addrtype --dst-type LOCAL -j ACCEPT 2>/dev/null; do :; done
-    iptables -t mangle -I PREROUTING 1 -m addrtype --dst-type LOCAL -j ACCEPT 2>/dev/null
-}
-
 # chain VPN_FORCE: создать (если нет) и подцепить в PREROUTING. Только PREROUTING:
 # трафик самого роутера (OUTPUT — handshake к endpoint, DNS к VPS) в туннель заворачивать
 # нельзя, будет петля. Позицию (ниже VPN_EXCLUDE) назначает ensure_prerouting_order.
@@ -759,9 +742,21 @@ force_active() {
 # ОДИН источник на обе семьи правил по источнику: «устройство целиком» (rebuild_force) и «адреса
 # устройства» (rebuild_dev). Разъехавшись, эти два списка дали бы «здесь выход учли, а здесь
 # молча напрямую» — самый дорогой вид расхождения, он не виден в панели вообще.
+main_vpn_off() { [ -f "$ENODIA_STATE/.vpn-off" ]; }
+
+# The same selector pair serves publication and the read-only keeper wiring check.
+vpn_mark_pair() {
+    _vmp_chain=$1 _vmp_mark=$2; shift 2
+    if [ "$VPN_POLICY_OP" = -C ]; then
+        iptables -t mangle -C PREROUTING -j "$_vmp_chain" 2>/dev/null || return 1
+    fi
+    iptables -t mangle "$VPN_POLICY_OP" "$_vmp_chain" "$@" -j MARK --set-mark "$_vmp_mark" 2>/dev/null &&
+        iptables -t mangle "$VPN_POLICY_OP" "$_vmp_chain" "$@" -j ACCEPT 2>/dev/null
+}
+VPN_POLICY_OP=-A
 mark_slots() {
     [ -f "$ENODIA_DIR/slots.sh" ] || { printf ' '; return 0; }
-    printf ' %s' "$(sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | awk -F"$TAB" '$2!="zapret"{print $1}' | tr '\n' ' ')"
+    printf ' %s' "$(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null | awk -F"$TAB" '$2!="zapret"{print $1}' | tr '\n' ' ')"
 }
 
 # Пересобрать VPN_FORCE из хранилища (идемпотентно: flush + заново в нужном
@@ -784,21 +779,23 @@ mark_slots() {
 # всё равно смотрит на трафик, который целиком уезжает в туннель; (3) без ACCEPT режим на таких
 # роутерах молча вырождается в «в VPN идут только заблокированные» — то есть НЕ делает обещанного.
 rebuild_force() {
-    if ! force_active; then
+    if [ "$VPN_POLICY_OP" = -C ]; then :
+    elif ! force_active; then
         # ничего не форсим — снять jump и очистить, вернуть чистый split
         iptables -t mangle -D PREROUTING -j "$FORCE_CHAIN" 2>/dev/null
         iptables -t mangle -F "$FORCE_CHAIN" 2>/dev/null
         echo "[apply-bypass] force(в VPN): выключено (раздельный режим)"
         return 0
-    fi
-    ensure_chain          # VPN_EXCLUDE должен существовать: порядок цепочек их сводит вместе
-    ensure_force_chain
-    iptables -t mangle -F "$FORCE_CHAIN"
+    else
+        ensure_chain          # VPN_EXCLUDE должен существовать: порядок цепочек их сводит вместе
+        ensure_force_chain
+        iptables -t mangle -F "$FORCE_CHAIN"
     # 1) локалку/служебное — наружу из цепочки (остаётся в прямом/локальном пути)
     for net in $LOCAL_NETS; do
         iptables -t mangle -A "$FORCE_CHAIN" -d "$net" -j RETURN
     done
-    iptables -t mangle -A "$FORCE_CHAIN" -d 255.255.255.255 -j RETURN
+        iptables -t mangle -A "$FORCE_CHAIN" -d 255.255.255.255 -j RETURN
+    fi
     n_fip=0; n_fif=0; fg=off; ft=off
     # 2) устройства (источник) целиком в VPN — основным туннелем (0x1) либо ДОП-ВЫХОДОМ (0xN).
     # Марку слота дальше обслуживает mark-core (`ip rule fwmark 0xN -> table 100N`, fallback-aware) —
@@ -827,8 +824,9 @@ rebuild_force() {
                         *) _fdown="$_fdown $ip->$fslot" ;;
                     esac ;;
             esac
-            iptables -t mangle -A "$FORCE_CHAIN" -s "$ip" -j MARK --set-mark "$_fmk" || continue
-            iptables -t mangle -A "$FORCE_CHAIN" -s "$ip" -j ACCEPT
+            if [ "$_fmk" = "$FWMARK" ] && main_vpn_off; then continue; fi
+            if [ "$VPN_POLICY_OP" = -C ] && [ -n "$1" ] && [ "$_fmk" != "0x$1" ]; then continue; fi
+            vpn_mark_pair "$FORCE_CHAIN" "$_fmk" -s "$ip" || { [ "$VPN_POLICY_OP" != -C ] || return 1; continue; }
             n_fip=$((n_fip+1))
         done < "$STORE_FORCE_IPS"
     fi
@@ -836,8 +834,9 @@ rebuild_force() {
     #    комментарий про physdev в шапке про bypass-ifaces / vpn-toggle.sh)
     # Строка — имя СЕТИ (см. шапку): раскрываем в живые wlN. Цепочка тут пересобирается с нуля
     # (-F выше), поэтому своего purge не нужно — достаточно миграции хранилища.
+    [ "$VPN_POLICY_OP" != -C ] || return 0
     migrate_if_store "$STORE_FORCE_IFS"
-    if [ -f "$STORE_FORCE_IFS" ]; then
+    if ! main_vpn_off && [ -f "$STORE_FORCE_IFS" ]; then
         while IFS= read -r iface || [ -n "$iface" ]; do
             [ -n "$iface" ] || continue
             for _ffi in $(wifi_resolve "$iface"); do
@@ -848,14 +847,14 @@ rebuild_force() {
         done < "$STORE_FORCE_IFS"
     fi
     # 4) гостевая целиком в VPN (по источнику-подсети)
-    if [ -f "$STORE_FORCE_GUEST" ]; then
+    if ! main_vpn_off && [ -f "$STORE_FORCE_GUEST" ]; then
         iptables -t mangle -A "$FORCE_CHAIN" -s "$GUEST_SUBNET" -j MARK --set-mark $FWMARK
         iptables -t mangle -A "$FORCE_CHAIN" -s "$GUEST_SUBNET" -j ACCEPT
         fg=on
     fi
     # 5) ГЛОБАЛЬНО: весь остальной (нелокальный) форвард — в VPN. Должен идти
     #    ПОСЛЕДНИМ, после локалки-RETURN и точечных правил.
-    if [ -f "$FULLTUNNEL_FLAG" ]; then
+    if ! main_vpn_off && [ -f "$FULLTUNNEL_FLAG" ]; then
         iptables -t mangle -A "$FORCE_CHAIN" -j MARK --set-mark $FWMARK
         iptables -t mangle -A "$FORCE_CHAIN" -j ACCEPT
         ft=on
@@ -935,7 +934,8 @@ port_rule_add() {
     # miwifi/NFQUEUE, который иначе стёр бы метку; грабля mipctld, см. mark-core.sh).
     if [ -n "$4" ]; then
         # shellcheck disable=SC2086 # $_s/$_d намеренно разбиваются на аргументы
-        iptables -t mangle -A "$PORTS_CHAIN" $_s -p "$2" $_d -j MARK --set-mark "$4" 2>/dev/null || return 1
+        vpn_mark_pair "$PORTS_CHAIN" "$4" $_s -p "$2" $_d
+        return $?
     fi
     iptables -t mangle -A "$PORTS_CHAIN" $_s -p "$2" $_d -j ACCEPT 2>/dev/null || return 1
     return 0
@@ -944,6 +944,7 @@ port_rule_add() {
 # Пересобрать VPN_PORTS из хранилища (идемпотентно: flush + заново, как rebuild_force).
 rebuild_ports() {
     if [ ! -s "$STORE_PORTS" ]; then
+        [ "$VPN_POLICY_OP" != -C ] || return 0
         # нет правил — снять jump и очистить: у тех, кто портами не пользуется,
         # набор правил остаётся ровно прежним (тот же приём, что в rebuild_force)
         iptables -t mangle -D PREROUTING -j "$PORTS_CHAIN" 2>/dev/null
@@ -956,15 +957,17 @@ rebuild_ports() {
         echo "[apply-bypass] порт-правила: нет port-lib.sh — прежняя цепочка оставлена"
         return 1
     fi
-    ensure_ports_chain
-    iptables -t mangle -F "$PORTS_CHAIN"
+    if [ "$VPN_POLICY_OP" != -C ]; then
+        ensure_ports_chain
+        iptables -t mangle -F "$PORTS_CHAIN"
     # локалку — наружу из цепочки (иначе «весь UDP в VPN» утащит туда LAN-LAN:
     # SSDP/mDNS/игры по локальной сети). Трафик к самому роутеру (DNS 53/udp)
     # выводит reply-guard, он стоит ВЫШЕ этой цепочки.
     for _net in $LOCAL_NETS; do
         iptables -t mangle -A "$PORTS_CHAIN" -d "$_net" -j RETURN
     done
-    iptables -t mangle -A "$PORTS_CHAIN" -d 255.255.255.255 -j RETURN
+        iptables -t mangle -A "$PORTS_CHAIN" -d 255.255.255.255 -j RETURN
+    fi
     _n=0; _tab=$(printf '\t')
     # Строки — в ПОРЯДКЕ ЦЕПОЧКИ и только действующие (port-lib.sh::port_rules_in_order): сперва правила
     # устройств, потом всего роутера. Тот же порядок и тот же фильтр читает devwatch.sh::load_port_rules
@@ -974,6 +977,8 @@ rebuild_ports() {
     # имена намеренно СВОИ (_l*): совпади они с $_src/$_dir из ветки port-add — та печатала бы
     # пустое «порт-правило:  udp 443 -> », а точечный conntrack по IP выродился бы в общий flush.
     _lrows=$(port_rules_in_order "$STORE_PORTS")
+    _l_slots=''
+    if main_vpn_off; then _l_slots=$(mark_slots); fi
     while IFS="$_tab" read -r _lsrc _lpro _lpts _ldir; do
         [ -n "$_ldir" ] || continue
         case "$_ldir" in
@@ -982,10 +987,20 @@ rebuild_ports() {
             block)    _mk=block ;;           # не выпускать вовсе — DROP вместо MARK+ACCEPT
             *)        _mk="" ;;              # direct — без метки, main-таблица
         esac
+        if main_vpn_off; then
+            case "$_ldir" in
+                vpn) continue ;;
+                s[2-7]) case "$_l_slots" in *" ${_ldir#s} "*) ;; *) continue ;; esac ;;
+            esac
+        fi
+        if [ "$VPN_POLICY_OP" = -C ]; then
+            case "$_ldir" in s[2-7]) [ -z "$1" ] || [ "$_ldir" = "s$1" ] || continue ;; *) continue ;; esac
+        fi
         case "$_lpro" in both) _prl="udp tcp" ;; *) _prl="$_lpro" ;; esac
         for _pr in $_prl; do
             for _pt in $(echo "$_lpts" | tr ',' ' '); do
-                port_rule_add "$_lsrc" "$_pr" "$_pt" "$_mk" && _n=$((_n+1))
+                if port_rule_add "$_lsrc" "$_pr" "$_pt" "$_mk"; then _n=$((_n+1))
+                elif [ "$VPN_POLICY_OP" = -C ]; then return 1; fi
             done
         done
     done <<EOF_PORTS
@@ -1008,6 +1023,11 @@ ensure_keep_chain() {
 # Пустое хранилище ⇒ цепочки нет вовсе: у того, кто тумблером не пользуется, набор правил
 # остаётся БАЙТ-В-БАЙТ прежним (тот же приём, что в rebuild_force/rebuild_ports).
 rebuild_keep() {
+    if main_vpn_off; then
+        iptables -t mangle -D PREROUTING -j "$KEEP_CHAIN" 2>/dev/null
+        iptables -t mangle -F "$KEEP_CHAIN" 2>/dev/null
+        return 0
+    fi
     if [ ! -s "$STORE_KEEP" ]; then
         iptables -t mangle -D PREROUTING -j "$KEEP_CHAIN" 2>/dev/null
         iptables -t mangle -F "$KEEP_CHAIN" 2>/dev/null
@@ -1041,6 +1061,7 @@ rebuild_keep() {
 # Перестраивать всё целиком было бы дороже и заметнее: снятие NFQUEUE у живого устройства рвёт
 # ему текущие сессии, а на буте нас зовут раньше, чем поднимется несущая.
 rebuild_desync() {
+    [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 0
     [ -f "$ZAPRET_SH" ] || { [ -s "$STORE_DESYNC" ] && echo "[apply-bypass] десинк устройств: нет zapret.sh — пропуск"; return 0; }
     _dsremove_fail=0
     _wired=$(sh "$ZAPRET_SH" src-list 2>/dev/null)
@@ -1109,26 +1130,27 @@ ensure_dev_chain() {
 rebuild_dev() {
     _drules=$(sh "$ENODIA_DIR/groups.sh" dev-rules 2>/dev/null)
     if [ -z "$_drules" ]; then
+        [ "$VPN_POLICY_OP" != -C ] || return 0
         iptables -t mangle -D PREROUTING -j "$DEV_CHAIN" 2>/dev/null
         iptables -t mangle -F "$DEV_CHAIN" 2>/dev/null
         echo "[apply-bypass] правила устройств (адреса): нет"
         return 0
     fi
-    ensure_dev_chain
-    iptables -t mangle -F "$DEV_CHAIN"
+    if [ "$VPN_POLICY_OP" != -C ]; then
+        ensure_dev_chain
+        iptables -t mangle -F "$DEV_CHAIN"
     # Локалку — наружу из цепочки: правило «эти адреса блокировать» не должно задевать связь
     # внутри LAN, а «в VPN» — утаскивать её в туннель (зеркало преамбулы VPN_PORTS/VPN_FORCE).
     # Трафик к САМОМУ роутеру выводит reply-guard, он стоит выше.
     for _net in $LOCAL_NETS; do
         iptables -t mangle -A "$DEV_CHAIN" -d "$_net" -j RETURN
     done
-    iptables -t mangle -A "$DEV_CHAIN" -d 255.255.255.255 -j RETURN
+        iptables -t mangle -A "$DEV_CHAIN" -d 255.255.255.255 -j RETURN
+    fi
     _dn=0; _dskip=""; _ddown=""
     _en_slots=$(mark_slots)
     # `done < файл` (не пайп): цикл в текущем шелле, счётчики не теряются. Имена переменных СВОИ
     # (_d*), чтобы не затирать переменные вызывающей ветки (грабля из rebuild_ports).
-    _dtmp=/tmp/.enodia-dev-rules.$$
-    printf '%s\n' "$_drules" > "$_dtmp"
     while IFS="$TAB" read -r _dip _dset _ddir _dslot; do
         [ -n "$_dset" ] || continue
         echo "$_dip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || continue   # в iptables уходит подстановка
@@ -1148,17 +1170,22 @@ rebuild_dev() {
                 esac
                 # MARK и СРАЗУ ACCEPT — пара обязательна (ACCEPT обрывает mangle до miwifi/NFQUEUE,
                 # который иначе стёр бы метку; грабля mipctld, см. mark-core.sh).
-                iptables -t mangle -A "$DEV_CHAIN" -s "$_dip" -m set --match-set "$_dset" dst -j MARK --set-mark "$_dmk" 2>/dev/null || continue
-                iptables -t mangle -A "$DEV_CHAIN" -s "$_dip" -m set --match-set "$_dset" dst -j ACCEPT 2>/dev/null ;;
+                if [ "$_dmk" = "$FWMARK" ] && main_vpn_off; then continue; fi
+                if [ "$VPN_POLICY_OP" = -C ] && { [ "$_dmk" = "$FWMARK" ] || { [ -n "$1" ] && [ "$_dmk" != "0x$1" ]; }; }; then continue; fi
+                vpn_mark_pair "$DEV_CHAIN" "$_dmk" -s "$_dip" -m set --match-set "$_dset" dst ||
+                    { [ "$VPN_POLICY_OP" != -C ] || return 1; continue; } ;;
             bypass)
+                [ "$VPN_POLICY_OP" != -C ] || continue
                 iptables -t mangle -A "$DEV_CHAIN" -s "$_dip" -m set --match-set "$_dset" dst -j ACCEPT 2>/dev/null || continue ;;
             block)
+                [ "$VPN_POLICY_OP" != -C ] || continue
                 iptables -t mangle -A "$DEV_CHAIN" -s "$_dip" -m set --match-set "$_dset" dst -j DROP 2>/dev/null || continue ;;
             *)  continue ;;
         esac
         _dn=$((_dn+1))
-    done < "$_dtmp"
-    rm -f "$_dtmp" 2>/dev/null
+    done <<EOF_DEV
+$_drules
+EOF_DEV
     echo "[apply-bypass] правила устройств (адреса): $_dn${_dskip:+, сетов ещё нет:$_dskip}${_ddown:+, выход выключен (идут основным):$_ddown}"
 }
 
@@ -1196,6 +1223,7 @@ EOF_DEL
 
 # --- переиграть ВСЁ хранилище (вызов на boot/repair) ---
 apply_all() {
+    [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 0
     ensure_chain
     n_ip=0; n_dst=0; n_if=0; g=off
     if [ -f "$STORE_IPS" ]; then
@@ -1247,12 +1275,15 @@ apply_all() {
     rebuild_dev
     # устройства «целиком в десинк» — обе половины режима: ACCEPT в VPN_EXCLUDE (прямой путь) и
     # NFQUEUE по источнику у zapret.sh. Идут ПОСЛЕ ensure_chain выше — цепочка вырезов уже есть.
-    rebuild_desync || return $?
+    if ! main_vpn_off || [ -n "$(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null)" ]; then
+        rebuild_desync || return $?
+    fi
     return "$_apply_endpoint"
 }
 
 case "$1" in
     apply)     apply_all ;;
+    slot-check) VPN_POLICY_OP=-C; rebuild_force "$2" && rebuild_ports "$2" && rebuild_dev "$2" ;;
     # Проводка правила «сет мимо VPN» по требованию — зовут groups.sh apply / domain.sh apply сразу
     # после того, как создали/наполнили свой сет (на боевом роутере сет появляется уже после apply_all).
     set-dst-ensure) [ -z "$2" ] && { echo "нужно имя ipset"; exit 1; }
@@ -1318,7 +1349,7 @@ case "$1" in
     force-del-ip)  [ -z "$2" ] && { echo "нужен IP";    exit 1; }; force_store_del "$2"; rebuild_force; conntrack_flush; echo "IP $2 -> обычный режим (раздельный)" ;;
     # Пересобрать VPN_FORCE под текущее состояние выходов — зовёт slots.sh при enable/disable/del
     # (иначе устройство, привязанное к выходу, узнало бы о его выключении лишь со следующей правкой).
-    force-rebind)  rebuild_force; conntrack_flush ;;
+    force-rebind) rebuild_force; conntrack_flush ;;
     force-add-if)  [ -z "$2" ] && { echo "нужен iface"; exit 1; }
         _ifk=$(if_store_key "$2"); store_del "$STORE_FORCE_IFS" "$2"; store_add "$STORE_FORCE_IFS" "$_ifk"
         rebuild_force; conntrack_flush; echo "сеть «$_ifk» -> ЦЕЛИКОМ через VPN" ;;

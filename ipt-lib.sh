@@ -143,6 +143,28 @@ ipt_top() {
 	iptables -I "$_itc" "$_itp" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"
 }
 
+# mangle sees the router's WAN address on replies before reverse NAT.
+ipt_reply_guard() {
+    if [ "$1" = check ]; then
+        iptables -t mangle -S PREROUTING 2>/dev/null | awk '
+            /^-A / {ok=($0=="-A PREROUTING -m addrtype --dst-type LOCAL -j ACCEPT"); exit}
+            END {exit !ok}'
+        return $?
+    fi
+    while iptables -t mangle -D PREROUTING -m addrtype --dst-type LOCAL -j ACCEPT 2>/dev/null; do :; done
+    [ "$1" != 0 ] || iptables -t mangle -I PREROUTING 1 -m addrtype --dst-type LOCAL -j ACCEPT
+}
+
+# ipt_delete_all <table> <chain> <selector>. Only an absent selector ends a successful removal.
+ipt_delete_all() {
+	_ida_table=$1; shift
+	while :; do
+		iptables -t "$_ida_table" -C "$@" 2>/dev/null
+		case "$?" in 1) return 0 ;; 0) ;; *) return 1 ;; esac
+		iptables -t "$_ida_table" -D "$@" || return 1
+	done
+}
+
 # mss_clamp <iface> / mss_unclamp <iface> — THE MSS OF TCP LEAVING THROUGH A CARRIER, one owner (BE7000 10.10.2026).
 # The router's OWN connection that goes into a tunnel by MARK is routed twice: first without the mark — to the ISP's interface, and TCP
 # writes the MSS of THAT interface (1460) into its SYN, — then mangle OUTPUT marks it and it leaves through the carrier. The far side

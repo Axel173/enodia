@@ -58,7 +58,7 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # Нет ipt-lib.sh с `ipt_top` (частичное обновление) ⇒ прежнее «первым в цепочку», байт-в-байт.
 command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$_itc" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
-command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot()   { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { :; }
 command -v ct_flush_route >/dev/null 2>&1 || ct_flush_route() { ct_flush; }
 # Где лежит бинарь (store-lib.sh): без накопителя — прежний путь байт-в-байт. Шим на случай
 # установки без lib.
@@ -83,7 +83,7 @@ command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$ENODIA_BIN/$1"
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 # «VPN выключен вручную — несущую не берёт никто» (carrier_barred/carrier_run, разбор в daemon-lib.sh). Нет — прежний путь.
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
-command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
+command -v carrier_run >/dev/null 2>&1 || carrier_run() { [ "$1" != -s ] || shift 2; shift; "$@"; }
 command -v daemon_log_fresh >/dev/null 2>&1 || daemon_log_fresh() { : > "$1" 2>/dev/null || true; }   # the old start: the log afresh, no `.prev`
 command -v daemon_wait_port >/dev/null 2>&1 || daemon_wait_port() {
     DAEMON_WAIT_WHY=''; _dwi=0; while [ "$_dwi" -lt "$3" ]; do netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0; sleep 1; _dwi=$((_dwi+1)); done
@@ -244,90 +244,34 @@ spawn_byedpi() {
     args=$(desync_args)
     start-stop-daemon -S -b -c nobody -m -p "$CIADPI_PID" -x /bin/sh -- -c "exec '$CIADPI' -i $SOCKS_ADDR -p $SOCKS_PORT $args >>'$CIADPI_LOG' 2>&1"
 }
-# --- СЛУЖЕБНЫЙ socks (аварийный канал апдейтера) ---------------------------------------------
-# ЗАЧЕМ. После реформы «ставим только панель» ВСЕ протоколы роутер добирает сам, с GitHub — и
-# упирается ровно в то, ради чего его и ставят: raw.githubusercontent у части провайдеров душится
-# по SNI. Обойти это умеет ciadpi, который лежит рядом с панелью с первой минуты (0.13 МБ) — но
-# только как ТРАНСПОРТ, а транспорт в этот момент не выбран. Отсюда отдельный вход: поднять ciadpi
-# РОВНО как socks-прокси, без hev, без tun, без правил и без записи `.transport` — то есть ничего
-# не меняя в маршрутизации. Знание «как правильно запустить ciadpi» (uid nobody, вырезанные
-# `-S`/md5sig, лестница стратегий) остаётся ЗДЕСЬ, в плагине; апдейтер спрашивает адрес и всё.
-#
-# Порт СВОЙ (не 10808): основной socks может в этот момент нести живой byedpi/xray/hy2, и занять
-# его чужим инстансом значило бы уронить несущую ради закачки. Пидфайл тоже свой — `socks-down`
-# обязан гасить ТОЛЬКО наш временный демон (инвариант проекта «гасим свой pid, не killall»).
-TMP_SOCKS_PORT=10809
-TMP_SOCKS_PID=/tmp/enodia-byedpi-fetch.pid
-TMP_SOCKS_LOG=/tmp/enodia-byedpi-fetch.log
-# РЕФ-СЧЁТ. Служебный socks — РАЗДЕЛЯЕМЫЙ ресурс: `gh-update.sh` живёт в НЕСКОЛЬКИХ процессах
-# одновременно (панельные «Обновить скрипты» и установка компонента общего лока не имеют), и
-# второй из них штатно ПЕРЕИСПОЛЬЗУЕТ уже поднятый демон вместо своего. Без счёта тот, кто
-# закончил первым, гасил бы прокси посреди чужой многомегабайтной закачки (xray — 8 МБ). Идиома
-# в проекте уже есть — ref-count у hev и `zt_any_src_wired`. Метка = pid вызывающего: смерть
-# владельца (kill -9 мимо ловушки) видна по /proc, иначе его метка держала бы демона до ребута.
-TMP_SOCKS_REF=/tmp/enodia-byedpi-fetch.users
-_ref_add() {   # $1 = метка (pid вызывающего)
-    mkdir -p "$TMP_SOCKS_REF" 2>/dev/null || return 0
-    : > "$TMP_SOCKS_REF/${1:-anon}" 2>/dev/null || true
-    return 0
-}
-_ref_others_alive() {   # $1 = снимаемая метка; 0 = демон нужен ещё кому-то
-    rm -f "$TMP_SOCKS_REF/${1:-anon}" 2>/dev/null
-    [ -d "$TMP_SOCKS_REF" ] || return 1
-    _rl=1
-    for _rf in "$TMP_SOCKS_REF"/*; do
-        [ -e "$_rf" ] || continue
-        _rt=${_rf##*/}
-        case "$_rt" in
-            # Метка не-pid («anon») приходит от СТАРОЙ копии апдейтера: аргумента она не передаёт,
-            # значит и жива ли она — не спросить. Считать такую метку живой НЕЛЬЗЯ: она бессмертна,
-            # и первый же прогон старого gh-update оставлял бы демона на 10809 до ребута, причём
-            # снять его уже некому (поймано на железе AX3600 15.08.2026 — регрессия ref-счёта).
-            # Untrackable = не считаем и удаляем: для старого вызывателя это его прежнее поведение.
-            ''|*[!0-9]*) rm -f "$_rf" 2>/dev/null ;;
-            *) if [ -d "/proc/$_rt" ]; then _rl=0; else rm -f "$_rf" 2>/dev/null; fi ;;
-        esac
-    done
-    return "$_rl"
-}
-# 0 = socks есть, его адрес НАПЕЧАТАН (127.0.0.1:порт). Уже поднятая ОСНОВНАЯ несущая byedpi
-# годится как есть — второй демон в этом случае лишний расход памяти на 176-МБ моделях.
-cmd_socks_up() {   # $1 = метка вызывающего (pid) для ref-счёта
-    if proc_alive "$CIADPI_PID" && socks_ours; then
-        _ref_add "$1"
-        echo "$SOCKS_ADDR:$SOCKS_PORT"; return 0
+# migrate: 1.3.6 updater EXIT trap
+legacy_socks_down() {
+    local base=/tmp/enodia-byedpi-fetch ref holder pid
+    if [ -d "$base.users" ] && [ ! -L "$base.users" ]; then
+        for ref in "$base.users/"*; do
+            [ -e "$ref" ] || continue
+            holder=${ref##*/}
+            case "$holder" in
+                ''|*[!0-9]*) : ;;
+                *) if [ "$holder" != "$1" ] && pid_runs "$holder" '(^|[ /])gh-update\.sh( |$)'; then continue; fi ;;
+            esac
+            rm -f "$ref" || return 1
+        done
+        # A different 1.3.6 updater can still need this listener.
+        rmdir "$base.users" 2>/dev/null || { [ ! -d "$base.users" ] || return 0; }
     fi
-    [ -x "$CIADPI" ] || { log "нет бинаря ciadpi — служебный socks не поднять"; return 1; }
-    if ! proc_alive "$TMP_SOCKS_PID"; then
-        : > "$TMP_SOCKS_LOG" 2>/dev/null || true
-        chmod 666 "$TMP_SOCKS_LOG" 2>/dev/null || true
-        start-stop-daemon -S -b -c nobody -m -p "$TMP_SOCKS_PID" -x /bin/sh -- \
-            -c "exec '$CIADPI' -i $SOCKS_ADDR -p $TMP_SOCKS_PORT $(desync_args) >>'$TMP_SOCKS_LOG' 2>&1"
+    if [ -f "$base.pid" ] && [ ! -L "$base.pid" ]; then
+        read -r pid < "$base.pid"
+        case "$pid" in ''|*[!0-9]*) pid= ;; esac
+        if [ -n "$pid" ] && [ -d "/proc/$pid" ] &&
+           [ "$(awk '/^Uid:/{print $2 ":" $3}' "/proc/$pid/status" 2>/dev/null)" = "$BYEDPI_UID:$BYEDPI_UID" ] &&
+           [ "$(tr '\000' '\n' 2>/dev/null < "/proc/$pid/cmdline" | head -n 5)" = "$(printf '%s\n-i\n%s\n-p\n10809' "$CIADPI" "$SOCKS_ADDR")" ]; then
+            command -v daemon_wait_gone >/dev/null 2>&1 || return 1
+            start-stop-daemon -K -p "$base.pid" -x "$CIADPI" -u "$BYEDPI_UID" >/dev/null 2>&1 || :
+            daemon_wait_gone "$pid" || { log 'Не удалось остановить прокси обновления 1.3.6 на порту 10809'; return 1; }
+        fi
     fi
-    # «Порт слушает» ≠ «слушает НАШ» — инвариант проекта, тот же, что в start_daemons.
-    if daemon_wait_port "$TMP_SOCKS_PID" byedpi 8 "$SOCKS_ADDR" "$TMP_SOCKS_PORT" \
-       && slot_socks_is_ours "$TMP_SOCKS_PORT" "$TMP_SOCKS_PID"; then
-        _ref_add "$1"
-        echo "$SOCKS_ADDR:$TMP_SOCKS_PORT"; return 0
-    fi
-    log "служебный ciadpi не забиндил $TMP_SOCKS_PORT (${DAEMON_WAIT_WHY:-порт держит ЧУЖОЙ демон}). Лог:"; tail -n 10 "$TMP_SOCKS_LOG" 2>/dev/null
-    cmd_socks_down "$1"
-    return 1
-}
-# Гасим ТОЛЬКО временный демон и ТОЛЬКО когда он больше никому не нужен. Основную несущую (10808)
-# не трогаем никогда — она могла быть поднята задолго до нас и к закачке отношения не имеет.
-cmd_socks_down() {   # $1 = метка вызывающего
-    _ref_others_alive "$1" && return 0        # прокси занят другой закачкой — не наше дело
-    # Владельца сверяем ДО сигнала: pid из файла мог быть переиспользован ядром после смерти
-    # ciadpi, и голый `kill` тогда бьёт по постороннему процессу (инвариант проекта «гасим свой
-    # pid, а не что попало»). Держателя порта спрашивает та же единственная реализация, что и
-    # везде; «не определился» = считаем нашим, рабочий путь на этом не рушим.
-    if proc_alive "$TMP_SOCKS_PID" && slot_socks_is_ours "$TMP_SOCKS_PORT" "$TMP_SOCKS_PID"; then
-        start-stop-daemon -K -p "$TMP_SOCKS_PID" >/dev/null 2>&1 || true
-    fi
-    rm -f "$TMP_SOCKS_PID"
-    rmdir "$TMP_SOCKS_REF" 2>/dev/null || true
-    return 0
+    rm -f "$base.pid" "$base.log"
 }
 
 start_daemons() {
@@ -749,9 +693,10 @@ cmd_sweep_apply() {
     log "sweep-apply: ciadpi не поднялся на этой стратегии (провал)"
     return 1
 }
+sweep_apply_slot() { cmd_sweep_apply "$2" "$1"; }
 # Стратегию возвращаем ВСЕГДА, а перезапуск ciadpi — это ПОДЪЁМ (restart_byedpi поднимает и мёртвый демон), значит под carrier_run:
 # свип, прерванный «Отключить VPN», панель всё равно завершает (`byedpi_sweep_end`), и прежде этот верб поднимал ciadpi на socks
-# 10808 при выключенном VPN — до ребута, а `transport.sh live` его не видит (ревью ветки, круг 3). Снятие — sweep_undo (id вторым).
+# 10808 при выключенном VPN — до ребута, а `transport.sh live` его не видит (ревью ветки, круг 3).
 sweep_end_restart() {
     if [ -n "$SW_SLOT" ]; then
         sweep_restart >/dev/null 2>&1; sweep_flush
@@ -764,7 +709,11 @@ sweep_end_restart() {
 cmd_sweep_end() {
     sweep_target "$1" || sweep_target ''
     sweep_restore
-    carrier_run sweep_undo sweep_end_restart '' "$SW_SLOT"
+    if [ -n "$SW_SLOT" ]; then
+        carrier_run -s byedpi cmd_slot_down sweep_end_restart "$SW_SLOT"
+    else
+        carrier_run cmd_down sweep_end_restart
+    fi
     log "sweep-end: исходная стратегия восстановлена, свип завершён"
     return 0
 }
@@ -956,9 +905,6 @@ cmd_slot_health() {   # $1 = id
     return 1
 }
 
-# Снятие поднятого свипом, если VPN выключили по ходу: у выхода — его несущая, у основной — `down` (carrier_run зовёт с теми же аргументами).
-sweep_undo() { if [ -n "$2" ]; then cmd_slot_down "$2"; else cmd_down; fi; }
-
 case "$1" in
     # Вербы, которые ПОДНИМАЮТ ciadpi/hev, — через carrier_run (daemon-lib.sh): при выключенном вручную VPN отказ, а выключение,
     # пришедшее по ходу, отпускает поднятое. `health` тоже здесь: он не только проба — просевшую несущую он ПЕРЕПОДНИМАЕТ на месте
@@ -972,21 +918,19 @@ case "$1" in
     dns)      set_direct_dns ;;      # переиграть DNS (DoH toggle/смена резолвера) — прямой режим через doh_apply_dns
     reload)   carrier_run cmd_down cmd_reload ;;   # перезапустить ciadpi с текущими .byedpi-args (без обрыва несущей)
     defaults) strip_unsupported "$DEFAULT_ARGS" ;;  # дефолтный авто-набор (для показа в панели; -S вырезан)
+    socks-down) legacy_socks_down "$2" ;;
     presets)  cmd_presets ;;         # курированная библиотека готовых стратегий (label|args)
-    # Служебный socks для АПДЕЙТЕРА (gh-update.sh): десинк без несущей, правил и tun. Печатает
-    # адрес; socks-down гасит только временный демон. Транспортом от этого byedpi НЕ становится.
-    socks-up)   cmd_socks_up "$2" ;;      # $2 = pid вызывающего (ref-счёт: прокси общий на процессы)
-    socks-down) cmd_socks_down "$2" ;;
     # Браузер-свип. 3-й/2-й аргумент = id ДОП-ВЫХОДА (пусто = основная несущая): у выхода своя
     # стратегия и свой ciadpi, значит и бэкап/рестарт его собственные.
     sweep-begin) cmd_sweep_begin "$2" ;;      # снять бэкап исходной стратегии + поставить lock
-    sweep-apply) carrier_run sweep_undo cmd_sweep_apply "$2" "$3" ;; # применить ОДНУ стратегию вживую (0=поднялся,1=нет)
+    sweep-apply) if [ -n "$3" ]; then carrier_run -s byedpi cmd_slot_down sweep_apply_slot "$3" "$2"; else carrier_run cmd_down cmd_sweep_apply "$2" ''; fi ;;
     sweep-end)   cmd_sweep_end "$2" ;;        # восстановить исходную стратегию, снять lock
     # Слот-вербы ОПЦИОНАЛЬНЫ: нет слот-слоя → код 2 «не умею», основная несущая не страдает.
-    slot-up)   slot_lib_ok || exit 2; carrier_run cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф1c): поднять ciadpi+hev+xtunN в table 100N (cfg игнор)
+    slot-up)   slot_lib_ok || exit 2; carrier_run -s byedpi cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф1c): поднять ciadpi+hev+xtunN в table 100N (cfg игнор)
     slot-down) slot_lib_ok || exit 2; cmd_slot_down "$2" ;;      # доп-выход: снять несущую слота (-> fallback-политика mark-core)
-    slot-health) slot_lib_ok || exit 2; carrier_run cmd_slot_down cmd_slot_health "$2" ;;  # доп-выход: жив ли (watchdog; egress-проба, не только pid); залипший hev выхода перезапускает — берёт несущую
-    slot-reload) slot_lib_ok || exit 2; carrier_run cmd_slot_down cmd_slot_reload "$2" ;;  # доп-выход: перечитать .byedpi-args-s<id> (перезапуск только ciadpi слота)
+    slot-health) slot_lib_ok || exit 2; carrier_run -s byedpi cmd_slot_down cmd_slot_health "$2" ;;  # доп-выход: жив ли (watchdog; egress-проба, не только pid); залипший hev выхода перезапускает — берёт несущую
+    slot-firewall) owner_rule_add ;;
+    slot-reload) slot_lib_ok || exit 2; carrier_run -s byedpi cmd_slot_down cmd_slot_reload "$2" ;;  # доп-выход: перечитать .byedpi-args-s<id> (перезапуск только ciadpi слота)
     slot-iface)  slot_lib_ok || exit 2; slot_tun "$2" ;;         # имя несущей слота — учёту трафика (владелец имени один: slot-tun-lib.sh)
-    *) echo "usage: $0 up|down|cold|status|health|failover|reload|defaults|presets|socks-up [pid]|socks-down [pid]|sweep-begin|sweep-apply|sweep-end|slot-up <id>|slot-down <id>|slot-health <id>|slot-reload <id>|slot-iface <id>"; exit 2 ;;
+    *) echo "usage: $0 up|down|cold|status|health|failover|reload|defaults|presets|sweep-begin|sweep-apply|sweep-end|slot-up <id>|slot-down <id>|slot-health <id>|slot-reload <id>|slot-iface <id>"; exit 2 ;;
 esac

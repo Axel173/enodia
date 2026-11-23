@@ -221,7 +221,15 @@ _dnslib_wan() { wan_iface; }
 # ЗАВОДИТЬ (следит C26).
 CURL_CA_CAP="${CURL_CA_CAP:-/tmp/.enodia-curl-cafile}"
 CURL_CA_CANDIDATES="${CURL_CA_CANDIDATES:-/etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /usr/share/ca-certificates/ca-certificates.crt}"
-curl_ca_opt() {   # $1 = URL пробы; $2… = доп-аргументы curl (напр. --resolve); без URL — только известный ответ
+_dns_ca_curl() {   # max time, URL, curl arguments
+    local limit=$1 url=$2
+    shift 2
+    _dns_seed_curl "$limit" --max-time "$limit" "$@" "$url"
+}
+curl_ca_opt() { curl_ca_opt_via _dns_ca_curl "$@"; }   # URL, curl arguments; no URL = cached answer only
+curl_ca_opt_via() {   # same selection and cache with a caller-supplied curl runner
+    local _cc_curl=$1
+    shift
     if [ -f "$CURL_CA_CAP" ]; then
         [ -s "$CURL_CA_CAP" ] && printf -- '--cacert %s' "$(cat "$CURL_CA_CAP" 2>/dev/null)"
         return 0
@@ -237,13 +245,13 @@ curl_ca_opt() {   # $1 = URL пробы; $2… = доп-аргументы curl 
     # Судим по ЛЮБОМУ валидному HTTP-коду: 400/404 значит, что TLS уже прошёл.
     for _cca in $CURL_CA_CANDIDATES; do
         [ -s "$_cca" ] || continue
-        _ccc=$(_dns_seed_curl 10 -s -o /dev/null -w '%{http_code}' --cacert "$_cca" --connect-timeout 5 --max-time 10 "$@" "$_ccu" 2>/dev/null)
+        _ccc=$("$_cc_curl" 10 "$_ccu" -s -o /dev/null -w '%{http_code}' --cacert "$_cca" --connect-timeout 5 "$@" 2>/dev/null)
         _ccr=$?
         case "$_ccc" in
             # rc=60 = «этот бандл не подошёл» ⇒ есть смысл в следующем. ЛЮБАЯ ДРУГАЯ осечка
             # (6/7/28 — не резолвится/не коннектится/таймаут) — про ПУТЬ, а не про бандл: другой
             # файл её не вылечит, а платить за него ещё одним таймаутом на горячем пути незачем.
-            ''|000) if [ "$_ccr" = 60 ]; then _cc60=1; else break; fi ;;
+            ''|000) case "$_ccr" in 60|77) _cc60=1 ;; *) return 0 ;; esac ;;
             *) printf '%s' "$_cca" > "$CURL_CA_CAP" 2>/dev/null
                printf -- '--cacert %s' "$_cca"; return 0 ;;
         esac

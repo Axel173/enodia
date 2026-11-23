@@ -59,6 +59,7 @@ fi
 # «Кто сейчас ведёт несущую» (тик сторожа, прогон heal) — daemon-lib.sh; нет его (старая установка) — доводчика выключения не
 # заводим, то есть ведём себя как раньше.
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
+if [ -f "$ENODIA_DIR/set-lib.sh" ]; then . "$ENODIA_DIR/set-lib.sh"; fi   # set_slot_needed: exit sets the builders require (repair)
 command -v wd_tick_alive >/dev/null 2>&1 || wd_tick_alive() { return 1; }
 command -v heal_alive >/dev/null 2>&1 || heal_alive() { return 1; }
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -d "/proc/$1" ]; }
@@ -72,18 +73,6 @@ settle_busy() { [ -e "$SWITCH_LOCK" ] || wd_tick_alive || heal_alive; }
 # оставляло VPN «включённым» без несущей: доводчик флаг уже проверил и снимал дальше (ревью ветки, круг 2). Держатель — живой
 # процесс vpn-toggle (его пид в файле; труп забираем сразу, лок переживает `kill -9`), живого ждём не дольше минуты: секция — секунды
 # снятия; timeout must refuse ON while this live owner can still mutate carriers. Ловушки нет НАМЕРЕННО: снятие внутри секции ставит и снимает свои.
-SETTLE_LOCK="/tmp/enodia-vpnoff-settle.lock"
-settle_lock_take() {
-    _stw=0
-    while ! ( set -C; echo $$ > "$SETTLE_LOCK" ) 2>/dev/null; do
-        _sth=$(cat "$SETTLE_LOCK" 2>/dev/null | tr -cd '0-9')
-        pid_runs "$_sth" 'vpn-toggle\.sh' || rm -f "$SETTLE_LOCK" 2>/dev/null
-        [ "$_stw" -ge 60 ] && return 1
-        sleep 1; _stw=$((_stw + 1))
-    done
-    return 0
-}
-settle_lock_drop() { [ "$(cat "$SETTLE_LOCK" 2>/dev/null)" = "$$" ] && rm -f "$SETTLE_LOCK" 2>/dev/null; return 0; }
 
 # ВАЖНО про target ACCEPT (а НЕ RETURN) в user-chain VPN_EXCLUDE:
 # Каскад в PREROUTING после ensure_chain выглядит так:
@@ -163,7 +152,13 @@ cmd_off() {
     # после ребута, а не половину снятых правил и полное возвращение через две минуты.
     mkdir -p "$ENODIA_STATE" 2>/dev/null
     # Доводчик (off-settle) момент выключения не переписывает: он доводит ТО ЖЕ нажатие.
-    [ "$OFF_SETTLE" = 1 ] || date +%s > "$VPN_OFF_FLAG" 2>/dev/null
+    if [ "$OFF_SETTLE" != 1 ]; then
+        settle_lock_take 5 || return 1
+        date +%s > "$VPN_OFF_FLAG" 2>/dev/null
+        _intent_rc=$?
+        settle_lock_drop
+        [ "$_intent_rc" = 0 ] || return 1
+    fi
     rm -f /tmp/enodia-road-failopen
     # PIPE и HUP — не просьба остановиться, их глушим ДО КОНЦА выключения, взяли мы лок или нет (как pkg-install.sh): убитый CGI
     # оставляет нас писать в мёртвую трубу, обрыв SSH шлёт HUP, а намерение уже на диске — умри мы здесь, несущая, выходы и
@@ -172,14 +167,18 @@ cmd_off() {
     # ЗАНЯТОСТЬ — И В МОМЕНТ НАЖАТИЯ, а не только в конце: тик, кончившийся посреди снятия, успевал поднять несущую после нашего
     # `down` и к концу был уже не виден (ревью ветки, круг 2). Свой switching-лок ниже ещё не взят — всё, что видно, чужое.
     _busy0=0; settle_busy && _busy0=1
+    _offkept=''; [ ! -f "$ENODIA_DIR/slots.sh" ] || _offkept=$(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null)
     ip rule del fwmark $MARK table $TABLE 2>/dev/null
-    for _s in 2 3 4 5 6 7; do
-        ip rule del fwmark "0x$_s" table "100$_s" 2>/dev/null
-        ip rule del fwmark "0x$_s" table $TABLE 2>/dev/null
-    done
+    if [ -f "$ENODIA_DIR/mark-core.sh" ]; then
+        if [ -n "$_offkept" ]; then sh "$ENODIA_DIR/mark-core.sh" slot-rules >/dev/null 2>&1
+        else sh "$ENODIA_DIR/mark-core.sh" slot-unrules >/dev/null 2>&1; fi
+    fi
     # Roads to servers (road.sh, pref 82..87) — ours too: «off» leaves the router as it is after a reboot with the flag. `on`
     # brings them back by the carriers' raise (endpoint-set → wire), the same path as a boot.
-    [ -f "$ENODIA_DIR/road.sh" ] && sh "$ENODIA_DIR/road.sh" unwire >/dev/null 2>&1
+    if [ -f "$ENODIA_DIR/road.sh" ]; then
+        if [ -n "$_offkept" ]; then sh "$ENODIA_DIR/road.sh" wire >/dev/null 2>&1
+        else sh "$ENODIA_DIR/road.sh" unwire >/dev/null 2>&1; fi
+    fi
     # ЛОК СМЕНЫ НЕСУЩЕЙ — И НА СНЯТИИ ТОЖЕ (зеркало cmd_on). Флаг `.vpn-off` записан выше, и тик
     # сторожа, который начнётся ПОСЛЕ него, из тика выйдет. Но тик, уже прошедший проверку флага,
     # может прямо сейчас вести failover — и поднять несущую ровно между нашим `down` и `cold`.
@@ -240,7 +239,7 @@ cmd_off() {
     # ребута с флагом, — а heal с флагом слоты не поднимает. Реестр не трогаем (выход остаётся
     # `on`): выключили VPN, а не выход; обратно поднимет `on` через heal replay, как и ребут.
     if [ -f "$ENODIA_DIR/transport.sh" ]; then
-        _offs=$(sh "$ENODIA_DIR/transport.sh" slots-down 2>&1) || _offfail=1
+        _offs=$(sh "$ENODIA_DIR/transport.sh" slots-down preserve-kept 2>&1) || _offfail=1
         [ -n "$_offs" ] && printf '%s\n' "$_offs" | sed 's/^/  /'
     fi
     # ТЁПЛЫЙ РЕЗЕРВ — ТОЖЕ РЕСУРС. `down` у awg оставляет awg0 живым НАРОЧНО: пока везёт другой
@@ -254,6 +253,9 @@ cmd_off() {
     # активный): awg0 мог остаться тёплым с прошлого switch, пока вёз xray.
     if [ -f "$ENODIA_DIR/transport.sh" ]; then
         sh "$ENODIA_DIR/transport.sh" cold >/dev/null 2>&1
+    fi
+    if [ -n "$_offkept" ] && [ -f "$ENODIA_DIR/mark-core.sh" ]; then
+        sh "$ENODIA_DIR/mark-core.sh" slot-replay >/dev/null 2>&1 || _offfail=1
     fi
     # Лок отпускаем ЗДЕСЬ — после снятия несущих и выходов, но ДО сброса conntrack: держать его на
     # ct_flush незачем, а сторож к этому моменту уже увидит и флаг, и снятое состояние.
@@ -284,7 +286,10 @@ cmd_off() {
         echo "Выключение сохранено, но часть правил пока не снята. Доводчик повторит попытку."
         return 1
     fi
-    echo "VPN глобально ВЫКЛЮЧЕН. Трафик идёт через провайдера (включая доп-выходы)."
+    if [ -z "$_offkept" ]; then echo "VPN глобально ВЫКЛЮЧЕН. Трафик идёт через провайдера (включая доп-выходы)."
+    elif sh "$ENODIA_DIR/slots.sh" state 2>/dev/null | grep -q "$(printf '\tup\tself$')"; then
+        echo "VPN глобально ВЫКЛЮЧЕН. Выбранные доп-выходы продолжают работать."
+    else echo "VPN глобально ВЫКЛЮЧЕН. Выбранные доп-выходы сейчас недоступны."; fi
     echo "Не забудьте: ipconfig /flushdns на клиентах."
 }
 
@@ -315,12 +320,12 @@ cmd_off_settle() {
         if settle_lock_take; then
             if [ ! -f "$VPN_OFF_FLAG" ]; then
                 :
-            elif [ "$_osretry" != 1 ] && [ ! -f "$SETTLE_PENDING" ] && ! carrier_left; then
+            elif [ "$_osretry" != 1 ] && [ ! -f "$SETTLE_PENDING" ] && ! carrier_left && off_rules_clean; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') vpn-toggle: выключение доведено, ничего не вернулось (ждал ${_osw} с)" >> "$WD_LOG" 2>/dev/null
             else
                 echo "$(date '+%Y-%m-%d %H:%M:%S') vpn-toggle: довожу выключение (ждал ${_osw} с)" >> "$WD_LOG" 2>/dev/null
                 OFF_SETTLE=1
-                cmd_off >/dev/null 2>&1 || _osagain=1
+                ENODIA_SETTLE_OWNER=$$ cmd_off >/dev/null 2>&1 || _osagain=1
             fi
             settle_lock_drop
         elif [ -f "$VPN_OFF_FLAG" ]; then
@@ -353,8 +358,14 @@ cmd_flag_clear() {
         return 1
     fi
     rm -f "$VPN_OFF_FLAG" 2>/dev/null
+    rm -f "$ENODIA_STATE/.vpn-deactivated" 2>/dev/null
     settle_lock_drop
     return 0
+}
+off_rules_clean() {
+    [ ! -f "$ENODIA_DIR/mark-core.sh" ] || sh "$ENODIA_DIR/mark-core.sh" slot-off-clean >/dev/null 2>&1 || return 1
+    [ ! -f "$ENODIA_DIR/zapret.sh" ] || sh "$ENODIA_DIR/zapret.sh" slot-off-clean >/dev/null 2>&1 || return 1
+    [ ! -f "$ENODIA_DIR/road.sh" ] || sh "$ENODIA_DIR/road.sh" off-clean >/dev/null 2>&1
 }
 carrier_left() {
     [ -f "$ENODIA_DIR/transport.sh" ] || return 0
@@ -397,6 +408,10 @@ active_transport() {
 REPAIR_CARRIER=1
 cmd_rules() { REPAIR_CARRIER=0; cmd_repair; }
 cmd_repair() {
+    if [ -f "$ENODIA_STATE/.vpn-deactivated" ]; then
+        echo "VPN деактивирован. Включите VPN, чтобы восстановить правила."
+        return 0
+    fi
     # ВЫКЛЮЧЕНО ЧЕЛОВЕКОМ — правила VPN не чиним. `repair` возвращает то, что снесли ЧУЖИЕ руки (fw3 reload из вебморды
     # Xiaomi), а правил VPN здесь нет НАРОЧНО: вернуть их = включить VPN за спиной человека. Ровно этим путём лестница сторожа и
     # воскрешала zapret после «выключить».
@@ -407,7 +422,7 @@ cmd_repair() {
     repair_off=0
     if [ -f "$VPN_OFF_FLAG" ]; then
         repair_off=1
-        echo "VPN выключен человеком — правила VPN не переигрываю, возвращаю только блокировки, запрет IPv6 и «доступ домой» (включить VPN: тумблер в панели или vpn-toggle.sh on)"
+        echo "VPN выключен человеком — восстанавливаю блокировки, запрет IPv6, «доступ домой» и выходы, которым разрешено работать при выключенном VPN."
     fi
     # Активный транспорт определяем СРАЗУ: несущая awg и альтов (xray/hy2) живёт на
     # РАЗНЫХ интерфейсах (awg0 vs xtun). Раньше cmd_repair был awg-центричен —
@@ -525,8 +540,25 @@ cmd_repair() {
     # (несущая — VPN), поэтому ветка zapret-транспорта выше слот не восстановит. Переигрываем как
     # heal 5.13b: zapret-слот re-wire ACCEPT+scoped NFQUEUE на свои сеты (живут в RAM, пережили
     # reload), non-zapret — марку/ip rule через mark-core. Реестр пуст → no-op.
-    [ "$repair_off" = 0 ] && [ -f "$ENODIA_DIR/slots.sh" ] && [ -n "$(sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null)" ] && \
-        [ -f "$ENODIA_DIR/transport.sh" ] && sh "$ENODIA_DIR/transport.sh" slots-up >/dev/null 2>&1
+    if [ -f "$ENODIA_DIR/slots.sh" ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
+        if [ -n "$(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null)" ]; then
+            if [ "$repair_off" = 1 ] && [ "$repair_t" != none ]; then sh "$ENODIA_DIR/transport.sh" dns "$repair_t" >/dev/null 2>&1; fi
+            sh "$ENODIA_DIR/transport.sh" slots-up >/dev/null 2>&1
+        fi
+    fi
+    # A set its builder requires but gone (set-lib.sh set_slot_need: a deactivation destroys sets, an On cut before its replay) reads
+    # «правил нет» on the exit and sends people HERE — a fw3 reload keeps sets, so nothing above rebuilds one. Its own builder does
+    # (idempotent; its build re-wires the exit through slots-up). Nothing required or all present ⇒ no build (walk dev.5, AX3600).
+    if command -v set_slot_needed >/dev/null 2>&1; then   # the record follows admission: with VPN off only kept exits are in it
+        _rpl=$(ipset list -n 2>/dev/null)
+        for _rps in $(set_slot_needed '[2-7]'); do
+            printf '%s\n' "$_rpl" | grep -qx "$_rps" && continue
+            case "$_rps" in
+                grp_*) [ -f "$ENODIA_DIR/groups.sh" ] && sh "$ENODIA_DIR/groups.sh" apply >/dev/null 2>&1 ;;
+                geo_*) [ -f "$ENODIA_DIR/geo.sh" ] && sh "$ENODIA_DIR/geo.sh" apply >/dev/null 2>&1 ;;
+            esac
+        done
+    fi
 
     # «Доступ домой» (vpn-server.sh): его цепочки (порт наружу, INPUT из туннеля с default-deny,
     # FORWARD) fw3-reload сносит вместе со всеми. Несущая awgs0 при этом ЖИВА, поэтому чинить надо
@@ -573,58 +605,37 @@ cmd_repair() {
     else echo "OK: правила восстановлены без несущей (транспорт: $repair_t)."; fi
 }
 
-cmd_on() {
+# Admit the choice, the On intent and the first AWG raise together with config deletion.
+# Release before repair/replay, which acquire their own runtime admission.
+# Why On raises awg0 itself: after a panel-only install + backup import (`.transport=awg` arrives as a FILE) + a component
+# delivered by «Компоненты» (installs, never activates) nobody raises the carrier — heal sits on its boot lock, repair needs a
+# READY awg0 — and the only panel button sent people to SSH (measured on AX3600 17.08.2026). The `ready` gate is mandatory:
+# without bins/config `up` reaches awg_setup.sh, which ends with `firewall reload` (wipes ALL iptables) for a doomed attempt.
+# Why under the switch lock: the raise takes seconds with no interface yet; a watchdog tick in that window reads «awg0 gone»
+# → safety_off + FAILOPEN + drops heal's boot lock → a full boot scenario a minute later (the July pseudo-reboot). Watchdog and
+# heal leave on this lock unconditionally. A refused lock = someone is switching right now: refuse in words, never race it.
+on_admit() (
+    trap '[ "$(cat "$SWITCH_LOCK" 2>/dev/null)" != "$$" ] || rm -f "$SWITCH_LOCK"' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    if command -v switch_hold >/dev/null 2>&1; then
+        switch_hold "$SWITCH_LOCK" 5 0
+    else
+        ( set -C; echo $$ > "$SWITCH_LOCK" ) 2>/dev/null
+    fi || { echo "Идёт смена транспорта или сервера — повторите включение VPN."; return 1; }
+    if [ -f "$ENODIA_DIR/transport.sh" ]; then
+        _on_config=$(sh "$ENODIA_DIR/transport.sh" require-config)
+        case "$?" in 0|2) ;; *) printf '%s\n' "$_on_config"; return 1 ;; esac  # 2 = an older transport owner
+    fi
     # Флаг снимаем ПЕРВЫМ делом: ниже мы зовём repair и `heal.sh replay`, а они этот же флаг
     # читают — оставленный, он погасил бы ровно то включение, ради которого нас позвали.
     cmd_flag_clear || return 1
-    # СНЯТОЕ ДЕАКТИВАЦИЕЙ — ПЕРВЫМ ЖЕ ШАГОМ (`uninstall.sh cron-restore`): расписание и намерение «доступа домой». После «Отключить
-    # VPN» cron-строк нет вовсе, а без них роутер живёт без сторожа (мёртвый VPS = дом без интернета: fail-open делать некому), без
-    # heal (ребут ничего не поднимет) и без обновления списков — при зелёной панели; что снято, знает ТОЛЬКО снимавший, своей копии
-    # реестра задач тут нет. Первым — потому что `heal.sh replay` ниже поднимает «доступ домой» ТОЛЬКО по флагу, и отложенное
-    # намерение обязано стать флагом ДО него (ревью шага 6d, круг 2), и потому что при отказе repair повторить починку без cron-строк
-    # было бы некому. Верб идемпотентен: на обычном `on` (ничего не снимали) молча выходит.
+    # Restore scheduling and home-access intent before the cold raise can block or be interrupted.
+    # The cron writers never wait for switch admission while holding the crontab lock.
     restore_cron
-    # НЕСУЩАЯ МОГЛА НЕ ПОДНИМАТЬСЯ НИ РАЗУ — и тогда клик «Включить VPN» упирался в гард repair'а,
-    # который советует SSH-команду. Типовой путь (замерено на AX3600 17.08.2026): установка
-    # «только панель» + импорт бэкапа (намерение `.transport=awg` приезжает ФАЙЛОМ, несущую импорт
-    # сознательно не поднимает) + доставка компонента в «Компонентах» (`packages.sh` ставит, но НЕ
-    # активирует). Поднять awg0 в этот момент некому: heal сидит на бутовом локе, а repair его
-    # сознательно не снимает — окно до трёх минут, пока не спохватится сторож. Другого пути в
-    # панели у человека НЕТ: пикер транспорта ТЕКУЩИЙ транспорт не переключает (`return` на
-    # cur.transport===k), то есть единственная кнопка отказывала и отправляла в SSH.
-    # Поднимаем сами и тем же вербом, что зовут heal (5.6) и repair для АЛЬТОВ: у awg ветка
-    # repair'а инлайновая и требует ГОТОВЫЙ awg0, у альтов несущую ставит плагин — асимметрия
-    # была только в этом. Гейт `ready` ОБЯЗАТЕЛЕН: без бинарей/конфига `up` дошёл бы до
-    # awg_setup.sh, а тот кончается `firewall reload` (снос ВСЕХ iptables) ради заведомо
-    # провальной попытки. Нет верба (код 2 = старая копия) ⇒ как раньше, байт-в-байт: причину
-    # назовёт гард repair'а ниже. Судим по ФАКТУ (интерфейс появился), а не по коду возврата.
-    # ЛОК СМЕНЫ НЕСУЩЕЙ ОБЯЗАТЕЛЕН, и по той же причине, что у `switch`: подъём идёт секунды, а
-    # внутри ЕЩЁ НЕТ интерфейса и ЕСТЬ `firewall reload` от awg_setup.sh. Тик сторожа (cron */2),
-    # попавший в это окно, увидит «awg0 нет» → safety_off + FAILOPEN + снимет бутовый лок heal, и
-    # тот через минуту прогонит ПОЛНЫЙ бутовый сценарий (`ip link del awg0` + второй firewall
-    # reload + письмо «загрузка OK») — тот самый псевдо-ребут, от которого лечили в июле. Лок
-    # существующий, четвёртой семантики не заводим: и сторож, и heal выходят на нём БЕЗУСЛОВНО
-    # (`[ -e ] && exit 0`), поэтому держим его ровно вокруг подъёма и снимаем сразу.
-    # Лок УЖЕ занят ⇒ прямо сейчас кто-то меняет транспорт: не лезем вовсе (гонка с ним — ровно
-    # то, что лок запрещает), причину назовёт гард repair'а ниже.
     if [ "$(active_transport)" = awg ] && ! ip link show awg0 >/dev/null 2>&1 \
-       && [ ! -e "$SWITCH_LOCK" ] \
        && [ -f "$ENODIA_DIR/transport.sh" ] && sh "$ENODIA_DIR/transport.sh" ready awg >/dev/null 2>&1; then
         echo "Несущая AmneziaWG не поднята — поднимаю awg0…"
-        _sl=0
-        # Ловушка нужна и на СИГНАЛАХ (uhttpd прибивает затянувшийся CGI): голый EXIT их не ловит,
-        # а забытый лок держит сторожа и heal до срока SWITCH_STALE (30 мин).
-        # Сигнал — ВЫХОД (C121): сигнальная без `exit` снимала лок, а подъём шёл дальше уже без него.
-        if : > "$SWITCH_LOCK" 2>/dev/null; then
-            _sl=1
-            trap 'rm -f "$SWITCH_LOCK" 2>/dev/null' EXIT
-            trap 'exit 1' HUP INT TERM PIPE
-        fi
         _up=$(sh "$ENODIA_DIR/transport.sh" up awg 2>&1)
-        if [ "$_sl" = 1 ]; then
-            trap - EXIT HUP INT TERM PIPE
-            rm -f "$SWITCH_LOCK" 2>/dev/null
-        fi
         if ip link show awg0 >/dev/null 2>&1; then
             echo "awg0 поднят."
         else
@@ -632,8 +643,12 @@ cmd_on() {
             echo "$_up" | tail -n 3
         fi
     fi
-    # Отказ repair — отказ всего `on`; расписание к этому моменту уже возвращено первым шагом (разбор у restore_cron выше), так что
-    # повторить починку будет кому. Строки — ровно снятые (`cron-restore`).
+    return 0
+)
+cmd_on() {
+    on_admit || return 1
+    # Admission already restored the removed cron lines and the flag that enables home access during replay.
+    # If repair refuses, the watchdog and heal schedule is already back.
     cmd_repair || return 1
     # `repair` возвращает ПРАВИЛА (он про снос от fw3 reload, где наборы в RAM живы). А после
     # «Отключить VPN» теряются САМИ НАБОРЫ и dnsmasq-сниппеты: их владельцы — groups.sh, geo.sh,

@@ -78,9 +78,8 @@ TAB=$(printf '\t')
 # именем («Germany-2.json», «enodiatest-2.conf» — загрузка «рядом») вставал в списке ВЫШЕ первого (замер BE7000 04.10.2026).
 # Имена у нас без переводов строки (upload_config/подписки пускают только [A-Za-z0-9_.-]) — построчный sort их не рвёт. Порядок —
 # побайтовый (`LC_ALL=C`): busybox иначе и не умеет, а GNU sort стенда в UTF-8 локали пропускал бы знаки и ставил бы имена иначе.
-# ПЕРЕБОР РЕЗЕРВА идёт иначе — глобом, по имени ФАЙЛА (switch-vpn.sh/xray-transport.sh/transport-hy2.sh::failover): «X-2» там раньше
-# «X». Сознательно: разница — только у пары «X / X-…», а общий владелец порядка на три плагина и CGI ради неё дороже; подсказка экрана
-# имени говорит «по алфавиту файлов» (ревью с.97).
+# Failover gets favourites first from daemon-lib.sh::server_candidates. Its remaining candidates keep the file glob order,
+# which puts X-2.json before X.json. This list sorts server names after removing their extensions.
 list_dir() {
 	dir="$1"; ext="$2"
 	for f in "$dir"/*."$ext"; do
@@ -95,23 +94,28 @@ list_dir() {
 # JSON-безопасны, но на всякий срезаем кавычки/бэкслеш.
 meta_xray() {
 	if [ -f "$D/xray-profile-lib.sh" ]; then . "$D/xray-profile-lib.sh"; fi
-	set --
+	_mx_mode=${1:-}; set --
 	for f in "$DS"/xray-configs/*.json; do [ -f "$f" ] && set -- "$@" "$f"; done
 	# No profile left — the owner drops the rows' cache (it holds what the directory holds), nothing to answer.
-	if [ $# -eq 0 ]; then if command -v xp_meta_rows >/dev/null 2>&1; then xp_meta_rows; fi; return 0; fi
+	if [ $# -eq 0 ] && [ -z "$_mx_mode" ]; then if command -v xp_meta_rows >/dev/null 2>&1; then xp_meta_rows; fi; return 0; fi
 	# The stream: first the ORDER of files («F⇥path»: a file without a single key still gets its entry), then the rows of each
 	# profile — pool · a chain's relay · the first member's scalars («K⇥path⇥key⇥value») — from their owner, cached by content
 	# (xray-profile-lib.sh::xp_meta_rows): ~0.3 s a file to read, 91 profiles held this answer 22 s on AX3600 (walk 19.11.2026).
 	# A key repeated within one file keeps its FIRST value: one member's address never meets another's SNI (dev/list-cgi-test.sh).
 	{
-		for f in "$@"; do printf 'F\t%s\n' "$f"; done
-		if command -v xp_meta_rows >/dev/null 2>&1; then xp_meta_rows "$@"; fi
-	} | awk -F"$TAB" '
+		if [ "$_mx_mode" = --cached ]; then
+			if command -v xp_meta_kick >/dev/null 2>&1; then xp_meta_rows --cached "$@"; fi
+		else
+			for f in "$@"; do printf 'F\t%s\n' "$f"; done
+			if command -v xp_meta_rows >/dev/null 2>&1; then xp_meta_rows "$@"; fi
+		fi
+	} | awk -F"$TAB" -v cached="$_mx_mode" '
+		$1 == "M" { pending = $2; next }
 		$1 == "F" { nm = $2; sub(/^.*\//, "", nm); sub(/\.json$/, "", nm); gsub(/["\\]/, "", nm); name[$2] = nm; ord[++n] = $2; next }
 		$1 == "P" { pool[$2] = 1; next }
 		$1 == "R" { relay[$2] = $3; next }
 		$1 == "K" {
-			v = $4; gsub(/["\\]/, "", v)
+			v = $4; gsub(/[[:cntrl:]"\\]/, "", v)
 			# Протокол outbound — ПЕРВЫЙ из четвёрки (inbound socks и freedom в неё не входят); нет ни одного — vless.
 			if ($3 == "protocol") { if (!($2 in pr) && v ~ /^(vless|vmess|trojan|shadowsocks)$/) pr[$2] = v; next }
 			k = $2 "\t" $3; if (!(k in val)) val[k] = v
@@ -124,23 +128,29 @@ meta_xray() {
 				printf "%s\"%s\":{\"proto\":\"%s\",\"sni\":\"%s\",\"fp\":\"%s\",\"host\":\"%s\",\"network\":\"%s\",\"security\":\"%s\",\"flow\":\"%s\"}", \
 					(i > 1 ? "," : ""), name[p], pp, val[p "\tserverName"], val[p "\tfingerprint"], val[p "\taddress"], val[p "\tnetwork"], val[p "\tsecurity"], val[p "\tflow"]
 			}
+			if (cached) printf "},\"meta_pending\":%d", pending
 		}'
 }
 meta_hy2() {
-	out=""
-	for f in "$DS"/hy2-configs/*.yaml; do
-		[ -f "$f" ] || continue
-		n=$(basename "$f" .yaml | tr -d '"\\')
-		# Управляющие байты — вон и из sni (прежде резали только кавычку и слэш): сырой байт в JSON ронял бы разбор ВСЕГО списка.
-		sni=$(sed -n 's/^[[:space:]]*sni:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' "$f" | head -1 | tr -d '\000-\037"\\')
-		ins=$(sed -n 's/^[[:space:]]*insecure:[[:space:]]*\([A-Za-z]*\).*$/\1/p' "$f" | head -1)
-		# Адрес сервера и обфускация — строке Hysteria2 под именем (макет «Серверов»: «адрес · salamander»). Не секрет: пароль obfs
-		# и auth не отдаём. Управляющие байты — вон, диапазон ПЕРВЫМ (busybox не читает восьмеричный код сразу после `\\`, C111).
-		srv=$(sed -n 's/^server:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' "$f" | head -1 | tr -d '\000-\037"\\')
-		obf=$(sed -n 's/^[[:space:]]*type:[[:space:]]*\(salamander\)[[:space:]]*$/\1/p' "$f" | head -1)
-		out="$out${out:+,}\"$n\":{\"sni\":\"$sni\",\"insecure\":\"$ins\",\"host\":\"$srv\",\"obfs\":\"$obf\"}"
-	done
-	printf '%s' "$out"
+	# Batch paths through xargs and emit each config, including an empty file, without building one large shell variable.
+	for f in "$DS"/hy2-configs/*.yaml; do [ ! -f "$f" ] || printf '%s\0' "$f"; done |
+		xargs -0 awk '
+		function clean(v) { sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); gsub(/[[:cntrl:]"\\]/, "", v); return v }
+		BEGIN {
+			for (i=1; i<ARGC; i++) {
+				f=ARGV[i]; name=f; sub(/^.*\//, "", name); sub(/\.yaml$/, "", name)
+				sni=ins=host=obf=""; seen_ins=0
+				while ((getline l < f)>0) {
+					if (sni=="" && l ~ /^[[:space:]]*sni:/) { v=l; sub(/^[[:space:]]*sni:/, "", v); sni=clean(v) }
+					if (!seen_ins && l ~ /^[[:space:]]*insecure:/) { v=l; sub(/^[[:space:]]*insecure:[[:space:]]*/, "", v); sub(/[^A-Za-z].*$/, "", v); ins=v; seen_ins=1 }
+					if (host=="" && l ~ /^server:/) { v=l; sub(/^server:/, "", v); host=clean(v) }
+					if (l ~ /^[[:space:]]*type:[[:space:]]*salamander[[:space:]]*$/) obf="salamander"
+				}
+				close(f)
+				printf "\"%s\":{\"sni\":\"%s\",\"insecure\":\"%s\",\"host\":\"%s\",\"obfs\":\"%s\"}\n", clean(name), sni, ins, host, obf
+			}
+			exit
+		}' | awk '{ printf "%s%s", (NR>1 ? "," : ""), $0 }'
 }
 
 # Подписки (метаданные с роутера) -> [{"tag","label"}]. URL (кред) НЕ отдаём — обновление
@@ -220,10 +230,30 @@ aw_active=$(cat "$DS/.active"      2>/dev/null | tr -d ' \r\n"\\')
 xr_active=$(cat "$DS/.xray-active" 2>/dev/null | tr -d ' \r\n"\\')
 hy_active=$(cat "$DS/.hy2-active"  2>/dev/null | tr -d ' \r\n"\\')
 
+# Take identities before any row fields. A writer that lands during this
+# reply can only make an old identity unusable at the action owner.
+cfg_revisions() (
+	[ -f "$D/xray-profile-lib.sh" ] || exit 0
+	. "$D/xray-profile-lib.sh"
+	set --
+	for f in "$DS"/configs/*.conf "$DS"/xray-configs/*.json "$DS"/hy2-configs/*.yaml; do
+		[ ! -f "$f" ] || set -- "$@" "$f"
+	done
+	[ "$#" -gt 0 ] || exit 0
+	_xmr_live_sums "$@" | awk -F "$TAB" '
+		{ n=split($2,p,"/")
+		  dir=p[n-1]; file=p[n]; sub(/\.[^.]+$/, "", file)
+		  k=(dir=="configs"?"awg":(dir=="xray-configs"?"xray":"hy2"))
+		  if (file ~ /^[A-Za-z0-9_.-]+$/) printf "%s\"%s|%s\":\"%s\"", (i++?",":""), k, file, $1 }
+	'
+)
 printf '{"transport":"%s",' "$t"
+printf '"revisions":{'; cfg_revisions; printf '},'
 printf '"awg":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"held":{%s},"gen":{%s},"ep":{%s}},'  "${aw_active:-?}" "$(is_ready awg)"  "$(bin_present awg)"  "$(list_dir "$DS/configs" conf)" "$(awg_held)" "$(awg_gen)" "$(awg_ep)"
-printf '"xray":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},' "${xr_active:-?}" "$(is_ready xray)" "$(bin_present xray)" "$(list_dir "$DS/xray-configs" json)" "$(meta_xray)"
-printf '"hy2":{"active":"%s","ready":%s,"bin":%s,"servers":[%s],"meta":{%s}},'  "${hy_active:-?}" "$(is_ready hy2)"  "$(bin_present hy2)"  "$(list_dir "$DS/hy2-configs" yaml)" "$(meta_hy2)"
+printf '"xray":{"active":"%s","ready":%s,"bin":%s,"servers":[' "${xr_active:-?}" "$(is_ready xray)" "$(bin_present xray)"
+list_dir "$DS/xray-configs" json; printf '],"meta":{'; meta_xray --cached; printf '},'
+printf '"hy2":{"active":"%s","ready":%s,"bin":%s,"servers":[' "${hy_active:-?}" "$(is_ready hy2)" "$(bin_present hy2)"
+list_dir "$DS/hy2-configs" yaml; printf '],"meta":{'; meta_hy2; printf '}},'
 printf '"subs":[%s],' "$(subs_list)"
 # How each subscription presents itself to its provider (User-Agent, HWID MASKED) — its owner answers (subs-update.sh client-json,
 # `.sub-client` of subs-lib.sh). No answer of its form (an older router, a verb that failed — no memory for its run dir, a fork) is
@@ -234,10 +264,10 @@ case "$_scj" in '{"presets":'*'}') : ;; *) _scj=null ;; esac
 printf '"subclient":%s,' "$_scj"
 # Настоящие имена конфигов, добавленных руками (cfg-names.sh, ключ «вид/файл»): разбор — у владельца, один запуск на список.
 printf '"cfgnames":{%s},' "$([ -f "$D/cfg-names.sh" ] && sh "$D/cfg-names.sh" json 2>/dev/null)"
+printf '"favourites":[%s],' "$([ -f "$D/server-favs.sh" ] && sh "$D/server-favs.sh" json 2>/dev/null)"
 # Дороги к серверам (road.sh: «вид/файл» → номер выхода-дороги) — тот же приём: разбор у владельца, один запуск на список.
 printf '"roads":{%s},' "$([ -f "$D/road.sh" ] && [ -s "$DS/.cfg-via" ] && sh "$D/road.sh" json 2>/dev/null)"
 # Which AmneziaWG configs ARE WARP (warp.sh list: `name⇥i1`) → {"name":1|0} — 1 = carries a masking I1. The owner judges by the
 # server key; the panel only draws (the «WARP» badge, the road exits, the «no masking» warning).
 printf '"warp":{%s},' "$([ -f "$D/warp.sh" ] && sh "$D/warp.sh" list 2>/dev/null | awk -F'\t' '{ printf "%s\"%s\":%s", (c++ ? "," : ""), $1, $2 }')"
-printf '"names":{%s}}' "$(names_map)"
-printf '\n'
+printf '"names":{'; names_map; printf '}}\n'

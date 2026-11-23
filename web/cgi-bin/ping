@@ -58,6 +58,7 @@ D=${ENODIA_DIR:-/data/usr/app/enodia}
 DS=${ENODIA_STATE:-/data/usr/app/enodia-state}
 DB=${ENODIA_BIN:-/data/usr/app/enodia-bin}
 TAB=$(printf '\t')
+if [ -f "$D/server-checks-lib.sh" ]; then . "$D/server-checks-lib.sh"; fi
 
 # WAN-интерфейс: пробу гоним НАПРЯМУЮ через него. КРИТИЧНО: IP серверов подписки часто ∈
 # iplist_set → curl из роутера к ним МАРКИРУЕТСЯ 0x1 → уходит в АКТИВНЫЙ туннель (xtun/awg0),
@@ -379,12 +380,16 @@ diagnosis_json() {
 if [ -f "$D/xray-profile-lib.sh" ]; then . "$D/xray-profile-lib.sh"; fi
 command -v xp_pool >/dev/null 2>&1 || xp_pool() { return 1; }
 pool_ping() {
-    _pp_out=$(sh "$D/xray-test.sh" "$1" 2>/dev/null </dev/null)
+    _pp_cfg="$DS/xray-configs/$1.json"
+    _pp_rev=$(sc_rev "$_pp_cfg" 2>/dev/null)
+    _pp_out=$(XRAY_TEST_EXPECTED="$_pp_rev" sh "$D/xray-test.sh" "$1" 2>/dev/null </dev/null)
+    _pp_save=
+    _pp_ts=$(sc_egress "$_pp_cfg" "$_pp_rev" "$_pp_out" 2>/dev/null) || _pp_save=',"saved":false'
     _pp_ms=$(printf '%s\n' "$_pp_out" | sed -n 's/.*"ms":\([0-9][0-9]*\).*/\1/p' | head -n1)
     _pp_method=tun
-    case "$_pp_out" in *'"busy":true'*|*'"nobin":true'*) _pp_method=busy ;; esac
+    case "$_pp_out" in *'"busy":true'*|*'"nobin":true'*|*'"stale":true'*) _pp_method=busy ;; esac
     [ "$first" = 1 ] || printf ','; first=0
-    printf '{"transport":"xray","name":"%s","host":"multi-outbound pool","port":"","proto":"tcp","ms":%s,"method":"%s","active":%s,"cdn":false,"blk":false,"tms":null,"tmt":"","ncmp":false,"via":"","vup":false,"vms":null,"vmt":"","pool":true}' "$(clean "$1")" "${_pp_ms:-null}" "$_pp_method" "$2"
+    printf '{"transport":"xray","name":"%s","host":"multi-outbound pool","port":"","proto":"tcp","ms":%s,"method":"%s","active":%s,"cdn":false,"blk":false,"tms":null,"tmt":"","ncmp":false,"via":"","vup":false,"vms":null,"vmt":"","pool":true,"rev":"%s"%s%s}' "$(clean "$1")" "${_pp_ms:-null}" "$_pp_method" "$2" "$_pp_rev" "${_pp_ts:+,\"ts\":$_pp_ts}" "$_pp_save"
 }
 # tag=<метка> -> пинг ТОЛЬКО серверов одной подписки (sub-<tag>-*). one=<конфиг> -> пинг ОДНОГО
 # сервера (панель шлёт по одному с ограниченной конкуренцией → виден прогресс + быстрее).
@@ -408,6 +413,7 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 	emit() { # transport name host port proto active config
 		[ "$first" = 1 ] || printf ','; first=0
 		_pmx=0
+		_check_rev=$8
 		if [ "$1" = awg ] && prem_srv "$(clean "$2")"; then prem_ms "$(clean "$2")" "$6"; _pmx=1; else probe "$3" "$4" "$5"; fi
 		msj=$MS; [ -n "$msj" ] || msj=null
 		rv=""; vmj=null; vmt=""; vup=false; vprobe=false; rv_cfg=""; rk=""
@@ -465,8 +471,26 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 		if [ "$msj" = null ] && [ "$vmj" = null ] && [ "$blk" = false ] && [ "$_own_live" = 0 ] && [ "$_pmx" = 0 ]; then
 			_diag=$(diagnosis_json "$3" "$1" "$7")
 		fi
-		printf '{"transport":"%s","name":"%s","host":"%s","port":"%s","proto":"%s","active":%s,"ms":%s,"method":"%s","cdn":%s,"blk":%s,"tms":%s,"tmt":"%s","ncmp":%s,"via":"%s","vup":%s,"vms":%s,"vmt":"%s","via_configured":"%s","vprobe":%s%s%s}' \
-			"$1" "$(clean "$2")" "$(clean "$3")" "${4:-}" "$5" "$6" "$msj" "${METHOD:-}" "$(cdn_json)" "$blk" "$tmj" "$tmt" "$ncmp" "$rv" "$vup" "$vmj" "$vmt" "$rv_cfg" "$vprobe" "${chb:+,\"chb\":$chb}" "$_diag"
+		_check_save=; _check_ts=
+		if [ -n "$7" ]; then
+			_check_status=dead; _check_ms=$msj; _check_method=$METHOD
+			_check_via=-; _check_dms=-; _check_cdn=$CDN; _check_reason=-; _check_ncmp=0; _check_chb=-
+			if [ -n "$rv" ] && { [ "$vup" = true ] || { [ "$vprobe" = true ] && [ "$6" != true ]; }; }; then
+				_check_via=$rv; _check_dms=$msj; _check_ms=$vmj; _check_method=$vmt; _check_cdn=0
+			elif [ "$blk" = true ]; then _check_status=blk; _check_method=$tmt
+			elif [ "$ncmp" = true ]; then _check_ncmp=1; fi
+			[ "$_check_ms" = null ] || _check_status=ok
+			if [ -n "$_diag" ]; then _check_status=inapplicable; _check_reason=ipv6_unreachable; fi
+			if [ -n "$chb" ] && [ "$(printf '%s' "$chb" | jsonfilter -e '@.state' 2>/dev/null)" = done ]; then
+				_check_chb=$(printf '%s' "$chb" | jsonfilter -e '@.verdict' -e '@.blocked' -e '@.online' 2>/dev/null | awk 'NR>1{printf ":"}{printf "%s",$0}')
+			fi
+			case "$METHOD" in busy|idle) ;; *)
+				_check_ts=$(sc_save "$1" "$7" "$_check_rev" endpoint "$_check_status" "$_check_ms" "${_check_method:--}" "$_check_cdn" - ping "$tmj" "$_check_via" "$_check_dms" "${_check_chb:--}" "$_check_ncmp" "$_check_reason" 2>/dev/null) ||
+					_check_save=',"saved":false' ;;
+			esac
+		fi
+		printf '{"transport":"%s","name":"%s","host":"%s","port":"%s","proto":"%s","active":%s,"ms":%s,"method":"%s","cdn":%s,"blk":%s,"tms":%s,"tmt":"%s","ncmp":%s,"via":"%s","vup":%s,"vms":%s,"vmt":"%s","via_configured":"%s","vprobe":%s,"rev":"%s"%s%s%s%s}' \
+			"$1" "$(clean "$2")" "$(clean "$3")" "${4:-}" "$5" "$6" "$msj" "${METHOD:-}" "$(cdn_json)" "$blk" "$tmj" "$tmt" "$ncmp" "$rv" "$vup" "$vmj" "$vmt" "$rv_cfg" "$vprobe" "$_check_rev" "${chb:+,\"chb\":$chb}" "$_diag" "${_check_ts:+,\"ts\":$_check_ts}" "$_check_save"
 	}
 	# tag= (подписка) — только xray. one= — транспорт по tpt= (без tpt: xray, обратная совместимость).
 	if { [ -z "$gtag" ] && [ -z "$gone" ]; } || { [ -n "$gone" ] && [ "$gtpt" = awg ]; }; then
@@ -474,10 +498,11 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 		[ -f "$cf" ] || continue
 		name=$(basename "$cf" .conf)
 		if [ -n "$gone" ]; then [ "$name" = "$gone" ] || continue; fi
+		_ping_rev=$(sc_rev "$cf" 2>/dev/null)
 		ep=$(grep -E '^[[:space:]]*Endpoint' "$cf" 2>/dev/null | head -1 | sed 's/.*=[[:space:]]*//')
 		split_hp "$ep"
 		a=$([ "$name" = "$aw_active" ] && echo true || echo false)
-		emit awg "$name" "$EH" "$EP" udp "$a" "$cf"
+		emit awg "$name" "$EH" "$EP" udp "$a" "$cf" "$_ping_rev"
 	done
 	fi
 	if [ -z "$gone" ] || [ -z "$gtpt" ] || [ "$gtpt" = xray ]; then
@@ -490,6 +515,7 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 			pool_ping "$name" "$([ "$name" = "$xr_active" ] && echo true || echo false)"
 			continue
 		fi
+		_ping_rev=$(sc_rev "$cf" 2>/dev/null)
 		_pcm=$(xp_first "$cf")
 		host=$(printf '%s' "$_pcm" | jsonfilter -e '@.address' 2>/dev/null)
 		port=$(printf '%s' "$_pcm" | jsonfilter -e '@.port' 2>/dev/null)
@@ -503,7 +529,7 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 		net=$(printf '%s' "$_pcm" | jsonfilter -e '@.streamSettings.network' 2>/dev/null)
 		case "$net" in quic|kcp) pr=udp ;; *) pr=tcp ;; esac
 		a=$([ "$name" = "$xr_active" ] && echo true || echo false)
-		emit xray "$name" "$host" "$port" "$pr" "$a" "$cf"
+		emit xray "$name" "$host" "$port" "$pr" "$a" "$cf" "$_ping_rev"
 	done
 	fi
 	if { [ -z "$gtag" ] && [ -z "$gone" ]; } || { [ -n "$gone" ] && [ "$gtpt" = hy2 ]; }; then
@@ -511,10 +537,11 @@ if [ "$QUERY_STRING" = "all=1" ] || [ "${QUERY_STRING#*all=1}" != "$QUERY_STRING
 		[ -f "$cf" ] || continue
 		name=$(basename "$cf" .yaml)
 		if [ -n "$gone" ]; then [ "$name" = "$gone" ] || continue; fi
+		_ping_rev=$(sc_rev "$cf" 2>/dev/null)
 		sv=$(sed -n 's/^[[:space:]]*server:[[:space:]]*//p' "$cf" 2>/dev/null | head -1)
 		split_hp "$sv"
 		a=$([ "$name" = "$hy_active" ] && echo true || echo false)
-		emit hy2 "$name" "$EH" "$EP" udp "$a" "$cf"
+		emit hy2 "$name" "$EH" "$EP" udp "$a" "$cf" "$_ping_rev"
 	done
 	fi
 	printf ']}\n'

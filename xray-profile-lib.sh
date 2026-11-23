@@ -354,6 +354,35 @@ xp_endpoints() {
         xp_outbound_endpoints "$_xep_outbound" || :
     done | sort -u
 }
+
+# Every member of a provider profile, independent of outbound and account
+# order. Transport tuning and the provider's display name can change in place.
+xp_subscription_ids() {
+    xp_read "$(xp_object "$(xp_get "$1" '@')")" '@.outbounds[*]' | while IFS= read -r _xsi_ob; do
+        _xsi_doc=$(xp_object "$_xsi_ob")
+        _xsi_proto=$(xp_read "$_xsi_doc" '@.protocol' | xp_dialer_types) || continue
+        xp_servers "$_xsi_doc" | while IFS= read -r _xsi_item; do
+            _xsi_server=$(xp_object "$_xsi_item")
+            _xsi_ep=$(xp_server_endpoint "$_xsi_server") || continue
+            _xsi_ids=$(
+                case "$_xsi_proto" in
+                    vless|vmess)
+                        _xsi_users=$(xp_read "$_xsi_server" '@.users[*].id')
+                        [ -n "$_xsi_users" ] || _xsi_users=$(xp_read "$_xsi_server" '@.users[*].uuid')
+                        [ -n "$_xsi_users" ] || _xsi_users=$(xp_read "$_xsi_server" '@.id')
+                        printf '%s\n' "${_xsi_users:-$(xp_read "$_xsi_server" '@.uuid')}" ;;
+                    trojan|shadowsocks) xp_read "$_xsi_server" '@.password' ;;
+                    wireguard) xp_read "$_xsi_server" '@.publickey' ;;
+                    *)
+                        for _xsi_key in id uuid auth password username; do
+                            xp_read "$_xsi_server" "@.$_xsi_key"
+                        done ;;
+                esac | LC_ALL=C sort -u | sha256sum | cut -d' ' -f1
+            )
+            printf '%s\t%s\t%s\n' "$_xsi_proto" "$(printf '%s' "$_xsi_ep" | tr 'A-Z' 'a-z')" "$_xsi_ids"
+        done
+    done | LC_ALL=C sort -u
+}
 # Count raw outbounds separately from the endpoint set: distinct paths may
 # dial the same host. Auxiliary outbounds without servers do not count.
 xp_pool() {
@@ -463,8 +492,9 @@ xp_reality_fp() {   # unambiguous REALITY stream, from the existing outbound rea
 # several times per file): 91 profiles held `/cgi-bin/list` 22 s on AX3600 and 12 s on BE7000 (walk 19.11.2026) — every «Серверы»
 # screen and every link to a server waited that long. A file's rows depend only on its bytes and on this library, so they are kept
 # in RAM under the file's md5 and the library's md5: a file seen before costs no process, a new or edited one pays once. Display
-# metadata only, never admission. The cache is rebuilt whole (`lbl_commit`); without label-lib or RAM the rows are still answered.
+# metadata only. CGI reads a snapshot without decoding. Imports and the background reader share one atomic publisher.
 XP_META_CACHE=${XP_META_CACHE:-/tmp/enodia-xray-meta}
+XP_META_PUBLISH_LOCK=${XP_META_PUBLISH_LOCK:-$XP_META_CACHE.lock}
 XP_LIB=${XP_LIB:-${ENODIA_DIR:+$ENODIA_DIR/xray-profile-lib.sh}}
 # The version key is the code THIS process runs, hashed when it was sourced: an update replacing the file under a running list or
 # warm-up made the old parser's rows carry the new key (review 3), and the new code then trusted them.
@@ -472,37 +502,138 @@ XP_LIB_MD5=
 if [ -n "$XP_LIB" ] && [ -f "$XP_LIB" ]; then XP_LIB_MD5=$(md5sum < "$XP_LIB" 2>/dev/null | cut -c1-32); fi
 # «md5⇥path» paired BY POSITION with the arguments: GNU md5sum escapes a backslash in a name (busybox does not), so the path is never
 # read back from its output. Code 1 — the counts differ (a file vanished since the glob).
-_xmr_pair() { { md5sum "$@" 2>/dev/null; echo --; printf '%s\n' "$@"; } | awk '
+_xmr_pair() { { printf '%s\0' "$@" | xargs -0 md5sum 2>/dev/null; echo --; printf '%s\n' "$@"; } | awk '
     $0 == "--" && !part { part = 1; next }
     !part { sub(/^\\/, ""); h[++n] = substr($0, 1, 32); next }
     { p[++m] = $0 }
     END { if (n != m) exit 1; for (i = 1; i <= n; i++) print h[i] "\t" p[i] }'; }
+_xmr_live_sums() {
+    # When a refresh prunes a file after the glob, retry the surviving files once.
+    if _xmh_sums=$(_xmr_pair "$@"); then printf '%s\n' "$_xmh_sums"; return 0; fi
+    _xmh_n=$#
+    while [ "$_xmh_n" -gt 0 ]; do
+        _xmh_f=$1; shift
+        [ ! -f "$_xmh_f" ] || set -- "$@" "$_xmh_f"
+        _xmh_n=$((_xmh_n - 1))
+    done
+    [ "$#" -eq 0 ] || _xmr_pair "$@"
+}
+_xmr_snapshot() {   # A read racing with publication still sees one complete version.
+    _xms_old=$(cat "$XP_META_CACHE" 2>/dev/null)
+    case "$_xms_old" in "v	${XP_LIB_MD5:-none}"|"v	${XP_LIB_MD5:-none}
+"*) printf '%s\n' "$_xms_old" ;; *) printf 'v\t%s\n' "${XP_LIB_MD5:-none}" ;; esac
+}
+_xmr_output() {   # cache, hashes, [cached-only]
+    printf '%s\n--\n%s\n' "$1" "$2" | awk -v cached="${3:-}" '
+        $0 == "--" { part++; next }
+        $0 == "" { next }
+        part == 0 { if (substr($0, 1, 2) == "v\t") next; h = substr($0, 1, 32); row[h, ++c[h]] = substr($0, 34); next }
+        { h = substr($0, 1, 32); p = substr($0, 34)
+          if (cached) {
+              if (!(h in c)) { missing++; next }
+              print "F\t" p
+          }
+          for (i = 1; i <= c[h]; i++) { x = row[h, i]; if (x == ".") continue
+              t = index(x, "\t"); if (t) print substr(x, 1, t - 1) "\t" p substr(x, t); else print x "\t" p } }
+        END { if (cached) print "M\t" missing+0 }'
+}
+_xmr_merge() {   # old rows, staged rows, live hashes
+    printf '%s\n--\n%s\n--\n%s\n' "$1" "$2" "$3" | awk -v ver="${XP_LIB_MD5:-none}" '
+        $0 == "--" { part++; next }
+        $0 == "" { next }
+        { h = substr($0, 1, 32) }
+        part == 0 { if (substr($0, 1, 2) != "v\t") r[++n] = $0; next }
+        part == 1 { if (substr($0, 1, 2) != "!\t") { new[h] = 1; a[++m] = $0 }; next }
+        { live[h] = 1; count++ }
+        END {
+            if (!count) exit
+            print "v\t" ver
+            for (i = 1; i <= n; i++) { h = substr(r[i], 1, 32); if (h in live && !(h in new)) print r[i] }
+            for (i = 1; i <= m; i++) if (substr(a[i], 1, 32) in live && !written[a[i]]++) print a[i]
+        }'
+}
+xp_meta_publish() (   # rows prepared by the background reader or a private import
+    command -v lbl_lock_take >/dev/null 2>&1 && command -v pid_runs >/dev/null 2>&1 || return 0
+    lbl_lock_take "$XP_META_PUBLISH_LOCK" 'xray-transport\.sh meta-warm|subs-import\.sh' || return 0
+    trap 'lbl_lock_drop "$XP_META_PUBLISH_LOCK"' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    # A pre-update worker cannot replace a cache written by the new parser.
+    if [ -n "$XP_LIB_MD5" ] && [ "$(md5sum < "$XP_LIB" 2>/dev/null | cut -c1-32)" != "$XP_LIB_MD5" ]; then return 0; fi
+    _xmp_rows=$1
+    # Re-read the cache and the current directory under the short publication lock. A boot fill can finish after an import.
+    set --
+    for _xmp_file in "$ENODIA_STATE"/xray-configs/*.json; do [ ! -f "$_xmp_file" ] || set -- "$@" "$_xmp_file"; done
+    _xmp_live=
+    if [ "$#" -gt 0 ]; then _xmp_live=$(_xmr_pair "$@") || return 0; fi
+    _xmp_old=$(_xmr_snapshot)
+    _xmp_new=$(_xmr_merge "$_xmp_old" "$_xmp_rows" "$_xmp_live")
+    if [ "$_xmp_new" != "$_xmp_old" ]; then lbl_commit "$XP_META_CACHE" "$_xmp_new" || :; fi
+)
+xp_meta_stage() {   # private, unchanged file; stdout goes into the import's temporary rows
+    _xms_hash=$(md5sum < "$1" 2>/dev/null | cut -c1-32)
+    [ "${#_xms_hash}" -eq 32 ] || return 0
+    _xms_src=$1; shift
+    if [ "$#" -gt 0 ]; then
+        xp_get "$_xms_src" '@' >/dev/null || return 0
+        _xms_rows=$(xp_meta_values "$@")
+    else
+        _xms_rows=$(xp_meta_file "$_xms_src") || return 0
+    fi
+    if [ -n "$_xms_rows" ]; then
+        _xms_prefixed=$(printf '%s\n' "$_xms_rows" | sed "s/^/$_xms_hash	/") || return 1
+        printf '%s\n' "$_xms_prefixed"
+    else
+        printf '%s\t.\n' "$_xms_hash"
+    fi
+}
+xp_meta_kick() {
+    [ -f "$ENODIA_DIR/xray-transport.sh" ] && [ -x /bin/nice ] || return 0
+    _xmk_pidfile="$XP_META_CACHE-warm.pid"
+    _xmk_pid=$(cat "$_xmk_pidfile" 2>/dev/null | tr -cd '0-9')
+    if [ -n "$_xmk_pid" ] && { tr '\000' ' ' < "/proc/$_xmk_pid/cmdline"; } 2>/dev/null | grep -q 'xray-transport\.sh meta-warm'; then return 0; fi
+    ENODIA_UPD_PROG= ENODIA_SWITCH_HOLDER= start-stop-daemon -S -b -m -p "$_xmk_pidfile" \
+        -x /bin/nice -- -n 19 /bin/sh "$ENODIA_DIR/xray-transport.sh" meta-warm </dev/null >/dev/null 2>&1 3>&- || :
+}
 xp_meta_file() {   # <file> — `P` (a pool), `R⇥host` (a chain's relay, the address the router dials), `K⇥key⇥value`; 2 — unread
     # The reader itself failed (no jsonfilter, a fork refused under the boot's memory pressure, not JSON): rows read now would be
     # blank, and cached they would stay blank after recovery (review 2) — code 2, the caller answers without caching.
-    jsonfilter -i "$1" -e '@' >/dev/null 2>&1 || return 2
-    if xp_pool "$1"; then printf 'P\n'; fi
+    _xmf_doc=$(xp_get "$1" '@') || return 2
+    _xmf_doc=$(xp_object "$_xmf_doc")
+    if xp_pool "$1" "$_xmf_doc"; then printf 'P\n'; fi
     if grep -q '"dialerProxy"' "$1" 2>/dev/null; then
         _xmf_rh=$(xp_members "$1" endpoints | head -n 1 | cut -f1 | tr -cd 'A-Za-z0-9.:-')
         [ -z "$_xmf_rh" ] || printf 'R\t%s\n' "$_xmf_rh"
     fi
-    _xmf_m=$(xp_first "$1")
+    _xmf_m=$(xp_first "$1" '' "$_xmf_doc")
     [ -n "$_xmf_m" ] || return 0
-    for _xmf_k in protocol address; do printf 'K\t%s\t%s\n' "$_xmf_k" "$(xp_read "$_xmf_m" "@.$_xmf_k")"; done
-    printf 'K\tflow\t%s\n' "$(xp_read "$_xmf_m" '@.account.flow')"
-    for _xmf_k in network security; do printf 'K\t%s\t%s\n' "$_xmf_k" "$(xp_read "$_xmf_m" "@.streamSettings.$_xmf_k")"; done
-    for _xmf_k in serverName fingerprint; do
-        _xmf_v=$(xp_read "$_xmf_m" "@.streamSettings.realitySettings.$_xmf_k")
-        [ -n "$_xmf_v" ] || _xmf_v=$(xp_read "$_xmf_m" "@.streamSettings.tlsSettings.$_xmf_k")
-        printf 'K\t%s\t%s\n' "$_xmf_k" "$_xmf_v"
-    done
+    xp_meta_values "$(xp_read "$_xmf_m" '@.protocol')" "$(xp_read "$_xmf_m" '@.address')" \
+        "$(xp_read "$_xmf_m" '@.account.flow')" "$(xp_read "$_xmf_m" '@.streamSettings.network')" \
+        "$(xp_read "$_xmf_m" '@.streamSettings.security')" "$(_xmf_tls_value serverName)" "$(_xmf_tls_value fingerprint)"
+}
+_xmf_tls_value() {
+    _xmt_value=$(xp_read "$_xmf_m" "@.streamSettings.realitySettings.$1")
+    if [ -n "$_xmt_value" ]; then printf '%s' "$_xmt_value"; else xp_read "$_xmf_m" "@.streamSettings.tlsSettings.$1"; fi
 }
 # Rows of xp_meta_file for each file as `TYPE⇥path[⇥…]`, in the order of the files. Cache: line 1 `v⇥<library md5>`, then
 # `<file md5>⇥<row>` (`.` — a file without rows). A path is taken from the arguments, never parsed, so a space, a colon or a
 # backslash in a drive's mount point survives.
 xp_meta_rows() {   # <file>… (none — the cache goes too: it holds what the directory holds)
+    _xmr_mode=
+    case "${1:-}" in --cached|--warm) _xmr_mode=$1; shift ;; esac
+    if [ "$_xmr_mode" = --cached ]; then
+        [ $# -gt 0 ] || { printf 'M\t0\n'; return 0; }
+        if _xmr_sums=$(_xmr_live_sums "$@"); then
+            _xmr_cached=$(_xmr_output "$(_xmr_snapshot)" "$_xmr_sums" 1)
+            printf '%s\n' "$_xmr_cached"
+            case "$_xmr_cached" in *"M	0") ;; *) xp_meta_kick ;; esac
+        else
+            printf 'M\t%s\n' "$#"
+            xp_meta_kick
+        fi
+        return 0
+    fi
+    if [ "$_xmr_mode" = --warm ] && [ $# -eq 0 ]; then xp_meta_publish ""; return 0; fi
     [ $# -gt 0 ] || { rm -f "$XP_META_CACHE"; return 0; }
-    _xmr_ver=${XP_LIB_MD5:-none}
     # A file that vanished since the glob (a subscription pruning its servers) shifts the count: the rest is hashed again without it,
     # rather than every profile read anew (review 3: one pruned file put a hot list of 90 back on the full read).
     if ! _xmr_sums=$(_xmr_pair "$@"); then
@@ -519,9 +650,7 @@ xp_meta_rows() {   # <file>… (none — the cache goes too: it holds what the d
         done
         return 0
     fi
-    _xmr_old=$(cat "$XP_META_CACHE" 2>/dev/null)
-    case "$_xmr_old" in "v	$_xmr_ver"|"v	$_xmr_ver
-"*) ;; *) _xmr_old="v	$_xmr_ver" ;; esac
+    _xmr_old=$(_xmr_snapshot)
     _xmr_add=$(printf '%s\n--\n%s\n' "$_xmr_old" "$_xmr_sums" | awk '
         $0 == "--" { part++; next }
         part == 0 { have[substr($0, 1, 32)] = 1; next }
@@ -539,22 +668,10 @@ xp_meta_rows() {   # <file>… (none — the cache goes too: it holds what the d
                 done
             elif [ -n "$_xmr_rows" ]; then printf '%s\n' "$_xmr_rows" | sed "s/^/$_xmr_h	/"; else printf '%s\t.\n' "$_xmr_h"; fi
         done)
-    # Rows of files no longer here leave the cache with this rebuild: it holds what the directory holds, not every file ever seen.
-    _xmr_new=$(printf '%s\n--\n%s\n--\n%s\n' "$_xmr_old" "$_xmr_add" "$_xmr_sums" | awk -v ver="$_xmr_ver" '
-        $0 == "--" { part++; next }
-        $0 == "" { next }
-        part == 0 { if (substr($0, 1, 2) != "v\t") { r[++n] = $0 }; next }
-        part == 1 { if (substr($0, 1, 2) != "!\t") r[++n] = $0; next }
-        { live[substr($0, 1, 32)] = 1 }
-        END { print "v\t" ver; for (i = 1; i <= n; i++) if (substr(r[i], 1, 32) in live) print r[i] }')
+    if [ "$_xmr_mode" = --warm ]; then xp_meta_publish "$_xmr_add"; return 0; fi
+    _xmr_new=$(_xmr_merge "$_xmr_old" "$_xmr_add" "$_xmr_sums")
     if [ "$_xmr_new" != "$_xmr_old" ] && command -v lbl_commit >/dev/null 2>&1; then lbl_commit "$XP_META_CACHE" "$_xmr_new" || :; fi
-    printf '%s\n--\n%s\n' "$_xmr_new" "$_xmr_sums" | awk '
-        $0 == "--" { part++; next }
-        $0 == "" { next }
-        part == 0 { if (substr($0, 1, 2) == "v\t") next; h = substr($0, 1, 32); row[h, ++c[h]] = substr($0, 34); next }
-        { h = substr($0, 1, 32); p = substr($0, 34)
-          for (i = 1; i <= c[h]; i++) { x = row[h, i]; if (x == ".") continue
-              t = index(x, "\t"); if (t) print substr(x, 1, t - 1) "\t" p substr(x, t); else print x "\t" p } }'
+    _xmr_output "$_xmr_new" "$_xmr_sums"
     printf '%s\n' "$_xmr_add" | sed -n 's/^!	//p'
 }
 
@@ -604,4 +721,7 @@ xp_members() {   # <config> endpoints|hosts|usable|ips [seed file] [shared]
             done | sort -u ;;
         *) return 1 ;;
     esac
+}
+xp_meta_values() {  # protocol, address, flow, network, security, SNI, fingerprint
+    printf 'K\tprotocol\t%s\nK\taddress\t%s\nK\tflow\t%s\nK\tnetwork\t%s\nK\tsecurity\t%s\nK\tserverName\t%s\nK\tfingerprint\t%s\n' "$@"
 }

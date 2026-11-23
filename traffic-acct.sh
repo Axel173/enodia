@@ -118,7 +118,7 @@ for _k in $SLOT_IDS; do eval "sif$_k=''; s${_k}rx=0; s${_k}tx=0; ls${_k}if=''; l
 if [ -s "$SLOTS_FILE" ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
     # Поля реестра: id⇥имя(b64)⇥транспорт⇥конфиг⇥fallback⇥on|off. Спрашиваем только ВКЛЮЧЁННЫЕ:
     # у выключенного несущей нет, а `slot-iface` на нём и так ответит отказом — экономим форк.
-    while IFS="$TAB" read -r _sid _snb _stp _scfg _sfb _sen; do
+    while IFS="$TAB" read -r _sid _snb _stp _scfg _sfb _sen _sk; do
         [ "$_sen" = on ] || continue
         # `</dev/null` ОБЯЗАТЕЛЕН: stdin этого цикла — САМ РЕЕСТР, и всё, что мы отсюда зовём,
         # его наследует. Прочитай оркестратор (или любой плагин по дороге) хоть строку со входа —

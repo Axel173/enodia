@@ -135,6 +135,8 @@ label-lib.sh
 # heal replay and slots-up, read by gh-update.sh status-json — one owner of the file and its format.
 prog-lib.sh
 cfg-names.sh
+server-favs.sh
+server-checks-lib.sh
 # «Дорога к серверу»: пакеты несущей к её серверу — через другой выход (адрес VPS заблокирован провайдером). Правила pref 82..87
 # выводит из хранилищ эндпоинтов; зовут apply-bypass, net-tune, slots, vpn-toggle, uninstall — все с гардом `-f`: нет файла —
 # дорог нет, поведение прежнее.

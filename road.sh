@@ -38,7 +38,7 @@
 #   road.sh serves <kind> <file>       — the exit this config runs that somebody rides (it IS a road), or empty
 #   road.sh clash <id> <file>          — a rider of exit <id> going to <file>'s server (moving the exit there would loop), or empty
 #   road.sh list | json                — every road (`kind/file⇥id` / {"kind/file":"id"})
-#   road.sh wire                       — rebuild the kernel rules (idempotent); `.vpn-off` ⇒ same as unwire
+#   road.sh wire                       — rebuild owned rules. With VPN off, both the rider and its road must be kept exits.
 #   road.sh unwire                     — remove every road rule
 #   road.sh probe-paths <kind/file> <bound|temporary> <address>... — address, exit and installed/saved probe source
 #   road.sh want                       — the rules that MUST stand: `address⇥id⇥carrier` (main|s<id>) — dump and stands
@@ -68,11 +68,8 @@ via_of() { cmd_list | awk -F"$TAB" -v k="$1" '$1==k { print $2; exit }'; }   # $
 cmd_riders() { cmd_list | awk -F"$TAB" -v i="$1" '$2==i { print $1 }'; }
 
 cfg_path() {
-    case "$1" in
-        awg) echo "$ENODIA_STATE/configs/$2.conf" ;;
-        xray) echo "$ENODIA_STATE/xray-configs/$2.json" ;;
-        hy2) echo "$ENODIA_STATE/hy2-configs/$2.yaml" ;;
-    esac
+    _rcp=$(lbl_cfg_path "$1" "$2") || return 1
+    printf '%s/%s\n' "$ENODIA_STATE" "$_rcp"
 }
 alt_members() (   # kind, config path, hosts|ips, seed file, [shared]
     [ -r "$2" ] && [ -f "$ENODIA_DIR/dns-lib.sh" ] || exit 0
@@ -127,10 +124,12 @@ hy2_warp_notice() {   # exit id, [timeout]
 
 # The exits registry — read ONCE per call (each `slots.sh` is a fork). Enabled exits: id⇥transport⇥config⇥fallback.
 slots_enabled() { [ -f "$ENODIA_DIR/slots.sh" ] && sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null; }
+slots_routing() { [ -f "$ENODIA_DIR/slots.sh" ] && sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null; }
+
 # The ENABLED AmneziaWG exits that run config $1, one id per line. The name is compared AS TEXT (`x ""`): awk takes a `-v` value
 # that looks like a number for one, and config «01» was config «1» — it «served as a road» for the other's riders, and clearing
 # its road re-raised the other's exit.
-exits_on() { slots_enabled | awk -F"$TAB" -v c="$1" '$2=="awg" && ($3 "") == (c "") { print $1 }'; }
+exits_on() { "${2:-slots_enabled}" | awk -F"$TAB" -v c="$1" '$2=="awg" && ($3 "") == (c "") { print $1 }'; }
 # Does this config SERVE as a road: it runs an enabled AmneziaWG exit somebody rides → that exit's id (empty — it doesn't). The ONLY
 # answer: a config can't ride a road while it is one (`set`), and it can't be deleted from under its riders (cgi-bin/action del_server).
 # An address of a serving exit must stay direct, no matter whose road its rider uses.
@@ -196,9 +195,10 @@ road_ok() {   # $1 = id, $2 = slots_enabled output, $3 = the rider's address (em
     [ -z "$3" ] || [ "$(exit_ip "$1" "$_rol")" != "$3" ]
 }
 cmd_eligible() {
+    if [ -n "$3" ] && ! slot_admitted "$3"; then return 0; fi
     _rei_id=$(via_of "$1/$2")
     [ -n "$_rei_id" ] || return 0
-    road_ok "$_rei_id" "$(slots_enabled)" ""; _rei_status=$?
+    road_ok "$_rei_id" "$(slots_routing)" ""; _rei_status=$?
     [ "$_rei_status" != 1 ] || return 0
     printf '%s\n' "$_rei_id"
     return "$_rei_status"
@@ -242,9 +242,7 @@ rider_rows() {   # carrier, selected key, slot, published record
         carrier_rows "$1" "$2" "$3" "$4" 1
     fi
 }
-road_rows() {
-    _rr_via=$(cmd_list)
-    printf '%s\n' "$_rr_via" | sed "s/^/via$TAB/"
+road_main_rows() {
     _rr_record=$(cat "$ENODIA_STATE/.endpoint-bypass" 2>/dev/null)
     _rr_cfg=$(active_cfg)
     _rr_kind=$(head -n1 "$ENODIA_STATE/.transport" 2>/dev/null)
@@ -265,7 +263,13 @@ road_rows() {
     if [ -n "$_rr_cfg" ] && [ "$_rr_main" != "awg/$_rr_cfg" ]; then
         [ "$_rr_selected" = "awg/$_rr_cfg" ] || printf 'warm\tawg/%s\t1\t%s\t0\n' "$_rr_cfg" "$(main_ip "$_rr_cfg")"
     fi
-    _rr_slots=$(slots_enabled)
+}
+road_rows() {
+    [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 0
+    _rr_via=$(cmd_list)
+    printf '%s\n' "$_rr_via" | sed "s/^/via$TAB/"
+    if [ ! -f "$ENODIA_STATE/.vpn-off" ]; then road_main_rows; fi
+    _rr_slots=$(slots_routing)
     road_exits "$_rr_slots" | while IFS="$TAB" read -r _rr_id _rr_kind _rr_file _rr_fb _rr_ok; do
         _rr_addr=$(exit_ip "$_rr_id" "$_rr_file")
         _rr_mtu=0; hy2_mtu_ok "$_rr_id" && _rr_mtu=1
@@ -277,9 +281,17 @@ road_rows() {
         rider_rows "s$_rr_id" "$_rr_kind/$_rr_file" "$_rr_id" "$(cat "$ENODIA_STATE/.endpoint-bypass-s$_rr_id" 2>/dev/null)"
     done
 }
+road_resolver_anchors() (
+    [ -f "$ENODIA_DIR/doh-lib.sh" ] || exit 0
+    . "$ENODIA_DIR/doh-lib.sh"
+    dns_now anchors
+)
+
 road_view() {
-    [ ! -f "$ENODIA_STATE/.vpn-off" ] && [ -s "$STORE" ] || return 0
-    road_rows | awk -F "$TAB" -v mode="$1" '
+    [ -s "$STORE" ] || return 0
+    # A destination lookup also runs before mangle OUTPUT, so a DNS anchor wins a shared address.
+    road_rows | awk -F "$TAB" -v mode="$1" -v dns="$(road_resolver_anchors)" '
+        BEGIN { nips=split(dns, ips, /[[:space:]]+/); for (j=1; j<=nips; j++) guard[ips[j]]=1 }
         $1=="via" { via[$2]=$3; serving[$3]=1; next }
         $1=="exit" { exits[$2]=$3; mtu[$2]=$5; stale[$2]=$6; if (serving[$2] && $4!="") guard[$4]=1; next }
         { tag[++n]=$1; key[n]=$2; live[n]=$3; ip[n]=$4; selected[n]=$5
@@ -378,9 +390,11 @@ cmd_probe_wire() (
     trap 'exit 3' HUP INT TERM PIPE
     _rpw_key=$1; shift
     _rpw_paths=$(cmd_probe_paths "$_rpw_key" temporary "$@") || exit "$?"
+    _rpw_dns=$(road_resolver_anchors)
     _rpw_n=0
     while IFS="$TAB" read -r _rpw_ip _rpw_id _rpw_src; do
         [ "$_rpw_src" = saved ] || continue
+        printf '%s\n' "$_rpw_dns" | tr ' ' '\n' | grep -qxF "$_rpw_ip" && continue
         ip rule add to "$_rpw_ip/32" iif lo lookup "100$_rpw_id" pref 88 2>/dev/null || exit 5
         _rpw_n=$((_rpw_n + 1))
     done <<EOF
@@ -430,7 +444,9 @@ cmd_wire() {
         _rwh=$(ip rule show 2>/dev/null) || { echo "$_rwerr"; return 1; }
         printf '%s\n' "$_rwh" | grep -qE '^(51|8[2-8]):' || return 0
     fi
-    lbl_lock_take "$WLOCK" 'road\.sh' || { echo "[road] правила дорог сейчас пересобирает другая операция — повторите"; return 1; }
+    if [ "${1:-}" != held ]; then
+        lbl_lock_take "$WLOCK" 'road\.sh' || { echo "[road] правила дорог сейчас пересобирает другая операция — повторите"; return 1; }
+    fi
     road_probe_reap
     _rwh=$(have_rules) || { lbl_lock_drop "$WLOCK"; echo "$_rwerr"; return 1; }
     _rww=$(road_view want | cut -f1,2)
@@ -471,6 +487,12 @@ cmd_unwire() {
     return 0
 }
 
+cmd_off_clean() {
+    _roc_have=$(have_rules) || return 1
+    _roc_want=$(road_view want | awk -F "$TAB" -v OFS="$TAB" '{print "8" $2,$1,"100" $2}')
+    [ "$(printf '%s\n' "$_roc_have" | sort)" = "$(printf '%s\n' "$_roc_want" | sort)" ]
+}
+
 # MTU ceiling of a config on its road: the road's LIVE interface MTU (the fact; nothing to cap by while it is down — the
 # rider's packets go direct then) − OVERHEAD − the config's S4 (AmneziaWG 2.0 pads every transport packet by S4 bytes).
 cmd_mtu_cap() {   # $1 = kind, $2 = file
@@ -479,7 +501,11 @@ cmd_mtu_cap() {   # $1 = kind, $2 = file
     # Only a road that WORKS caps: one `road_ok` refuses (the same server, a road that rides a road) has no rule — the packets go
     # directly, and lowering the MTU there would only slow the carrier (review s.118, round 2).
     _rma=$(endpoint_ip_of "$ENODIA_STATE/configs/$2.conf"); [ -z "$_rma" ] && [ "$2" = "$(active_cfg)" ] && _rma=$(main_ip "$2")
-    road_ok "$_rmv" "$(slots_enabled)" "$_rma" || return 0
+    _rm_slots=$(slots_routing)
+    if [ -f "$ENODIA_STATE/.vpn-off" ]; then
+        printf '%s\n' "$_rm_slots" | awk -F "$TAB" -v cfg="$2" '$2=="awg" && $3==cfg {found=1} END {exit !found}' || return 0
+    fi
+    road_ok "$_rmv" "$_rm_slots" "$_rma" || return 0
     _rmu=$(cat "/sys/class/net/awg$_rmv/mtu" 2>/dev/null | tr -cd '0-9'); [ -n "$_rmu" ] || return 0
     _rms=$(grep -E '^[[:space:]]*S4[[:space:]]*=' "$ENODIA_STATE/configs/$2.conf" 2>/dev/null | head -n1 | sed 's/^[^=]*=//' | tr -cd '0-9')
     _rmc=$((_rmu - OVERHEAD - ${_rms:-0}))
@@ -494,11 +520,12 @@ lower_mtu() {   # $1 = iface, $2 = kind/file — lower to the ceiling, never rai
     return 0
 }
 cmd_mtu_fix() {
-    [ -f "$ENODIA_STATE/.vpn-off" ] && return 0
     [ -s "$STORE" ] || return 0
-    _rfc=$(active_cfg)
-    [ -n "$_rfc" ] && lower_mtu awg0 "awg/$_rfc"   # carrying or the warm reserve — both ride the road
-    slots_enabled | while IFS="$TAB" read -r _rfid _rft _rfcfg _rffb; do
+    if [ ! -f "$ENODIA_STATE/.vpn-off" ]; then
+        _rfc=$(active_cfg)
+        [ -n "$_rfc" ] && lower_mtu awg0 "awg/$_rfc"   # carrying or the warm reserve — both ride the road
+    fi
+    slots_routing | while IFS="$TAB" read -r _rfid _rft _rfcfg _rffb; do
         [ "$_rft" = awg ] && lower_mtu "awg$_rfid" "awg/$_rfcfg"
     done
     return 0
@@ -513,30 +540,41 @@ cmd_carrier() {   # $1 = main | 2..7
     return 0
 }
 
-put() {   # kind/file, road id (empty = drop), expected exit config for a new assignment
+road_expect() {   # kind/file, expected digest
+    _rex_file=$(cfg_path "${1%%/*}" "${1#*/}") && lbl_cfg_matches "$_rex_file" "$2" ||
+        { echo '[road] Конфиг изменился. Обновите список серверов.'; return 1; }
+}
+put() (   # kind/file, road id (empty = drop), expected exit config, optional rider digest
     lbl_lock_take "$LOCK" 'road\.sh' || { echo "[road] дороги сейчас правит другая операция — повторите"; return 1; }
+    _rpr_lease=0
+    trap '[ "$_rpr_lease" != 1 ] || sh "$ENODIA_DIR/subs-import.sh" row-unlock "$$" >/dev/null 2>&1; lbl_lock_drop "$LOCK"' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    if [ -n "${4:-}" ]; then
+        sh "$ENODIA_DIR/subs-import.sh" row-lock "$$" >/dev/null 2>&1 ||
+            { echo 'Идёт обновление подписок — повторите действие.'; return 1; }
+        _rpr_lease=1
+        road_expect "$1" "$4" || return 1
+        [ "$(via_of "$1")" != "$2" ] || return 0
+    fi
     if [ -n "$2" ] && [ "$(sh "$ENODIA_DIR/slots.sh" show "$2" 2>/dev/null | cut -f3,4,6)" != "awg$TAB$3${TAB}on" ]; then
-        lbl_lock_drop "$LOCK"
         echo "[road] выход №$2 изменился — выберите дорогу заново"; return 1
     fi
-    lbl_write "$STORE" "$1" "$2" "$KEY_RE"; _rpr=$?
-    lbl_lock_drop "$LOCK"
-    [ "$_rpr" = 0 ] || { echo "[road] не удалось записать дорогу (место на разделе?)"; return 1; }
-    return 0
-}
+    lbl_write "$STORE" "$1" "$2" "$KEY_RE" || { echo "[road] не удалось записать дорогу (место на разделе?)"; return 1; }
+)
 
 # Who runs this config right now: `main` (carrying), `warm` (awg0 as the reserve) and/or exit ids, one per line — the re-raise
 # targets when its road is cleared.
 runners() {   # $1 = file
-    if [ "$(active_cfg)" = "$1" ]; then
+    if [ ! -f "$ENODIA_STATE/.vpn-off" ] && [ "$(active_cfg)" = "$1" ]; then
         if [ "$(active_transport)" = awg ]; then echo main
         elif [ -e /sys/class/net/awg0 ]; then echo warm; fi
     fi
-    exits_on "$1"
+    exits_on "$1" slots_routing
 }
 
-cmd_set() {   # $1 = kind, $2 = file, $3 = id | ""
+cmd_set() {   # $1 = kind, $2 = file, $3 = id | "", $4 = observed digest (optional for CLI)
     lbl_cfg_key "$1/$2" || { echo "[road] дорога доступна для конфигов AmneziaWG, Xray и Hysteria2"; return 1; }
+    [ -z "${4:-}" ] || road_expect "$1/$2" "$4" || return 1
     _rso=$(via_of "$1/$2")
     if [ -n "$3" ] && [ "$_rso" != "$3" ]; then
         # The file is needed to SET a road; a road of a removed file is still cleared below (else its exit stays «ridden»).
@@ -574,7 +612,7 @@ cmd_set() {   # $1 = kind, $2 = file, $3 = id | ""
 $(slots_enabled)
 EOF
     fi
-    [ "$_rso" = "$3" ] || put "$1/$2" "$3" "${_rsc:-}" || return 1
+    { [ "$_rso" = "$3" ] && [ -z "${4:-}" ]; } || put "$1/$2" "$3" "${_rsc:-}" "${4:-}" || return 1
     cmd_wire || return 1
     if [ "$1" = hy2 ] && [ -n "$3" ]; then hy2_warp_notice "$3" "" || :; fi
     if [ "$_rso" = "$3" ] && [ -z "$_rwchg" ]; then
@@ -582,7 +620,7 @@ EOF
         else echo "[road] дороги и так нет — сервер идёт напрямую"; fi
         return 0
     fi
-    if [ ! -f "$ENODIA_STATE/.vpn-off" ] && [ "$1" = awg ]; then
+    if [ "$1" = awg ]; then
         # THE PATH TO THE SERVER HAS JUST CHANGED — whoever runs this config is brought in line with it NOW (BE7000, the walk of
         # 12.10.2026, both halves):
         #  * the road is CLEARED under a live carrier — its MTU was lowered for the road, and its raise is the only writer of the
@@ -657,11 +695,7 @@ cmd_restore_scan() {   # compare against the local config before CGI copies the 
 
 # Stage the road map before publishing the registry. A rejected registry leaves roads and peer files alone.
 cmd_import() (
-    _rik=$(for _rif in "$1"/configs/*.conf "$1"/xray-configs/*.json "$1"/hy2-configs/*.yaml; do
-        [ -f "$_rif" ] || continue
-        _rib=${_rif##*/}
-        case "$_rib" in *.conf) echo "awg/${_rib%.conf}" ;; *.json) echo "xray/${_rib%.json}" ;; *.yaml) echo "hy2/${_rib%.yaml}" ;; esac
-    done)
+    _rik=$(lbl_cfg_keys "$1")
     lbl_lock_take "$LOCK" 'road\.sh' || exit 1
     _ri_stage="$STORE.$$.new"
     trap 'rm -f "$_ri_stage"; lbl_lock_drop "$LOCK"' EXIT
@@ -680,7 +714,11 @@ cmd_import() (
         }')
     _ri_next=$(printf '%s\n' "$_ri_rows" | awk -F "$TAB" '$1=="keep"' | cut -f2-)
     [ "$_ri_next" = "$_ri_local" ] || lbl_commit "$_ri_stage" "$_ri_next" || exit 1
-    [ ! -f "$1/.slots" ] || sh "$ENODIA_DIR/slots.sh" restore-registry "$1/.slots" "$_ri_before" || exit 1
+    if [ -f "$1/.slots" ] || [ -n "$_ri_before" ]; then
+        sh "$ENODIA_DIR/slots.sh" restore-registry "$1/.slots" "$_ri_before" "$1/.vpn-off" "$1" "${2:-}" || exit 1
+    elif [ -n "${2:-}" ] && [ -f "$ENODIA_DIR/subs-import.sh" ]; then
+        sh "$ENODIA_DIR/subs-import.sh" restore-lock "$2" || exit 1
+    fi
     if [ "$_ri_next" != "$_ri_local" ]; then
         if [ -n "$_ri_next" ]; then mv -f "$_ri_stage" "$STORE" || exit 1; else rm -f "$STORE" || exit 1; fi
     fi
@@ -699,11 +737,39 @@ cmd_merge() {
     return 0
 }
 
+# The road map stays locked from the read-only plan through publication.
+# Registry and subscription admission happen inside this scope.
+cmd_remove_saved() (   # delete-config|prune-sub, kind, file, [expected digest]
+    lbl_cfg_key "$2/$3" || exit 1
+    lbl_lock_take "$LOCK" 'road\.sh' || { echo '[road] дороги сейчас правит другая операция — повторите'; exit 1; }
+    _rda_stage="$STORE.$$.delete.new"
+    road_remove_cleanup() {
+        rm -f "$_rda_stage"
+        [ "$(cat "$WLOCK/pid" 2>/dev/null)" != "$$" ] || lbl_lock_drop "$WLOCK"
+        lbl_lock_drop "$LOCK"
+    }
+    trap 'road_remove_cleanup' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    lbl_stage_drop "$STORE" "$2/$3" "$_rda_stage" || { echo 'Не удалось подготовить удаление дороги к серверу.'; exit 1; }
+    _rda_wire=''
+    [ ! -f "$_rda_stage" ] || _rda_wire=$$
+    ENODIA_DELETE_WIRE_LOCK=$WLOCK sh "$ENODIA_DIR/slots.sh" "$@" "$_rda_wire" || exit $?
+    # Unlink committed. A kernel reconciliation failure leaves a retry for
+    # the normal road wiring path and cannot turn deletion into a refusal.
+    if [ -f "$_rda_stage" ]; then
+        lbl_publish_drop "$STORE" "$_rda_stage" && cmd_wire held >/dev/null ||
+            echo 'Конфиг удалён. Не удалось обновить дорогу к серверу.'
+    fi
+    exit 0
+)
+
 case "$1" in
     get)     lbl_cfg_key "$2/$3" && via_of "$2/$3"; exit 0 ;;
-    eligible) lbl_cfg_key "$2/$3" && cmd_eligible "$2" "$3"; exit $? ;;
-    set)     cmd_set "$2" "$3" "$4" ;;
+    eligible) lbl_cfg_key "$2/$3" && cmd_eligible "$2" "$3" "$4"; exit $? ;;
+    off-clean) cmd_off_clean ;;
+    set)     cmd_set "$2" "$3" "$4" "${5:-}" ;;
     del)     lbl_cfg_key "$2/$3" || exit 0; [ -z "$(via_of "$2/$3")" ] || put "$2/$3" "" || exit 1; cmd_wire >/dev/null ;;
+    delete-config|prune-sub) cmd_remove_saved "$@" ;;
     mv)      cmd_mv "$2" "$3" "$4" ;;
     riders)  case "$2" in [2-7]) cmd_riders "$2" ;; esac; exit 0 ;;
     serves)  [ "$2" = awg ] && lbl_cfg_key "$2/$3" && cmd_serves "$3"; exit 0 ;;
@@ -724,7 +790,7 @@ case "$1" in
     mtu-fix) cmd_mtu_fix ;;
     carrier) cmd_carrier "$2"; exit 0 ;;
     carriers) case "$2" in watchdog) road_view watchdog ;; *) road_view carriers ;; esac; exit 0 ;;
-    import)  cmd_import "$2" ;;
+    import)  cmd_import "$2" "${3:-}" ;;
     merge)   cmd_merge "$2" ;;
     *) echo "usage: $0 get <вид> <файл> | set <вид> <файл> <id|\"\"> | del <вид> <файл> | mv <вид> <старый> <новый> | riders <id> | list | json | wire | unwire | want | mtu-cap <вид> <файл> | mtu-fix | carrier <main|id> | import <корень архива> | merge <файл>"; exit 2 ;;
 esac

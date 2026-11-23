@@ -244,7 +244,7 @@ km_sources() {
 }
 km_wire() {
     km_profile || return 0
-    case "$2" in add|del) : ;; *) return 1 ;; esac
+    case "$2" in add|del|check) : ;; *) return 1 ;; esac
     case "$1:$3" in set:*)
         case "$3" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
         set -- "$2" -p tcp -m set --match-set "$3" dst -j CT --helper enodia_noflow ;;
@@ -254,9 +254,12 @@ km_wire() {
     *) return 1 ;;
     esac
     km_action=$1; shift
-    if [ "$km_action" = del ]; then
+    if [ "$km_action" = check ]; then
+        iptables -t raw -C PREROUTING -i br+ -p tcp --dport 443 -j "$KM_CHAIN" 2>/dev/null &&
+            iptables -t raw -C "$KM_CHAIN" "$@" 2>/dev/null
+    elif [ "$km_action" = del ]; then
         grep -q '^iptable_raw ' /proc/modules || return 0
-        while iptables -t raw -D "$KM_CHAIN" "$@" 2>/dev/null; do :; done
+        ipt_delete_all raw "$KM_CHAIN" "$@" || return 1
         km_raw_gc
     else
         km_prepare || return 1
@@ -401,6 +404,8 @@ case "$1" in
     ready) km_ready ;;
     profile) km_profile && echo "$KM_ID" ;;
     sources) km_sources ;;
+    set-wired) ! km_profile || km_wire set check "$2" ;;
+    source-wired) km_wire src check "$2" ;;
     bytes-needed) if km_profile && ! km_cache_ok; then echo "$KM_BYTES"; else echo 0; fi ;;
     bytes-installed) if [ -d "$KM_STORE" ]; then du -sk "$KM_STORE" | awk '{print $1*1024}'; else echo 0; fi ;;
     # For the status screen: the knob, and the value it had before we raised it. Nothing where the knob does not exist.

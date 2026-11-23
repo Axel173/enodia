@@ -58,11 +58,7 @@ LOG=/tmp/enodia-subs-update.log
 LOCK=/tmp/enodia-subs-update.lock
 TMPD=/tmp/enodia-subs-update.$$
 TAB=$(printf '\t')
-# Кап серверов на подписку: 20-МБ /data + ~1 КБ на конфиг. Больше 200 — это не подписка,
-# а выгрузка всего пула провайдера; лучше честно обрезать, чем забить флеш.
-MAXSRV=${MAXSRV:-200}
-# Ниже этого свободного места на /data (КБ) обновление не начинаем: переполнение флеша роняет
-# DNS и туннель (грабля «всё тяжёлое — в ОЗУ»), а подписка того не стоит.
+# Preserve enough space on the volume that actually holds the configs and labels.
 MINFREE_KB=${MINFREE_KB:-2048}
 
 if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
@@ -72,6 +68,7 @@ if [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
 # switch_hold — the carrier is restarted under the switching lock, as every other restarter does (refresh_active; review s.136, M5).
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 command -v switch_hold >/dev/null 2>&1 || switch_hold() { ( set -C; echo $$ > "$1" ) 2>/dev/null; }
+command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\000' ' ' 2>/dev/null < "/proc/$1/cmdline" | grep -qE "$2"; }
 SWITCH_LOCK=/tmp/enodia-switching.lock
 # WHOSE NEWS a config in use carries — the owner's words and events. A subscription run: the server «изменился в подписке». An Amnezia
 # Premium refresh (premium.sh put, SUBS_PUT_WHY=premium): the router took a NEW KEY itself — «изменился в подписке» read as if the
@@ -401,10 +398,11 @@ zlib_at() {
 	[ $(( _zv % 31 )) -eq 0 ] && [ $(( (_zv >> 8) & 15 )) -eq 8 ]
 }
 
-# zlib_inflate <file> <offset of the zlib header> <out> — the stream into <out>, cut at VPN_MAX. Judged by the file.
+# zlib_inflate <file> <offset of the zlib header> <out> — the stream into <out>, up to VPN_MAX. Judged by the file.
 zlib_inflate() {
 	{ printf '\037\213\010\000\000\000\000\000\000\003'; tail -c +"$(( $2 + 3 ))" "$1"; } 2>/dev/null \
-		| gunzip -c 2>/dev/null | head -c "$VPN_MAX" > "$3" 2>/dev/null
+		| gunzip -c 2>/dev/null | head -c "$((VPN_MAX+1))" > "$3" 2>/dev/null
+	if [ "$(wc -c < "$3")" -gt "$VPN_MAX" ]; then N_PARTIAL=1; return 1; fi
 	[ -s "$3" ]
 }
 
@@ -449,6 +447,7 @@ vpn_from() {
 			done
 			_vi=$((_vi + 1))
 		done
+		if [ -z "$_vfound" ] && [ "$_vi" -eq "$VPN_CONT" ] && vpn_val "$_vj" "@.containers[$_vi]" "$_vd.val"; then N_PARTIAL=1; fi
 		[ -n "$_vfound" ] || return 1
 		VPN_NAME=$(vpn_meta description)
 		_vdns1=$(vpn_meta dns1); _vdns2=$(vpn_meta dns2); _vmtu=$(vpn_meta mtu)
@@ -808,91 +807,68 @@ cfg_sig() {
 	esac
 }
 
-# --- имена файлов -----------------------------------------------------------
-# name_for <tag> <настоящее имя> <порядковый> — имя файла конфига.
-# СНАЧАЛА ищем уже существующее имя этого же сервера в .sub-names: так конфиг, заведённый
-# панелью, остаётся собой (панель режет не-латиницу по UTF-16-символам, sed — по байтам ⇒
-# сгенерённые имена у двух путей РАЗНЫЕ, и каждый счёл бы чужие файлы «устаревшими»).
-name_for() {
-	_t="$1"; _raw="$2"; _idx="$3"
-	_nm=""; _free=""
-	if [ -f "$NAMES" ] && [ -n "$_raw" ]; then
-		# Кандидатов с одним и тем же настоящим именем бывает НЕСКОЛЬКО: у провайдеров
-		# «🇩🇪⚡Германия» встречается по два-три раза. Берём того, чей конфиг несёт ТОТ ЖЕ
-		# адрес, — иначе одинаковые имена перетасовывают серверы между файлами каждый прогон.
-		# The name is compared AS TEXT (`x ""`): awk takes a `-v` value that looks like a number for one, and server «01» was
-		# server «1» — on an address change it took the other's file (and that file may be the active config).
-		awk -F"$TAB" -v r="$_raw" -v p="sub-$_t-" '$1 ~ "^"p && ($2 "") == (r "") {print $1}' "$NAMES" 2>/dev/null > "$TMPD/cand"
-		while IFS= read -r _c; do
-			[ -n "$_c" ] || continue
-			grep -qxF "$_c" "$TMPD/used" 2>/dev/null && continue
-			# ВЛАДЕЛЬЦА СПРАШИВАЕМ ЯВНО. Отбор кандидатов выше — голый префикс `^sub-<tag>-`, а теги
-			# бывают префиксами друг друга («liberty» ⊂ «liberty-vpn»), и `-` встречается ВНУТРИ тега.
-			# Без этой строки подписка «liberty» брала имена соседки и писала свои серверы прямо в её
-			# файлы: замерено на живом BE7000 24.08.2026 — 16 конфигов «liberty-vpn» переписаны,
-			# в `.sub-names` 16 дублирующихся ключей. Тот же владелец (ДЛИННЕЙШИЙ тег), что у
-			# prune_stale, cmd_drop и ownerTag() в панели — четвёртое место, где он нужен.
-			[ "$(sub_owner_tag "$_c")" = "$_t" ] || continue
-			# ИМЯ — ОДНО ПРОСТРАНСТВО НА ОБА СЕМЕЙСТВА (`.sub-names` и `$TMPD/keep` знают только
-			# имя, а файлов у имени может быть два: xray-configs/x.json и hy2-configs/x.yaml).
-			# Кандидат, чей файл лежит в ЧУЖОМ каталоге, ЗАНЯТ — в запасные его брать нельзя.
-			# Замерено песочницей 24.08.2026: смешанная подписка, два сервера с ОДНИМ настоящим
-			# именем (провайдер выдаёт узел и по vless, и по hysteria2), провайдер перетасовал
-			# порядок и сменил адрес — vless забирал имя hy2-конфига, hy2 забирал имя xray-шного,
-			# и на два сервера оставалось ЧЕТЫРЕ файла: два живых и два призрака. Призраки не
-			# удалить никогда (их имя каждый прогон лежит в `keep`), панель показывает дубли, а
-			# если такое имя было АКТИВНЫМ — активный конфиг молча начинал указывать на ДРУГОЙ
-			# сервер, ровно то, от чего защищает липкий выбор.
-			# Three families now (AmneziaWG's configs/) — one owner of the question, name_elsewhere.
-			name_elsewhere "$_c" && continue
-			if [ -n "$P_PROFILE" ]; then
-				# Duplicate remarks can share a decoy. Identity follows every member,
-				# independent of which outbound supplied the legacy metadata fields.
-				if [ "$(xp_members "$FAM_DIR/$_c.$FAM_EXT" endpoints)" = "$(xp_members "$P_PROFILE" endpoints)" ]; then _nm="$_c"; break; fi
-			elif [ "$(cfg_addr "$FAM_DIR/$_c.$FAM_EXT")" = "$P_HOST" ]; then _nm="$_c"; break; fi
-			# В запасные — только имя, за которым НЕТ файла ни в одном каталоге (сервер сменил
-			# адрес ⇒ переиспользуем его собственный файл) или наш собственный.
-			[ -n "$_free" ] || _free="$_c"
-		done < "$TMPD/cand"
-		[ -n "$_nm" ] || _nm="$_free"
-	fi
+# Full identity is independent of the filename and display remark. Keep
+# credentials out of the temporary index itself.
+cfg_identity() {
+	case "$1" in
+		*.yaml|*.conf)
+			_ci_host=$(cfg_addr "$1" | tr 'A-Z' 'a-z')
+			_ci_port=$(cfg_port "$1")
+			[ -n "$_ci_host" ] && [ -n "$_ci_port" ] || return 1
+			_ci_text=$(printf '%s\n%s\n%s\n%s' "${1##*.}" "$_ci_host" "$_ci_port" "$(cfg_cred "$1")")
+			if [ "${1##*.}" = conf ]; then _ci_text="$_ci_text$LBL_NL$(conf_val "$1" PublicKey)"; fi ;;
+		*) _ci_text=$(xp_subscription_ids "$1"); [ -n "$_ci_text" ] || return 1 ;;
+	esac
+	printf '%s' "$_ci_text" | sha256sum | cut -d' ' -f1
+}
+identity_index() (
+	for _ii_family in $FAMS; do
+		fam_set "$_ii_family"
+		for _ii_cfg in "$FAM_DIR"/sub-"$1"-*."$FAM_EXT"; do
+			[ -f "$_ii_cfg" ] || continue
+			_ii_name=${_ii_cfg##*/}; _ii_name=${_ii_name%.*}
+			[ "$(sub_owner_tag "$_ii_name")" = "$1" ] || continue
+			_ii_key=$(cfg_identity "$_ii_cfg") || continue
+			printf '%s\t%s\t%s\n' "$_ii_key" "$FAM_TNAME" "$_ii_name"
+		done
+	done
+)
+stage_identities() {
+	: > "$TMPD/old-names"
+	[ ! -f "$NAMES" ] || cat "$NAMES" > "$TMPD/old-names"
+	identity_index "$1" > "$TMPD/identities"
+}
+name_taken() {
+	[ -e "$FAM_DIR/$1.$FAM_EXT" ] || name_elsewhere "$1" || grep -qxF "$1" "$TMPD/used"
+}
+name_for() {   # tag, remark, ordinal, full identity digest
+	printf '%s\n' "$2" > "$TMPD/remark"
+	_nm=$(awk -F "$TAB" -v id="$4" -v kind="$FAM_TNAME" '
+		FILENAME==ARGV[1] {remark=$0; next}
+		FILENAME==ARGV[2] {used[$1]=1; next}
+		FILENAME==ARGV[3] {label[$1]=$2; next}
+		$1==id && $2==kind && !used[$3] {
+			if ((label[$3] "") == (remark "")) {pick=$3; exit}
+			if (!first) first=$3
+		}
+		END {print (pick ? pick : first)}
+	' "$TMPD/remark" "$TMPD/used" "$TMPD/old-names" "$TMPD/identities")
 	if [ -z "$_nm" ]; then
-		_rem=$(printf '%s' "$_raw" | sed 's/[^A-Za-z0-9._-]/-/g; s/^-*//; s/-*$//')
-		# ПОРЯДКОВЫЙ НОМЕР в имени — мина (поймана на живой подписке 29.07.2026): у имён из
-		# одних эмодзи/кириллицы латиницы не остаётся, имя вырождалось в номер, а номера съезжают
-		# от прогона к прогону (провайдер пропускает элементы) ⇒ сервер попадал в ЧУЖОЙ файл,
-		# «изменено 30» на ровном месте — а окажись среди них активный, был бы ещё и рестарт
-		# несущей каждый тик cron. Запасное имя берём из host+port: детерминированно и читаемо.
-		# …И ТА ЖЕ МИНА, ЕСЛИ ОТ ИМЕНИ ОСТАЛАСЬ ГОЛАЯ ЦИФРА. Гард выше ловил только ПУСТОЕ имя,
-		# а «🇨🇭⚡Швейцария-2» после чистки — это «2», и «🇨🇭⚪Швейцария (БС-2)☁️» тоже «2»:
-		# два РАЗНЫХ сервера дерутся за одно имя, и кто получит суффикс, решает ПОРЯДОК в теле
-		# подписки. Провайдер порядок тасует ⇒ имена скачут. Замерено на живом BE7000 24.08.2026
-		# (пул «liberty», 38 серверов): каждый прогон крона 5 файлов удаляются и заводятся заново
-		# под другими именами — лишние записи на 20-МБ флеш, дубли в панели, а окажись среди них
-		# активный, был бы и рестарт несущей. Номер СОХРАНЯЕМ (он различает «БС-2» и «БС-3»), но
-		# приклеиваем к адресу: адрес+порт+номер зависят только от самого сервера, не от порядка.
+		_rem=$(printf '%s' "$2" | sed 's/[^A-Za-z0-9._-]/-/g; s/^-*//; s/-*$//')
 		_hp=$(printf '%s-%s' "$P_HOST" "$P_PORT" | sed 's/[^A-Za-z0-9]/-/g; s/^-*//; s/-*$//')
-		if [ -n "$P_PROFILE" ]; then _hp="pool-$(xp_members "$P_PROFILE" endpoints | md5sum | cut -c1-12)"; fi
+		if [ -n "$P_PROFILE" ]; then _hp="pool-$(printf '%.12s' "$4")"; fi
 		case "$_rem" in
 			'')        _rem="$_hp" ;;
 			*[!0-9-]*) : ;;
 			*)         _rem="$_hp-$_rem" ;;
 		esac
-		[ -n "$_rem" ] || _rem="$_idx"
-		_nm=$(printf 'sub-%s-%s' "$_t" "$_rem" | cut -c1-48)
-		# КОЛЛИЗИЮ РАЗВОДИМ ОТПЕЧАТКОМ НАСТОЯЩЕГО ИМЕНИ, а не бегущим счётчиком: счётчик — это
-		# опять «кто пришёл первым», то есть порядок. Отпечаток зависит только от сервера, и при
-		# перетасовке пула имя остаётся тем же. Счётчик оставлен ПОСЛЕ отпечатка — на случай двух
-		# серверов с одинаковым именем НА ОДНОМ адресе (тогда различать уже нечем).
-		if grep -qxF "$_nm" "$TMPD/used" 2>/dev/null; then
-			_base=$(printf '%s' "$_nm" | cut -c1-42)
-			_h=$(printf '%s' "$_raw" | md5sum 2>/dev/null | cut -c1-4 | tr -cd 'a-f0-9')
-			# Нет md5sum — берём порядковый номер: в пределах ОДНОГО прогона он различает, а имя без
-			# отпечатка вовсе дало бы «base--2» (двойной дефис) и всё ту же зависимость от порядка.
-			[ -n "$_h" ] || _h=$_idx
+		_nm=$(printf 'sub-%s-%s' "$1" "${_rem:-$3}" | cut -c1-48)
+		if name_taken "$_nm"; then
+			_base=$(printf '%s' "$_nm" | cut -c1-39)
+			_h=$(printf '%.8s' "$4")
 			_nm="$_base-$_h"
 			_k=2
-			while grep -qxF "$_nm" "$TMPD/used" 2>/dev/null; do _nm="$_base-$_h-$_k"; _k=$((_k+1)); done
+			while name_taken "$_nm"; do _nm="$_base-$_h-$_k"; _k=$((_k+1)); done
 		fi
 	fi
 	echo "$_nm" >> "$TMPD/used"
@@ -910,8 +886,6 @@ put_server() {
 	mkdir -p "$FAM_DIR" 2>/dev/null
 	_raw=$(printf '%s' "$P_REMARK" | tr -d '\r\n\t' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 	[ -n "$_raw" ] || _raw="#$_i"
-	_nm=$(name_for "$_t" "$_raw" "$_i")
-	_dst="$FAM_DIR/$_nm.$FAM_EXT"
 	# Расширение у ВРЕМЕННОГО файла обязательное: по нему cfg_sig/cfg_addr понимают, JSON перед
 	# ними или YAML. Без него подпись новичка считалась json-веткой поверх YAML (пусто), не
 	# совпадала никогда — и hy2-конфиги переписывались на флеш КАЖДЫЙ тик крона при нулевых
@@ -922,28 +896,9 @@ put_server() {
 		*)   if [ -n "$P_PROFILE" ]; then cat "$P_PROFILE"; else emit_cfg; fi > "$TMPD/cfg.new.$FAM_EXT" 2>/dev/null ;;
 	esac
 	[ -s "$TMPD/cfg.new.$FAM_EXT" ] || { N_BAD=$((N_BAD+1)); return 1; }
-	printf '%s\t%s\n' "$_nm" "$_raw" >> "$TMPD/names"
-	# Семейство выхода — только для подписок-JSON: у ссылочных пула нет, липнуть не к чему.
-	echo "$_nm" >> "$TMPD/keep"
-	# АКТИВНЫЙ конфиг не переписываем, пока его сервер ЕЩЁ ЕСТЬ в свежей подписке. У провайдеров
-	# с пулом (адрес под одним и тем же именем меняется на каждой закачке) иначе выходило бы:
-	# каждый тик cron = новый сервер у несущей = ежедневный рестарт туннеля на ровном месте.
-	# Сверяем ТРИ поля (адрес+порт+креды): если провайдер сменил хоть одно — сервер действительно
-	# другой, и конфиг надо обновить, иначе несущая останется с протухшими кредами.
-	# NOT for AmneziaWG: a `vpn://` link is base64 (the body cannot be searched for an address), a server there is one key pair
-	# and not a pool, and the active config is applied by refresh_awg by the STATE of the working copy, not by this run's news.
-	if [ -z "$P_PROFILE" ] && ! xp_pool "$_dst" && [ "$FAM_EXT" != conf ] && [ -f "$_dst" ] && [ "$_nm" = "$(cat "$FAM_ACT" 2>/dev/null | tr -d ' \r\n\"\\')" ]; then
-		_oa=$(cfg_addr "$_dst")
-		_op=$(cfg_port "$_dst")
-		_oc=$(cfg_cred "$_dst")
-		if [ -n "$_oa" ] && grep -qF "$_oa" "$TMPD/body" 2>/dev/null \
-		   && { [ -z "$_op" ] || grep -qF "$_op" "$TMPD/body" 2>/dev/null; } \
-		   && { [ -z "$_oc" ] || grep -qF "$_oc" "$TMPD/body" 2>/dev/null; }; then
-			rm -f "$TMPD/cfg.new.$FAM_EXT" 2>/dev/null
-			N_SAME=$((N_SAME+1))
-			return 0
-		fi
-	fi
+	_new_id=$(cfg_identity "$TMPD/cfg.new.$FAM_EXT") || { N_BAD=$((N_BAD+1)); return 1; }
+	_nm=$(name_for "$_t" "$_raw" "$_i" "$_new_id")
+	_dst="$FAM_DIR/$_nm.$FAM_EXT"
 	if [ ! -f "$_dst" ]; then
 		cfg_put "$TMPD/cfg.new.$FAM_EXT" "$_dst" || return 1
 		N_NEW=$((N_NEW+1))
@@ -955,34 +910,79 @@ put_server() {
 		rm -f "$TMPD/cfg.new.$FAM_EXT" 2>/dev/null
 		N_SAME=$((N_SAME+1))
 	fi
-	return 0
+	keep_server
+}
+
+keep_server() {
+	if ! { printf '%s\t%s\n' "$_nm" "$_raw" >> "$TMPD/names" && printf '%s\n' "$_nm" >> "$TMPD/keep"; }; then
+		N_SPACE_STOP="не удалось сохранить имена серверов"
+		return 1
+	fi
+	# Reserve the next atomic rewrite of the map alongside the staged config. Four bytes per character covers UTF-8.
+	N_NAME_BYTES=$((N_NAME_BYTES+${#_nm}+4*${#_raw}+2))
+}
+
+sub_space() {
+	_sfree=$(df -Pk "$ENODIA_STATE" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ { print $4 }')
+	[ -n "$_sfree" ] && [ "$_sfree" -ge "$((MINFREE_KB+$1))" ]
+}
+sub_space_reason() {
+	if [ -n "$_sfree" ]; then printf 'мало места на разделе настроек'; else printf 'не удалось проверить свободное место'; fi
 }
 # cfg_put <built config> <its place> — WHOLE OR NOT AT ALL (label-lib.sh), mode 600 from the first byte. It was `mv` from /tmp
 # — a copy across file systems with nobody asking how it ended: on a full partition a stump took the config's place and the run
 # counted it «изменено». A stump of an AmneziaWG config is a lost key, and of the active one — a tunnel that will not come up.
 # The old config stays as it was; the run says so and counts the server as not laid out.
 cfg_put() {
+	_cpbytes=$(wc -c < "$1")
+	if ! sub_space "$((4+(_cpbytes+N_NAME_BYTES+${#_nm}+4*${#_raw}+2+1023)/1024))"; then
+		N_SPACE_STOP=$(sub_space_reason)
+		rm -f "$1" 2>/dev/null
+		return 1
+	fi
 	( umask 077; lbl_commit_out "$2" cat "$1" ) 2>/dev/null; _cpr=$?
+	if [ "$_cpr" = 0 ] && [ "$FAM_EXT" = json ] && command -v xp_meta_stage >/dev/null 2>&1; then
+		cfg_meta_stage "$1" >> "$TMPD/xray-meta" 2>/dev/null || N_META_BAD=1
+	fi
 	rm -f "$1" 2>/dev/null
 	[ "$_cpr" = 0 ] && return 0
 	say "  конфиг «$(basename "$2")» не записался (место на разделе?) — прежний оставлен"
 	N_BAD=$((N_BAD+1))
+	N_SPACE_STOP="не удалось записать конфиг"
 	return 1
+}
+cfg_meta_stage() {
+	# Link configs were just emitted from these values. Profile JSON and escaped display fields use the canonical reader.
+	if [ -n "$P_PROFILE" ] || [ "$P_HOST" = null ]; then xp_meta_stage "$1"; return; fi
+	_cms_flow=; _cms_sni=; _cms_fp=
+	case "$P_PROTO" in vless|trojan) _cms_flow=$P_FLOW ;; esac
+	case "$_sec" in tls|reality) _cms_sni=$P_SNI; _cms_fp=${P_FP:-chrome} ;; esac
+	case "$_net$_sec$_cms_flow$_cms_sni$_cms_fp" in
+		*[!A-Za-z0-9._:-]*) xp_meta_stage "$1" ;;
+		*) xp_meta_stage "$1" "$P_PROTO" "$P_HOST" "$_cms_flow" "$_net" "$_sec" "$_cms_sni" "$_cms_fp" ;;
+	esac
 }
 
 # --- разбор тела ------------------------------------------------------------
+relay_read_progress() {
+	[ -n "${SUB_RELAY_PROGRESS:-}" ] || return 0
+	case "$N_READ" in 1|*0) ;;
+		*) return 0 ;;
+	esac
+	printf '%s\n' "$N_READ" > "$SUB_RELAY_PROGRESS.new" && mv -f "$SUB_RELAY_PROGRESS.new" "$SUB_RELAY_PROGRESS"
+}
 # parse_links <файл> <tag> — тело как список ссылок (plaintext или base64 такого списка).
 parse_links() {
 	_f="$1"; _t="$2"; _i=0
 	# `|| [ -n "$_line" ]` — тело подписки часто приходит БЕЗ хвостового перевода строки (у
 	# base64-подписок это норма), а `read` в таком случае возвращает 1 и цикл бросает уже
 	# прочитанную ПОСЛЕДНЮЮ строку. Замерено на busybox BE7000: 3 строки без \n → 2 итерации.
-	while IFS= read -r _line || [ -n "$_line" ]; do
+	while IFS= read -r _line || { [ "$SUB_FETCH_PARTIAL" = 0 ] && [ -n "$_line" ]; }; do
 		case "$_line" in *://*) : ;; *) continue ;; esac
 		_line=$(printf '%s' "$_line" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-		[ "$_i" -ge "$MAXSRV" ] && { N_CUT=1; break; }
 		if parse_any "$_line"; then
-			_i=$((_i+1)); put_server "$_t" "$_i"
+			_i=$((_i+1)); N_READ=$_i; relay_read_progress; put_server "$_t" "$_i"
+			[ -z "$N_SPACE_STOP" ] || break
 		else
 			N_SKIP=$((N_SKIP+1))
 		fi
@@ -998,8 +998,7 @@ parse_json() {
 	_pj_xray=$(profile_xray_bin)
 	xp_profile_rows "$_pj_file" > "$TMPD/profiles" || return 1
 	while IFS= read -r _pj_json; do
-		[ "$_n" -lt "$MAXSRV" ] || { N_CUT=1; break; }
-		_pji=$((_pji+1))
+		_pji=$((_pji+1)); N_READ=$_pji; relay_read_progress
 		printf '%s\n' "$_pj_json" > "$TMPD/el.json" || return 1
 		if xp_prepare "$TMPD/el.json" "$TMPD/profile.json" "$_pj_xray"; then
 			[ "$XP_GEO_REMOVED" != 1 ] || _pj_geo=1
@@ -1010,6 +1009,7 @@ parse_json() {
 			[ -n "$P_REMARK" ] || P_REMARK=$(xp_field "$P_PROFILE" tag)
 			_n=$((_n+1))
 			put_server "$_pj_tag" "$_n"
+			[ -z "$N_SPACE_STOP" ] || break
 		else
 			say "  профиль $_pji пропущен: $XP_REASON"
 			N_BAD=$((N_BAD+1))
@@ -1059,7 +1059,15 @@ prune_stale() {
 				HELD_GONE="${HELD_GONE:+$HELD_GONE }$_b:$_hx"
 				continue
 			fi
-			if cfg_gone "$_f" "$_b"; then N_DEL=$((N_DEL+1)); else DEL_FAILED="$DEL_FAILED $_b"; fi
+			cfg_gone "$_f" "$_b"
+			case "$?" in
+				0) N_DEL=$((N_DEL+1)) ;;
+				2)
+					BUSY_GONE="$BUSY_GONE $_b"
+					say "  сервер «$(disp_of "$_b")» оставлен: занят выходом/дорогой или выбран для подключения" ;;
+				*) DEL_FAILED="$DEL_FAILED $_b" ;;
+			esac
+			[ "$SUBS_LOCK_MINE" = 1 ] || return 1
 		done
 	done
 }
@@ -1070,15 +1078,30 @@ held_by() {
 	[ -f "$ENODIA_DIR/slots.sh" ] || return 0
 	sh "$ENODIA_DIR/slots.sh" holders "$1" "$2" ${3:+"$3"} 2>/dev/null </dev/null | grep -E '^[2-7](,[2-7])*$' | head -1
 }
-# Keep the config available for retry until its road owner accepts removal.
-cfg_gone() {
-	if [ -s "$ENODIA_STATE/.cfg-via" ] && [ -f "$ENODIA_DIR/road.sh" ]; then
-		sh "$ENODIA_DIR/road.sh" del "$FAM_TNAME" "$2" >/dev/null 2>&1 </dev/null || {
-			say "  не удалось снять дорогу к серверу «$2» — конфиг оставлен" >&2
-			return 1
-		}
+# Drop the state lock before entering the switch → road → registry → state
+# order. Job admission still protects the import while the state lock is free.
+prune_through_owner() (
+	if [ -z "${ENODIA_SWITCH_HOLDER:-}" ] ||
+	    [ "$(cat "$SWITCH_LOCK" 2>/dev/null)" != "$ENODIA_SWITCH_HOLDER" ]; then
+		switch_hold "$SWITCH_LOCK" 0 0 || { echo 'идёт смена транспорта или сервера — повторите удаление'; exit 1; }
+		trap 'rm -f "$SWITCH_LOCK"' EXIT
+		trap 'exit 1' HUP INT TERM PIPE
 	fi
-	rm -f "$1" 2>/dev/null && [ ! -e "$1" ]
+	if [ -f "$ENODIA_DIR/road.sh" ]; then
+		sh "$ENODIA_DIR/road.sh" prune-sub "$@"
+	elif [ ! -s "$ENODIA_STATE/.cfg-via" ]; then
+		sh "$ENODIA_DIR/slots.sh" prune-sub "$@"
+	else
+		return 1
+	fi
+)
+cfg_gone() {
+	_cg_digest=$(lbl_cfg_digest "$1") || return 1
+	drop_lock
+	_cg_out=$(prune_through_owner "$FAM_TNAME" "$2" "$_cg_digest" 2>&1 </dev/null); _cg_rc=$?
+	take_lock || return 1
+	if [ -n "$_cg_out" ] && [ "$_cg_rc" != 2 ]; then say "  $_cg_out" >&2; fi
+	return "$_cg_rc"
 }
 # disp_of <file name> — the server as the person knows it: its real name from this run's lines, else from the map, else the
 # file name. For the words of messages and events only — identity is the file name.
@@ -1093,13 +1116,21 @@ disp_of() {
 # `^sub-<tag>-` уносил имена соседней подписки с тегом-надмножеством.
 # Текст хранилища $2 после прогона подписки $1: чужие блоки, строки исчезнувшего активного, строки этого прогона ($3).
 names_text() {
+	if [ -n "$N_SPACE_STOP$N_PARTIAL" ]; then
+		# Unprocessed servers are unknown, so retain their labels as well as their files.
+		if [ -f "$2" ]; then
+			awk -F "$TAB" 'FILENAME==ARGV[1] { new[$1]=1; next } !($1 in new)' "$3" "$2" || return 1
+		fi
+		cat "$3"
+		return $?
+	fi
 	sub_names_keep_other "$1" "$2"
 	# Активный конфиг, ИСЧЕЗНУВШИЙ из подписки, prune_stale намеренно оставляет на диске —
 	# значит и строку имени надо оставить: иначе файл теряет идентичность (панель показывает
 	# его именем файла), а вернувшийся сервер заведёт себе ВТОРОЙ файл вместо этого.
 	# The same for a config left under an exit (HELD_GONE — «name:exits»).
-	if [ -n "$ACT_GONE$HELD_GONE$HOME_GONE$DEL_FAILED" ] && [ -f "$2" ]; then
-		for _ag in $ACT_GONE $HELD_GONE $HOME_GONE $DEL_FAILED; do grep "^${_ag%%:*}$TAB" "$2" 2>/dev/null | head -1; done
+	if [ -n "$ACT_GONE$HELD_GONE$HOME_GONE$BUSY_GONE$DEL_FAILED" ] && [ -f "$2" ]; then
+		for _ag in $ACT_GONE $HELD_GONE $HOME_GONE $BUSY_GONE $DEL_FAILED; do grep "^${_ag%%:*}$TAB" "$2" 2>/dev/null | head -1; done
 	fi
 	if [ -s "$3" ]; then cat "$3"; fi
 	return 0
@@ -1108,8 +1139,13 @@ names_text() {
 # разделе выходит с кодом 0, и обрубок карты идентичности заводил бы серверам вторые файлы).
 write_names() {
 	_t="$1"
-	lbl_commit_out "$NAMES" names_text "$_t" "$NAMES" "$TMPD/names" 2>/dev/null && chmod 600 "$NAMES" 2>/dev/null
-
+	names_text "$_t" "$NAMES" "$TMPD/names" > "$TMPD/names.next" || return 1
+	cmp -s "$TMPD/names.next" "$NAMES" && return 0
+	if ! sub_space "$((4+($(wc -c < "$TMPD/names.next")+1023)/1024))"; then
+		N_SPACE_STOP=$(sub_space_reason)
+		return 1
+	fi
+	( umask 077; lbl_commit_out "$NAMES" cat "$TMPD/names.next" )
 }
 
 # --- активный сервер --------------------------------------------------------
@@ -1288,7 +1324,7 @@ reup_exits() {
 		_oifs=$IFS; IFS=','
 		for _rxi in $_rxh; do
 			IFS=$_oifs
-			_rxo=$(sh "$ENODIA_DIR/slots.sh" set "$_rxi" config "$_rxn" 2>&1 </dev/null); _rxr=$?
+			_rxo=$(sh "$ENODIA_DIR/slots.sh" refresh-config "$_rxi" "$_rxt" "$_rxn" 2>&1 </dev/null); _rxr=$?
 			_rxl=$(printf '%s\n' "$_rxo" | tail -n 1 | sed 's/^\[slots\] //' | tr -d '\r\n\t')
 			say "  выход №$_rxi: сервер «$(disp_of "$_rxn")» $CHG — ${_rxl:-перезапущен}"
 			if [ "$_rxr" != 0 ] || printf '%s' "$_rxo" | grep -q 'не поднялась'; then
@@ -1309,6 +1345,17 @@ ev() { [ -f "$ENODIA_DIR/notify-event.sh" ] && sh "$ENODIA_DIR/notify-event.sh" 
 ev_log() { [ -f "$ENODIA_DIR/events.sh" ] && sh "$ENODIA_DIR/events.sh" add "$1" "$2" "$3" "$4" >/dev/null 2>&1; return 0; }
 
 # --- обновление одной подписки ----------------------------------------------
+partial_note() {
+	_partial_note="прочитано $N_READ, остальное не дошло — прежние серверы сохранены"
+	say "  $_partial_note"
+	ev_log subs-partial 300 "Подписка прочитана частично" "«$_lab»: $_partial_note"
+}
+update_fetch_failed() {
+	say "  $1"
+	SUMMARY="$SUMMARY«$_lab»: $1. "
+	FAILED=$((FAILED+1))
+	sub_info_put "$_t" fail
+}
 update_one() {
 	_t="$1"
 	_url=$(sub_url_of "$_t"); _lab=$(sub_label_of "$_t"); [ -n "$_lab" ] || _lab="$_t"
@@ -1325,23 +1372,21 @@ update_one() {
 			_pmo=$(printf '%s\n' "$_pmo" | tail -n 1 | tr -d '\r\t')
 			say "  $_pmo"
 			if [ "$_pmr" = 0 ]; then SUMMARY="$SUMMARY«$_lab»: $_pmo. "; return 0; fi
-			# Code 2 — another Amnezia work runs right now (a pick waiting for THIS run's lock): skipped, not failed (review s.136 r2, M4).
-			if [ "$_pmr" = 2 ]; then SUMMARY="$SUMMARY«$_lab»: пропущена ($_pmo). "; return 0; fi
+			# Busy Premium work also leaves this subscription unrefreshed.
 			SUMMARY="$SUMMARY«$_lab»: не обновилась ($_pmo). "; FAILED=$((FAILED+1))
 			return 1 ;;
 	esac
-	case "$_url" in http://*|https://*) : ;; *) say "подписка «$_lab»: нет ссылки в реестре — пропуск"; return 1 ;; esac
-	sub_host_public "$_url" || { say "подписка «$_lab»: ссылка ведёт на приватный адрес — отказ (SSRF)"; return 1; }
+	case "$_url" in http://*|https://*) : ;; *) update_fetch_failed 'нет ссылки в реестре'; return 1 ;; esac
+	sub_host_public "$_url" || { update_fetch_failed 'ссылка ведёт на приватный адрес'; return 1; }
+	SUB_FETCH_PARTIAL=0
 	if [ -n "${2:-}" ]; then
-		cp "$2" "$TMPD/body" || return 1
+		cp "$2" "$TMPD/body" || { update_fetch_failed 'не удалось прочитать скачанную подписку'; return 1; }
+		if command -v sub_unpack_body >/dev/null 2>&1; then sub_unpack_body "$TMPD/body" || :; fi
 	else
 		say "подписка «$_lab» ($_t): скачиваю"
 		SUB_FETCH_VIA=""
-		if ! sub_fetch_tag "$_t" "$_url" "$TMPD/body"; then
-			say "  недоступна или пустая"
-			SUMMARY="$SUMMARY«$_lab»: не скачалась. "
-			FAILED=$((FAILED+1))
-			sub_info_put "$_t" fail
+		if ! sub_fetch_tag "$_t" "$_url" "$TMPD/body" && [ "$SUB_FETCH_PARTIAL" = 0 ]; then
+			update_fetch_failed 'не скачалась: недоступна или пуста'
 			return 1
 		fi
 		# ОТМЕТКА — СРАЗУ ПОСЛЕ ЗАКАЧКИ, А НЕ В КОНЦЕ. Остаток трафика приезжает заголовком ответа, и
@@ -1352,24 +1397,30 @@ update_one() {
 		# «через WAN» = хост подписки лежит в iplist_set и обычным путём ушёл бы в туннель.
 		[ -n "$SUB_FETCH_VIA" ] && say "  (скачано напрямую через $SUB_FETCH_VIA — хост подписки маршрутизировался в туннель)"
 	fi
-	: > "$TMPD/keep"; : > "$TMPD/names"; : > "$TMPD/used"; : > "$TMPD/changed"
-	N_NEW=0; N_CHG=0; N_SAME=0; N_DEL=0; N_SKIP=0; N_BAD=0; N_CUT=0; ACT_GONE=""; HELD_GONE=""; HOME_GONE=""; _pj_geo=0
+	: > "$TMPD/keep"; : > "$TMPD/names"; : > "$TMPD/used"; : > "$TMPD/changed"; : > "$TMPD/xray-meta"; N_META_BAD=0
+	stage_identities "$_t"
+	N_NEW=0; N_CHG=0; N_SAME=0; N_DEL=0; N_SKIP=0; N_BAD=0; N_SPACE_STOP=""; ACT_GONE=""; HELD_GONE=""; HOME_GONE=""; BUSY_GONE=""; _pj_geo=0
+	N_READ=0; N_PARTIAL=""; [ "$SUB_FETCH_PARTIAL" = 0 ] || N_PARTIAL=1
+	N_NAME_BYTES=0; [ ! -f "$NAMES" ] || N_NAME_BYTES=$(wc -c < "$NAMES")
 	DEL_FAILED=""
 
 	# Strip a UTF-8 BOM before classifying the body.
-	if [ "$(head -c 3 "$TMPD/body")" = "$(printf '\357\273\277')" ]; then
+	if [ "$(head -c 3 "$TMPD/body" 2>/dev/null)" = "$(printf '\357\273\277')" ]; then
 		tail -c +4 "$TMPD/body" > "$TMPD/body.no-bom" && mv "$TMPD/body.no-bom" "$TMPD/body"
 	fi
 	# Provider JSON profiles, links, or a base64 list of links.
 	_head=$(head -c 400 "$TMPD/body" 2>/dev/null | tr -d ' \t\r\n' | cut -c1-1)
 	_ok=1
-	if [ "$_head" = "[" ] || [ "$_head" = "{" ]; then
+	if [ ! -s "$TMPD/body" ]; then
+		_ok=0
+	elif [ "$_head" = "[" ] || [ "$_head" = "{" ]; then
 		parse_json "$TMPD/body" "$_t" || _ok=0
 	else
 		if ! grep -q '://' "$TMPD/body" 2>/dev/null; then
-			b64_dec < "$TMPD/body" | cat > "$TMPD/body.d" 2>/dev/null || rm -f "$TMPD/body.d" 2>/dev/null   # через cat: base64 о неудачной записи молчит
+			( b64_dec < "$TMPD/body"; echo "$?" > "$TMPD/body.status" ) | cat > "$TMPD/body.d" 2>/dev/null || rm -f "$TMPD/body.d" 2>/dev/null
 			if [ -s "$TMPD/body.d" ] && grep -q '://' "$TMPD/body.d" 2>/dev/null; then
 				mv "$TMPD/body.d" "$TMPD/body"
+				if [ "$(cat "$TMPD/body.status" 2>/dev/null)" != 0 ]; then N_PARTIAL=1; SUB_FETCH_PARTIAL=1; fi
 			else
 				rm -f "$TMPD/body.d" 2>/dev/null
 			fi
@@ -1377,6 +1428,12 @@ update_one() {
 		parse_links "$TMPD/body" "$_t" || _ok=0
 	fi
 	if [ "$_ok" != 1 ]; then
+		if [ -n "$N_PARTIAL" ]; then
+			partial_note
+			SUMMARY="$SUMMARY«$_lab»: $_partial_note. "
+			FAILED=$((FAILED+1)); sub_info_put "$_t" fail
+			return 1
+		fi
 		# Пустой ответ провайдера («ключи кончились», протухший токен) выглядит как наша ошибка
 		# разбора. Если тело — короткий JSON с detail/error/message, показываем ЕГО СЛОВА: иначе
 		# человек ищет баг у себя, а подписку надо просто перевыпустить.
@@ -1388,10 +1445,17 @@ update_one() {
 		sub_info_put "$_t" fail
 		return 1
 	fi
-	prune_stale "$_t"
-	write_names "$_t"
+	# Before any pruning, reserve enough for the largest possible map (including retained labels).
+	if [ -z "$N_SPACE_STOP" ] && ! sub_space "$((4+(N_NAME_BYTES+1023)/1024))"; then N_SPACE_STOP=$(sub_space_reason); fi
+	[ -n "$N_SPACE_STOP$N_PARTIAL" ] || prune_stale "$_t"
+	[ "$SUBS_LOCK_MINE" = 1 ] || return 1
+	if [ "${N_META_BAD:-0}" = 0 ] && [ -s "$TMPD/xray-meta" ] && command -v xp_meta_publish >/dev/null 2>&1; then
+		_meta_stage=$(cat "$TMPD/xray-meta") && xp_meta_publish "$_meta_stage"
+	fi
+	_names_failed=0
+	if [ -s "$TMPD/names" ] || [ -z "$N_SPACE_STOP$N_PARTIAL" ]; then write_names "$_t" || _names_failed=1; fi
 	_tot=$((N_NEW+N_CHG+N_SAME))
-	say "  серверов $_tot (новых $N_NEW, изменено $N_CHG, снято $N_DEL, пропущено $((N_SKIP+N_BAD)))$([ "$N_CUT" = 1 ] && printf ', обрезано по капу %s' "$MAXSRV")"
+	say "  серверов $_tot (новых $N_NEW, изменено $N_CHG, снято $N_DEL, пропущено $((N_SKIP+N_BAD)))"
 	CH_TOTAL=$((CH_TOTAL+N_NEW+N_CHG+N_DEL))
 	SRV_TOTAL=$((SRV_TOTAL+_tot))
 	# The run's record for the panel (the toast of «Обновить серверы», the «Автообновление» card, the journal) is put together
@@ -1419,17 +1483,32 @@ update_one() {
 		say "  ВНИМАНИЕ: сервер «$(disp_of "$_hm")» исчез из подписки — конфиг ОСТАВЛЕН: он «дом» резерва, сторож вернётся на него"
 	done
 	AWG_LAGS=0
+	drop_lock
 	refresh_active "$_t"
 	reup_exits
+	take_lock || return 1
 	# Two facts a person must not miss, said in the record itself (each after «;» — the record's own clause stays whole for
 	# the panel's translation): servers that left the subscription and were KEPT because they are in use, and a new config of
 	# the active server that is NOT applied (refused now or earlier — said on every run while the working copy lags).
-	_sumk=0; for _sk in $ACT_GONE $HELD_GONE $HOME_GONE; do _sumk=$((_sumk+1)); done
+	_sumk=0; for _sk in $ACT_GONE $HELD_GONE $HOME_GONE $BUSY_GONE; do _sumk=$((_sumk+1)); done
 	[ "$_sumk" = 0 ] || _sumrec="$_sumrec; занятых оставлено $_sumk"
 	case "$AWG_LAGS" in
 		1) _sumrec="$_sumrec; новый конфиг активного сервера не применён — работает прежний" ;;
 		2) _sumrec="$_sumrec; новый конфиг активного сервера не применён, прежний не отвечает — роутер в прямом режиме" ;;
 	esac
+	if [ -n "$N_SPACE_STOP" ]; then
+		_space_result="сохранено $_tot серверов; остальные не сохранены: $N_SPACE_STOP"
+		say "  $_space_result"
+		_sumrec="$_sumrec; $_space_result"
+	fi
+	if [ -n "$N_PARTIAL" ]; then partial_note; _sumrec="$_sumrec; $_partial_note"; fi
+	[ "$_names_failed" = 0 ] || _sumrec="$_sumrec; не удалось сохранить имена серверов"
+	if [ -n "$N_SPACE_STOP$N_PARTIAL" ] || [ "$_names_failed" = 1 ]; then
+		FAILED=$((FAILED+1))
+		sub_info_put "$_t" fail
+		SUMMARY="$SUMMARY$_sumrec. "
+		return 1
+	fi
 	if [ -n "$DEL_FAILED" ]; then
 		FAILED=$((FAILED+1))
 		sub_info_put "$_t" fail
@@ -1441,15 +1520,45 @@ update_one() {
 }
 
 # --- вербы ------------------------------------------------------------------
+sub_run_record() {
+	# One small flash write for the panel and a result for the browser relay.
+	_record=$(printf '%s' "${SUMMARY:-нет подписок}" | sub_sum_cut 1000)
+	_run_ts=$(date +%s 2>/dev/null)
+	case "$_run_ts" in ''|*[!0-9]*) _run_ts=1 ;; esac
+	_run_prev=$(cut -f1 "$ENODIA_STATE/.subs-last" 2>/dev/null)
+	if [ "$_run_prev" = "$_run_ts" ]; then _run_ts=$((_run_ts+1)); fi
+	_run_published=0
+	if [ ! -d "$ENODIA_STATE/.subs-last" ] &&
+	   lbl_commit_out "$ENODIA_STATE/.subs-last" printf '%s\t%s\t%s\t%s\n' \
+		"$_run_ts" "$([ "$FAILED" -gt 0 ] && echo fail || echo ok)" "$_record" "${RUN_GEO:-0}"; then
+		_run_published=1
+	else
+		SUMMARY="Не удалось сохранить результат обновления подписок. $SUMMARY"
+		_record=$(printf '%s' "$SUMMARY" | sub_sum_cut 1000)
+		say "$_record"
+	fi
+	[ -z "$1" ] || printf 'relay-result\t%s\t%s\n' "${RUN_GEO:-0}" "$_record"
+	[ "$_run_published" = 1 ]
+}
 cmd_update() {
 	_one="$1"
-	[ -f "$ENODIA_STATE/.subs" ] || { say "подписок нет (.subs пуст)"; return 0; }
+	if [ -n "${3:-}" ] && [ "$(sub_url_revision "$(sub_url_of "$_one")")" != "$3" ]; then
+		printf 'relay-result\t0\tСсылка подписки изменилась — скачайте подписку заново.\n'
+		return 1
+	fi
+	if [ ! -f "$ENODIA_STATE/.subs" ]; then
+		[ -z "$_one" ] && return 0
+		SUMMARY="Подписка «$_one» не найдена в реестре."
+		[ -z "${2:-}" ] || printf 'relay-result\t0\t%s\n' "$SUMMARY"
+		return 1
+	fi
 	# место на флеше: конфиги подписки пишутся на /data, а переполнение UBIFS роняет DNS и туннель
-	_free=$(df -k "$ENODIA_DIR" 2>/dev/null | awk 'NR==2{print $4+0}')
-	if [ -n "$_free" ] && [ "$_free" -lt "$MINFREE_KB" ]; then
-		say "мало места на /data (${_free} КБ) — обновление подписок отменено"
-		ev "subs-nospace" 21600 "Нет места для обновления подписок" \
-			"На /data свободно ${_free} КБ — обновление подписок отменено, чтобы не переполнить флеш."
+	if ! sub_space 0; then
+		SUMMARY="сохранено 0 серверов; остальные не сохранены: $(sub_space_reason)."
+		FAILED=1
+		say "$SUMMARY"
+		sub_run_record "${2:-}"
+		ev "subs-nospace" 21600 "Нет места для обновления подписок" "$SUMMARY"
 		return 1
 	fi
 	mkdir -p "$CFGDIR" "$HY2DIR" 2>/dev/null
@@ -1462,24 +1571,23 @@ cmd_update() {
 		case "$_tg" in ''|*[!a-z0-9-]*) continue ;; esac
 		[ -n "$_one" ] && [ "$_one" != "$_tg" ] && continue
 		update_one "$_tg" "${2:-}" && DONE=$((DONE+1))
+		if [ "$SUBS_LOCK_MINE" != 1 ]; then
+			say 'Идёт другая операция с подписками — повторите обновление.'
+			[ -z "${2:-}" ] || printf 'relay-result\t0\tИдёт другая операция с подписками — повторите обновление.\n'
+			return 1
+		fi
 	done < "$TMPD/tags"
-	[ -n "$_one" ] && [ "$DONE" = 0 ] && [ "$FAILED" = 0 ] && say "подписка «$_one» не найдена в реестре"
-	if [ "$CH_TOTAL" -gt 0 ]; then
-		ev_log "subs-update" 300 "Подписки обновлены" "$SUMMARY"
+	if [ -n "$_one" ] && [ "$DONE" = 0 ] && [ "$FAILED" = 0 ]; then
+		SUMMARY="Подписка «$_one» не найдена в реестре."
+		FAILED=1
 	fi
-	# Отметка последнего прогона для панели («обновлено N минут назад») — ts⇥итог⇥сводка.
-	# Пишем РАЗ за прогон: /data — флеш, а cron ходит сюда каждые несколько часов.
-	printf '%s\t%s\t%s\t%s\n' "$(date +%s 2>/dev/null)" \
-		"$([ "$FAILED" -gt 0 ] && echo fail || echo ok)" \
-		"$(printf '%s' "${SUMMARY:-нет подписок}" | sub_sum_cut 1000)" "$RUN_GEO" \
-		> "$ENODIA_STATE/.subs-last.$$" && mv -f "$ENODIA_STATE/.subs-last.$$" "$ENODIA_STATE/.subs-last"
-	if [ -n "${2:-}" ]; then
-		printf 'relay-result\t%s\t%s\n' "$RUN_GEO" "$(printf '%s' "$SUMMARY" | sub_sum_cut 1000)"
+	sub_run_record "${2:-}" || return 1
+	if [ "$CH_TOTAL" -gt 0 ] && [ "$DONE" -gt 0 ]; then
+		ev_log "subs-update" 300 "Подписки обновлены" "$SUMMARY"
 	fi
 	if [ -n "${2:-}" ] && [ "$DONE" = 0 ]; then return 1; fi
 	if [ "$FAILED" -gt 0 ] && [ "$DONE" = 0 ]; then
-		ev "subs-fail" 21600 "Подписки не обновились" \
-			"Ни одна подписка не скачалась ($FAILED шт.). Проверьте интернет и ссылки подписок в панели."
+		ev "subs-fail" 21600 "Подписки не обновились" "$SUMMARY"
 		return 1
 	fi
 	return 0
@@ -1511,6 +1619,7 @@ cmd_fetch() {
 	_t="$1"
 	case "$_t" in ''|*[!a-z0-9-]*) echo "плохая метка подписки" >&2; return 1 ;; esac
 	_url=$(sub_url_of "$_t")
+	[ -z "${2:-}" ] || [ "$(sub_url_revision "$_url")" = "$2" ] || return 4
 	case "$_url" in http://*|https://*) : ;; *) echo "подписка не найдена на роутере" >&2; return 1 ;; esac
 	sub_host_public "$_url" || { echo "URL подписки ведёт на приватный/локальный адрес — отказ (SSRF)" >&2; return 1; }
 	# СЧЁТЧИКИ ПИШЕМ И ЗДЕСЬ. Этим вербом панель забирает тело при импорте — то есть в тот самый
@@ -1521,7 +1630,10 @@ cmd_fetch() {
 	# импорту, пока cron обновляет соседнюю подписку. Цена — гонка в единственном исходе: если
 	# запись cron'а придётся ровно в окно между нашим чтением файла и mv, потеряется ОТМЕТКА
 	# одной подписки (не файл: mv атомарен), и её вернёт ближайшее обновление.
-	if ! sub_fetch_tag "$_t" "$_url" "$TMPD/body"; then
+	SUB_FETCH_PARTIAL=0
+	sub_fetch_tag "$_t" "$_url" "$TMPD/body"; _fetched=$?
+	if [ "$SUB_FETCH_PARTIAL" = 1 ]; then sub_info_put "$_t" fail; return 3; fi
+	if [ "$_fetched" != 0 ]; then
 		sub_info_put "$_t" fail
 		echo "подписка недоступна или пустая" >&2; return 1
 	fi
@@ -1632,8 +1744,6 @@ cmd_drop() {
 			cfg_gone "$_f" "$_b" || return 4
 		done
 	done
-	# The maps — by the OWNER, not by the prefix (subs-lib.sh::sub_names_keep_other); the tag is given explicitly.
-	[ ! -f "$NAMES" ] || lbl_commit_out "$NAMES" sub_names_keep_other "$_dt" "$NAMES" 2>/dev/null
 	# AMNEZIA PREMIUM: its cache goes and — nothing kept — the router's place in the subscription is given back. premium.sh reads
 	# the key from the registry, so BEFORE the link is cleared below.
 	case "$(sub_url_of "$_dt")" in
@@ -1709,6 +1819,7 @@ cmd_put() {
 	lbl_commit_out "$NAMES" lbl_without "$NAMES" "^$_pun$TAB" "$_pun$TAB$_pud" 2>/dev/null && chmod 600 "$NAMES" 2>/dev/null
 	printf '%s\t%s\n' "$FAM_TNAME" "$_pun" > "$TMPD/changed"
 	AWG_DEFER=0
+	drop_lock
 	refresh_active "$_put"
 	reup_exits
 	echo "конфиг «$_pud» на месте"
@@ -1747,11 +1858,121 @@ cmd_unput() {
 		fi
 		_unx=$(held_by "$FAM_TNAME" "$_unn")
 		[ -z "$_unx" ] || { echo "на «$_und» стоит выход №$(printf '%s' "$_unx" | sed 's/,/, №/g') — сперва смените выходу сервер"; return 2; }
-		cfg_gone "$_unf" "$_unn" || { echo "не удалось удалить «$_und»"; return 1; }
+		cfg_gone "$_unf" "$_unn"
+		case "$?" in
+			0) : ;;
+			2) echo "сервер «$_und» оставлен: занят выходом/дорогой или выбран для подключения"; return 2 ;;
+			*) echo "не удалось удалить «$_und»"; return 1 ;;
+		esac
 	fi
-	[ ! -f "$NAMES" ] || lbl_commit_out "$NAMES" lbl_without "$NAMES" "^$_unn$TAB" 2>/dev/null
 	echo "сервер «$_und» убран"
 }
+
+# Config deletion is one commit: the unlink. Road and registry locks are
+# already held by their owners, in order, before subscription admission.
+delete_wire_take() {
+	[ -n "$1" ] || return 0
+	case "$1" in *[!0-9]*) return 1 ;; esac
+	[ -n "${ENODIA_DELETE_WIRE_LOCK:-}" ] && lbl_lock_take "$ENODIA_DELETE_WIRE_LOCK" 'road\.sh' "$1" ||
+		{ echo '[road] правила дорог сейчас пересобирает другая операция — повторите'; return 1; }
+}
+delete_saved_cfg() (   # kind, file, expected digest, wire lock pid, manual|prune
+	_da_kind=$1; _da_name=$2; _da_expected=$3
+	lbl_cfg_key "$_da_kind/$_da_name" || exit 1
+	fam_set "$_da_kind"
+	_da_cfg="$FAM_DIR/$_da_name.$FAM_EXT"
+	[ -f "$_da_cfg" ] || { echo "нет конфига $_da_name"; exit 1; }
+	lbl_cfg_matches "$_da_cfg" "$_da_expected" ||
+		{ echo 'Конфиг изменился или его версия неизвестна. Обновите список серверов.'; exit 1; }
+	_da_active=$(cat "$FAM_ACT" 2>/dev/null | tr -d ' \r\n"\\')
+	_da_reserve=""
+	_da_at=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
+	if [ "$_da_name" = "$_da_active" ]; then
+		[ "$5" != prune ] || exit 2
+		if [ "$_da_kind" = awg ]; then
+			if [ "${_da_at:-awg}" = awg ] && [ ! -f "$ENODIA_STATE/.vpn-off" ]; then
+				echo "нельзя удалить активный конфиг ($_da_name) — сначала переключитесь на другой"; exit 2
+			fi
+			# Phase two stops the selected reserve. Other live keys still hold the file.
+			_da_reserve=stop-selected-reserve
+		elif [ "$_da_kind" = "$_da_at" ]; then
+			case "$_da_kind" in
+				xray) echo 'это активный конфиг при включённом Xray — сначала переключитесь на другой транспорт' ;;
+				hy2) echo 'это активный конфиг при включённой Hysteria2 — сначала переключитесь на другой транспорт' ;;
+			esac
+			exit 2
+		fi
+	fi
+	if [ "$_da_kind" = awg ]; then
+		if [ "$_da_name" != "$_da_active" ] && [ "$_da_name" = "$(cat "$ENODIA_STATE/.failover-home" 2>/dev/null | tr -d ' \r\n')" ]; then
+			echo "«$_da_name» — «дом» резерва: сторож вернётся на него; сперва выберите основным другой сервер"; exit 2
+		fi
+		if [ -f "$ENODIA_DIR/road.sh" ]; then
+			_da_road=$(sh "$ENODIA_DIR/road.sh" serves awg "$_da_name" 2>/dev/null | tr -cd '0-9')
+			[ -z "$_da_road" ] || { echo "конфиг $_da_name служит дорогой (выход №$_da_road) — сначала переключите дорогу его пассажиров на «напрямую»"; exit 2; }
+		fi
+		_da_holder=$(sh "$ENODIA_DIR/slots.sh" key-holder "$_da_name" main enabled "$_da_reserve" 2>/dev/null)
+		case "$?" in
+			0) echo "$_da_holder"; exit 2 ;;
+			1) : ;;
+			*) echo 'Не удалось проверить ключ работающего AmneziaWG — повторите удаление.'; exit 1 ;;
+		esac
+	fi
+	# Preserve disabled bindings for subscription removals and the non-AWG manual actions.
+	if [ "$5" = prune ] || [ "$_da_kind" != awg ]; then
+		_da_holder=$(held_by "$_da_kind" "$_da_name")
+		[ -z "$_da_holder" ] || { echo "конфиг $_da_name держит выход №${_da_holder%%,*} — сначала удалите выход или смените его сервер"; exit 2; }
+	fi
+	_da_names="$ENODIA_STATE/.cfg-names"; _da_favs="$ENODIA_STATE/.server-favs"
+	_da_names_stage="$_da_names.$$.delete.new"
+	_da_favs_stage="$_da_favs.$$.delete.new"
+	_da_sub_stage="$NAMES.$$.delete.new"
+	_da_names_locked=0; _da_favs_locked=0
+	delete_saved_cleanup() {
+		rm -f "$_da_names_stage" "$_da_favs_stage" "$_da_sub_stage"
+		[ "$_da_favs_locked" = 0 ] || lbl_lock_drop "$LBL_FAV_LOCK"
+		[ "$_da_names_locked" = 0 ] || lbl_lock_drop "$LBL_CFG_NAMES_LOCK"
+	}
+	trap 'delete_saved_cleanup' EXIT
+	trap 'exit 1' HUP INT TERM PIPE
+	lbl_lock_take "$LBL_CFG_NAMES_LOCK" "$LBL_CFG_NAMES_HOLDERS" ||
+		{ echo 'Имена серверов сейчас меняются — повторите удаление.'; exit 1; }
+	_da_names_locked=1
+	lbl_lock_take "$LBL_FAV_LOCK" "$LBL_FAV_HOLDERS" ||
+		{ echo 'Избранное сейчас меняется — повторите удаление.'; exit 1; }
+	_da_favs_locked=1
+	lbl_stage_drop "$_da_names" "$_da_kind/$_da_name" "$_da_names_stage" &&
+		lbl_stage_drop "$_da_favs" "$_da_kind/$_da_name" "$_da_favs_stage" ||
+		{ echo 'Не удалось подготовить обновление имён и избранного.'; exit 1; }
+	if ! name_elsewhere "$_da_name"; then
+		lbl_stage_drop "$NAMES" "$_da_name" "$_da_sub_stage" ||
+			{ echo 'Не удалось подготовить удаление имени сервера подписки.'; exit 1; }
+	fi
+	delete_wire_take "${4:-}" || exit 1
+	lbl_cfg_matches "$_da_cfg" "$_da_expected" ||
+		{ echo 'Конфиг изменился или его версия неизвестна. Обновите список серверов.'; exit 1; }
+
+	{ rm -f "$_da_cfg" 2>/dev/null && [ ! -e "$_da_cfg" ]; } || { echo "не удалось удалить $_da_name"; exit 1; }
+	_da_warn=0
+	if [ -f "$ENODIA_DIR/server-checks-lib.sh" ]; then
+		( . "$ENODIA_DIR/server-checks-lib.sh"; sc_drop "$_da_kind" "$_da_cfg" ) >/dev/null 2>&1
+	fi
+	if [ "$_da_name" = "$_da_active" ]; then
+		if [ "$_da_kind" = awg ]; then
+			sh "$ENODIA_DIR/switch-vpn.sh" clear-selection "$_da_name" >/dev/null 2>&1 || _da_warn=1
+		else
+			rm -f "$FAM_ACT" || _da_warn=1
+		fi
+	fi
+	lbl_publish_drop "$NAMES" "$_da_sub_stage" || _da_warn=1
+	lbl_publish_drop "$_da_names" "$_da_names_stage" || _da_warn=1
+	lbl_publish_drop "$_da_favs" "$_da_favs_stage" || _da_warn=1
+	if [ "$_da_kind" = awg ] && [ -f "$ENODIA_DIR/warp.sh" ]; then
+		sh "$ENODIA_DIR/warp.sh" prune give >/dev/null 2>&1 || _da_warn=1
+	fi
+	[ "$_da_warn" = 0 ] || echo 'Конфиг удалён. Не удалось полностью обновить список серверов.'
+	exit 0
+)
 
 # Лок: параллельный прогон (cron + кнопка в панели) топтал бы один набор файлов. Устаревший
 # лок снимаем `rm -rf` — внутри pid-файл, rmdir его не возьмёт (грабля do_update в lists).
@@ -1770,12 +1991,7 @@ take_lock() {
 		# часов вперёд объявил бы СВЕЖИЙ лок протухшим — то есть ровно тот исход, от которого
 		# оберегает абзац выше, только по другой причине.
 		if [ -z "$_p" ]; then
-			# Пустой `_lt` (нет `date -r` в этой сборке) обязан значить «СЧИТАЕМ СВЕЖИМ», как и было:
-			# age_since на пустом отдаёт 999999, то есть «протух» — и мы снесли бы ЖИВОЙ лок ровно
-			# там, где абзац выше это запрещает.
-			_lt=$(date -r "$LOCK" +%s 2>/dev/null)
-			case "$_lt" in ''|*[!0-9]*) _lt="" ;; esac
-			if [ -z "$_lt" ] || [ "$(age_since "$_lt")" -lt 1800 ]; then
+			if unpublished_lock_live "$LOCK"; then
 				say "лок обновления подписок свежий, но без pid — жду следующего запуска"
 				return 1
 			fi
@@ -1783,11 +1999,91 @@ take_lock() {
 		say "лок обновления подписок протух — перехватываю"
 		rm -rf "$LOCK" 2>/dev/null; mkdir "$LOCK" 2>/dev/null || return 1
 	fi
-	echo $$ > "$LOCK/pid" 2>/dev/null
+	echo "${1:-$$}" > "$LOCK/pid" 2>/dev/null || { rm -rf "$LOCK"; return 1; }
 	SUBS_LOCK_MINE=1
 	return 0
 }
-drop_lock() { rm -rf "$LOCK" 2>/dev/null; SUBS_LOCK_MINE=0; }
+unpublished_lock_live() {
+	_ul_time=$(date -r "$1" +%s 2>/dev/null)
+	case "$_ul_time" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$(age_since "$_ul_time")" -lt 1800 ]
+}
+drop_lock() { [ "$SUBS_LOCK_MINE" != 1 ] || rm -rf "$LOCK" 2>/dev/null; SUBS_LOCK_MINE=0; }
+# One subscription job retains admission even while its short state lock
+# is released to acquire earlier locks for pruning or carrier replay.
+take_job() {
+	_sj_state_lock=$LOCK
+	LOCK="$LOCK.run"
+	take_lock; _sj_rc=$?
+	LOCK=$_sj_state_lock
+	[ "$_sj_rc" = 0 ] || return 1
+	SUBS_LOCK_MINE=0; SUBS_JOB_MINE=1
+}
+subs_job_live() {
+	[ -d "$LOCK.run" ] || return 1
+	_sj_pid=$(cat "$LOCK.run/pid" 2>/dev/null | tr -cd '0-9')
+	if [ -n "$_sj_pid" ]; then [ -d "/proc/$_sj_pid" ]; else unpublished_lock_live "$LOCK.run"; fi
+}
+drop_job() { [ "$SUBS_JOB_MINE" = 0 ] || rm -rf "$LOCK.run"; SUBS_JOB_MINE=0; }
+
+# The CGI owns launch until spawn_bg publishes the worker PID. Only the
+# small terminal receipts have a retention period for repeated polls.
+subs_work_sweep() {
+	command -v store_tmp_pid_sweep >/dev/null 2>&1 || return 0
+	store_tmp_pid_sweep "${TMPD%.*}"
+	store_tmp_pid_sweep "${TMPD%/*}/enodia-cgi-in"
+	for _sw_dir in "${TMPD%/*}"/enodia-subs-relay.* "${TMPD%/*}"/enodia-subs-refresh.*; do
+		_sw_token=${_sw_dir##*.}
+		case "$_sw_token" in *[!A-Za-z0-9]*) continue ;; esac
+		[ "${#_sw_token}" = 6 ] && [ -d "$_sw_dir" ] && [ ! -L "$_sw_dir" ] || continue
+		if store_pid_live "$(cat "$_sw_dir/launch" 2>/dev/null)" ||
+		   store_pid_live "$(cat "$_sw_dir/pid" 2>/dev/null)"; then continue; fi
+		if [ -e "$_sw_dir/body" ] || store_tmp_dir_expired "$_sw_dir" 900; then rm -rf "$_sw_dir"; fi
+	done
+	return 0
+}
+
+refresh_path() {
+	case "$1" in *[!A-Za-z0-9]*) return 1 ;; esac
+	[ "${#1}" = 6 ] || return 1
+	_refresh_dir="/tmp/enodia-subs-refresh.$1"
+	[ -d "$_refresh_dir" ] && [ ! -L "$_refresh_dir" ]
+}
+refresh_status() {
+	if refresh_path "$1"; then
+		[ ! -s "$_refresh_dir/result" ] || { cat "$_refresh_dir/result"; return; }
+		if pid_runs "$(cat "$_refresh_dir/pid" 2>/dev/null)" 'subs-import\.sh.*refresh-job'; then
+			printf 'running\n'; return
+		fi
+		[ ! -s "$_refresh_dir/result" ] || { cat "$_refresh_dir/result"; return; }
+	fi
+	printf 'error\t0\t0\tОбновление подписки прервано.\n'
+}
+refresh_job() {
+	refresh_path "$2" || return 1
+	_refresh_ok=0; _refresh_state=refused; RUN_GEO=0
+	SUMMARY='Уже идёт обновление подписок. Повторите после его завершения.'
+	if take_job && take_lock; then
+		SUMMARY=; FAILED=0; DONE=0; _refresh_state=done
+		if cmd_update "$1" >/dev/null && [ "$FAILED" = 0 ] && [ "$DONE" -gt 0 ]; then _refresh_ok=1; fi
+		[ -n "$SUMMARY" ] || SUMMARY='Нет подписок для обновления.'
+	fi
+	drop_lock; drop_job
+	_refresh_msg=$(printf '%s' "${SUMMARY:-Нет результата обновления подписки.}" | sub_sum_cut 1000)
+	( umask 077; lbl_commit_out "$_refresh_dir/result" printf '%s\t%s\t%s\t%s\n' \
+		"$_refresh_state" "$_refresh_ok" "${RUN_GEO:-0}" "$_refresh_msg" )
+}
+import_body_run() {
+	case "$1" in ''|*[!a-z0-9-]*) return 1 ;; esac
+	[ -s "$2" ] || return 1
+	if ! { take_job && take_lock; }; then
+		printf 'relay-result\t0\tУже идёт обновление подписок. Повторите после его завершения.\n'
+		return 1
+	fi
+	cmd_update "$1" "$2" "${3:-}"; _ibr_rc=$?
+	drop_lock
+	return "$_ibr_rc"
+}
 
 # Лог в /tmp (RAM, ротации в проекте нет) — но подрезаем, чтобы частый cron не съел память.
 trim_log() {
@@ -1796,6 +2092,14 @@ trim_log() {
 	[ "$_sz" -lt 131072 ] && return 0
 	tail -n 300 "$LOG" > "$LOG.new" 2>/dev/null && mv "$LOG.new" "$LOG" 2>/dev/null
 }
+
+# Public status shares the real job admission, including the unpublished lock.
+if [ "$1" = running ]; then subs_job_live; exit $?; fi
+if [ "$1" = refresh-status ]; then refresh_status "$2"; exit $?; fi
+case "$1" in
+	workspace-sweep) subs_work_sweep; exit $? ;;  # the relay CGI calls before allocating its body
+	update|""|refresh-job|relay-job|import-body) subs_work_sweep ;;
+esac
 
 # THE RUN'S FILES CARRY PRIVATE KEYS (a decoded link, a config on its way to its place): the dir is the run's OWN and CLOSED —
 # made, not «made or found». `mkdir -p` under the caller's umask left them readable to every process of the router, in a dir a
@@ -1808,25 +2112,56 @@ rm -rf "$TMPD" 2>/dev/null
 # /tmp/enodia-subs-update.7007) пережил обрыв и не убирался ничем. Сигнал — ВЫХОД (C121): ловушка без
 # `exit` убирала каталог, а прогон шёл дальше — уже без него.
 # Свой лок — тоже здесь: строку `drop_lock` после cmd_update выход по сигналу пропускает.
-SUBS_LOCK_MINE=0
-trap 'rm -rf "$TMPD" 2>/dev/null; [ "$SUBS_LOCK_MINE" = 1 ] && drop_lock' EXIT
+SUBS_LOCK_MINE=0; SUBS_JOB_MINE=0
+trap 'rm -rf "$TMPD" 2>/dev/null; drop_lock; drop_job' EXIT
 trap 'exit 1' INT TERM HUP PIPE
 trim_log
 
 case "$1" in
+	refresh-job) refresh_job "$2" "$3"; exit $? ;;
+	relay-job)
+		# One process owns the queued body, progress and importer workspace.
+		SUB_RELAY_PROGRESS="$3/progress"
+		import_body_run "$2" "$3/body" "$4" > "$3/result" 2>&1; rc=$?
+		rm -f "$3/body"
+		printf '%s\n' "$rc" > "$3/exit.new" && mv -f "$3/exit.new" "$3/exit"
+		exit "$rc" ;;
 	import-body)
-		case "$2" in ''|*[!a-z0-9-]*) exit 1 ;; esac
-		[ -s "$3" ] || exit 1
-		take_lock || exit 1
-		cmd_update "$2" "$3"; rc=$?
-		drop_lock
-		exit $rc ;;
+		import_body_run "$2" "$3" "${4:-}"; exit $? ;;
 	update|"")
-		take_lock || exit 0
+		take_job && take_lock || exit 0
 		cmd_update "$2"; rc=$?
 		drop_lock
 		exit $rc ;;
-	fetch) cmd_fetch "$2" ;;
+	fetch) cmd_fetch "$2" "${3:-}" ;;
+	registry-put|registry-del)
+		case "$2" in ''|*[!a-z0-9-]*) exit 1 ;; esac
+		take_job >/dev/null && take_lock >/dev/null || exit 2
+		_reg_row=''
+		if [ "$1" = registry-put ]; then
+			_reg_row="$2$TAB$3$TAB$4"
+		elif [ -f "$NAMES" ]; then
+			# The caller has moved the kept servers out of this subscription.
+			lbl_commit_out "$NAMES" sub_names_keep_other "$2" "$NAMES" || exit 1
+		fi
+		( umask 077; lbl_commit_out "$ENODIA_STATE/.subs" lbl_without "$ENODIA_STATE/.subs" "^$2$TAB" "$_reg_row" )
+		exit $? ;;
+	names-replace)
+		case "$2" in ''|*[!a-z0-9-]*) exit 1 ;; esac
+		take_job >/dev/null && take_lock >/dev/null || exit 2
+		lbl_commit_out "$NAMES" sub_names_from_form "$2" "$3" "$NAMES"
+		exit $? ;;
+	restore-lock|row-lock)
+		case "$2" in ''|*[!0-9]*) exit 1 ;; esac
+		case "$1" in restore-lock) _lease_proc='cgi-bin/backup' ;; row-lock) _lease_proc='cgi-bin/action|road\.sh|warp\.sh' ;; esac
+		pid_runs "$2" "$_lease_proc" && ! subs_job_live && take_lock "$2" >/dev/null || exit 1
+		SUBS_LOCK_MINE=0   # The caller now owns the lease.
+		exit 0 ;;
+	restore-unlock|row-unlock)
+		[ -n "$2" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$2" ] || exit 1
+		SUBS_LOCK_MINE=1
+		drop_lock
+		exit 0 ;;
 	list)  cmd_list ;;
 	client-json) cmd_client_json ;;
 	parse) cmd_parse "$2" ;;
@@ -1834,13 +2169,19 @@ case "$1" in
 	name)  cmd_name "$2" ;;
 	vpn-json) cmd_vpn_json "$2" "$3" ;;
 	vpn-conf) cmd_vpn_conf "$2" "$3" "$4" ;;
-	put|unput|settle)
+	delete-config)
+		! subs_job_live && take_lock >/dev/null || { echo 'Идёт обновление подписок — повторите удаление.'; exit 1; }
+		delete_saved_cfg "$2" "$3" "$4" "${5:-}" manual; exit $? ;;
+	prune-sub)
+		take_lock >/dev/null || exit 1
+		delete_saved_cfg "$2" "$3" "$4" "${5:-}" prune; exit $? ;;
+	settle) cmd_settle "$2"; exit $? ;;
+	put|unput)
 		# The run's lock, as `drop`: these write a run's files. Its refusal is the caller's answer (code 1, words on stdout).
-		take_lock || exit 1
+		take_job && take_lock || exit 1
 		case "$1" in
 			put) cmd_put "$2" "$3" "$4" "$5" "$6" ;;
 			unput) cmd_unput "$2" "$3" "$4" ;;
-			settle) cmd_settle "$2" ;;
 		esac
 		rc=$?
 		drop_lock
@@ -1848,7 +2189,7 @@ case "$1" in
 	drop)
 		# Under the run's own lock: a run in progress would lay the subscription's configs out again right after us. Its
 		# refusal is the caller's answer (code 1, the words on stdout), not a silent «done».
-		take_lock || exit 1
+		take_job && take_lock || exit 1
 		cmd_drop "$2"; rc=$?
 		drop_lock
 		exit $rc ;;

@@ -65,6 +65,7 @@ STREAMS="$3"; case "$STREAMS" in ''|*[!0-9]*) STREAMS=4 ;; esac
 [ "$STREAMS" -lt 1 ] 2>/dev/null && STREAMS=1; [ "$STREAMS" -gt 8 ] 2>/dev/null && STREAMS=8
 DUR="$4"; case "$DUR" in ''|*[!0-9]*) DUR=12 ;; esac
 [ "$DUR" -lt 5 ] 2>/dev/null && DUR=5; [ "$DUR" -gt 30 ] 2>/dev/null && DUR=30
+TSOURCE=/tmp/enodia-xray-test.$TPORT.source.json
 TCONF=/tmp/enodia-xray-test.$TPORT.json
 TPID=/tmp/enodia-xray-test.$TPORT.pid
 TLOG=/tmp/xray-test.$TPORT.log
@@ -192,7 +193,7 @@ cleanup() {
 			pid_runs "$_xp" xray && { kill -9 "$_xp" 2>/dev/null; daemon_wait_gone "$_xp" 2; }
 		fi
 	fi
-	rm -f "$TPID" "$TPID.pool-ready" "$TCONF" "$TOUT" "$TOUT".* "$TACC" 2>/dev/null
+	rm -f "$TPID" "$TPID.pool-ready" "$TCONF" "$TSOURCE" "$TOUT" "$TOUT".* "$TACC" 2>/dev/null
 	[ "$_xt_fp_level" != info ] || rm -f "$TLOG"
 	return 0
 }
@@ -220,12 +221,20 @@ XT_NOBIN='{"ok":false,"nobin":true,"msg":"xray не установлен на р
 
 lock_take || { emit "{\"ok\":false,\"busy\":true,\"msg\":\"на временном порту $TPORT идёт другая проверка — повторите, когда она кончится\"}"; exit 0; }
 cleanup   # снять возможный прошлый тест (замок наш — значит, прежний держатель мёртв)
+_xt_profile=$src
+if [ -n "${XRAY_TEST_EXPECTED:-}" ]; then
+	# The expected digest names the bytes used to build the runtime config.
+	( umask 077; set -C; cat "$src" > "$TSOURCE" ) 2>/dev/null &&
+	    lbl_cfg_matches "$TSOURCE" "$XRAY_TEST_EXPECTED" ||
+	    { emit '{"ok":false,"stale":true,"msg":"Конфиг изменился. Обновите список серверов."}'; exit 0; }
+	_xt_profile=$TSOURCE
+fi
 
 # Retry summaries (including the TLS 1.3 refusal) are Info. Enable that level
 # only in an egress check and discard the bounded diagnostic log at teardown.
 _xt_fp= _xt_fp_level= _xt_fp_rev= _xt_fp_class=
-[ "$MODE" = egress ] && _xt_fp=$(xp_reality_fp "$src") && _xt_fp_class=$(xp_reality_class "$_xt_fp") &&
-    _xt_fp_rev=$(xp_reality_rev "$src") && _xt_fp_level=info
+[ "$MODE" = egress ] && _xt_fp=$(xp_reality_fp "$_xt_profile") && _xt_fp_class=$(xp_reality_class "$_xt_fp") &&
+    _xt_fp_rev=$(xp_reality_rev "$_xt_profile") && _xt_fp_level=info
 
 # Копия конфига: socks-инбаунд 10808 -> временный $TPORT; лог-пути -> порт-уникальные *-test
 # (не трогаем боевой /tmp/xray.log И не пересекаемся с параллельными тест-инстансами на др. портах).
@@ -236,10 +245,12 @@ _xt_fp= _xt_fp_level= _xt_fp_rev= _xt_fp_class=
 # The copy holds the server's credential (an Amnezia Premium standby key among them, probed every ~15 s for minutes): born closed
 # and new — the caller's umask made it 0644, and a name planted in shared /tmp would be followed by `>` (review s.136 r2, L5).
 ( umask 077; rm -f "$TCONF"; set -C
-  lbl_commit_out "$TCONF" xp_runtime "$src" "$TPORT" "$TLOG" '' "$_xt_fp_level" ) 2>/dev/null
+  lbl_commit_out "$TCONF" xp_runtime "$_xt_profile" "$TPORT" "$TLOG" '' "$_xt_fp_level" ) 2>/dev/null
 [ "$?" = 0 ] && [ -s "$TCONF" ] || { emit '{"ok":false,"busy":true,"msg":"не удалось подготовить тест-конфиг"}'; exit 0; }
-[ -z "$_xt_fp_rev" ] || { [ "$_xt_fp_rev" = "$(xp_reality_rev "$src")" ] &&
+[ -z "$_xt_fp_rev" ] || { [ "$_xt_fp_rev" = "$(xp_reality_rev "$_xt_profile")" ] &&
     [ "$_xt_fp" = "$(xp_reality_fp "$TCONF")" ]; } || _xt_fp_rev=
+
+rm -f "$TSOURCE"
 
 ( umask 077; rm -f "$TLOG"; set -C; : > "$TLOG" ) 2>/dev/null ||
     { emit '{"ok":false,"busy":true,"msg":"не удалось подготовить лог проверки"}'; exit 0; }

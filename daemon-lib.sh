@@ -76,6 +76,44 @@ daemon_where_ru() {   # $1 = имя бинаря
 # иначе `busy` пускал бы кнопку, а движок отказывал бы «уже выполняется» (круг 3). Без библиотеки у потребителей шим — прежнее «жив».
 pid_runs() { [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\000' ' ' 2>/dev/null < "/proc/$1/cmdline" | grep -qE "$2"; }
 
+# Preserve the caller's candidate order after the favourites recorded by the router.
+server_candidates() {
+    _dsc_kind=$1; shift
+    if [ ! -s "$ENODIA_STATE/.server-favs" ] || [ ! -f "$ENODIA_DIR/server-favs.sh" ]; then printf '%s\n' "$@"; return; fi
+    {
+        sh "$ENODIA_DIR/server-favs.sh" list
+        printf '%s\n' --
+        printf '%s\n' "$@"
+    } | awk -v kind="$_dsc_kind/" '
+        $0 == "--" { paths=1; next }
+        !paths { if (index($0,kind)==1) fav[++f]=$0; next }
+        {
+            path[++n]=$0; key=$0; sub(/^.*\//,"",key); sub(/\.[^.]+$/,"",key)
+            pos[kind key]=n
+        }
+        END {
+            for (i=1; i<=f; i++) if (fav[i] in pos) { j=pos[fav[i]]; print path[j]; used[j]=1 }
+            for (i=1; i<=n; i++) if (!(i in used)) print path[i]
+        }'
+}
+
+# Serialize main intent changes with exit replay and firewall repair.
+SETTLE_LOCK=${SETTLE_LOCK:-/tmp/enodia-vpnoff-settle.lock}
+settle_lock_take() {
+    _stw=0
+    while ! ( set -C; echo $$ > "$SETTLE_LOCK" ) 2>/dev/null; do
+        _sth=$(cat "$SETTLE_LOCK" 2>/dev/null | tr -cd '0-9')
+        if { [ -n "$_sth" ] && ! pid_runs "$_sth" '(vpn-toggle|mark-core)\.sh'; } ||
+           { [ -z "$_sth" ] && [ "$_stw" -ge 2 ]; }; then
+            rm -f "$SETTLE_LOCK" 2>/dev/null || return 1
+        else
+            [ "$_stw" -lt "${1:-60}" ] || return 1
+            sleep 1; _stw=$((_stw + 1))
+        fi
+    done
+}
+settle_lock_drop() { [ "$(cat "$SETTLE_LOCK" 2>/dev/null)" = "$$" ] && rm -f "$SETTLE_LOCK" 2>/dev/null; return 0; }
+
 # ИДЁТ ЛИ РАБОТА СПИСКОВ ИЛИ ГЕО — процессы движка списков, гео и iplist в ЛЮБОЙ фазе. Не по локам: фоновое применение списков
 # (heal replay после установки, кнопка панели, cron) идёт ПО КАТЕГОРИЯМ и между ними лок отпускает, а держит ПУТИ, полученные на
 # старте. Спрашивает смена раскладки (usb-offload.sh cmd_mode): процесс со старыми путями после переезда дописывал на флеш (замер
@@ -219,14 +257,33 @@ uninstall_alive() {
 #   · ПОСЛЕ: флаг появился, пока поднимали, ⇒ отпускаем поднятое своим же снятием и отвечаем отказом.
 # Окна между ними нет: `off` пишет флаг ПЕРВЫМ шагом, а снимает после — значит флаг, появившийся после нашей второй проверки,
 # означает снятие, которое ещё впереди и уберёт и наше. Нет библиотеки (частичное обновление) — у потребителей шим, прежний путь.
-carrier_barred() { [ -f "$ENODIA_STATE/.vpn-off" ]; }
+carrier_barred() { [ -f "$ENODIA_STATE/.vpn-off" ] || [ -f "$ENODIA_STATE/.vpn-deactivated" ]; }
+# Runtime consumers read the same admitted rows, including the plugin's pre/post raise guard.
+slot_rows() {   # enabled|admitted|off [id] [transport] [registry]
+    [ "$1" = enabled ] || [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 0
+    _slr_mode=$1
+    if [ "$1" = admitted ] && [ -f "$ENODIA_STATE/.vpn-off" ]; then _slr_mode=off; fi
+    _slr_file=${4:-$ENODIA_STATE/.slots}
+    [ -s "$_slr_file" ] || return 0
+    awk -F '\t' -v OFS='\t' -v mode="$_slr_mode" -v id="${2:-}" -v kind="${3:-}" '
+        $1~/^[2-7]$/ && $6=="on" && (id=="" || $1==id) && (kind=="" || $3==kind) &&
+        (mode!="off" || (NF==7 && $7=="keep_when_off=1")) {print $1,$3,$4,$5}
+    ' "$_slr_file"
+}
+slot_admitted() { [ -n "$(slot_rows admitted "$@")" ]; }
+slot_kept() { [ -n "$(slot_rows off "$@")" ]; }
+carrier_run_barred() {
+    if [ -n "$2" ]; then ! slot_admitted "$1" "$2"; else carrier_barred; fi
+}
 _crlog() { if command -v log >/dev/null 2>&1; then log "$1"; else echo "$1"; fi; }
-# carrier_run <снятие> <подъём> [аргументы] — подъём под этим правилом; снятие зовётся с ТЕМИ ЖЕ аргументами (у выхода это его id).
+# carrier_run [-s transport] <undo> <raise> [args]. With -s, the first action argument is the slot ID.
 carrier_run() {
+    _crslot='' _crkind=''
+    if [ "$1" = -s ]; then _crkind=$2; shift 2; _crslot=$3; fi
     _cru=$1; _crf=$2; shift 2
-    if carrier_barred; then _crlog "VPN выключен вручную — несущую не поднимаю"; return 1; fi
+    if carrier_run_barred "$_crslot" "$_crkind"; then _crlog "VPN выключен вручную — несущую не поднимаю"; return 1; fi
     "$_crf" "$@"; _crr=$?
-    carrier_barred || return "$_crr"
+    carrier_run_barred "$_crslot" "$_crkind" || return "$_crr"
     _crlog "VPN выключили вручную, пока поднималась несущая, — отпускаю её"
     "$_cru" "$@" >/dev/null 2>&1
     return 1

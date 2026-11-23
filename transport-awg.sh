@@ -47,7 +47,7 @@ command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$
 # No ipt-lib.sh with `mss_clamp` (a partial update) ⇒ the old path: no clamp.
 command -v mss_clamp >/dev/null 2>&1 || { mss_clamp() { :; }; mss_unclamp() { :; }; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
-command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { :; }
 TABLE=1000
 IFACE=awg0
 FWMARK=0x1
@@ -92,7 +92,7 @@ command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 command -v go_quiet >/dev/null 2>&1 || go_quiet() { "$@"; }   # the shim of a missing library: the launch as it was, with the banner
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
-command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
+command -v carrier_run >/dev/null 2>&1 || carrier_run() { [ "$1" != -s ] || shift 2; shift; "$@"; }
 # The config probe's lock (cmd_try) — label-lib.sh's shared lock directory (the holder is judged by daemon-lib.sh's pid_runs). No
 # library — the probe refuses in words, everything else works as before.
 command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\000' ' ' 2>/dev/null < "/proc/$1/cmdline" | grep -qE "$2"; }
@@ -244,6 +244,7 @@ carrier_endpoint_fresh() {
     return 0
 }
 ensure_carrier() {
+    [ -s "$ACTIVE_CONF" ] || return 1
     if ip link show "$IFACE" >/dev/null 2>&1; then
         carrier_matches_conf && return 0
         log "awg0 поднят с ДРУГИМ сервером или адресом (конфиг сменили, пока несущая была тёплым резервом) — пересоздаю"
@@ -518,15 +519,18 @@ slot_exclude_endpoint() {   # $1 = id, $2 = config
     fi
 }
 
-# Наложить карриер-часть слота: default dev awgN в table 100N + FORWARD ACCEPT + MASQUERADE.
-# ip rule (fwmark 0xN -> table 100N) ставит mark-core (transport.sh переигрывает после slot-up).
+slot_firewall() {
+    ipt_top FORWARD -o "$1" -j ACCEPT
+    ipt_top FORWARD -i "$1" -j ACCEPT
+    iptables -t nat -C POSTROUTING -o "$1" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$1" -j MASQUERADE
+    mss_clamp "$1"
+}
+
+# The carrier installs its route. mark-core owns the fwmark rules.
 slot_apply_routing() {   # $1 = id
     _id="$1"; _if=$(slot_iface "$_id"); _tab=$(slot_table "$_id")
     ip link set "$_if" up 2>/dev/null
-    ipt_top FORWARD -o "$_if" -j ACCEPT
-    ipt_top FORWARD -i "$_if" -j ACCEPT
-    iptables -t nat -C POSTROUTING -o "$_if" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$_if" -j MASQUERADE
-    mss_clamp "$_if"
+    slot_firewall "$_if"
     ip route replace default dev "$_if" table "$_tab"
 }
 slot_remove_routing() {   # $1 = id
@@ -1087,9 +1091,10 @@ case "$1" in
     # DNS активной несущей (DoH toggle/смена резолвера) — через doh_apply_dns. При выключенном VPN туннельного DNS нет: адрес в awg0,
     # которого нет, оставил бы без имён весь дом — ставим прямой, как `down`.
     dns)      if carrier_barred; then set_public_dns; else restore_vpn_dns; fi ;;
-    slot-up)   carrier_run cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф2): поднять awgN в table 100N
+    slot-up)   carrier_run -s awg cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф2): поднять awgN в table 100N
     slot-down) cmd_slot_down "$2" ;;      # доп-выход: снять awgN (-> fallback-политика mark-core)
-    slot-probe) carrier_run cmd_slot_down cmd_slot_probe "$2" "$3" ;;   # снятый выход: проба сервера без перепроводки, жив — вернуть
+    slot-firewall) case "$2" in [2-7]) slot_firewall "$(slot_iface "$2")" ;; *) exit 2 ;; esac ;;
+    slot-probe) carrier_run -s awg cmd_slot_down cmd_slot_probe "$2" "$3" ;;   # снятый выход: проба сервера без перепроводки, жив — вернуть
     # ИМЯ НЕСУЩЕЙ СЛОТА — ТОЛЬКО ОТСЮДА. Спрашивает учёт трафика (traffic-acct.sh через
     # transport.sh slot-iface): «сколько прошло через выход №N» считается по счётчикам ЕГО
     # интерфейса, и третьей копии формулы «id -> awgN» в проекте быть не должно — она уже

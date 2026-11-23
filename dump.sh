@@ -188,7 +188,7 @@ xqver() { grep -E "^[[:space:]]*option $1 " /usr/share/xiaoqiang/xiaoqiang_versi
 # описывает восстановление из бэкапа. Проверку «RAM_LOGS ⊆ DUMP_LOGS» делает local/check-consistency.ps1.
 DUMP_LOGS="enodia-startup enodia-bin-purge enodia-watchdog enodia-switch-vpn-setup enodia-transport-awg-setup
 enodia-iplist-update enodia-subs-update enodia-notify enodia-notify-event enodia-hev
-enodia-hysteria enodia-byedpi enodia-byedpi-test-run enodia-byedpi-fetch enodia-zapret-nfqws
+enodia-hysteria enodia-byedpi enodia-byedpi-test-run enodia-zapret-nfqws
 enodia-doh enodia-panel-tls enodia-support enodia-xiaomi-bypass enodia-dnsq enodia-restore
 enodia-store-mode enodia-pkg-restart enodia-dns-filter xray xray-access hytest ussl-dbg
 switch-vpn-setup transport-awg-setup iplist-update subs-update notify notify-event hev hysteria
@@ -984,7 +984,7 @@ sec "ЛОКИ / СТЕЙТ В /tmp"
 # inpl_swap; inside — the engine's pid and the file): server checks answer «идёт замена» while that engine lives. A marker whose pid
 # is dead is no swap — the line shows which one it is.
 for l in enodia-heal.lock enodia-heal.reason enodia-heal.skipped enodia-heal-kick.tries enodia-heal-kick.stamp \
-         enodia-heal-kick.said enodia-heal-kick.mailed enodia-heal-kick.cfg enodia-switching.lock enodia-watchdog.lock enodia-watchdog.pid \
+         enodia-heal-kick.said enodia-heal-kick.mailed enodia-heal-kick.cfg enodia-switching.lock enodia-fallback-handover.lock enodia-watchdog.lock enodia-watchdog.pid \
          enodia-watchdog.state enodia-watchdog.xstate enodia-road-failopen enodia-failover.stamp enodia-failover.backoff \
          enodia-failover-episode enodia-awg0.seen enodia-awg0.firstup \
          enodia-domwarm.stamp enodia-proto-install.lock enodia-byedpi-sweep.lock \

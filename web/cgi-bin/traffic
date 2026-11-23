@@ -355,7 +355,7 @@ exits=''
 SLOTS_FILE="$DS/.slots"
 if [ -s "$SLOTS_FILE" ]; then
 	_tab=$(printf '\t')
-	while IFS="$_tab" read -r _sid _snb _stp _scfg _sfb _sen; do
+	while IFS="$_tab" read -r _sid _snb _stp _scfg _sfb _sen _sk; do
 		case "$_sid" in [2-7]) ;; *) continue ;; esac
 		eval "_sif=\$sl${_sid}if; _sr=\$s${_sid}r; _st=\$s${_sid}t; _wr=\$w${_sid}r; _wt=\$w${_sid}t; _mr=\$m${_sid}r; _mt=\$m${_sid}t; _yr=\$y${_sid}r; _yt=\$y${_sid}t; _cr=\$cs${_sid}r; _ct=\$cs${_sid}t"
 		# САНИТАЙЗ — ПРОВЕРКОЙ ФОРМЫ, А НЕ `tr`: поля едут в JSON как есть, а приезжают из файла

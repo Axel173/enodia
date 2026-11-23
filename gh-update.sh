@@ -29,6 +29,80 @@ ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 # Резидентный бутстрап — цель всех cron-строк. Апдейтеру он нужен ровно затем, чтобы передать его
 # путь установщику пакета (тот пересобирает бутстрап из свежего кода через install.sh).
 ENODIA_BOOT=${ENODIA_BOOT:-/data/usr/app/enodia-boot}
+# The same directory inode locks fetches and cleanup. Its body is group-writable only
+# by the dedicated fetch identity. Ordinary nobody services do not have that group.
+GH_WAN_DIR=/tmp/enodia-gh-fetch
+GH_WAN_BODY="$GH_WAN_DIR/body"
+GH_WAN_UID=65534
+GH_WAN_GID=64554
+gh_wan_rule() {
+    iptables -t mangle "$1" OUTPUT -m owner --uid-owner "$GH_WAN_UID" --gid-owner "$GH_WAN_GID" \
+        -m comment --comment enodia-byedpi-fetch -j RETURN
+}
+gh_wan_has_rule() {
+    local rules
+    rules=$(iptables -t mangle -S OUTPUT) || return 2
+    printf '%s\n' "$rules" | grep -qE ' --comment "?enodia-byedpi-fetch"? '
+}
+gh_wan_ensure() {
+    gh_wan_has_rule
+    case "$?" in
+        0) return 0 ;;
+        1) gh_wan_rule -I >&2 ;;
+        *) return 1 ;;
+    esac
+}
+gh_wan_clean() {
+    rm -f "$GH_WAN_BODY" || return 1
+    gh_wan_has_rule
+    case "$?" in
+        1) return 0 ;;
+        0) gh_wan_rule -D >&2 || return 1 ;;
+        *) return 1 ;;
+    esac
+    # A duplicate or a concurrent firewall writer can leave the tag in place.
+    # Let the next reap retry so one watchdog/heal call has a fixed bound.
+    gh_wan_has_rule
+    [ "$?" -eq 1 ] && return 0
+    echo "Не удалось подтвердить снятие правила прямой загрузки с GitHub" >&2
+    return 1
+}
+gh_wan_run() {
+    local end=${GH_CHECK_END:-} now
+    command -v flock >/dev/null 2>&1 || { echo "Нет flock — прямой канал GitHub недоступен" >&2; return 1; }
+    mkdir -m 0711 "$GH_WAN_DIR" 2>/dev/null || :
+    [ ! -L "$GH_WAN_DIR" ] && [ -d "$GH_WAN_DIR" ] &&
+        [ "$(stat -c '%a:%u' "$GH_WAN_DIR" 2>/dev/null)" = "711:$(id -u)" ] || return 1
+    (
+        # FD 9 stays open in the foreground curl as well as this round.
+        while ! flock -n 9; do
+            [ "$1" = reap ] && exit 0
+            now=$(uptime_s)
+            # Detached callers have a separate 60 s admission budget.
+            [ -n "$end" ] || end=$((now + 60))
+            if [ "$now" -ge "$end" ] || [ "$now" -eq 999999999 ]; then
+                gh_code_note busy
+                exit 1
+            fi
+            sleep 1
+        done
+        if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
+        [ "$1" != reap ] || { gh_wan_clean; exit $?; }
+        trap 'gh_wan_clean || echo "Не удалось снять правило прямой загрузки с GitHub" >&2' EXIT
+        trap 'exit 1' INT TERM HUP PIPE
+        echo "GitHub по обычному маршруту не отвечает — пробую через WAN напрямую" >&2
+        "$@"
+    ) 9<"$GH_WAN_DIR"
+}
+if [ "$1" = fetch-reap ]; then
+    reap_rc=0
+    if [ -e /tmp/enodia-byedpi-fetch.pid ] || [ -d /tmp/enodia-byedpi-fetch.users ] || [ -e /tmp/enodia-byedpi-fetch.log ]; then
+        sh "$ENODIA_DIR/transport-byedpi.sh" socks-down || reap_rc=1
+    fi
+    gh_wan_run reap || reap_rc=1
+    exit "$reap_rc"
+fi
+
 # Репозиторий-источник. Override: строка `владелец/репо` в $ENODIA_STATE/.gh-repo — ею тестовый
 # роутер переключается на черновой репозиторий, не трогая код. Форму ПРОВЕРЯЕМ: кривая строка
 # построила бы URL, который просто не резолвится, и отказ читался бы как «нет сети».
@@ -84,7 +158,8 @@ CURL_TIMEOUT=150
 # подключилось, но отдаёт <4 КБ/с дольше 8с (мёртвый узел = 0 Б/с → обрыв за 8с). connect-timeout
 # на случай реально недоступного узла. БЕЗ --retry: перебор IP делает gh_get сам (curl --retry
 # переснял бы тот же набор и мог снова сесть на мёртвый IP).
-CURL_OPTS="--connect-timeout 8 --speed-limit 4096 --speed-time 8 --max-time $CURL_TIMEOUT"
+CURL_OPTS="--connect-timeout 8 --speed-limit 4096 --speed-time 8"
+GH_CHECK_END=
 GH_RAW_HOST=raw.githubusercontent.com
 GH_RAW_IPS="185.199.108.133 185.199.109.133 185.199.110.133 185.199.111.133"
 # Хосты, на которые уезжает РЕДИРЕКТ за ассетом релиза (сам запрос идёт на github.com по DNS).
@@ -92,6 +167,8 @@ GH_RAW_IPS="185.199.108.133 185.199.109.133 185.199.110.133 185.199.111.133"
 # («узел подключился и молчит»), и лечится тем же списком. Имён два: GitHub отдаёт то одно, то
 # другое; пиним оба, незадействованное просто не встретится.
 GH_ASSET_HOSTS="release-assets.githubusercontent.com objects.githubusercontent.com"
+# The first HTTPS request for an asset goes to github.com before its anycast redirect.
+GH_WEB_IPS="140.82.121.4 140.82.112.4 140.82.114.3"
 
 # --- ЧТО ИМЕННО ОТВЕТИЛ GITHUB. Отдельный слой, потому что вопрос «почему не скачалось» имеет
 # РАЗНЫЕ ответы с разными действиями человека, а раньше все они схлопывались в одну строку
@@ -131,6 +208,7 @@ gh_code_get() { cat "$GH_CODE_FILE" 2>/dev/null; }
 # Человеческая причина по коду; пусто = сказать нечего (обычный сетевой сбой, пусть говорит вызвавший).
 gh_code_reason() {
     case "$1" in
+        busy) echo "Другая проверка обновления уже идёт" ;;
         429) echo "GitHub ограничил скачивание с вашего внешнего адреса (HTTP 429, слишком много обращений) — подождите 10-15 минут и повторите" ;;
         403) echo "GitHub отказал в выдаче файла (HTTP 403) — как правило, то же ограничение по частоте; подождите и повторите" ;;
         404) echo "на GitHub нет файла по этому пути (HTTP 404)" ;;
@@ -139,8 +217,8 @@ gh_code_reason() {
         *)   echo "GitHub ответил HTTP $1" ;;
     esac
 }
-# «Сеть жива, но качать не дадут» — вердикт, которого не обойти ни другим доверием TLS, ни
-# десинком (внешний адрес тот же). Отдельный предикат, потому что спрашивают его ДВОЕ.
+# «Сеть жива, но качать не дадут» — вердикт, при котором не пробуем другое доверие TLS или
+# сменой маршрута. Это также останавливает перебор узлов.
 gh_code_refused() { case "$(gh_code_get)" in 429|403) return 0 ;; *) return 1 ;; esac; }
 
 # --- ДОВЕРИЕ TLS НА СБОРКАХ, ГДЕ curl НЕ НАХОДИТ СИСТЕМНОГО ХРАНИЛИЩА -----------------------
@@ -153,6 +231,18 @@ gh_code_refused() { case "$(gh_code_get)" in 429|403) return 0 ;; *) return 1 ;;
 # шим: старая установка без свежей библиотеки обязана вести себя ровно как раньше, а не падать.
 if [ -f "$ENODIA_DIR/dns-lib.sh" ]; then . "$ENODIA_DIR/dns-lib.sh"; fi
 command -v curl_ca_opt >/dev/null 2>&1 || curl_ca_opt() { return 0; }
+if ! command -v uptime_s >/dev/null 2>&1 && [ -f "$ENODIA_DIR/clock-lib.sh" ]; then . "$ENODIA_DIR/clock-lib.sh"; fi
+command -v uptime_s >/dev/null 2>&1 || uptime_s() { _cl_u=$(awk '{print int($1)}' /proc/uptime 2>/dev/null); case "$_cl_u" in ''|*[!0-9]*) _cl_u=999999999 ;; esac; echo "$_cl_u"; }
+# Keep the CGI deadline when dns-lib is missing during a partial upgrade.
+command -v _dns_time_left >/dev/null 2>&1 || _dns_time_left() {
+    local now left
+    now=$(uptime_s)
+    [ "$now" -ne 999999999 ] || return 1
+    left=$((DNS_SEED_DEADLINE - now))
+    [ "$left" -gt 0 ] || return 1
+    [ "$left" -le "$1" ] || left=$1
+    printf '%s\n' "$left"
+}
 if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi   # lbl_commit_out: a file replaced whole or not at all
 command -v lbl_commit_out_as >/dev/null 2>&1 || { lbl_commit_out_as() { _lct=$1; _lcf=$2; shift 2; "$@" > "$_lct" && mv -f "$_lct" "$_lcf" && return 0; rm -f "$_lct"; return 1; }; lbl_commit_out() { _lcf=$1; shift; lbl_commit_out_as "$_lcf.$$.new" "$_lcf" "$@"; }; lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }; lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }; }   # write-blind: the shim of a missing library is the old line
 # The run's progress by stages for the «Обновление» screen: this file writes the download and the checks, status-json reads it all
@@ -177,7 +267,7 @@ gh_ca_probe() {   # $1 = URL, на котором споткнулись
     esac
     _cap=$(curl_ca_opt "$1" $_capr)
     [ -n "$_cap" ] || return 1
-    log "TLS: системное хранилище curl пусто — доверяю системному бандлу"
+    log "TLS: системное хранилище curl пусто — доверяю системному бандлу" >&2
     return 0
 }
 
@@ -206,117 +296,105 @@ gh_pin_hosts() {
         *)                      echo "" ;;
     esac
 }
-gh_get_round() {   # $1=url $2=out $3=опция доверия («» = системная)
-    _gr=1; _g60=0
-    _pin=$(gh_pin_hosts "$1")
-    if [ -n "$_pin" ]; then
-        for _ipx in $GH_RAW_IPS __dns__; do
-            _res=""
-            if [ "$_ipx" != __dns__ ]; then
-                for _ph in $_pin; do _res="$_res --resolve $_ph:443:$_ipx"; done
+gh_wan_curl() {   # max time, URL, curl arguments
+    local limit=$1 url=$2 curl_path
+    shift 2
+    # A firewall reload may have removed the exemption during the previous attempt.
+    gh_wan_ensure || return 1
+    if [ -n "$GH_CHECK_END" ]; then limit=$(_dns_time_left "$limit") || return 28; fi
+    curl_path=$(command -v curl) || return 1
+    start-stop-daemon -S -c "$GH_WAN_UID:$GH_WAN_GID" -u "$GH_WAN_UID" -x "$curl_path" -- \
+        -q --noproxy '*' --max-time "$limit" "$@" "$url"
+}
+gh_pin_curl() {   # route, max time, URL, CA option, output, then resolve arguments
+    local mode=$1 limit=$2 url=$3 ca=$4 out=$5 opts code rc
+    shift 5
+    if [ "$out" = /dev/null ]; then opts='-s --connect-timeout 8'; else opts="-fsSL $CURL_OPTS --proto-redir =https"; fi
+    if [ "$mode" != wan ]; then
+        curl --max-time "$limit" $ca $opts -w '%{http_code}' -o "$out" "$@" "$url"
+        return $?
+    fi
+    ca=$(gh_ca_opt)
+    code=$(gh_wan_curl "$limit" "$url" $ca $opts -w '%{http_code}' -o "$out" "$@"); rc=$?
+    case "$rc" in
+        60|77)
+            # Probe trust on the same pins, through the same UID. HEAD avoids downloading the package twice.
+            if [ -z "$ca" ] && command -v curl_ca_opt_via >/dev/null 2>&1; then
+                ca=$(curl_ca_opt_via gh_wan_curl "$url" -IL --proto-redir '=https' "$@")
+                if [ -n "$ca" ]; then
+                    gh_wan_curl "$limit" "$url" $ca $opts -w '%{http_code}' -o "$out" "$@"
+                    return $?
+                fi
+            fi ;;
+    esac
+    printf '%s' "$code"
+    return "$rc"
+}
+gh_get_round() {   # url output CA-option [wan]
+    local url=$1 out=$2 ca=$3 mode=$4 pins ips webs=__dns__ web ip host code rc=1 badca=0 limit
+    pins=$(gh_pin_hosts "$url")
+    ips=__dns__
+    if [ "$mode" = wan ]; then
+        ips=$GH_RAW_IPS
+        case "$url" in https://github.com/*) webs=$GH_WEB_IPS ;; esac
+    elif [ -n "$pins" ]; then
+        ips="$GH_RAW_IPS __dns__"
+    fi
+    for web in $webs; do
+        for ip in $ips; do
+            set --
+            [ "$web" = __dns__ ] || set -- "$@" --resolve "github.com:443:$web"
+            if [ "$ip" != __dns__ ]; then
+                for host in $pins; do set -- "$@" --resolve "$host:443:$ip"; done
             fi
-            _c=$(curl -fsSL $CURL_OPTS $3 $_res -w '%{http_code}' -o "$2" "$1" 2>/dev/null); _gr=$?
-            gh_code_note "$_c"
-            [ "$_gr" = 0 ] && return 0
-            [ "$_gr" = 60 ] && _g60=1
-            # Отказ по частоте одинаков на ВСЕХ anycast-узлах (лимит на клиентский адрес, не
-            # на узел) — перебирать остальные незачем, это только время на экране установки.
-            gh_code_refused && break
-            rm -f "$2"
+            if [ "$mode" = wan ]; then : > "$out" || return 1; fi
+            limit=$CURL_TIMEOUT
+            if [ -n "$GH_CHECK_END" ]; then limit=$(_dns_time_left 8) || break 2; fi
+            if [ -n "$GH_DL_TOTAL" ]; then prog_dl "$GH_DL_TOTAL" "$GH_DL_PATH"; fi
+            code=$(gh_pin_curl "$mode" "$limit" "$url" "$ca" "$out" "$@" 2>/dev/null)
+            rc=$?
+            gh_code_note "$code"
+            [ "$rc" = 0 ] && return 0
+            [ "$rc" = 60 ] && badca=1
+            [ "$mode" = wan ] || rm -f "$out"
+            gh_code_refused && break 2
         done
-    else
-        _c=$(curl -fsSL $CURL_OPTS $3 -w '%{http_code}' -o "$2" "$1" 2>/dev/null); _gr=$?
-        gh_code_note "$_c"
-        [ "$_gr" = 0 ] && return 0
-        [ "$_gr" = 60 ] && _g60=1
+    done
+    [ "$badca" = 0 ] || return 60
+    return "$rc"
+}
+gh_wan_get() {
+    (umask 077; : > "$GH_WAN_BODY") &&
+        chown "0:$GH_WAN_GID" "$GH_WAN_BODY" && chmod 660 "$GH_WAN_BODY" || return 1
+    # The panel can size the package through its private path during an unprivileged download.
+    [ -z "$GH_DL_TOTAL" ] || ln "$GH_WAN_BODY" "$2" || return 1
+    if gh_get_round "$1" "$GH_WAN_BODY" "" wan &&
+       chmod 600 "$GH_WAN_BODY" && chown 0:0 "$GH_WAN_BODY"; then
+        [ -n "$GH_DL_TOTAL" ] || mv -f "$GH_WAN_BODY" "$2"
+        return $?
     fi
     rm -f "$2"
-    [ "$_g60" = 1 ] && return 60
-    return "$_gr"
+    return 1
 }
 gh_get() {
-    _ghu="$1"; _gho="$2"
-    gh_code_reset          # вердикт — про ЭТОТ URL, а не про предыдущий
-    _cao=$(gh_ca_opt)
-    gh_get_round "$_ghu" "$_gho" "$_cao" && return 0
-    _grc=$?
-    # ВТОРОЙ КРУГ — только если споткнулись именно о ПРОВЕРКУ СЕРТИФИКАТА (60) и рабочий бандл
-    # ещё не найден. На здоровом роутере сюда не заходят вовсе: там первый круг либо успешен,
-    # либо провалился по другой причине (сеть, 404), и лишнего запроса не делается.
-    if [ "$_grc" = 60 ] && [ -z "$_cao" ] && gh_ca_probe "$_ghu"; then
-        _cao=$(gh_ca_opt)
-        gh_get_round "$_ghu" "$_gho" "$_cao" && return 0
-        # Вердикт ПЕРЕЗАПИСЫВАЕМ: дальше по коду решается, стоит ли будить десинк, а решает это
-        # `_grc`. Оставь тут код ПЕРВОГО круга (60 = «сертификат не проверить») — и HTTP-ошибка,
-        # полученная уже со здоровым бандлом, полетела бы в аварийный канал мимо отсечки ниже.
-        _grc=$?
+    local url=$1 out=$2 GH_DL_TOTAL=$3 GH_DL_PATH=$2 ca rc
+    gh_code_reset
+    ca=$(gh_ca_opt)
+    gh_get_round "$url" "$out" "$ca" && return 0
+    rc=$?
+    if [ "$rc" = 60 ] && [ -z "$ca" ] && gh_ca_probe "$url"; then
+        ca=$(gh_ca_opt)
+        gh_get_round "$url" "$out" "$ca" && return 0
+        rc=$?
     fi
-    # ТРЕТИЙ КРУГ — АВАРИЙНЫЙ КАНАЛ ЧЕРЕЗ ДЕСИНК (см. gh_socks_try). НО НЕ НА HTTP-ОШИБКЕ: `curl
-    # -f` отдаёт 22 на 4xx/5xx, а это «сервер ответил», то есть сеть в порядке и десинку пробивать
-    # нечего. Разница не теоретическая: `check` КАЖДЫЙ раз качает VERSION, которого в публичном
-    # репо нет by design (404) — без этой отсечки любая проверка обновлений на любом роутере
-    # поднимала бы ciadpi, ждала порт, повторяла запрос и получала тот же 404.
-    [ "$_grc" = 22 ] && return 1
-    # …и то же самое, когда вердикт круга затёрт кодом 60 от СОСЕДНЕГО узла (у одного не сошёлся
-    # сертификат, другой ответил 429): решение принимает не `_grc`, а сам ответ GitHub.
-    gh_code_refused && return 1
-    gh_socks_round "$_ghu" "$_gho" "$_cao"
+    [ "$rc" != 22 ] && ! gh_code_refused && [ -n "$(gh_pin_hosts "$url")" ] || return 1
+    # Leave the synchronous check time for the pinned WAN round after trying the ordinary route.
+    if [ -n "$GH_CHECK_END" ]; then DNS_SEED_DEADLINE=$GH_CHECK_END; fi
+    gh_wan_run gh_wan_get "$url" "$out"
 }
 
-# --- АВАРИЙНЫЙ КАНАЛ: raw.github через локальный десинк (ciadpi) ------------------------------
-# ЗАЧЕМ. Роутер теперь добирает ВСЕ протоколы сам, с GitHub — и упирается ровно в то, ради чего
-# его и ставят: у части провайдеров raw.githubusercontent душится по SNI (соединение встаёт и
-# молчит — тот самый случай, что рубит `--speed-time`). Раньше это лечилось заливкой бинарей с
-# ПК; после реформы «ставим только панель» ПК из цепочки ушёл, и единственный оставшийся ответ —
-# пробить блокировку тем, что уже лежит на роутере: ciadpi (0.13 МБ, кладётся вместе с панелью).
-# Он тут НЕ транспорт: ни tun, ни правил, ни `.transport` — только socks на время закачки.
-#
-# Порядок кругов сознателен: сперва обычный путь (на здоровом провайдере он и работает), потом
-# доверие, и лишь затем десинк. Обратный порядок гнал бы ВЕСЬ трафик обновлений через прокси,
-# который на 176-МБ моделях стоит памяти, а на здоровой сети не нужен вовсе.
-GH_SOCKS=""        # "" = ещё не пробовали · "-" = не вышло (второй раз не дёргаем) · адрес = есть
-GH_SOCKS_MINE=0    # 1 = демон подняли МЫ и обязаны погасить
-BYEDPI_SH="$ENODIA_DIR/transport-byedpi.sh"
-gh_socks_try() {
-    [ "$GH_SOCKS" = "-" ] && return 1
-    [ -n "$GH_SOCKS" ] && return 0
-    GH_SOCKS="-"
-    [ -f "$BYEDPI_SH" ] || return 1
-    # Код 2 = старая копия плагина не знает верба ⇒ канала нет, ведём себя как раньше.
-    # Метка `$$` — наш pid для ref-счёта на стороне плагина: прокси РАЗДЕЛЯЕМЫЙ (нас могут
-    # запустить в двух процессах сразу — «Обновить скрипты» и установка компонента), и без метки
-    # закончивший первым гасил бы демона посреди чужой закачки. Старый плагин лишний аргумент
-    # игнорирует, поэтому передаём его безусловно.
-    _sa=$(sh "$BYEDPI_SH" socks-up "$$" 2>/dev/null | tail -n1 | tr -d ' \r')
-    case "$_sa" in
-        [0-9]*.[0-9]*.[0-9]*.[0-9]*:[0-9]*) : ;;
-        *) return 1 ;;
-    esac
-    GH_SOCKS="$_sa"; GH_SOCKS_MINE=1
-    log "GitHub напрямую не отвечает — пробую через локальный десинк ($GH_SOCKS)"
-    return 0
-}
-# Гасим за собой ВСЕГДА: демон нужен ровно на время закачки, а на 176-МБ модели забытый ciadpi —
-# это память, отнятая у несущей. Основную несущую byedpi (если она и была socks'ом) плагин не
-# трогает — там свой пидфайл.
-# СПРАШИВАЕМ ПЛАГИН ВСЕГДА, а не по своей переменной. `GH_SOCKS_MINE` живёт в ПАМЯТИ ТОГО шелла,
-# который поднял прокси, — а поднимаем мы его сплошь и рядом внутри КОМАНДНОЙ ПОДСТАНОВКИ
-# (`x=$(…)` в вербах-вопросах). Из `$( )` присваивание наружу не возвращается,
-# родитель видит 0, ловушка молчит, и ciadpi переживает процесс — на 176-МБ моделях это память,
-# отнятая у несущей, и висит она до ребута. Поймано на железе AX3600 15.08.2026: после `check`
-# порт 10809 остался слушать. Состояние, которое ПЕРЕЖИВАЕТ подоболочку, — не переменная, а файл,
-# и владеет им плагин; `$$` в `$( )` тот же, что у родителя, значит метка совпадает. Лишний вызов
-# безвреден: `socks-down` считает пользователей и чужого демона не трогает.
-gh_socks_release() {
-    [ -f "$BYEDPI_SH" ] && sh "$BYEDPI_SH" socks-down "$$" >/dev/null 2>&1
-    GH_SOCKS_MINE=0
-}
-# Ловушка, а не строка в конце: закачку бинаря панель гоняет в фоне и может оборвать (человек
-# закрыл экран, `-K` из CGI), а брошенный ciadpi остался бы жить до ребута, отнимая память у
-# несущей. На busybox EXIT-ловушка по сигналу НЕ срабатывает — её зовёт `exit` сигнальной; без него
-# ловушка лишь гасила смерть, и закачка шла дальше без socks (C121).
 # ФОНОВАЯ ЗАКАЧКА (fetch_bin_one) — ТОЖЕ в уборке выхода: сигнал теперь выходит (C121), а `curl` — внук, подоболочку gh_get
-# переживает и докачивал бы в ОЗУ/на флеш уже ничей `.dl`. Потомков — ВСЕХ уровней (у socks-ветки `sh socks-up` — правнук) —
+# переживает и докачивал бы в ОЗУ/на флеш уже ничей `.dl`. Потомков — ВСЕХ уровней —
 # собираем, ПОКА жив родитель: после его смерти их PPid = 1. `.dl` снимаем и без живого фона: файл лежит рядом с местом установки
 # до самого `mv` (проверки размера, ELF и суммы — секунды), а это пик 20-МБ /data.
 gh_bg_stop() {
@@ -344,18 +422,9 @@ gh_bg_stop() {
 }
 # Signals ignored for the cleanup itself (review s.177): in busybox ash a second trapped signal inside the EXIT trap runs `exit 1`
 # and drops the rest of it — between proc_tree_kill's STOP and its CONT that left the download tree frozen for good.
-gh_exit() { trap '' INT TERM HUP PIPE; gh_bg_stop; gh_socks_release; }
+gh_exit() { trap '' INT TERM HUP PIPE; gh_bg_stop; }
 trap 'gh_exit' EXIT
 trap 'exit 1' INT TERM HUP PIPE
-# ОДНА попытка через socks. `--resolve` здесь не нужен и не работает: имя резолвит прокси
-# (--socks5-hostname), в этом половина смысла — DNS-путь тоже не наш.
-gh_socks_round() {   # $1=url $2=out $3=опция доверия
-    gh_socks_try || return 1
-    curl -fsSL $CURL_OPTS $3 --socks5-hostname "$GH_SOCKS" -o "$2" "$1" 2>/dev/null && return 0
-    rm -f "$2"
-    return 1
-}
-
 # --- ДОСТИЖИМОСТЬ raw.githubusercontent (НЕ наличие файла). Для pre-check в proto-install:
 #     цель — убедиться, что сетевой путь к GitHub жив ПЕРЕД сносом рабочего альта, а НЕ что
 #     конкретный файл существует. Публичный репо может НЕ содержать пробный файл (напр. VERSION
@@ -374,10 +443,16 @@ gh_socks_round() {   # $1=url $2=out $3=опция доверия
 #     компонент, а закачка нового валилась на том же 429 — то есть ровно та авария («роутер без
 #     транспорта»), ради которой пре-чек и написан. 429/403 значат «сеть до GitHub жива, но файла
 #     он не даст», а вопрос здесь именно «дадут ли скачать».
-gh_reach_round() {   # $1 = путь, $2 = опция доверия
-    for _ipx in $GH_RAW_IPS __dns__; do
-        if [ "$_ipx" = __dns__ ]; then _res=""; else _res="--resolve $GH_RAW_HOST:443:$_ipx"; fi
-        _c=$(curl -s -o /dev/null -w '%{http_code}' $2 --connect-timeout 8 --max-time 12 $_res "$RAW/$1" 2>/dev/null)
+gh_reach_round() {   # $1 = path, $2 = CA option, $3 = optional wan round
+    _reach_ips=$GH_RAW_IPS
+    _reach_url="$RAW/$1"; _reach_ca=$2; _reach_mode=$3
+    [ "$_reach_mode" = wan ] || _reach_ips="$_reach_ips __dns__"
+    for _ipx in $_reach_ips; do
+        case "$_ipx" in
+            __dns__) set -- ;;
+            *) set -- --resolve "$GH_RAW_HOST:443:$_ipx" ;;
+        esac
+        _c=$(gh_pin_curl "$_reach_mode" 12 "$_reach_url" "$_reach_ca" /dev/null "$@" 2>/dev/null)
         gh_code_note "$_c"
         case "$_c" in
             ''|000)  : ;;             # не соединились — пробуем следующий узел
@@ -399,9 +474,9 @@ gh_reachable() {
     # на 404 при КАЖДОЙ проверке: ассетов в репозитории может не лежать вовсе, это норма.
     [ -n "$_p" ] || _p=VERSION
     gh_reach_round "$_p" "$(gh_ca_opt)" && return 0
-    # Развилка. Ни второй круг (доверие TLS), ни третий (десинк) отказа ПО ЧАСТОТЕ не обойдут:
-    # соединение состоялось, сертификат проверен, внешний адрес у десинка ТОТ ЖЕ. Поэтому при
-    # 429/403 идём во второй канал, а круги доверия и десинка — только при ИНОМ отказе. Это не
+    # Развилка. Ни второй круг (доверие TLS), ни третий (WAN) не нужны после отказа ПО ЧАСТОТЕ:
+    # соединение состоялось, сертификат проверен, GitHub явно сообщил об отказе. Поэтому при
+    # 429/403 идём во второй канал, а круги доверия и прямого маршрута — при ИНОМ отказе. Это не
     # осторожность, а экономия полуминуты на экране установки и честный текст вместо «недоступен».
     if gh_code_refused; then
         # Проба дешёвая: SHA256SUMS ассетом — 4 КБ, и это ровно тот путь (github.com → редирект).
@@ -423,20 +498,15 @@ gh_reachable() {
             gh_code_note "$_rc"
         fi
     else
-        # рабочий бандл уже известен — значит дело не в доверии, но десинк попробовать ОБЯЗАНЫ
+        # Если рабочий бандл известен, переходим сразу к прямому маршруту.
         if [ -z "$(gh_ca_opt)" ] && gh_ca_probe "$RAW/$_p"; then
             gh_reach_round "$_p" "$(gh_ca_opt)" && return 0
         fi
         # Аварийный канал спрашиваем и ЗДЕСЬ, а не только в закачке: `reachable` — это пре-чек, на
         # котором packages.sh/proto-install останавливаются ДО удаления и закачки. Отвечай он «нет»,
-        # пока канал через десинк жив, — установка компонентов из панели была бы закрыта наглухо,
+        # пока прямой канал работает, — установка компонентов из панели была бы закрыта наглухо,
         # причём с формулировкой «GitHub недоступен», которая для человека означает «ждите».
-        if gh_socks_try; then
-            _c=$(curl -s -o /dev/null -w '%{http_code}' $(gh_ca_opt) --connect-timeout 8 --max-time 12 \
-                 --socks5-hostname "$GH_SOCKS" "$RAW/$_p" 2>/dev/null)
-            gh_code_note "$_c"
-            case "$_c" in ''|000) : ;; 429|403) : ;; *) return 0 ;; esac
-        fi
+        gh_wan_run gh_reach_round "$_p" "" wan && return 0
     fi
     _why=$(gh_code_reason "$(gh_code_get)")
     [ -n "$_why" ] || _why="GitHub недоступен — ни один канал не ответил"
@@ -1228,6 +1298,18 @@ cmd_check() {
 # ПОДПИСАННОГО описания) → состав архива → распаковка в /tmp → версия внутри = версия описания →
 # установщик ИЗ ПАКЕТА. Всё до последнего шага ничего на роутере не меняет.
 pkg_cleanup() { if [ -n "$PKG_TMP" ]; then rm -rf "$PKG_TMP" 2>/dev/null; fi; PKG_TMP=""; }
+pkg_handoff() (
+    if [ "$REL_CODE" -le "$lc" ] && grep -q '^    downgrade-fallbacks)' "$ENODIA_DIR/slots.sh" 2>/dev/null &&
+       ! grep -q '^    slot-plan)' "$PKG_TMP/root/slots.sh" 2>/dev/null; then
+        # The old installer takes switching itself. Close admission before normalisation, across that handoff.
+        _hand=/tmp/enodia-fallback-handover.lock
+        lbl_lock_take "$_hand" '(gh-update|pkg-install)\.sh' || return 1
+        trap 'lbl_lock_drop "$_hand"' EXIT
+        sh "$ENODIA_DIR/slots.sh" downgrade-fallbacks || { log '[apply] не удалось убрать цепочки запасных выходов'; return 1; }
+    fi
+    ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" ENODIA_BIN="$ENODIA_BIN" ENODIA_BOOT="$ENODIA_BOOT" PKG_NEED_PRIOR=1 \
+        sh "$PKG_TMP/root/pkg-install.sh" install "$PKG_TMP/root"
+)
 pkg_mkdir() {   # свой рабочий каталог (см. PKG_TMP); 1 — не создан
     PKG_TMP=$(mktemp -d /tmp/enodia-pkg.XXXXXX 2>/dev/null) || PKG_TMP=""
     [ -n "$PKG_TMP" ] && mkdir "$PKG_TMP/root" 2>/dev/null && return 0
@@ -1291,7 +1373,7 @@ cmd_apply() {
     log "[apply] релиз $REL_VERSION (код $REL_CODE): подпись сошлась, качаю $REL_PKG ($REL_SIZE байт)"
     # curl writes the package straight to this path, so the screen's bytes and speed are the file's own size (no write per chunk).
     prog_dl "$REL_SIZE" "$PKG_TMP/pkg.tar.gz"
-    if ! gh_get "$_pu" "$PKG_TMP/pkg.tar.gz"; then
+    if ! gh_get "$_pu" "$PKG_TMP/pkg.tar.gz" "$REL_SIZE"; then
         _pr=$(gh_code_reason "$(gh_code_get)")
         log "[apply] СТОП: пакет не скачался: ${_pr:-нет связи с GitHub} — ничего не заменено"; pkg_cleanup; return 1
     fi
@@ -1334,8 +1416,7 @@ cmd_apply() {
     # Установщик ИЗ ПАКЕТА — в этом весь смысл: его правила приехали вместе с кодом. Пути — явно: нас
     # зовут и из CGI, и из cron-бутстрапа, и наследование окружения не должно решать, куда ставить.
     # PKG_NEED_PRIOR — обновление не ставит систему с нуля: пустой каталог кода у нас = он уехал (смена раскладки), а не «свежая».
-    ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" ENODIA_BIN="$ENODIA_BIN" ENODIA_BOOT="$ENODIA_BOOT" PKG_NEED_PRIOR=1 \
-        sh "$PKG_TMP/root/pkg-install.sh" install "$PKG_TMP/root"
+    pkg_handoff
     _prc=$?
     pkg_cleanup
     return "$_prc"
@@ -1565,8 +1646,16 @@ upd_running() {
 # `why` обязательна; refused — ответил, но не даст (429/403). `remote` — только у описания, чья подпись СОШЛАСЬ.
 cmd_check_json() {
     lc=$(local_code); ln=$(local_name)
+    # The CGI has 120 s. Cap HTTP attempts and the CA probe at a single 75 s
+    # monotonic deadline, with the ordinary route taking at most the first 41 s.
+    GH_CHECK_END=$(($(uptime_s) + 75))
+    DNS_SEED_DEADLINE=$((GH_CHECK_END - 34))
     rel_load
     _why="$REL_WHY"; _rem=null
+    if [ "$REL_STATE" = fail ] && [ -z "$_why" ] && [ -n "$GH_CHECK_END" ]; then
+        DNS_SEED_DEADLINE=$GH_CHECK_END
+        if ! _dns_time_left 1 >/dev/null; then _why="Не успели проверить обновления — повторите попытку"; fi
+    fi
     case "$REL_STATE" in
         ok)
             if [ "$REL_CODE" -gt "$lc" ]; then _v=newer; else _v=current; fi
@@ -1585,9 +1674,7 @@ cmd_check_json() {
 # bins=false — бинари НЕ сверяли (нет манифеста или арка не опознана): панель обязана это сказать, иначе «расходится 0» читается
 # как «программы протоколов целы» (ревью ветки, круг 2). old — «путь версия» прежних подписанных сборок (см. verify_scan).
 cmd_verify_json() {
-    # Вывод `log` из сетевого круга (аварийный канал через десинк, «TLS: …» на сборках со сломанным CApath) — в stdout: без
-    # перенаправления он вставал ПЕРЕД JSON, и панель читала «ответил не то» ровно на той сети, ради которой канал заведён
-    # (ревью шага 6c, круг 1). Вердикт живёт в $SUMS_STATE — вывод не нужен.
+    # Keep stdout reserved for JSON even when a mixed install prints a notice while loading sums.
     _vt="$GH_TMP/vf"
     if ! verify_all "$_vt" ""; then
         rm -f "$_vt.diff" "$_vt.miss" "$_vt.old"

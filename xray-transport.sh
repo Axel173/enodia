@@ -40,7 +40,7 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # Нет ipt-lib.sh с `ipt_top` (частичное обновление) ⇒ прежнее «первым в цепочку», байт-в-байт.
 command -v ipt_top >/dev/null 2>&1 || ipt_top() { _itc=$1; shift; iptables -C "$_itc" "$@" 2>/dev/null || iptables -I "$_itc" 1 "$@"; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
-command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot()   { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { :; }
 command -v ct_flush_route >/dev/null 2>&1 || ct_flush_route() { ct_flush; }
 # Где лежит бинарь (store-lib.sh). Без внешнего накопителя — прежний путь БАЙТ-В-БАЙТ; при
 # оффлоаде тяжёлый xray живёт на накопителе, а мелкий hev может остаться на флеше — bin_path
@@ -59,7 +59,7 @@ if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi
 command -v lbl_commit_out >/dev/null 2>&1 || lbl_commit_out() { _lcf=$1; shift; "$@" > "$_lcf.$$.new" && mv -f "$_lcf.$$.new" "$_lcf" && return 0; rm -f "$_lcf.$$.new"; return 1; }   # write-blind: the shim of a missing library is the old line
 # «VPN выключен вручную — несущую не берёт никто» (carrier_barred/carrier_run, разбор в daemon-lib.sh). Нет — прежний путь.
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
-command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
+command -v carrier_run >/dev/null 2>&1 || carrier_run() { [ "$1" != -s ] || shift 2; shift; "$@"; }
 command -v daemon_log_fresh >/dev/null 2>&1 || daemon_log_fresh() { : > "$1" 2>/dev/null || true; }   # the old start: the log afresh, no `.prev`
 command -v daemon_wait_port >/dev/null 2>&1 || daemon_wait_port() {
     DAEMON_WAIT_WHY=''; _dwi=0; while [ "$_dwi" -lt "$3" ]; do netstat -ltn 2>/dev/null | grep -q "$4:$5 " && return 0; sleep 1; _dwi=$((_dwi+1)); done
@@ -513,7 +513,12 @@ cmd_failover() {
     # же — значит обрывать всегда. Нет владельца (старая ip-lib) — не спрашиваем вовсе, как раньше.
     _xfw=0
     command -v wan_probe_ok >/dev/null 2>&1 && command -v wan_recheck >/dev/null 2>&1 && wan_probe_ok && _xfw=1
-    for f in "$ENODIA_STATE"/xray-configs/*.json; do
+    if command -v server_candidates >/dev/null 2>&1; then
+        _xf_files=$(server_candidates xray "$ENODIA_STATE"/xray-configs/*.json)
+    else
+        _xf_files=$(printf '%s\n' "$ENODIA_STATE"/xray-configs/*.json)
+    fi
+    while IFS= read -r f <&8; do
         [ -f "$f" ] || continue
         if [ -e "$SWITCH_LOCK" ]; then
             [ "$_xfr_touched" = 0 ] || seed_dns_reload_pending
@@ -560,7 +565,9 @@ xray-конфиг: $name — VPN снова работает. Внешний IP:
         if [ "$_xfw" = 1 ] && ! wan_probe_ok && ! wan_recheck; then
             _xfwl=1; log "xray-failover: интернет через WAN пропал посреди перебора — прерываю (недостижим любой сервер)"; break
         fi
-    done
+    done 8<<EOF
+$_xf_files
+EOF
     # Ни один резерв не встал. Если мы что-то пробовали (xray.json уже перезаписан
     # дохлым кандидатом) — вернём исходный активный, чтобы down/мониторинг шли по нему.
     # Если резервов не было вовсе ($tried пуст) — xray.json не трогали, рестарт не нужен.
@@ -826,12 +833,13 @@ case "$1" in
                lbl_lock_take "$_mwl" 'xray-transport\.sh meta-warm' || exit 0
                trap 'lbl_lock_drop "$_mwl"' EXIT; trap 'exit 1' HUP INT TERM PIPE
                set --; for _mw in "$ENODIA_STATE"/xray-configs/*.json; do [ -f "$_mw" ] && set -- "$@" "$_mw"; done
+               if command -v xp_meta_publish >/dev/null 2>&1; then set -- --warm "$@"; fi
                xp_meta_rows "$@" >/dev/null ;;
     # Слот-вербы ОПЦИОНАЛЬНЫ по контракту: нет слот-слоя → код 2 «не умею» (оркестратор оставит
     # выход на fallback), а не тихая смерть шелла на провалившемся `.`.
-    slot-up)     slot_lib_ok || exit 2; carrier_run cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф3): 2-й xray + hev + xtunN в table 100N
+    slot-up)     slot_lib_ok || exit 2; carrier_run -s xray cmd_slot_down cmd_slot_up "$2" "$3" ;;   # доп-выход (Ф3): 2-й xray + hev + xtunN в table 100N
     slot-down)   slot_lib_ok || exit 2; cmd_slot_down "$2" ;;      # доп-выход: снять несущую слота (-> fallback-политика mark-core)
-    slot-health) slot_lib_ok || exit 2; carrier_run cmd_slot_down cmd_slot_health "$2" ;;   # доп-выход: жив ли (watchdog); залипший hev выхода перезапускает — берёт несущую
+    slot-health) slot_lib_ok || exit 2; carrier_run -s xray cmd_slot_down cmd_slot_health "$2" ;;   # доп-выход: жив ли (watchdog); залипший hev выхода перезапускает — берёт несущую
     slot-iface)  slot_lib_ok || exit 2; slot_tun "$2" ;;           # имя несущей слота — учёту трафика (владелец имени один: slot-tun-lib.sh)
     *) echo "usage: $0 up|down|cold|status|health|failover|dns|access-purge|slot-up <id> <cfg>|slot-down <id>|slot-health <id>|slot-iface <id>"; exit 2 ;;
 esac

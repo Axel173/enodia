@@ -103,7 +103,8 @@ case "${1:-}" in
     # enodia-dnsq, transport-awg-setup и все пер-слотовые). Список мусора и логов в ОЗУ — истина
     # ОДНА, и живёт она здесь; потребители обязаны СПРАШИВАТЬ, а не копировать.
     ramlogs-list) MODE=ramlogs-list ;;
-    *) echo "usage: $0 [dryrun|json|clean [junk snaps ramlogs stocklogs]|ramlogs-list]" >&2; exit 2 ;;
+    stocklogs-set|stocklogs-apply|stocklogs-restore) MODE=$1 ;;
+    *) echo "usage: $0 [dryrun|json|clean [junk snaps ramlogs stocklogs]|ramlogs-list|stocklogs-set <stock|compact|ram>|stocklogs-apply|stocklogs-restore]" >&2; exit 2 ;;
 esac
 
 # --- примитивы размера ---------------------------------------------------------------
@@ -204,7 +205,7 @@ snap_targets() {
 # Логи В ОЗУ. Список ЯВНЫЙ, а не `/tmp/*.log`: рядом лежат СТОКОВЫЕ логи Xiaomi
 # (wifi_analysis.log, ssh_patch.log, *.bootcheck.log) — обрезать чужое мы не вправе.
 RAM_LOGS="enodia-dnsq enodia-restore enodia-startup enodia-bin-purge enodia-store-mode enodia-watchdog enodia-pkg-restart enodia-dns-filter
-enodia-byedpi enodia-byedpi-test-run enodia-byedpi-fetch enodia-doh enodia-hev enodia-hysteria
+enodia-byedpi enodia-byedpi-test-run enodia-doh enodia-hev enodia-hysteria
 enodia-iplist-update enodia-notify enodia-notify-event enodia-panel-tls enodia-subs-update
 enodia-support enodia-switch-vpn-setup enodia-transport-awg-setup enodia-xiaomi-bypass
 enodia-zapret-nfqws hytest ussl-dbg xray xray-access
@@ -325,6 +326,169 @@ sys_walk() {
 # ЦЕНА, которую панель обязана назвать: это ЕДИНСТВЕННЫЙ лог, переживающий ребут, и ровно его
 # кладёт в архив `dump.sh archive`. Снёс — разбирать «что было до перезагрузки» будет нечем.
 STOCK_LOG_DIR=/data/usr/log
+STOCK_LOG_RULE=/etc/logrotate.d/messages
+STOCK_LOG_SOURCE=/var/messages
+STOCK_LOG_RAM=/tmp/enodia-stocklogs
+STOCK_LOG_LOCK=/tmp/enodia-stocklogs-mode.lock
+STOCK_LOG_PREF="$ENODIA_STATE/.stocklogs-mode"
+STOCK_LOG_ORIGINAL="$ENODIA_STATE/.stocklogs-original"
+STOCK_LOG_COMPACT_COUNT=3
+
+stocklogs_rule() {
+    case "$1" in
+        stock)   _sl_dir=$STOCK_LOG_DIR; _sl_rotate=6; _sl_perm=755; _sl_delay=delaycompress ;;
+        compact) _sl_dir=$STOCK_LOG_DIR; _sl_rotate=$STOCK_LOG_COMPACT_COUNT; _sl_perm=755; _sl_delay=nodelaycompress ;;
+        ram)     _sl_dir=$STOCK_LOG_RAM; _sl_rotate=1; _sl_perm=700; _sl_delay=delaycompress ;;
+        *) return 1 ;;
+    esac
+    [ "$1" = stock ] || printf '# Managed by Enodia (system log)\n'
+    printf '%s {\n\tsize 3072k\n\tcreateolddir %s root root\n\tolddir %s\n\tcopytruncate\n\tsu root root\n\tstart 0\n\trotate %s\n\t%s\n\tcompress\n}\n' \
+        "$STOCK_LOG_SOURCE" "$_sl_perm" "$_sl_dir" "$_sl_rotate" "$_sl_delay"
+}
+stocklogs_signature() { awk '{ sub(/#.*/, ""); if (NF) { $1=$1; print } }' "$@"; }
+stocklogs_stock_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(wc -c < "$1")" -le 4096 ] &&
+        [ "$(stocklogs_signature "$1")" = "$(stocklogs_rule stock | stocklogs_signature)" ]
+}
+stocklogs_current() {
+    if [ -L "$STOCK_LOG_RULE" ]; then echo custom; return; fi
+    if [ ! -f "$STOCK_LOG_RULE" ]; then echo unavailable; return; fi
+    if [ "$(wc -c < "$STOCK_LOG_RULE")" -gt 4096 ]; then echo custom; return; fi
+    _sl_text=$(cat "$STOCK_LOG_RULE")
+    for _sl_mode in compact ram; do
+        [ "$_sl_text" != "$(stocklogs_rule "$_sl_mode")" ] || { echo "$_sl_mode"; return; }
+    done
+    if stocklogs_stock_file "$STOCK_LOG_RULE"; then echo stock; else echo custom; fi
+}
+stocklogs_valid() { case "$1" in stock|compact|ram) return 0 ;; *) return 1 ;; esac; }
+stocklogs_allow() {
+    case "$1" in
+        unavailable) echo "В этой прошивке нет поддерживаемого правила ротации системного лога."; return 1 ;;
+        custom) echo "У системного лога своё правило ротации. Измените его вручную."; return 1 ;;
+    esac
+    return 0
+}
+stocklogs_save_original() {
+    # Called only with a stock rule live. Firmware can refresh those bytes even on persistent /etc.
+    if stocklogs_stock_file "$STOCK_LOG_ORIGINAL"; then
+        cmp -s "$STOCK_LOG_ORIGINAL" "$STOCK_LOG_RULE" && return 0
+    fi
+    ( umask 077; lbl_commit_out "$STOCK_LOG_ORIGINAL" cat "$STOCK_LOG_RULE" )
+}
+stocklogs_compact_latest() {
+    _sl_raw="$STOCK_LOG_DIR/messages.0"
+    [ -e "$_sl_raw" ] || [ -L "$_sl_raw" ] || return 0
+    [ -f "$_sl_raw" ] && [ ! -L "$_sl_raw" ] || return 1
+    _sl_held="$_sl_raw.enodia-$$"
+    _sl_stage="$_sl_held.partial.gz"
+    [ ! -e "$_sl_held" ] && [ ! -L "$_sl_held" ] || return 1
+    mv "$_sl_raw" "$_sl_held" || return 1
+    # A rotation may have occupied .0.gz since we took the raw archive. Never replace it.
+    if ( umask 077; lbl_commit_out "$_sl_stage" gzip -c "$_sl_held" ) && {
+        { [ ! -e "$_sl_raw.gz" ] && [ ! -L "$_sl_raw.gz" ] && ln "$_sl_stage" "$_sl_raw.gz"; } ||
+        { [ ! -e "$_sl_held.gz" ] && [ ! -L "$_sl_held.gz" ] && ln "$_sl_stage" "$_sl_held.gz"; }
+    }; then
+        rm -f "$_sl_held" "$_sl_stage"
+        return $?
+    fi
+    rm -f "$_sl_stage" 2>/dev/null
+    # If a rotation already put a new file there, keep the archived copy under its separate name.
+    [ -e "$_sl_raw" ] || [ -L "$_sl_raw" ] || mv "$_sl_held" "$_sl_raw"
+    return 1
+}
+stocklogs_trim_compact() {
+    for _sl_file in "$STOCK_LOG_DIR"/messages.[0-9]*; do
+        [ -f "$_sl_file" ] && [ ! -L "$_sl_file" ] || continue
+        _sl_index=${_sl_file##*/messages.}; _sl_index=${_sl_index%.gz}
+        case "$_sl_file" in
+            */messages.0.enodia-*)
+                _sl_pid=${_sl_index#0.enodia-}
+                case "$_sl_pid" in ''|*[!0-9]*) continue ;; esac
+                rm -f "$_sl_file" || return 1
+                continue ;;
+        esac
+        case "$_sl_index" in ''|*[!0-9]*) continue ;; esac
+        [ "$_sl_index" -ge "$STOCK_LOG_COMPACT_COUNT" ] || continue
+        rm -f "$_sl_file" || return 1
+    done
+}
+stocklogs_apply_mode() {
+    _sl_prev=$(stocklogs_current)
+    stocklogs_allow "$_sl_prev" || return 1
+    if [ "$1" = ram ] && { [ -L "$STOCK_LOG_RAM" ] || { [ ! -d "$STOCK_LOG_RAM" ] && ! mkdir -m 700 "$STOCK_LOG_RAM"; }; }; then
+        echo "Не удалось подготовить каталог архива в ОЗУ."
+        return 1
+    fi
+    if [ "$_sl_prev" = "$1" ]; then
+        [ "$1" != compact ] || stocklogs_trim_compact
+        return $?
+    fi
+    if [ "$_sl_prev" = stock ] && ! stocklogs_save_original; then
+        echo "Не удалось сохранить исходное правило ротации."
+        return 1
+    fi
+    # Immediate rotation would otherwise strand the uncompressed stock archive as a .backup.
+    if [ "$1" = compact ] && ! stocklogs_compact_latest; then
+        echo "Не удалось сжать предыдущий архив системного лога."
+        return 1
+    fi
+    # Stage on the same filesystem under a suffix ignored by logrotate's include.
+    if ( umask 022
+         [ "$(stocklogs_current)" = "$_sl_prev" ] || exit 1
+         if [ "$1" = stock ] && stocklogs_stock_file "$STOCK_LOG_ORIGINAL"; then
+             lbl_commit_out_as "$STOCK_LOG_RULE.enodia-$$.disabled" "$STOCK_LOG_RULE" cat "$STOCK_LOG_ORIGINAL"
+         else
+             lbl_commit_out_as "$STOCK_LOG_RULE.enodia-$$.disabled" "$STOCK_LOG_RULE" stocklogs_rule "$1"
+         fi ); then return 0; fi
+    echo "Не удалось применить режим системного лога."
+    return 1
+}
+stocklogs_finish_mode() {
+    [ "$1" != compact ] || stocklogs_trim_compact || {
+        echo "Сжатие включено, но не удалось убрать лишние архивы системного лога. Выберите этот режим ещё раз."
+        return 1
+    }
+}
+stocklogs_mutate() {
+    [ ! -f "$ENODIA_DIR/label-lib.sh" ] || . "$ENODIA_DIR/label-lib.sh"
+    command -v lbl_lock_take >/dev/null 2>&1 || { echo "Обновите скрипты роутера."; return 1; }
+    lbl_lock_take "$STOCK_LOG_LOCK" 'clean\.sh' || { echo "Режим системного лога уже меняется. Повторите через несколько секунд."; return 1; }
+    trap 'lbl_lock_drop "$STOCK_LOG_LOCK"' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    case "$MODE" in
+        stocklogs-set)
+            stocklogs_valid "$1" || { echo "Выберите режим системного лога."; return 1; }
+            stocklogs_allow "$(stocklogs_current)" || return 1
+            _sl_old=$(cat "$STOCK_LOG_PREF" 2>/dev/null)
+            if [ "$_sl_old" != "$1" ] && ! ( umask 077; lbl_commit "$STOCK_LOG_PREF" "$1" ); then
+                echo "Не удалось сохранить режим системного лога."
+                return 1
+            fi
+            if ! stocklogs_apply_mode "$1"; then
+                [ "$_sl_old" = "$1" ] || ( umask 077; lbl_commit "$STOCK_LOG_PREF" "$_sl_old" ) || echo "Сохранённый выбор будет применён при следующем запуске."
+                return 1
+            fi
+            stocklogs_finish_mode "$1" || return 1
+            echo "Режим системного лога сохранён."
+            ;;
+        stocklogs-apply)
+            [ -f "$STOCK_LOG_PREF" ] || return 0
+            _sl_choice=$(cat "$STOCK_LOG_PREF" 2>/dev/null)
+            stocklogs_valid "$_sl_choice" || { echo "Выберите режим системного лога."; return 1; }
+            stocklogs_apply_mode "$_sl_choice" && stocklogs_finish_mode "$_sl_choice"
+            ;;
+        stocklogs-restore)
+            case "$(stocklogs_current)" in
+                compact|ram) stocklogs_apply_mode stock ;;
+                custom) stocklogs_allow custom || return 0 ;;
+            esac
+            ;;
+    esac
+}
+case "$MODE" in
+    stocklogs-*) stocklogs_mutate "$2"; exit $? ;;
+esac
+
 stocklog_rotated() {   # ротации — удаляем
     for _t in "$STOCK_LOG_DIR"/messages.*; do [ -f "$_t" ] && echo "$_t"; done
     return 0
@@ -425,10 +589,10 @@ if [ "$MODE" = json ]; then
         _first=0
         printf '{"path":"%s","b":%s}' "$_p" "$(kb "$(sz_k "$_p")")"
     done
-    printf '],"junk_b":%s,"snaps_b":%s,"snaps_n":%s,"ramlogs_b":%s,"ramlogs_n":%s,"stocklogs_b":%s,"stocklogs_n":%s}\n' \
+    printf '],"junk_b":%s,"snaps_b":%s,"snaps_n":%s,"ramlogs_b":%s,"ramlogs_n":%s,"stocklogs_b":%s,"stocklogs_n":%s,"stocklogs_mode":"%s"}\n' \
         "$(kb "$JNK_K")" "$(kb "$SNP_K")" "$(snap_targets | wc -l)" \
         "$(kb "$(sum_of ramlog_targets)")" "$(ramlog_targets | wc -l)" \
-        "$(kb "$(sum_of stocklog_targets)")" "$(stocklog_targets | wc -l)"
+        "$(kb "$(sum_of stocklog_targets)")" "$(stocklog_targets | wc -l)" "$(stocklogs_current)"
     exit 0
 fi
 

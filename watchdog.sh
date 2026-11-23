@@ -903,7 +903,7 @@ slot_fail_event() {   # $1=id $2=cfg $3=fallback $4=причина: desync|noans
     # VPN ВЫКЛЮЧИЛИ, ПОКА ШЁЛ СВИП: флаг свип смотрит один раз на входе, а дальше вербы несущих под carrier_run отказывают — и отказ
     # читался бы падением выхода («сервер не отвечает», а после «Включить VPN» — ещё и «снова работает»). Выход снял человек,
     # вместе со всем VPN: эпизода нет (ревью с.93, круг 2).
-    [ -f "$ENODIA_STATE/.vpn-off" ] && return 0
+    slot_admitted "$1" "$5" || return 0
     [ -f "$SLOT_DOWN.$1" ] && return 0
     echo "$2" > "$SLOT_DOWN.$1"
     [ -f "$NOTIFY_EVENT" ] || return 0
@@ -948,8 +948,7 @@ slot_fail_event() {   # $1=id $2=cfg $3=fallback $4=причина: desync|noans
     # WHAT THE ROUTER DID WITH THE EXIT — the mail's second line: taken down (its traffic rides the fallback), or, for `silent`,
     # LEFT UP: a restart gives the same handshake and the same cut, and the return probe (it judges by the handshake) would bring
     # it back every other tick — a pair of mails each time.
-    if [ "$3" = direct ]; then _sfl="Его трафик переключён на запасной путь: напрямую."; _sfle="Its traffic is switched to the fallback path: direct."
-    else _sfl="Его трафик переключён на запасной путь: через основной туннель."; _sfle="Its traffic is switched to the fallback path: through the main tunnel."; fi
+    _sfl=""; _sfle=""
     if [ "$4" = silent ]; then
         _sfl="Роутер оставил его поднятым: перезапуск даст то же рукопожатие и тот же обрыв."
         _sfle="The router left it up: a restart gives the same handshake and the same cut."
@@ -984,14 +983,12 @@ These ride this exit to their servers: $_sfrd. While it is down they are unreach
     if [ "$NF_LANG" = en ]; then
         sh "$NOTIFY_EVENT" "slot-fail-$1" 0 \
             "BE7000: extra exit #$1 is down" \
-"Extra exit #$1 (server $2) does not respond ($_sfe).
-$_sfle
+"Extra exit #$1 (server $2) does not respond ($_sfe).${_sfle:+$NL$_sfle}
 $_sfne" >/dev/null 2>&1
     else
         sh "$NOTIFY_EVENT" "slot-fail-$1" 0 \
             "BE7000: доп-выход №$1 недоступен" \
-"Дополнительный выход №$1 (сервер $2) не отвечает ($_sfr).
-$_sfl
+"Дополнительный выход №$1 (сервер $2) не отвечает ($_sfr).${_sfl:+$NL$_sfl}
 $_sfn" >/dev/null 2>&1
     fi
 }
@@ -1004,11 +1001,11 @@ slot_back_event() {   # $1=id $2=cfg — выход прошёл проверк�
     if [ "$NF_LANG" = en ]; then
         sh "$NOTIFY_EVENT" "slot-ok-$1" 0 \
             "BE7000: extra exit #$1 works again" \
-"Extra exit #$1 (server $2) responds again — its traffic goes through it again, not via the fallback path." >/dev/null 2>&1
+"Extra exit #$1 (server $2) responds again." >/dev/null 2>&1
     else
         sh "$NOTIFY_EVENT" "slot-ok-$1" 0 \
             "BE7000: доп-выход №$1 снова работает" \
-"Дополнительный выход №$1 (сервер $2) снова отвечает — его трафик опять идёт через него, а не запасным путём." >/dev/null 2>&1
+"Дополнительный выход №$1 (сервер $2) снова отвечает." >/dev/null 2>&1
     fi
 }
 # АВТОВОЗВРАТ ВЫХОДА AmneziaWG. Снятый выход (рукопожатие умерло → slot-down, или демон упал сам) прежде лежал до ручного
@@ -1113,14 +1110,9 @@ slot_health_sweep() {
     # снимаются и поднимаются штатно, и любая проба здоровья слота в этом окне читается как отказ.
     # Тот же гард стоит в health/failover byedpi (батч 5).
     [ -e "$SWITCH_LOCK" ] && return 0
-    # VPN ВЫКЛЮЧЕН ЧЕЛОВЕКОМ — свип молчит. Гейт выше (TRANSPORT_OK=0) выводит тик через finish(),
-    # а finish зовёт ИМЕННО ЭТОТ свип — то есть мимо гейта. Цена: после ребута с выключенным VPN
-    # несущих слотов нет вовсе (heal их сознательно не поднимает), слот-health честно отвечает
-    # «просел», и через две минуты свип поднимал бы их обратно вторым инстансом xray/ciadpi —
-    # ровно жалоба «выключаю, а оно воскресает», только про доп-выходы: трафика в них нет (ip rule
-    # снят `vpn-toggle off`), а ОЗУ и письма о падении слота есть. Найдено ревью 02.09.2026.
-    [ -f "$ENODIA_STATE/.vpn-off" ] && return 0
-    _sen=$(sh "$SLOTS_SH" list-enabled 2>/dev/null)
+    sh "$SLOTS_SH" retry-pending >>"$LOG" 2>&1
+    _sen=$(sh "$SLOTS_SH" list-admitted 2>/dev/null)
+    [ -n "$_sen" ] || return 0
     # Выход выключили или удалили посреди эпизода «недоступен» — отметка осиротела: номер займёт НОВЫЙ выход, и его первый
     # здоровый тик назвался бы «снова работает» (slot_back_event).
     # То же у паузы возврата AmneziaWG-выхода (slot_awg_return): новый выход на этом номере ждал бы чужую паузу.
@@ -1156,6 +1148,7 @@ EOF
     WARP_JOB=""; [ -f "$ENODIA_DIR/warp.sh" ] && WARP_JOB=$(sh "$ENODIA_DIR/warp.sh" running 2>/dev/null)
     printf '%s\n' "$_sfirst${_slast:+$NL$_slast}${_sagain:+$NL$_sagain}" | while IFS="$TAB" read -r sid st scfg sfb _spass; do
         [ -n "$sid" ] || continue
+        slot_admitted "$sid" "$st" || continue
         if [ "$_spass" = again ]; then
             case "$ROAD_PV" in *" $sid:s "*)
                 if [ -f "$ROAD_SILENT.$sid" ] && [ ! -f "$SLOT_DOWN.$sid" ] && ip link show "awg$sid" >/dev/null 2>&1; then
@@ -1172,7 +1165,7 @@ EOF
             # транспорт, а выход живёт и при awg).
             if [ -f "$ENODIA_STATE/.byedpi-args-s$sid.sweepbak" ]; then
                 log "slot-health: браузер-свип выхода №$sid брошен — восстанавливаю исходную стратегию"
-                sh "$ENODIA_DIR/transport-byedpi.sh" sweep-end "$sid" >>"$LOG" 2>&1
+                sh "$TRANSPORT_SH" byedpi-sweep sweep-end "$sid" >>"$LOG" 2>&1
             fi
             # byedpi-выход (Ф1c): несущая = ciadpi(pid)+hev+xtunN. Здоровье спрашиваем у ПЛАГИНА
             # (verb slot-health): он делает egress-пробу через socks выхода, а не только смотрит
@@ -1270,7 +1263,12 @@ EOF
             fi
             continue
         fi
-        [ "$st" = awg ] || continue                 # у zapret-слота несущей нет — сторожить нечего
+        if [ "$st" = zapret ]; then
+            if ! sh "$TRANSPORT_SH" slot-health "$sid" >/dev/null 2>&1; then
+                sh "$TRANSPORT_SH" slot-up "$sid" >>"$LOG" 2>&1
+            fi
+        fi
+        [ "$st" = awg ] || continue
         # Без бинаря awg возраст handshake не прочитать: slot_hs_age отдаёт 999999, и выход был бы
         # ПОГАШЕН по ложному «мёртв». Нечем судить — не трогаем (как rc=2 у плагинов выше).
         [ -n "$WG" ] || continue
@@ -1302,9 +1300,7 @@ EOF
             # демон, упавший сам, проба обычно поднимает тем же тиком — и пара писем «недоступен»/«снова работает» о минуте,
             # которую никто не заметил, была бы шумом. Не поднялся — проба объявила эпизод сама (noanswer), `gone` её не дублирует.
             _sgone=0
-            if [ "$sfb" = main ] && ip rule show 2>/dev/null | grep -qE "fwmark 0x$sid(/\S+)? lookup 100$sid"; then
-                log "slot-health: awg-выход №$sid — несущая исчезла, fallback=main → переигрываю (table 1000)"
-                restore_marking
+            if [ "$sfb" != direct ] && ip rule show 2>/dev/null | grep -qE "fwmark 0x$sid(/\S+)? lookup 100$sid"; then
                 _sgone=1
             fi
             # THE EXIT RIDES A ROAD THAT SHAKES HANDS AND CARRIES NOTHING (the cheap check above let it through). The return probe
@@ -1413,6 +1409,7 @@ EOF
         slot_retry_arm "$sid" "" "$st"
         slot_fail_event "$sid" "$scfg" "$sfb" "hs:$_age" "$st"
     done
+    [ ! -f "$MARK_CORE" ] || sh "$MARK_CORE" slot-repair >>"$LOG" 2>&1
 }
 
 # ВЫХОД ИЗ ТИКА, который НЕ теряет свип доп-выходов. ГРАБЛЯ (ревью 04.08.2026): сам свип стоял
@@ -2881,6 +2878,11 @@ trap 'exit 1' INT TERM HUP PIPE
 # и идемпотентно (no-op, когда доступ не открыт — гейт [ -s .support-active ] внутри). Ставим
 # ДО boot-grace-выхода, но после ребута /tmp сброшен → .support-active нет → сразу no-op.
 [ -f "$SUPPORT_SH" ] && sh "$SUPPORT_SH" reap >/dev/null 2>&1
+
+# Recover the OUTPUT exemption if the fetching process was killed.
+if [ -f "$ENODIA_DIR/gh-update.sh" ]; then
+    sh "$ENODIA_DIR/gh-update.sh" fetch-reap >>"$LOG" 2>&1
+fi
 
 # --- DoH keepalive: демон https_dns_proxy мог упасть, а dnsmasq форвардит на 127.0.0.1:5053 ---
 # Мёртвый прокси при включённом DoH = DNS всего дома лёг (dnsmasq стучит в пустой loopback-порт).

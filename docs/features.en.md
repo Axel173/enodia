@@ -27,6 +27,9 @@ Besides the main VPN you can raise **up to six additional exits** through other 
 own sites, groups or devices to each. An exit whose server your ISP blocked can go over a «road» — another exit, for
 example your own WARP.
 
+If an exit falls, its traffic goes through the main VPN, directly or through another exit — you choose on the exit's
+screen. An exit with «Keep running when VPN is off» stays up when the main VPN is off.
+
 ## Subscriptions and Amnezia Premium
 
 Xray, Hysteria2 and AmneziaWG servers are added from one subscription link (3x-ui included) and updated on a

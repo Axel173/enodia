@@ -82,7 +82,7 @@ if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 # «VPN выключен вручную — несущую не берёт никто» (carrier_barred/carrier_run, разбор в daemon-lib.sh). Нет — прежний путь.
 command -v carrier_barred >/dev/null 2>&1 || carrier_barred() { return 1; }
-command -v carrier_run >/dev/null 2>&1 || carrier_run() { shift; "$@"; }
+command -v carrier_run >/dev/null 2>&1 || carrier_run() { [ "$1" != -s ] || shift 2; shift; "$@"; }
 # Возраст lock'а свипа — через age_since (clock-lib.sh): lock в /tmp рождается после загрузки, а часы
 # без RTC прыгают вперёд ⇒ голая разность делает идущий свип «протухшим», и apply затирает временную
 # стратегию посреди замера. Шим = прежнее поведение. [[watchdog-clock-step-false-death]]
@@ -193,9 +193,8 @@ SLOTS_SH="$ENODIA_DIR/slots.sh"
 zt_transport_active() { ! carrier_barred && [ "$(cat "$TRANSPORT_FLAG" 2>/dev/null | tr -d ' \r\n')" = zapret ]; }
 # Есть ли ВКЛЮЧЁННЫЙ zapret-слот (опц. исключая id $1). list-enabled: id⇥transport⇥cfg⇥fallback.
 zt_any_slot_enabled() {
-    carrier_barred && return 1
     [ -f "$SLOTS_SH" ] || return 1
-    sh "$SLOTS_SH" list-enabled 2>/dev/null | while IFS="$(printf '\t')" read -r _sid _st _sc _sf; do
+    sh "$SLOTS_SH" list-admitted 2>/dev/null | while IFS="$(printf '\t')" read -r _sid _st _sc _sf; do
         [ "$_st" = zapret ] || continue
         [ "$_sid" = "$1" ] && continue
         echo x; break
@@ -510,37 +509,48 @@ nfq_supported() {
 # зовёт транспорт (SET=zapret_set) и zapret-СЛОТ (grp_vpn_sN/geo_vpn_sN — десинк рядом с VPN).
 # ACCEPT в ENODIA_ZAPRET (выше базовой маркировки mark-core) → сайты сета идут ПРЯМО, даже
 # если их IP ∈ iplist_set (иначе ушли бы в туннель, а не в десинк). Идемпотентно.
-nfq_set_rules() {   # <set> <add|del>
-    _ns="$1"
-    # ЛЕГАСИ-ФОРМА: до 08.2026 тот же ACCEPT лежал прямо в PREROUTING. Снимаем её ВСЕГДА — и на
-    # add тоже: правила живут в RAM до ребута, и после обновления скриптов старая копия осталась
-    # бы ВЫШЕ всех цепочек, продолжая перебивать правила устройства (то самое, что мы чиним).
-    while iptables -t mangle -D PREROUTING -m set --match-set "$_ns" dst -j ACCEPT 2>/dev/null; do :; done
-    if [ "$2" = del ]; then
-        nfq_platform wire-set "$_ns" del || return 1
-        while iptables -t mangle -D "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT 2>/dev/null; do :; done
-        for proto in tcp udp; do
-            while iptables -t mangle -D POSTROUTING -p $proto --dport 443 -m set --match-set "$_ns" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null; do :; done
-        done
-        zt_chain_gc
-    else
-        nfq_platform wire-set "$_ns" add || return 1
-        zt_chain_ensure
-        iptables -t mangle -C "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT 2>/dev/null || \
-            iptables -t mangle -A "$ZCHAIN" -m set --match-set "$_ns" dst -j ACCEPT
-        # The insert's answer is the brick's: a queue that did not go in (the xtables lock's wait ran out) fails the caller. Those
-        # that roll back (cmd_slot_up, cmd_t_up — the ACCEPT alone takes the set past the tunnel with nothing to desync it) do; the
-        # others (rewire, failover) keep the half that went in — so the hold comes either way, and a rollback's release gives it
-        # back by the fact.
-        _nsr=0
-        for proto in tcp udp; do
-            iptables -t mangle -C POSTROUTING -p $proto --dport 443 -m set --match-set "$_ns" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null || \
-                iptables -t mangle -I POSTROUTING 1 -p $proto --dport 443 -m set --match-set "$_ns" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass || _nsr=1
-        done
-        nfq_ecm_hold
-        [ "$_nsr" = 0 ]
-    fi
+nfq_set_present() {
+    printf '%s\n' "$1" | grep -qE -- "--match-set $2 dst .* -j NFQUEUE .*--queue-num $QNUM( |$)"
 }
+
+nfq_set_rules() (   # <set> <add|del|check>
+    _ns_set=$1; _ns_op=$2
+    if [ "$_ns_op" = del ]; then
+        _ns_sets=$(ipset list -n) || exit 1
+        printf '%s\n' "$_ns_sets" | grep -qxF "$_ns_set" || exit 0
+        _ns_queues=$(iptables -t mangle -S POSTROUTING) || exit 1
+    fi
+    case "$_ns_op" in
+        add|del)
+            ipt_delete_all mangle PREROUTING -m set --match-set "$_ns_set" dst -j ACCEPT || exit 1
+            nfq_platform wire-set "$_ns_set" "$_ns_op" || exit 1 ;;
+        check)
+            nfq_platform set-wired "$_ns_set" &&
+                iptables -t mangle -C PREROUTING -j "$ZCHAIN" 2>/dev/null || exit 1 ;;
+    esac
+    set -- "$ZCHAIN" -m set --match-set "$_ns_set" dst -j ACCEPT
+    case "$_ns_op" in
+        add)
+            zt_chain_ensure
+            iptables -t mangle -C "$@" 2>/dev/null || iptables -t mangle -A "$@" || exit 1 ;;
+        del) ipt_delete_all mangle "$@" || exit 1 ;;
+        check) iptables -t mangle -C "$@" 2>/dev/null || exit 1 ;;
+    esac
+    _ns_rc=0
+    for proto in tcp udp; do
+        set -- POSTROUTING -p "$proto" --dport 443 -m set --match-set "$_ns_set" dst $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass
+        case "$_ns_op" in
+            add) iptables -t mangle -C "$@" 2>/dev/null || iptables -t mangle -I "$@" || _ns_rc=1 ;;
+            del) ! nfq_set_present "$_ns_queues" "$_ns_set" || ipt_delete_all mangle "$@" || exit 1 ;;
+            check) iptables -t mangle -C "$@" 2>/dev/null || exit 1 ;;
+        esac
+    done
+    case "$_ns_op" in
+        # Rewire may keep a partially installed pair. Its live queue still needs the ECM delay.
+        add) nfq_ecm_hold; exit "$_ns_rc" ;;
+        del) zt_chain_gc ;;
+    esac
+)
 # ---- ДЕСИНК ПО ИСТОЧНИКУ («устройство целиком в десинк») ----------------------
 # ЗАЧЕМ ОТДЕЛЬНЫЙ КИРПИЧ. Всё выше матчит по адресу НАЗНАЧЕНИЯ (ipset), а значит работает только
 # для клиентов НАШЕГО dnsmasq: доменные пулы наполняются по ответам резолвера, и приставка/ТВ со
@@ -558,8 +568,15 @@ nfq_set_rules() {   # <set> <add|del>
 # 1:8 ловит ClientHello до offload-акселерации. «Целиком» здесь = «весь трафик устройства идёт
 # напрямую, а его TLS/QUIC-рукопожатия проходят через nfqws», а не «каждый его пакет через nfqws».
 # «Before acceleration» is not true of every ECM: BE7000's takes a WIRED client's flow before its ClientHello — nfq_ecm_hold.
-nfq_src_rules() {   # <ip> <add|del>
+nfq_src_rules() {   # <ip> <add|del|check>
     _si="$1"
+    if [ "$2" = check ]; then
+        nfq_platform source-wired "$_si" || return 1
+        for proto in tcp udp; do
+            iptables -t mangle -C POSTROUTING -s "$_si" -p "$proto" --dport 443 $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null || return 1
+        done
+        return 0
+    fi
     nfq_platform wire-src "$_si" "$2" || return 1
     if [ "$2" = del ]; then
         for proto in tcp udp; do
@@ -646,6 +663,7 @@ teardown() {
 }
 
 cmd_apply() {
+    carrier_barred && return 0
     if [ ! -f "$ON_FLAG" ]; then
         teardown
         return $?
@@ -672,6 +690,7 @@ cmd_rewire() {
     # «VPN выключен» is a state (C67): the flag a refused teardown kept (the off settler gave up) is no order to wire whole-house
     # desync after a reboot — heal's list reapply and geo builds call us, and «перезагрузите роутер» promised the rest goes away.
     [ ! -f "$ENODIA_STATE/.vpn-off" ] || return 0
+    [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 0
     rules_add
     ct_flush
 }
@@ -741,6 +760,23 @@ cmd_t_failover() {
 # ОРКЕСТРАТОР (transport.sh slot-up/slot-down → _slot_dispatch). Контракт: 0 = сделано, 1 = сбой
 # (нет бинаря/битый id). Марок/таблиц у zapret-слота НЕТ — mark-core его сеты пропускает.
 zt_slot_sets() { echo "grp_vpn_s$1 geo_vpn_s$1"; }
+
+cmd_slot_health() {
+    case "$1" in [2-7]) ;; *) return 1 ;; esac
+    proc_alive "$NFQ_PID" || return 1
+    for _zs in $(zt_slot_sets "$1"); do nfq_set_rules "$_zs" check || return 1; done
+}
+
+cmd_slot_off_clean() {
+    _zoc_rules=$(iptables -t mangle -S POSTROUTING 2>/dev/null) || return 1
+    for _zoc_id in 2 3 4 5 6 7; do
+        slot_admitted "$_zoc_id" zapret && continue
+        for _zoc_set in $(zt_slot_sets "$_zoc_id"); do
+            nfq_set_present "$_zoc_rules" "$_zoc_set" && return 1
+        done
+    done
+    return 0
+}
 # СЕТ СЛОТА СОЗДАЁМ САМИ, ЕСЛИ ЕГО ЕЩЁ НЕТ. У zapret-ТРАНСПОРТА эта развилка решена давно
 # (`ensure_set` создаёт свои наборы пустыми — пустой ipset ничего не стоит, «кто первый создал»
 # не задано), а у СЛОТА её не было, и цена оказалась высокой: `slots.sh::slot_activate` зовёт
@@ -786,14 +822,15 @@ cmd_slot_up() {   # <id> <config-игнор> — поднять zapret-деси�
         # тут глушится: получилось бы ровно то, что чиним, только без следов в логе.
         if ! ipset list -n 2>/dev/null | grep -qx "$_s"; then
             log "слот №$_id: набор $_s не создан — правило не ставлю (десинк этого набора не заработает)"
-            continue
+            cmd_slot_down "$_id" >/dev/null 2>&1
+            return 1
         fi
         # A refused step undoes the sets already wired: their ACCEPT would take the group past the tunnel with nothing to desync it.
         nfq_set_rules "$_s" add || { cmd_slot_down "$_id" >/dev/null 2>&1; return 1; }
     done
     nfq_antiloop add
     proc_alive "$NFQ_PID" || spawn_nfqws || { cmd_slot_down "$_id" >/dev/null 2>&1; return 1; }
-    ct_flush
+    if command -v ct_flush_slot >/dev/null 2>&1; then ct_flush_slot "$_id" origin; fi
     log "слот №$_id: zapret-десинк рядом с VPN (сеты grp_vpn_s$_id/geo_vpn_s$_id; стратегия: $(desync_args))"
     log "слот №$_id: правила стоят заранее — пока наборы пусты, десинк ничего не заворачивает и включится сам при первой привязке группы или гео-категории"
     return 0
@@ -808,7 +845,7 @@ cmd_slot_down() {   # <id> — снять zapret-десинк слота
         nfq_antiloop del
         stop_nfqws
     fi
-    ct_flush
+    if command -v ct_flush_slot >/dev/null 2>&1; then ct_flush_slot "$_id" origin; fi
     log "слот №$_id: zapret-десинк снят"
     nfq_platform release
     return 0
@@ -846,6 +883,7 @@ zt_source_run() (
     "$@"
 )
 cmd_src_wire() {   # <ip>
+    [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 1
     _sip=$(printf '%s' "$1" | tr -d ' \r\n')
     echo "$_sip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || { log "src-wire: нужен IPv4"; return 1; }
     # The router's own address is no device: `-s <own>` in POSTROUTING would queue ALL the router's own TLS into nfqws (an address
@@ -860,14 +898,18 @@ cmd_src_wire() {   # <ip>
     }
     # The platform's `ready` says nothing of its own: without this line the refusal fell back to «нет nfqws» with nfqws in place.
     nfq_installed || { log "src-wire: не установлен пакет поддержки ядра — Роутер → Компоненты → Zapret"; return 1; }
-    ensure_fakes
-    nfq_prepare || return 1
-    nfq_src_rules "$_sip" add || return 1
+    _src_changed=0
+    if ! nfq_src_rules "$_sip" check; then
+        ensure_fakes
+        nfq_prepare || return 1
+        nfq_src_rules "$_sip" add || return 1
+        _src_changed=1
+    fi
     nfq_antiloop add
     proc_alive "$NFQ_PID" || spawn_nfqws || return 1
     # Точечно по источнику: рвать сессии всей сети из-за одного устройства незачем (зеркало
     # ports_conntrack в apply-bypass). Без сброса NSS/ECM держал бы старый путь до таймаута.
-    ct_flush_src "$_sip"
+    [ "$_src_changed" = 0 ] || ct_flush_src "$_sip"
     log "устройство $_sip: десинк по источнику ВКЛ (стратегия: $(desync_args))"
     return 0
 }
@@ -1223,7 +1265,9 @@ case "$1" in
     health)    cmd_t_health ;;
     failover)  carrier_run cmd_t_down cmd_t_failover ;;
     # zapret-СЛОТ (десинк рядом с VPN, Ф1) — зовёт оркестратор transport.sh slot-up/slot-down.
-    slot-up)   carrier_run cmd_slot_down cmd_slot_up "$2" "$3" ;;
+    slot-up)   carrier_run -s zapret cmd_slot_down cmd_slot_up "$2" "$3" ;;
+    slot-health) cmd_slot_health "$2" ;;
+    slot-off-clean) cmd_slot_off_clean ;;
     slot-down) cmd_slot_down "$2" ;;
     # десинк по ИСТОЧНИКУ (устройство целиком в десинк) — зовёт apply-bypass.sh, владелец списка.
     src-wire)   zt_source_run cmd_src_wire "$2" ;;

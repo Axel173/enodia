@@ -23,7 +23,9 @@ without OpenWrt. Blocked sites go through your VPN server (AmneziaWG, Xray, Hyst
   is done in the browser.
 - Split routing by domains, subnets, geo categories and rule groups, separately for devices and
   Wi-Fi networks.
-- Several VPN protocols and up to six additional exits through other servers.
+- Several VPN protocols and up to six additional exits through other servers. A fallen exit can fall back to another
+  exit, and a marked exit keeps running while the VPN is off.
+- In Servers, you can search by country, filter by the latest check results and mark favourites. Failover tries favourites first.
 - Subscriptions: Xray, Hysteria2, AmneziaWG and WireGuard servers from one link (3x-ui included), updated on a
   schedule. Xray profiles preserve the provider's outbounds, their order, routing and balancers. The panel shows why an individual
   profile was refused and continues importing. Pool tests wait for usable egress. The panel exports pools as complete JSON

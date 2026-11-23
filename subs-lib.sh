@@ -66,10 +66,7 @@ sub_host_public() {
 	sub_ip_public "$_ip"
 }
 
-# Потолок тела подписки. Тело живёт в /tmp = ОЗУ, а 200 серверов — это десятки КБ: всё, что
-# больше, либо не подписка, либо злой умысел. Ограничение НУЖНО в двух местах — на закачке и на
-# РАСПАКОВКЕ: «1 КБ архива → гигабайт распакованного» кладёт роутер целиком, а gunzip мы зовём
-# на любом теле (магию байтов не читаем — `od` в busybox нет).
+# The response and decompression byte ceiling protects /tmp on 128 MiB routers.
 SUB_MAXSIZE=${SUB_MAXSIZE:-4194304}
 
 # --- ОСТАТОК ПОДПИСКИ: заголовок `subscription-userinfo` ---------------------------------------
@@ -253,27 +250,54 @@ sub_client_drop() {
 # обратное). Теперь каждый хоп проходит тот же гард ДО перехода.
 # `-f` намеренно НЕТ: тело ошибки провайдера («No keys available after processing») читает
 # update_one и показывает человеку ЕГО СЛОВА вместо «не распознали серверов».
+# Status 2 is an admission refusal. The previous hop's body and headers belong to the redirect.
 sub_get_once() {
 	_gu="$1"; _go="$2"; shift 2
+	SUB_FETCH_PARTIAL=0
 	_hop=0
 	while [ "$_hop" -le 3 ]; do
-		sub_host_public "$_gu" || return 1
 		# Дамп заголовков — рядом с телом и на КАЖДОМ хопе заново: остаток подписки приезжает
 		# заголовком того ответа, чьё тело мы взяли (см. sub_userinfo_read). Снимает файл
 		# ВЫЗЫВАТЕЛЬ (sub_fetch) — он же и единственный, кто его читает.
 		rm -f "$_go" "$_go.hdr" 2>/dev/null
+		sub_host_public "$_gu" || return 2
 		_loc=$(curl -s --max-time 25 --max-filesize "$SUB_MAXSIZE" -A "$SUB_UA_DEFAULT" \
 			"$@" -D "$_go.hdr" -o "$_go" -w '%{redirect_url}' "$_gu" 2>/dev/null)
+		_grc=$?
+		if [ "$_grc" != 0 ]; then
+			if [ "$_grc" = 63 ] || [ -s "$_go" ]; then SUB_FETCH_PARTIAL=1; fi
+			break
+		fi
 		[ -n "$_loc" ] || break
+		if [ "$_hop" = 3 ]; then SUB_FETCH_PARTIAL=1; rm -f "$_go"; return 1; fi
 		_gu="$_loc"; _hop=$((_hop+1))
 	done
 	# --max-filesize молчит, когда сервер не сказал Content-Length (chunked), поэтому размер
 	# сверяем и по факту: усечь по месту нечем (тело пишет сам curl), но принять — тем более.
 	if [ -s "$_go" ]; then
 		_sz=$(wc -c < "$_go" 2>/dev/null); case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
-		[ "$_sz" -gt "$SUB_MAXSIZE" ] && { rm -f "$_go" 2>/dev/null; return 1; }
+		[ "$_sz" -gt "$SUB_MAXSIZE" ] && { SUB_FETCH_PARTIAL=1; rm -f "$_go" 2>/dev/null; return 1; }
 	fi
 	[ -s "$_go" ]
+}
+
+# The extra byte distinguishes an exact fit. Keep gunzip's status too: an incomplete gzip can emit a useful prefix.
+sub_unpack_body() {
+	[ "$(head -c 2 "$1" | base64 | tr -d '\r\n')" = H4s= ] || return 0
+	if ! ( gunzip -c "$1" 2>/dev/null; echo "$?" > "$1.gz.status" ) | head -c "$((SUB_MAXSIZE+1))" > "$1.gz"; then
+		SUB_FETCH_PARTIAL=1
+		rm -f "$1" "$1.gz" "$1.gz.status"
+		return 1
+	fi
+	if [ "$(wc -c < "$1.gz")" -gt "$SUB_MAXSIZE" ]; then
+		SUB_FETCH_PARTIAL=1
+		head -c "$SUB_MAXSIZE" "$1.gz" > "$1" || rm -f "$1"
+	else
+		[ "$(cat "$1.gz.status" 2>/dev/null)" = 0 ] || SUB_FETCH_PARTIAL=1
+		mv -f "$1.gz" "$1" || { SUB_FETCH_PARTIAL=1; rm -f "$1"; }
+	fi
+	rm -f "$1.gz" "$1.gz.status"
+	[ -s "$1" ]
 }
 
 # sub_fetch <url> <файл> [доп. опции curl] — скачать тело подписки в файл. Возврат 0 = непустое тело.
@@ -283,8 +307,7 @@ sub_get_once() {
 # (замер: из типовой строки ошибки парсер достаёт ДВА «домена»). Один загрузчик, разная политика
 # у вызывающего — вместо второй копии закачки.
 # Тело качаем В ФАЙЛ, а не в переменную: часть панелей (durev) отдаёт gzip БЕЗУСЛОВНО, а
-# NUL-байты обрезали бы shell-переменную. `od` в busybox НЕТ ⇒ магию байтов не читаем, а
-# ПРОБУЕМ разжать (удалось + непусто ⇒ был gzip).
+# NUL-байты обрезали бы shell-переменную. Возврат 0 = есть тело, SUB_FETCH_PARTIAL=1 = остаток неизвестен.
 #
 # ДВЕ ПОПЫТКИ, и это не перестраховка (замер на живом BE7000 29.07.2026): хост подписки часто
 # сам лежит в `iplist_set` (opencck) ⇒ router-локальный curl метится в mangle OUTPUT и уходит
@@ -299,15 +322,15 @@ sub_fetch() {
 	rm -f "$_o" "$_o.gz" "$_o.hdr" 2>/dev/null
 	SUB_FETCH_VIA=""
 	SUB_UI_HAVE=0; SUB_UI_UP=0; SUB_UI_DOWN=0; SUB_UI_TOTAL=0; SUB_UI_EXP=0
-	sub_get_once "$_u" "$_o" "$@"
-	if [ ! -s "$_o" ]; then
+	sub_get_once "$_u" "$_o" "$@" || [ "$?" -ne 2 ] || return 1
+	if [ ! -s "$_o" ] && [ "$SUB_FETCH_PARTIAL" = 0 ]; then
 		# Имя WAN — у владельца (ip-lib.sh::wan_iface, следит C81). До 05.09.2026 тут стояло
 		# `ip route get 8.8.8.8`: в awg-режиме плагин кладёт `<DNS>/32 dev awg0`, и при `DNS = 8.8.8.8`
 		# в конфиге «вторая попытка через WAN» биндилась В туннель — ровно в том случае, ради
 		# которого заведена (хост подписки ∈ iplist_set, VPS его не отдаёт).
 		_wan=$(wan_iface)
 		if [ -n "$_wan" ]; then
-			sub_get_once "$_u" "$_o" "$@" --interface "$_wan"
+			sub_get_once "$_u" "$_o" "$@" --interface "$_wan" || [ "$?" -ne 2 ] || return 1
 			[ -s "$_o" ] && SUB_FETCH_VIA="$_wan"
 		fi
 	fi
@@ -317,12 +340,7 @@ sub_fetch() {
 	sub_userinfo_read "$_o.hdr"
 	rm -f "$_o.hdr" 2>/dev/null
 	[ -s "$_o" ] || { rm -f "$_o" 2>/dev/null; return 1; }
-	if gunzip -c "$_o" 2>/dev/null | head -c "$SUB_MAXSIZE" > "$_o.gz" && [ -s "$_o.gz" ]; then
-		mv "$_o.gz" "$_o"
-	else
-		rm -f "$_o.gz" 2>/dev/null
-	fi
-	[ -s "$_o" ]
+	sub_unpack_body "$_o"
 }
 
 # sub_fetch_tag <tag> <url> <файл> — sub_fetch AS THIS SUBSCRIPTION'S CLIENT: its User-Agent (a later `-A` wins over
@@ -340,6 +358,11 @@ sub_tags() { [ -f "$SUBS_STATE/.subs" ] && cut -d"$SUBS_TAB" -f1 "$SUBS_STATE/.s
 # sub_url_of <tag> / sub_label_of <tag> — поля реестра (пусто = подписки нет).
 sub_url_of()   { [ -f "$SUBS_STATE/.subs" ] && grep "^$1$SUBS_TAB" "$SUBS_STATE/.subs" 2>/dev/null | head -1 | cut -d"$SUBS_TAB" -f2; }
 sub_label_of() { [ -f "$SUBS_STATE/.subs" ] && grep "^$1$SUBS_TAB" "$SUBS_STATE/.subs" 2>/dev/null | head -1 | cut -d"$SUBS_TAB" -f3-; }
+sub_url_revision() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+sub_names_from_form() {
+	sub_names_keep_other "$1" "$3" || return 1
+	printf '%s' "$2" | base64 -d 2>/dev/null | awk '{print}'
+}
 
 # sub_owner_tag <имя-конфига> — ЧЬЯ это подписка. Теги бывают префиксами друг друга
 # («liberty» ⊂ «liberty-vpn»), а «-» встречается и ВНУТРИ тега ⇒ голый префикс `sub-<tag>-`

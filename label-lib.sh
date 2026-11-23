@@ -36,6 +36,10 @@ LBL_NL='
 XT_ROAD_LOCK=/tmp/enodia-xray-test.road
 TRY_LOCK=/tmp/enodia-awg-try.lock
 TRY_LOCK_HOLDERS='transport-awg\.sh|road\.sh'
+LBL_CFG_NAMES_LOCK=/tmp/enodia-cfg-names.lock
+LBL_FAV_LOCK=${FAV_LOCK:-/tmp/enodia-server-favs.lock}
+LBL_CFG_NAMES_HOLDERS='cfg-names|subs-import\.sh'
+LBL_FAV_HOLDERS='server-favs\.sh|subs-import\.sh'
 lbl_lock_live() {   # A missing PID can be a holder still publishing it.
     _lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9')
     [ -n "$_lp" ] || { sleep 1; _lp=$(cat "$1/pid" 2>/dev/null | tr -cd '0-9'); }
@@ -49,7 +53,7 @@ lbl_rule_sweep() {
 # Лок-КАТАЛОГ (mkdir атомарен) с ПИДом. Протух — если держателя нет: пид мёртв ИЛИ уже чужой (пиды переиспользуются, а лок в
 # /tmp живёт до ребута), либо пида нет дольше, чем живой держатель пишет его (миг после mkdir): держатель умер между mkdir и
 # echo. Судим по /proc, а не по возрасту (часы роутера прыгают, C24). Не взять за 5 с — отказ словами, а не тихая потеря правки.
-lbl_lock_take() {
+lbl_lock_take() {   # lock, holder pattern, [owner PID for a nested operation]
     _lbli=0
     while ! mkdir "$1" 2>/dev/null; do
         _lbli=$((_lbli+1)); [ "$_lbli" -gt 5 ] && return 1
@@ -61,10 +65,22 @@ lbl_lock_take() {
         fi
         sleep 1
     done
-    echo $$ > "$1/pid" 2>/dev/null
-    return 0
+    echo "${3:-$$}" > "$1/pid" 2>/dev/null || { lbl_lock_drop "$1"; return 1; }
 }
 lbl_lock_drop() { rm -rf "$1" 2>/dev/null; }
+
+# Prepare a label removal beside the store. Publish only after the owner
+# commits the operation the label belongs to.
+lbl_stage_drop() {   # store, key, stage
+    [ -e "$1" ] || return 0
+    [ -f "$1" ] || return 1
+    (umask 077; lbl_commit_out "$3" awk -F "$LBL_TAB" -v key="$2" '($1 "") != (key "")' "$1") || return 1
+    if cmp -s "$1" "$3"; then rm -f "$3"; fi
+}
+lbl_publish_drop() {   # store, stage
+    [ -f "$2" ] || return 0
+    if [ -s "$2" ]; then mv -f "$2" "$1"; else rm -f "$1" "$2"; fi
+}
 
 # Имя человека → безопасная строка персиста: таб и переводы строки — в пробел (это разделители TSV, но человеку — пробел),
 # прочие управляющие байты, кавычка и обратная косая — вон (JSON), пробелы по краям — вон, подряд идущие — в один.
@@ -100,6 +116,18 @@ lbl_merge() {
     _lblw=$( { lbl_list "$2" "$3" "$4"; lbl_list "$1" "$3" "$4"; } | awk -F"$LBL_TAB" '!($1 in s) { s[$1] = 1; print }')
     lbl_commit "$1" "$_lblw"
 }
+lbl_cfg_keys() {
+    for _lcf in "$1"/configs/*.conf "$1"/xray-configs/*.json "$1"/hy2-configs/*.yaml; do
+        [ -f "$_lcf" ] || continue
+        _lcn=${_lcf##*/}
+        case "$_lcf" in
+            "$1"/configs/*) printf 'awg/%s\n' "${_lcn%.conf}" ;;
+            "$1"/xray-configs/*) printf 'xray/%s\n' "${_lcn%.json}" ;;
+            "$1"/hy2-configs/*) printf 'hy2/%s\n' "${_lcn%.yaml}" ;;
+        esac
+    done
+}
+
 # Backup import BY WHAT THE ARCHIVE BROUGHT ($3 — its keys, one per line): an archive line counts only for a key the archive
 # brought (a line stuck in the archive would land on SOMEONE ELSE'S local file of the same name — review s.96, round 3); a
 # local line of a key the archive brought is dropped even when the archive has none (it described the replaced file — the
@@ -171,3 +199,25 @@ lbl_grep() { grep "$@" || [ "$?" -le 1 ]; }
 # the lines grep finds by the pattern (a basic regex: `^key<TAB>`), then the line (none or empty — the key is simply gone).
 # A file that is not there is an empty one; a file that could not be read is a FAILURE — the writer then leaves it as it was.
 lbl_without() { if [ -f "$1" ]; then lbl_grep -v -- "$2" "$1" || return 1; fi; [ -z "${3:-}" ] || printf '%s\n' "$3"; }
+
+# Byte identity for config observations and the owners that act on them.
+lbl_cfg_digest() {
+    [ -f "$1" ] || return 1
+    _lcd=$(md5sum < "$1" 2>/dev/null) || return 1
+    printf '%s\n' "${_lcd%% *}"
+}
+lbl_cfg_matches() {
+    [ "${#2}" -eq 32 ] || return 1
+    [ "$(lbl_cfg_digest "$1")" = "$2" ]
+}
+
+# Relative config path for the archive and the installed registry.
+lbl_cfg_path() {
+    lbl_cfg_key "$1/$2" || return 1
+    case "$1" in
+        awg) printf 'configs/%s.conf\n' "$2" ;;
+        xray) printf 'xray-configs/%s.json\n' "$2" ;;
+        hy2) printf 'hy2-configs/%s.yaml\n' "$2" ;;
+        *) return 1 ;;
+    esac
+}

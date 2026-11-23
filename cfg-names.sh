@@ -26,7 +26,6 @@
 ENODIA_DIR=${ENODIA_DIR:-/data/usr/app/enodia}
 ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 STORE="$ENODIA_STATE/.cfg-names"
-LOCK=/tmp/enodia-cfg-names.lock
 # Потолок — БАЙТАМИ и ОТКАЗОМ, как у меток устройств (обрезка `cut -c` режет байты и рвёт UTF-8). Эмодзи — 4 байта: 240 байт —
 # это 60 букв даже из одних эмодзи — ровно столько панель и отправляет (dispCap режет показ по буквам ещё до отправки).
 NAME_MAX=240
@@ -36,6 +35,7 @@ command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -r "/proc/$
 if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; else
     echo "[cfg-names] нет $ENODIA_DIR/label-lib.sh — обновите установку" >&2; exit 1
 fi
+LOCK=$LBL_CFG_NAMES_LOCK
 
 key_ok() { printf '%s' "$1" | grep -qE "$KEY_RE"; }
 cmd_list() { lbl_list "$STORE" "$KEY_RE"; }
@@ -48,7 +48,7 @@ cmd_display() {
 
 # Записать «вид/файл → имя» под локом. Имя, совпавшее с именем файла, — не своё имя: строку снимаем (показ и так тот же).
 put() {   # $1 = вид/файл, $2 = имя (пусто = снять)
-    lbl_lock_take "$LOCK" 'cfg-names' || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
+    lbl_lock_take "$LOCK" "$LBL_CFG_NAMES_HOLDERS" || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
     lbl_write "$STORE" "$1" "$2" "$KEY_RE"; _pr=$?
     lbl_lock_drop "$LOCK"
     [ "$_pr" = 0 ] || { echo "[cfg-names] не удалось записать имя (место на разделе?)"; return 1; }
@@ -80,7 +80,7 @@ cmd_set() {
 # по-прежнему). Всё — одной записью под одним локом: прочитать «прежний» и записать два ключа без окна для чужой правки.
 cmd_mv() {
     key_ok "$1/$2" && key_ok "$1/$3" || { echo "[cfg-names] не тот вид или имя файла: $1/$2 → $1/$3"; return 1; }
-    lbl_lock_take "$LOCK" 'cfg-names' || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
+    lbl_lock_take "$LOCK" "$LBL_CFG_NAMES_HOLDERS" || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
     if [ "$#" -ge 4 ]; then _mvn="$4"; else _mvn=$(cmd_list | awk -F"$LBL_TAB" -v k="$1/$2" '$1==k { print $2; exit }'); fi
     # Файл уже переименован (зовут ПОСЛЕ mv): строку старого ключа снимаем В ЛЮБОМ случае — иначе её получил бы следующий файл с тем же
     # именем. Отказ очистки — ЕГО словами последней строкой (CGI берёт последнюю; ревью с.96, круг 2: причину закрывало «не удалось»).
@@ -102,10 +102,8 @@ cmd_json() {
 # у конфига, который архив ПРИВЁЗ (его файл заменён архивным), а строки имени в архиве нет, локальный показ СНИМАЕМ — он про прежний
 # сервер с тем же файлом (ревью с.96, круг 2: слияние оставляло «🇩🇪 Германия» на заменённом из архива vless). Прочие — как были.
 cmd_import() {
-    _ik=$( for _if in "$2"/configs/*.conf; do [ -f "$_if" ] && { _ib=${_if##*/}; echo "awg/${_ib%.conf}"; }; done
-           for _if in "$2"/xray-configs/*.json; do [ -f "$_if" ] && { _ib=${_if##*/}; echo "xray/${_ib%.json}"; }; done
-           for _if in "$2"/hy2-configs/*.yaml; do [ -f "$_if" ] && { _ib=${_if##*/}; echo "hy2/${_ib%.yaml}"; }; done )
-    lbl_lock_take "$LOCK" 'cfg-names' || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
+    _ik=$(lbl_cfg_keys "$2")
+    lbl_lock_take "$LOCK" "$LBL_CFG_NAMES_HOLDERS" || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
     # Архивные имена — ТОЛЬКО у конфигов, которые архив привёз: застрявшая в архиве строка (сбой снятия) иначе легла бы на ЧУЖОЙ
     # локальный конфиг с тем же файлом — класс находки 1 ревью с.95 (ревью с.96, круг 3). Алгоритм — у label-lib (тот же у road.sh).
     lbl_import "$STORE" "$1" "$_ik" "$KEY_RE"; _imr=$?
@@ -116,7 +114,7 @@ cmd_import() {
 
 cmd_merge() {
     [ -f "$1" ] || { echo "[cfg-names] нет файла $1"; return 1; }
-    lbl_lock_take "$LOCK" 'cfg-names' || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
+    lbl_lock_take "$LOCK" "$LBL_CFG_NAMES_HOLDERS" || { echo "[cfg-names] имена сейчас правит другая операция — повторите"; return 1; }
     lbl_merge "$STORE" "$1" "$KEY_RE"; _mgr=$?
     lbl_lock_drop "$LOCK"
     [ "$_mgr" = 0 ] || { echo "[cfg-names] не удалось записать имена (место на разделе?)"; return 1; }

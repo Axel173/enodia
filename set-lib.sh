@@ -35,6 +35,20 @@
 
 SET_SNAP=${SET_SNAP:-/tmp/.enodia-set-snap}
 
+# WHICH EXIT SETS MUST EXIST — the builders' own answer (review 9/10). groups.sh and geo.sh record, after each build, the exit sets
+# (grp_vpn_s<N>, geo_vpn_s<N>) their members require, by the very condition they create them with; mark-core.sh slot-wired reads it.
+# A copy of their selection drifted twice (a set-existence guess, then a registry mirror). In RAM, apart from SET_SNAP: a deactivation
+# destroys the sets and keeps this record, so a bound exit whose set is gone reads unwired; a reboot loses both, and the boot rebuild
+# writes it again. One file per builder — two writers, no shared lock.
+SET_SLOT_NEED=${SET_SLOT_NEED:-/tmp/enodia-slot-sets}
+set_slot_need() {  # set_slot_need <grp|geo> [set…] — the builder's required exit sets; a failed write keeps the previous record
+	_sl_nk=$1; shift
+	lbl_commit_out "$SET_SLOT_NEED.$_sl_nk" echo "$@" 2>/dev/null || :
+}
+set_slot_needed() {  # set_slot_needed <id> — the required sets of exit <id>, one per line; nothing = nothing to mark
+	cat "$SET_SLOT_NEED.grp" "$SET_SLOT_NEED.geo" 2>/dev/null | tr ' ' '\n' | grep -xE "(grp|geo)_vpn_s$1" || :
+}
+
 # Чем сравнивать снимок с текущим составом. `cmp` есть НЕ во всякой сборке busybox — в проекте его
 # везде гардят (gh-update.sh, install.sh), и здесь гард нужен ОСОБЕННО: без него оба
 # сравнения ниже возвращали бы «не совпало» (код 127), обе умные ветки не срабатывали бы никогда,

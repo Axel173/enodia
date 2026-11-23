@@ -11,18 +11,17 @@
 #   * марка слота = его id (0x2..0x7) -> ip rule pref 9<id> -> table 100<id>;
 #   * слот-сеты grp_vpn_s<id> / geo_vpn_s<id> МЕТИТ mark-core.sh (инвариант проекта: логика
 #     «выше miwifi/NFQUEUE» живёт в ОДНОМ месте — там). Этот скрипт правила НЕ СТАВИТ;
-#   * а вот СНИМАЕТ правила своего слота — он (unwire): del/disable обязаны прибрать за собой,
-#     mark-core чужие похороны не делает (он только переигрывает ВКЛЮЧЁННЫЕ слоты);
+#   * mark-core also owns withdrawal of the lookup when the exit is disabled or removed;
 #   * пустая table 100<id> (несущая слота не поднята) => fwmark проваливается в main =
 #     fail-open напрямую. Безопасно by construction — как и всё ядро.
 #
-# Персист: /data/usr/app/enodia-state/.slots — TSV, строка: id<TAB>name_b64<TAB>transport<TAB>config<TAB>fallback<TAB>on|off
+# Registry TSV: id<TAB>name_b64<TAB>transport<TAB>config<TAB>fallback<TAB>on|off[<TAB>keep_when_off=1]
 #   name_b64 — имя слота в base64 (кириллица/пробелы/эмодзи; JSON/TSV-эскейпа на busybox нет —
 #   тот же паттерн, что title/text в events.sh);
 #   transport — из SELECTABLE transport.sh (awg|xray|hy2|byedpi|zapret);
 #   config    — имя конфига несущей (для awg: configs/<имя>.conf; для xray: xray-configs/<имя>;
 #               для byedpi/zapret: '-' — конфига нет, стратегия своя);
-#   fallback  — main (деф.; при сбое слота его трафик через ОСНОВНОЙ выход) | direct (напрямую).
+#   fallback  — main (default), direct, or a tunnel exit ID (2..7, tunnel sources only).
 #
 # Команды:
 #   slots.sh list                — все слоты (человеко-TSV: id, имя, транспорт, конфиг, fallback, вкл)
@@ -60,9 +59,9 @@ if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 # Ожидание xtables-лока: ipt-lib.sh подменяет команду `iptables` и добавляет `-w`. Лок занят
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
-command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
-command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot()   { ct_flush; }   # no scoped flush in an old ct-lib — the global one, as before
+command -v ct_flush_slot >/dev/null 2>&1 || ct_flush_slot() { :; }
 SLOTS_FILE="$ENODIA_STATE/.slots"
+SLOTS_PENDING="$ENODIA_STATE/.slots-unapplied"
 MIN_ID=2
 MAX_ID=7
 TAB=$(printf '\t')
@@ -103,8 +102,77 @@ valid_transport() {
 }
 
 slot_line() { grep "^$1$TAB" "$SLOTS_FILE" 2>/dev/null | head -n1; }
-# The kernel's rule of exit <id> — its `ip rule` line of `fwmark 0x<id>` (mark-core owns it); empty when there is none.
-slot_rule() { ip rule show 2>/dev/null | grep "fwmark 0x$1 " | head -n1; }
+slot_tunnel() { case "$1" in awg|xray|hy2|byedpi) return 0 ;; *) return 1 ;; esac; }
+
+SWITCH_LOCK=/tmp/enodia-switching.lock
+FALLBACK_HANDOVER=/tmp/enodia-fallback-handover.lock
+
+# A disabled row still supplies its next edge. Bound malformed imports and ignore Zapret entirely.
+cmd_slot_plan() {
+    [ -s "$SLOTS_FILE" ] || return 0
+    [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 0
+    _sp_legacy="$1"; fallback_downgrading && _sp_legacy=legacy
+    _sp_off=0; [ ! -f "$ENODIA_STATE/.vpn-off" ] || _sp_off=1
+    [ "$_sp_off:$_sp_legacy" != 1:legacy ] || return 0
+    _sp_rows=$(cmd_list_admitted)
+    _sp_admitted=$(printf '%s\n' "$_sp_rows" | cut -f1 | tr '\n' ' ')
+    _sp_targets=$(printf '%s\n' "$_sp_rows" | while IFS="$TAB" read -r _spi _spt _spc _spf; do
+        slot_tunnel "$_spt" || continue
+        if slot_owned_default "$_spi" "$_spt" ||
+           { ! slot_route_default "100$_spi" && sh "$ENODIA_DIR/transport.sh" slot-ready "$_spt" >/dev/null 2>&1; }; then
+            printf ' %s ' "$_spi"
+        fi
+    done)
+    _sp_plan=$(awk -F "$TAB" -v lo="$MIN_ID" -v hi="$MAX_ID" -v legacy="$_sp_legacy" -v off="$_sp_off" -v targets="$_sp_targets" -v admitted_ids=" $_sp_admitted" '
+        function tunnel(i) { return kind[i] ~ /^(awg|xray|hy2|byedpi)$/ }
+        $1 ~ /^[0-9]$/ && $1>=lo && $1<=hi && !($1 in kind) {
+            kind[$1]=$3; edge[$1]=$5; admitted[$1]=index(admitted_ids," " $1 " ")
+        }
+        END {
+            for (i=lo; i<=hi; i++) {
+                if (!admitted[i] || !tunnel(i)) continue
+                if (legacy=="legacy") { print i, "9" i, "100" i, edge[i]; continue }
+                if (index(targets," " i " ")) print i, "9" i, "100" i
+                pref=110; seen=" " i " "; hop=edge[i]
+                while (hop ~ /^[0-9]$/ && !index(seen," " hop " ") && tunnel(hop)) {
+                    if (admitted[hop] && index(targets," " hop " ")) print i, pref++, "100" hop
+                    seen=seen hop " "; hop=edge[hop]
+                }
+                if (!off && hop!="direct") print i, pref, 1000
+            }
+        }' "$SLOTS_FILE") || return 1
+    [ "$_sp_legacy" = legacy ] || { printf '%s\n' "$_sp_plan"; return; }
+    printf '%s\n' "$_sp_plan" | while read -r _sp_id _sp_pref _sp_table _sp_edge; do
+        [ -n "$_sp_id" ] || continue
+        if [ "$_sp_edge" = main ] && ! slot_route_default "$_sp_table"; then _sp_table=1000; fi
+        printf '%s %s %s\n' "$_sp_id" "$_sp_pref" "$_sp_table"
+    done
+}
+
+fallback_dependants() {
+    [ -s "$SLOTS_FILE" ] || return 0
+    awk -F "$TAB" -v id="$1" '$3!="zapret" && $5 ""==id "" && $1!=id {printf "%s%s", sep,$1; sep=", "}' "$SLOTS_FILE"
+}
+fallback_guard() {   # source, proposed edge, source transport; called under the registry lock
+    case "$2" in main|direct) return 0 ;; esac
+    valid_id "$2" || { echo "[slots] fallback = main|direct|$MIN_ID..$MAX_ID"; return 1; }
+    slot_tunnel "$3" || { echo 'Для выхода Zapret запасной путь — основной выход или напрямую'; return 1; }
+    fallback_handover && { echo 'Идёт обновление или смена транспорта — повторите позже'; return 1; }
+    _fg_next=$2; _fg_seen=" $1 "; _fg_path=$1
+    while valid_id "$_fg_next"; do
+        _fg_path="$_fg_path → $_fg_next"
+        case "$_fg_seen" in *" $_fg_next "*) echo "Цикл запасных выходов: $_fg_path"; return 1 ;; esac
+        _fg_seen="$_fg_seen$_fg_next "
+        _fg_row=$(slot_line "$_fg_next")
+        [ -n "$_fg_row" ] || { echo "Запасной выход не найден: №$_fg_next"; return 1; }
+        slot_tunnel "$(printf '%s\n' "$_fg_row" | cut -f3)" || { echo 'Запасным может быть только туннельный выход'; return 1; }
+        _fg_next=$(printf '%s\n' "$_fg_row" | cut -f5)
+    done
+    case "$_fg_next" in main|direct) return 0 ;; *) echo '[slots] Повреждён запасной путь'; return 1 ;; esac
+}
+
+fallback_downgrading() { pid_runs "$(cat "$FALLBACK_HANDOVER/pid" 2>/dev/null)" '(gh-update|pkg-install)\.sh' 2>/dev/null; }
+fallback_handover() { [ -e "$SWITCH_LOCK" ] || fallback_downgrading || pkg_install_alive 2>/dev/null; }
 
 # --- ЗАПИСЬ В РЕЕСТР: лок + атомарная подмена ------------------------------------------------
 # Реестр правят НЕСКОЛЬКО потребителей (клик в панели, второй клик, slot-* из сторожа/heal), а
@@ -117,37 +185,125 @@ slots_lock_take() {   # $1 = сколько секунд ждать (деф. 10)
     _lw="${1:-10}"; _li=0
     while ! mkdir "$SLOTS_LOCK" 2>/dev/null; do
         _lp=$(cat "$SLOTS_LOCK/pid" 2>/dev/null | tr -d ' \r\n')
-        if [ -z "$_lp" ] || ! kill -0 "$_lp" 2>/dev/null; then
-            rm -rf "$SLOTS_LOCK" 2>/dev/null; continue        # держатель умер — лок протух
+        if { [ -z "$_lp" ] && [ "$_li" -ge 2 ]; } || { [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; }; then
+            rm -rf "$SLOTS_LOCK" 2>/dev/null        # держатель умер — лок протух
         fi
         _li=$((_li+1)); [ "$_li" -ge "$_lw" ] && return 1
         sleep 1
     done
-    echo $$ > "$SLOTS_LOCK/pid" 2>/dev/null
-    return 0
+    if echo $$ > "$SLOTS_LOCK/pid" 2>/dev/null; then
+        ENODIA_SLOTS_OWNER=$$; export ENODIA_SLOTS_OWNER
+        return 0
+    fi
+    slots_lock_drop; return 1
 }
 slots_lock_drop() { rm -rf "$SLOTS_LOCK" 2>/dev/null; }
+slots_mutate() {
+    slots_lock_take || { echo '[slots] реестр занят другой операцией — повторите'; return 1; }
+    trap 'slots_lock_drop' EXIT
+    trap 'exit 1' HUP INT TERM
+    "$@"
+}
+# Registry edits and carrier dispatch both take this lock before reading the row.
+# Imports take the road registry lock first; carrier publication may take the road wire lock last.
+slot_dispatch_carrier() {
+    ENODIA_DIR="$ENODIA_DIR" ENODIA_STATE="$ENODIA_STATE" sh "$ENODIA_DIR/transport.sh" dispatch-held "$@"
+}
 # Переписать (или УДАЛИТЬ, если полей нет) строку слота. Звать ТОЛЬКО под локом.
 # Whole or not at all (label-lib.sh): every line but the exit's own, then the exit's. A registry that could not be read is a
 # failure, not «no other exits» — the file then stays as it is. The last exit gone — the file goes too.
 # Code 1 — NOTHING was written (no room, an unreadable registry): the caller must say so and stop — an exit raised, announced
 # «создан» and absent from the registry is what the code used to answer a full partition with (review s.127).
 SLOTS_NOWRITE="[slots] реестр выходов не записался (нет места на разделе настроек?) — изменение не сохранено"
-_slots_write() {   # $1 = id ; [$2..$6 = name_b64 transport config fallback en]
+_slots_write() {   # $1 = id ; [$2..$7 = name_b64 transport config fallback en keep-token]
     _wln=""; [ "$#" -le 1 ] || _wln="$1$TAB$2$TAB$3$TAB$4$TAB$5$TAB$6"
+    [ -z "${7:-}" ] || _wln="$_wln$TAB$7"
     lbl_commit_out "$SLOTS_FILE" lbl_without "$SLOTS_FILE" "^$1$TAB" "$_wln" || return 1
     [ -s "$SLOTS_FILE" ] || rm -f "$SLOTS_FILE"
 }
 
-# A settings restore compares against the registry the road owner inspected before publishing any road changes.
-cmd_restore_registry() {   # staged registry, previous contents
-    [ -f "$1" ] && [ "$#" = 2 ] || return 1
-    slots_lock_take || return 1
-    _srr_now=""; _srr_rc=1
-    if { [ ! -e "$SLOTS_FILE" ] || _srr_now=$(cat "$SLOTS_FILE"); } && [ "$_srr_now" = "$2" ]; then
-        lbl_commit_out "$SLOTS_FILE" cat "$1" && _srr_rc=0
+cmd_validate_registry() {
+    [ -f "$1" ] && awk -F "$TAB" '
+        $1 !~ /^[2-7]$/ || seen[$1]++ || $6 !~ /^(on|off)$/ {exit 1}
+        NF!=6 && !(NF==7 && $7=="keep_when_off=1") {exit 1}
+    ' "$1" || {
+        echo '[slots] неверный формат реестра выходов'; return 1;
+    }
+}
+
+# Profile and strategy publication share the dispatcher lock. Publish each Off profile whole
+# so a failed copy leaves a usable file for the next watchdog tick.
+import_exit_files() (
+    [ -n "$1" ] || exit 0
+    umask 077
+    for _ip_dir in configs xray-configs hy2-configs; do
+        [ -d "$1/$_ip_dir" ] || continue
+        mkdir -p "$ENODIA_STATE/$_ip_dir" || exit 1
+        if [ "$_srr_off" = 0 ]; then
+            cp -rp "$1/$_ip_dir/." "$ENODIA_STATE/$_ip_dir/" || exit 1
+        else
+            for _ip_src in "$1/$_ip_dir"/* "$1/$_ip_dir"/.[!.]* "$1/$_ip_dir"/..?*; do
+                [ -e "$_ip_src" ] || continue
+                if [ -d "$_ip_src" ]; then
+                    cp -rp "$_ip_src" "$ENODIA_STATE/$_ip_dir/" || exit 1
+                else
+                    lbl_commit_out "$ENODIA_STATE/$_ip_dir/${_ip_src##*/}" cat "$_ip_src" || exit 1
+                fi
+            done
+        fi
+    done
+    for _ip_src in "$1"/.byedpi-args "$1"/.byedpi-args-s[2-7] "$1"/.zapret-args; do
+        [ ! -f "$_ip_src" ] || lbl_commit_out "$ENODIA_STATE/${_ip_src##*/}" cat "$_ip_src" || exit 1
+    done
+)
+
+# The old plugin is still the only owner that can remove its carrier.
+retire_import_carriers() {
+    _rik_kept=''
+    if [ "$_srr_off" = 1 ]; then
+        _rik_kept=$({ slot_rows off; slot_rows off '' '' "$1"; } | awk -F "$TAB" '{printf " %s ", $1}')
     fi
-    slots_lock_drop
+    while IFS="$TAB" read -r _rik_id _rik_kind _rik_cfg _rik_fb; do
+        [ -n "$_rik_id" ] || continue
+        case "$_rik_kept" in
+            *" $_rik_id "*) ;;
+            *) awk -F "$TAB" -v id="$_rik_id" -v kind="$_rik_kind" -v cfg="$_rik_cfg" '
+                $1==id && $3==kind && ($4 "")==(cfg "") && $6=="on" {same=1}
+                END {exit !same}' "$1" && continue ;;
+        esac
+        slot_deactivate "$_rik_id" || return 1
+        _srr_retired="$_srr_retired $_rik_id"
+    done <<EOF
+$(cmd_list_enabled)
+EOF
+}
+
+# A settings restore compares against the registry the road owner inspected before publishing any road changes.
+cmd_restore_registry() {   # staged registry, previous contents, [staged off intent], [archive root], [switch/restore holder PID]
+    _srr_holder=${5:-}; _srr_archive=${4:-}; _srr_registry=$1
+    [ -f "$_srr_registry" ] || _srr_registry=$SLOTS_FILE
+    cmd_validate_registry "$_srr_registry" || return 1
+    slots_lock_take || return 1
+    trap 'slots_lock_drop' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    _srr_now=""; _srr_rc=1; _srr_retired=''; _srr_off=0
+    [ ! -f "$ENODIA_STATE/.vpn-off" ] && [ ! -f "${3:-}" ] || _srr_off=1
+    if { { [ -e "$SWITCH_LOCK" ] && { [ -z "$_srr_holder" ] || [ "$(cat "$SWITCH_LOCK" 2>/dev/null)" != "$_srr_holder" ]; }; } ||
+         fallback_downgrading || pkg_install_alive 2>/dev/null; } && awk -F "$TAB" '$5 ~ /^[0-9]+$/ {f=1} END {exit !f}' "$_srr_registry"; then
+        echo 'Идёт обновление или смена транспорта — повторите позже'
+    elif { [ ! -e "$SLOTS_FILE" ] || _srr_now=$(cat "$SLOTS_FILE"); } && [ "$_srr_now" = "$2" ]; then
+        if [ -n "$_srr_holder" ] && [ -f "$ENODIA_DIR/subs-import.sh" ]; then
+            sh "$ENODIA_DIR/subs-import.sh" restore-lock "$_srr_holder" || return 1
+        fi
+        if retire_import_carriers "$_srr_registry" &&
+           import_exit_files "$_srr_archive" &&
+           { [ ! -f "${3:-}" ] || [ -f "$ENODIA_STATE/.vpn-off" ] || : > "$ENODIA_STATE/.vpn-off"; } &&
+           { [ "$_srr_registry" = "$SLOTS_FILE" ] || lbl_commit_out "$SLOTS_FILE" cat "$_srr_registry"; }; then
+            _srr_rc=0
+        elif [ "$_srr_off" = 0 ]; then
+            for _srr_id in $_srr_retired; do slot_restore_carrier "$_srr_id"; done
+        fi
+    fi
     return "$_srr_rc"
 }
 
@@ -169,7 +325,7 @@ cmd_holders() {
 
 cmd_list() {
     [ -s "$SLOTS_FILE" ] || return 0
-    while IFS="$TAB" read -r id nb t cfg fb en; do
+    while IFS="$TAB" read -r id nb t cfg fb en keep || [ -n "$id" ]; do
         [ -n "$id" ] || continue
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$(b64d "$nb")" "$t" "$cfg" "$fb" "$en"
     done < "$SLOTS_FILE"
@@ -183,13 +339,8 @@ cmd_configs() {
     awk -F"$TAB" -v t="$1" '($3 "") == (t "") && $4 != "" && $4 != "-" { print $4 }' "$SLOTS_FILE" 2>/dev/null
 }
 
-cmd_list_enabled() {
-    [ -s "$SLOTS_FILE" ] || return 0
-    while IFS="$TAB" read -r id nb t cfg fb en; do
-        [ "$en" = on ] || continue
-        printf '%s\t%s\t%s\t%s\n' "$id" "$t" "$cfg" "$fb"
-    done < "$SLOTS_FILE"
-}
+cmd_list_enabled() { slot_rows enabled; }
+cmd_list_admitted() { slot_rows "${1:-admitted}"; }
 
 # --- ДОМЕНЫ ПРИВЯЗОК ВЫХОДА -----------------------------------------------------------------
 # «Какие домены реально едут через выход №N» — ЕДИНЫЙ ответ на всех потребителей: кандидаты
@@ -253,7 +404,7 @@ cmd_domains() {
         # Транспорт учитываем, только если zapret и правда активен (иначе его сеты не в игре).
         [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = zapret ] && collect_domains 0
         if [ -s "$SLOTS_FILE" ]; then
-            while IFS="$TAB" read -r _zi _zn _zt _zc _zf _ze; do
+            while IFS="$TAB" read -r _zi _zn _zt _zc _zf _ze _zk; do
                 [ "$_ze" = on ] && [ "$_zt" = zapret ] && collect_domains "$_zi"
             done < "$SLOTS_FILE"
         fi
@@ -305,7 +456,7 @@ slot_route_sets() {   # <id|0|zapret> -> сеты, попадание в кот�
             _rs=""
             [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = zapret ] && _rs="zapret_set zapret_cidr zapret_dom geo_zapret"
             if [ -s "$SLOTS_FILE" ]; then
-                while IFS="$TAB" read -r _zi _zn _zt _zc _zf _ze; do
+                while IFS="$TAB" read -r _zi _zn _zt _zc _zf _ze _zk; do
                     [ "$_ze" = on ] && [ "$_zt" = zapret ] && _rs="$_rs grp_vpn_s$_zi geo_vpn_s$_zi"
                 done < "$SLOTS_FILE"
             fi
@@ -352,52 +503,45 @@ cmd_route() {   # <id|0|zapret> <домен>
 #   карриер (awg/xray/hy2/byedpi): есть ip rule метки 0x<id> + default в table 100<id>;
 #   zapret:                        марки нет вовсе (mark-core его пропускает) — судим по ОБЩЕМУ
 #                                  nfqws + scoped NFQUEUE на сетах слота.
-# Ответы: up (несёт свой трафик) · dead (маршрут есть, но демон выхода не слушает — сайты выхода
-#         не откроются, чинит сторож) · fallback (несущей нет, метка уведена в основной туннель) ·
+# Ответы: up (несёт свой трафик) · fallback (трафик идёт через запасной выход или основной туннель) ·
 #         direct (несущей нет, метка проваливается в main ⇒ трафик выхода идёт НАПРЯМУЮ мимо VPN) ·
 #         down (правил выхода нет вовсе — лечит «Починить правила») ·
 #         idle (zapret-выход без привязок: десинкать нечего, это не поломка).
-slot_state() {   # <id> <transport> <fallback>
-    _sid="$1"; _stp="$2"
-    if [ "$_stp" = zapret ]; then
-        _sets=0
-        ipset list -n 2>/dev/null | grep -qx "grp_vpn_s$_sid" && _sets=1
-        ipset list -n 2>/dev/null | grep -qx "geo_vpn_s$_sid" && _sets=1
-        [ "$_sets" = 1 ] || { echo idle; return 0; }
-        _srul=0
-        iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q -- "--match-set grp_vpn_s$_sid dst" && _srul=1
-        iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q -- "--match-set geo_vpn_s$_sid dst" && _srul=1
-        _spid=$(cat /tmp/enodia-zapret-nfqws.pid 2>/dev/null | tr -d ' \r\n')
-        if [ "$_srul" = 1 ] && [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null; then echo up; else echo down; fi
-        return 0
+slot_report() {   # id, transport, enabled
+    [ "$3" = on ] || { printf 'off\tunavailable\n'; return; }
+    if ! slot_admitted "$1" "$2"; then printf 'down\tunavailable\n'; return; fi
+    if [ "$2" = zapret ]; then
+        if sh "$ENODIA_DIR/zapret.sh" slot-health "$1" >/dev/null 2>&1; then printf 'up\tself\n'
+        else printf 'down\tunavailable\n'; fi
+        return
     fi
-    _srl=$(slot_rule "$_sid")
-    [ -n "$_srl" ] || { echo down; return 0; }
-    if ip route show table "100$_sid" 2>/dev/null | grep -q '^default'; then   # not-wan: несущая СЛОТА (table 100N), а не основная и не WAN
-        # Маршрут есть — но у socks-выходов (byedpi/xray/hy2) он ведёт в tun2socks, а тот без
-        # ЖИВОГО socks просто глотает пакеты: «маршрут на месте» ≠ «выход везёт». Демон мог
-        # умереть между тиками сторожа (ciadpi самовыключается на accept-EINVAL) — тогда сайты
-        # выхода не откроются ВООБЩЕ (не «поедут другим путём»), и это отдельный ответ.
-        case "$_stp" in
-            byedpi|xray|hy2)
-                netstat -ltn 2>/dev/null | grep -q "127.0.0.1:$(slot_socks_port "$_sid")" || { echo dead; return 0; } ;;
-        esac
-        echo up; return 0
-    fi
-    # Несущей нет. Куда РЕАЛЬНО едет метка сейчас: правило на table 1000 = в основной туннель;
-    # иначе метка проваливается в main = напрямую (даже если в реестре fallback=main — mark-core
-    # переиграет правило лишь следующим проходом/тиком сторожа, а трафик идёт уже сейчас).
-    case "$_srl" in *"lookup 1000"*) echo fallback ;; *) echo direct ;; esac
+    _srl=$(ip rule show 2>/dev/null | slot_rule_rows "$1")
+    [ -n "$_srl" ] || { printf 'down\tunavailable\n'; return; }
+    _srt=$(printf '%s\n' "$_srl" | slot_rule_path)
+    case "$_srt" in
+        1000) if [ -f "$ENODIA_STATE/.vpn-off" ]; then printf 'direct\tdirect\n'; else printf 'fallback\tmain\n'; fi ;;
+        100[2-7])
+            _target=${_srt#100}
+            if [ "$_target" = "$1" ]; then _path=self; _health=up; _type=$2
+            else _path=$_target; _health=fallback; _type=$(slot_line "$_target" | cut -f3); fi
+            case "$_type" in
+                xray|hy2|byedpi)
+                    netstat -ltn 2>/dev/null | grep -q "127\.0\.0\.1:$(slot_socks_port "$_target")[[:space:]]" || _health=dead ;;
+            esac
+            if [ "$_health" = up ] && ! sh "$ENODIA_DIR/mark-core.sh" slot-wired "$1" "$2" >/dev/null 2>&1; then
+                printf 'down\tunavailable\n'
+            else printf '%s\t%s\n' "$_health" "$_path"; fi ;;
+        *) printf 'direct\tdirect\n' ;;
+    esac
 }
-
-# Машинный срез состояний: id⇥state по КАЖДОМУ слоту реестра (выключенный = off). Читают
+# Machine status: id⇥state⇥installed path for every exit in the registry. The first two columns retain their meaning.
 # cgi-bin/status (индикатор «выход не работает» в шапке) и диагностика.
 cmd_state() {
     [ -s "$SLOTS_FILE" ] || return 0
-    while IFS="$TAB" read -r id nb t cfg fb en; do
+    while IFS="$TAB" read -r id nb t cfg fb en keep || [ -n "$id" ]; do
         [ -n "$id" ] || continue
-        if [ "$en" = on ]; then _st=$(slot_state "$id" "$t" "$fb"); else _st=off; fi
-        printf '%s%s%s\n' "$id" "$TAB" "$_st"
+        valid_id "$id" || continue
+        printf '%s%s%s\n' "$id" "$TAB" "$(slot_report "$id" "$t" "$en")"
     done < "$SLOTS_FILE"
 }
 
@@ -432,15 +576,17 @@ cmd_list_json() {
     _wpl=''; if [ -f "$ENODIA_DIR/warp.sh" ]; then _wpl=$(sh "$ENODIA_DIR/warp.sh" list 2>/dev/null | cut -f1); fi
     printf '{"slots":['
     if [ -s "$SLOTS_FILE" ]; then
-        while IFS="$TAB" read -r id nb t cfg fb en; do
-            [ -n "$id" ] || continue
+        while IFS="$TAB" read -r id nb t cfg fb en keep || [ -n "$id" ]; do
+            valid_id "$id" || continue
             _n=$((_n+1))
             [ "$_first" = 1 ] || printf ','
             _first=0
             slot_bindings "$id"
-            # state — честный статус (см. slot_state): панель красит точку и объясняет, почему
+            # state — честный статус (см. slot_report): панель красит точку и объясняет, почему
             # включённый выход не везёт трафик. Выключенный не щупаем (правил у него нет).
-            if [ "$en" = on ]; then _st=$(slot_state "$id" "$t" "$fb"); else _st=off; fi
+            _sr=$(slot_report "$id" "$t" "$en")
+            _st=${_sr%%"$TAB"*}; _path=${_sr#*"$TAB"}
+            case "$fb" in main|direct) ;; *) slot_tunnel "$t" && valid_id "$fb" || fb=main ;; esac
             # key_clash — КТО МЕШАЕТ этому awg-выходу (main | s<N> | пусто), и вопрос у включённого и выключенного разный:
             # включённому — «почему не поднимается» (live: держатель занимает сессию СЕЙЧАС — cmd_slot_up откажет, а состояние
             # скажет лишь «несущая не поднялась»), выключенному — «почему не включится» (intent: откажет форма). Иначе работающий
@@ -459,8 +605,9 @@ cmd_list_json() {
                 _rlegacy=$(printf '%s\n' "$_rdl" | awk -F"$TAB" -v i="$id" '$2 == i && $1 ~ /^awg\// { printf "%s\"%s\"", (c++ ? "," : ""), substr($1,5) }')
             fi
             _wp=false; if [ "$t" = awg ] && [ -n "$_wpl" ] && printf '%s\n' "$_wpl" | grep -qxF -- "$cfg"; then _wp=true; fi
-            printf '{"id":%s,"name_b64":"%s","transport":"%s","config":"%s","fallback":"%s","enabled":%s,"state":"%s","groups":%s,"geo":%s,"geo_keys":[%s],"key_clash":"%s","riders":[%s],"road_riders":[%s],"warp":%s}' \
-                "$id" "$nb" "$t" "$cfg" "$fb" "$([ "$en" = on ] && echo true || echo false)" "$_st" "$_bc" "$_be" "$_bk" "$_kcl" "$_rlegacy" "$_rdr" "$_wp"
+            _keep_json=false; [ "$keep" != keep_when_off=1 ] || _keep_json=true
+            printf '{"id":%s,"name_b64":"%s","transport":"%s","config":"%s","fallback":"%s","enabled":%s,"state":"%s","groups":%s,"geo":%s,"geo_keys":[%s],"key_clash":"%s","riders":[%s],"road_riders":[%s],"warp":%s,"path":"%s","unapplied":%s,"keep_when_off":%s}' \
+                "$id" "$nb" "$t" "$cfg" "$fb" "$([ "$en" = on ] && echo true || echo false)" "$_st" "$_bc" "$_be" "$_bk" "$_kcl" "$_rlegacy" "$_rdr" "$_wp" "$_path" "$([ -f "$SLOTS_PENDING.$id" ] && echo true || echo false)" "$_keep_json"
         done < "$SLOTS_FILE"
     fi
     # Транспорты, готовые нести ДОП-ВЫХОД, — от ОРКЕСТРАТОРА (`transport.sh slot-list`),
@@ -567,14 +714,47 @@ awg_key_live() {   # $1 = iface -> «ключ:пир» живого демона
     printf '%s\n' "$_kp" | while IFS= read -r _kq; do [ -n "$_kq" ] && printf '%s:%s\n' "$_kl" "$_kq"; done
     return 0
 }
+# Public keys of the runtime carriers, including a warm AWG main and an exit whose saved config changed.
+# The registry can name a different file or key by now. An unreadable live interface invalidates the snapshot.
+cmd_live_awg_keys() {
+    command -v ip >/dev/null 2>&1 || return 1
+    _lpk_bin=$(bin_path awg)
+    _lpk_ids=0; _lpk_id=$MIN_ID
+    while [ "$_lpk_id" -le "$MAX_ID" ]; do _lpk_ids="$_lpk_ids $_lpk_id"; _lpk_id=$((_lpk_id+1)); done
+    for _lpk_id in $_lpk_ids; do
+        [ "$_lpk_id:${1:-}" != 0:stop-selected-reserve ] || continue
+        ip link show "awg$_lpk_id" >/dev/null 2>&1 || continue
+        [ -x "$_lpk_bin" ] || return 1
+        _lpk_pub=$("$_lpk_bin" show "awg$_lpk_id" public-key 2>/dev/null) || return 1
+        case "$_lpk_pub" in '(none)') continue ;; '') return 1 ;; esac
+        printf '%s\t%s\n' "$_lpk_id" "$_lpk_pub"
+    done
+}
+delete_live_holder() {
+    _dlh_rows=$(cmd_live_awg_keys "${2:-}") || return 2
+    [ -n "$_dlh_rows" ] || return 1
+    _dlh_priv=$(awg_key_file "$AWG_CONFIGS/$1.conf" | sed -n '1s/:.*//p')
+    [ -n "$_dlh_priv" ] || return 1
+    _dlh_bin=$(bin_path awg)
+    _dlh_pub=$(printf '%s\n' "$_dlh_priv" | "$_dlh_bin" pubkey 2>/dev/null) || return 2
+    [ -n "$_dlh_pub" ] || return 2
+    _dlh_id=$(printf '%s\n' "$_dlh_rows" | awk -F "$TAB" -v key="$_dlh_pub" '$2 == key { print $1; exit }')
+    case "$_dlh_id" in
+        '') return 1 ;;
+        0)
+            _dlh_at=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
+            if [ ! -f "$ENODIA_STATE/.vpn-off" ] && [ "${_dlh_at:-awg}" = awg ]; then key_busy_msg "$1" main
+            else echo 'Конфиг используется резервом AmneziaWG — сначала выберите другой сервер.'; fi ;;
+        *) key_busy_msg "$1" "s$_dlh_id" ;;
+    esac
+}
 key_row() {   # $1 = кто, $2 = имя, $3 = идентичности строками -> R-строки
     printf '%s\n' "$3" | while IFS= read -r _kr1; do [ -n "$_kr1" ] && printf 'R\t%s\t%s\t%s\n' "$1" "$2" "$_kr1"; done
     return 0
 }
-# key_rows <intent|live> -> держатели строками «R⇥кто⇥имя⇥идентичность» (кто = main | s<N>). Считаются ОДИН раз на вопрос:
+# key_rows <intent|live|enabled> -> держатели строками «R⇥кто⇥имя⇥идентичность» (кто = main | s<N>). Считаются ОДИН раз на вопрос:
 # живой ключ — это два вызова `awg` на интерфейс. Имена переменных — СВОИ (`_r*`): `local` в busybox sh нет.
-key_rows() {
-    _rmode="$1"
+key_main_rows() {
     _rm=$(awg_key_file "$ENODIA_STATE/awg.conf"); _ra=$(cat "$ENODIA_STATE/.active" 2>/dev/null | tr -d ' \r\n')
     if [ "$_rmode" = intent ] || [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')" = awg ]; then
         key_row main "$_ra" "$_rm"
@@ -593,12 +773,21 @@ key_rows() {
             key_row main "$_rh" "$(awg_key_file "$AWG_CONFIGS/$_rh.conf")"
         fi
     fi
+}
+key_rows() {
+    _rmode="$1"
+    [ "$_rmode" = enabled ] || key_main_rows
     [ -s "$SLOTS_FILE" ] || return 0
     # `|| [ -n ]` — последняя строка без перевода строки не теряется (busybox read).
-    while IFS="$TAB" read -r _ri _rn _rt _rc _rf _re || [ -n "$_ri" ]; do
+    while IFS="$TAB" read -r _ri _rn _rt _rc _rf _re _rk || [ -n "$_ri" ]; do
         [ "$_rt" = awg ] || continue
-        if [ "$_rmode" = intent ]; then _rk=$(awg_key_file "$AWG_CONFIGS/$_rc.conf")
-        else [ "$_re" = on ] || continue; _rk=$(awg_key_live "awg$_ri"); fi
+        case "$_rmode" in
+            intent)  _rk=$(awg_key_file "$AWG_CONFIGS/$_rc.conf") ;;
+            live)    [ "$_re" = on ] || continue; _rk=$(awg_key_live "awg$_ri") ;;
+            enabled) [ "$_re" = on ] || continue; _rk=$(awg_key_file "$AWG_CONFIGS/$_rc.conf")
+                     # The enabled exit references this name even when the file is malformed.
+                     [ -n "$_rk" ] || { printf 'R\ts%s\t%s\t\n' "$_ri" "$_rc"; continue; } ;;
+        esac
         key_row "s$_ri" "$_rc" "$_rk"
     done < "$SLOTS_FILE"
 }
@@ -611,6 +800,8 @@ $1 == "C" {
     ck = $3; sub(/:.*/, "", ck); ce = ""; if ($3 ~ /:/) { ce = $3; sub(/^[^:]*:/, "", ce) }
     for (i = 1; i <= n; i++) {
         if (rw[i] == self) continue
+        if (byname && (rn[i] "") == ($2 "")) { print $2 "\t" rw[i] "\t" rn[i]; continue }
+        if (ck == "") continue
         rk = rp[i]; sub(/:.*/, "", rk)
         if (rk == "" || rk != ck) continue
         re = ""; if (rp[i] ~ /:/) { re = rp[i]; sub(/^[^:]*:/, "", re) }
@@ -618,8 +809,8 @@ $1 == "C" {
         print $2 "\t" rw[i] "\t" rn[i]
     }
 }'
-key_match() {   # $1 = R-строки (key_rows), $2 = self; stdin — C-строки
-    { printf '%s\n' "$1"; cat; } | awk -F"$TAB" -v self="$2" "$KEY_MATCH_AWK"
+key_match() {   # $1 = R-строки (key_rows), $2 = self, $3 = compare names too; stdin — C-строки
+    { printf '%s\n' "$1"; cat; } | awk -F"$TAB" -v self="$2" -v byname="${3:-0}" "$KEY_MATCH_AWK"
 }
 # Человеческая причина отказа — ОДНА формулировка на все точки (выход и основной канал говорят одно).
 # $1 = имя конфига, $2 = «main⇥имя» | «s<N>⇥имя» (держатель).
@@ -643,13 +834,23 @@ key_busy_msg() {
 key_self() { case "$1" in main|none) printf '%s' "$1" ;; *) printf 's%s' "$1" ;; esac; }
 # key-holder <имя конфига> <main|2..7> [live] — CLI-вход для switch-vpn.sh (intent) и transport-awg.sh (live).
 # Код: 0 — ЗАНЯТ (в stdout причина словами), 1 — свободен, 2 — судить не по чему (нет файла/ключа).
+# enabled is the delete check: include enabled intents and the current public key of every carrying interface.
 cmd_key_holder() {
-    _kc="$1"; _ks=$(key_self "$2"); _kmode=intent; [ "$3" = live ] && _kmode=live
+    _kc="$1"; _ks=$(key_self "$2"); _kmode=intent; _kn=0
+    case "$3" in live) _kmode=live ;; enabled) _kmode=enabled; _kn=1 ;; esac
     valid_config "$_kc" && [ "$_kc" != '-' ] || return 2
     [ -f "$AWG_CONFIGS/$_kc.conf" ] || return 2
-    _kid=$(awg_ids "$AWG_CONFIGS/$_kc.conf"); [ -n "$_kid" ] || return 2
-    _kh=$(printf '%s\n' "$_kid" | key_match "$(key_rows "$_kmode")" "$_ks" | head -n1 | cut -f2-)
-    [ -n "$_kh" ] || return 1
+    _kid=$(awg_ids "$AWG_CONFIGS/$_kc.conf")
+    if [ -z "$_kid" ]; then
+        [ "$_kn" = 1 ] || return 2
+        _kid=$(printf 'C\t%s\t' "$_kc")
+    fi
+    _kh=$(printf '%s\n' "$_kid" | key_match "$(key_rows "$_kmode")" "$_ks" "$_kn" | head -n1 | cut -f2-)
+    if [ -z "$_kh" ]; then
+        [ "$_kmode" = enabled ] || return 1
+        delete_live_holder "$_kc" "${4:-}"
+        return $?
+    fi
     key_busy_msg "$_kc" "$_kh"
     return 0
 }
@@ -717,25 +918,33 @@ slot_free_id() {
 }
 SLOTS_FULL="[slots] мест нет: заняты все $((MAX_ID-MIN_ID+1)) доп-выходов"
 
+# Revalidate the file under the same registry lock that deletion takes.
+slot_config_present() {
+    case "$1/$2" in
+        */-) return 0 ;;
+        awg/*) [ -f "$AWG_CONFIGS/$2.conf" ] ;;
+        xray/*) [ -f "$ENODIA_STATE/xray-configs/$2.json" ] ;;
+        hy2/*) [ -f "$ENODIA_STATE/hy2-configs/$2.yaml" ] ;;
+        *) return 0 ;;
+    esac && return 0
+    echo 'Конфиг для выхода не найден — выберите сервер.'
+    return 1
+}
+
 cmd_add() {
     name="$1"; t="$2"; cfg="${3:--}"; fb="${4:-main}"
+    keep=$(keep_token "${5:-0}") || { echo '[slots] keep_when_off = 0|1'; return 1; }
     [ -n "$name" ] || { echo "[slots] имя обязательно"; return 1; }
     valid_transport "$t" || { echo "[slots] неизвестный транспорт '$t' (awg|xray|hy2|byedpi|zapret)"; return 1; }
     valid_config "$cfg" || { echo "[slots] недопустимое имя конфига (буквы, цифры, . _ - или '-')"; return 1; }
-    case "$fb" in main|direct) ;; *) echo "[slots] fallback = main|direct"; return 1 ;; esac
-    # Лок держим на ВЕСЬ выбор id + запись: без него два клика панели выбрали бы ОДИН свободный
-    # id и второй затёр бы первый (или строки склеились). Сверка ключа — ПОД ТЕМ ЖЕ локом: два одновременных add на один
-    # свободный конфиг иначе оба прошли бы гард (ревью 27.09.2026). У set/enable гонку добирает последний рубеж — подъём
-    # выхода (live): из двух выходов на одном ключе встаёт первый.
-    slots_lock_take || { echo "[slots] реестр занят другой операцией — повторите"; return 1; }
-    slot_key_guard "$t" "$cfg" new || { slots_lock_drop; return 1; }
-    slot_ram_guard "$t" || { slots_lock_drop; return 1; }
-    id=$(slot_free_id) || { slots_lock_drop; echo "$SLOTS_FULL"; return 1; }
-    _slots_write "$id" "$(b64e "$name")" "$t" "$cfg" "$fb" on || { slots_lock_drop; echo "$SLOTS_NOWRITE"; return 1; }
-    slots_lock_drop
+    slot_config_present "$t" "$cfg" && slot_key_guard "$t" "$cfg" new || return 1
+    slot_ram_guard "$t" || return 1
+    id=$(slot_free_id) || { echo "$SLOTS_FULL"; return 1; }
+    fallback_guard "$id" "$fb" "$t" || return 1
+    _slots_write "$id" "$(b64e "$name")" "$t" "$cfg" "$fb" on "$keep" || { echo "$SLOTS_NOWRITE"; return 1; }
     # Строка пишется сразу en=on ⇒ выход ОБЯЗАН начать работать здесь же, а не через тик
     # watchdog: поднимаем несущую и переигрываем владельцев (ровно как enable) — см. slot_activate.
-    slot_activate "$id"
+    slot_apply "$id" slot_rebind || return 1
     # «-» = «конфига нет» (zapret) — в сообщении не показываем, иначе «(zapret · -)».
     if [ "$cfg" = '-' ]; then _cfgh=""; else _cfgh=" · $cfg"; fi
     echo "[slots] выход №$id «$name» ($t$_cfgh) создан, fallback=$fb"
@@ -775,13 +984,19 @@ cmd_rename_config() {
 # `|| [ -n ]` — последняя строка без перевода строки не теряется (busybox read).
 _slots_renamed() {
     _rnn=0
-    while IFS="$TAB" read -r _i _nb _t _c _f _e || [ -n "$_i" ]; do
+    while IFS="$TAB" read -r _i _nb _t _c _f _e _k || [ -n "$_i" ]; do
         [ -n "$_i" ] || continue
         if [ "$_t" = "$1" ] && [ "$_c" = "$2" ]; then _c="$3"; _rnn=$((_rnn+1)); fi
-        [ "${4:-}" = count ] || printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_i" "$_nb" "$_t" "$_c" "$_f" "$_e"
+        if [ "${4:-}" != count ]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s' "$_i" "$_nb" "$_t" "$_c" "$_f" "$_e"
+            [ -z "$_k" ] || printf '\t%s' "$_k"
+            printf '\n'
+        fi
     done < "$SLOTS_FILE" || return 1
     [ "${4:-}" != count ] || echo "$_rnn"
 }
+
+keep_token() { case "$1" in 0) return 0 ;; 1) printf 'keep_when_off=1' ;; *) return 1 ;; esac; }
 
 # Переписать одно поле строки id. Правка через временный файл + mv (атомарно на /data,
 # как весь персист проекта) — sed по TSV с base64 внутри хрупок, собираем строку заново.
@@ -791,18 +1006,40 @@ cmd_set() {
     line=$(slot_line "$id"); [ -n "$line" ] || { echo "[slots] нет слота №$id"; return 1; }
     old_nb=$(echo "$line" | cut -f2); old_t=$(echo "$line" | cut -f3)
     old_cfg=$(echo "$line" | cut -f4); old_fb=$(echo "$line" | cut -f5); old_en=$(echo "$line" | cut -f6)
+    old_keep=$(printf '%s\n' "$line" | cut -f7)
+    reup=0
     case "$field" in
         name)      old_nb=$(b64e "$val") ;;
         transport) valid_transport "$val" || { echo "[slots] неизвестный транспорт '$val'"; return 1; }
+                   if [ "$val" = zapret ] && [ -n "$(fallback_dependants "$id")" ]; then
+                       echo 'Запасным может быть только туннельный выход'; return 1
+                   fi
+                   if [ "$old_t" = zapret ] && valid_id "$old_fb"; then old_fb=main; fi
+                   if [ "$val" = zapret ]; then fallback_guard "$id" "$old_fb" "$val" || return 1; fi
                    old_t="$val" ;;
         config)    valid_config "$val" || { echo "[slots] недопустимое имя конфига (буквы, цифры, . _ - или '-')"; return 1; }
                    old_cfg="$val" ;;
-        fallback)  case "$val" in main|direct) ;; *) echo "[slots] fallback = main|direct"; return 1 ;; esac
+        fallback)  fallback_guard "$id" "$val" "$old_t" || return 1
                    old_fb="$val" ;;
-        *) echo "[slots] поле = name|transport|config|fallback"; return 1 ;;
+        keep_when_off)
+            new_keep=$(keep_token "$val") || { echo '[slots] keep_when_off = 0|1'; return 1; }
+            if [ "$old_en" = on ] && [ -f "$ENODIA_STATE/.vpn-off" ] && [ "$old_keep" != "$new_keep" ]; then
+                if [ -z "$new_keep" ]; then
+                    slot_disable "$id" _slots_write "$id" "$old_nb" "$old_t" "$old_cfg" "$old_fb" "$old_en" '' || return 1
+                    echo "[slots] слот №$id: $field обновлён"
+                    return 0
+                fi
+                slot_ram_guard "$old_t" || return 1
+                reup=1
+            fi
+            old_keep=$new_keep ;;
+        *) echo "[slots] поле = name|transport|config|fallback|keep_when_off"; return 1 ;;
     esac
     # Сверка ключа — и при смене КОНФИГА, и при смене ТРАНСПОРТА на awg (конфиг тот, что уже записан).
-    case "$field" in transport|config) slot_key_guard "$old_t" "$old_cfg" "$id" || return 1 ;; esac
+    case "$field" in transport|config)
+        [ "$old_en" != on ] || slot_config_present "$old_t" "$old_cfg" || return 1
+        slot_key_guard "$old_t" "$old_cfg" "$id" || return 1 ;;
+    esac
     # Road exit: only AmneziaWG carries a road, and its config must go direct itself (road.sh, one step).
     [ "$field" = transport ] && [ "$old_t" != awg ] && { slot_road_guard "$id" "меняйте транспорт" || return 1; }
     # A heavy daemon replacing a light one on an exit that runs (AmneziaWG → Xray) is a second Go daemon now: asked as add/enable are;
@@ -821,57 +1058,88 @@ cmd_set() {
     # ТРАНСПОРТА ещё и осиротила бы старую несущую (следующий slot-down ушёл бы уже в НОВЫЙ плагин,
     # и демон/tun/table прежнего остались бы жить). Поэтому: down СТАРЫМ плагином (реестр ещё
     # старый и en=on — диспетч требует именно этого) → запись → up НОВЫМ.
-    reup=0
     case "$field" in transport|config) [ "$old_en" = on ] && reup=1 ;; esac
-    if [ "$reup" = 1 ]; then slot_deactivate "$id" || return 1; fi
-    # Not saved — the registry is busy for longer than the wait, or the write did not land: the registry kept the OLD line and
-    # its carrier was taken down above — bring that one back, whichever of the two it was.
-    _swhy=""
-    if ! slots_lock_take; then _swhy="[slots] реестр занят другой операцией — повторите"
-    elif ! _slots_write "$id" "$old_nb" "$old_t" "$old_cfg" "$old_fb" "$old_en"; then slots_lock_drop; _swhy=$SLOTS_NOWRITE
-    else slots_lock_drop; fi
-    if [ -n "$_swhy" ]; then
-        echo "$_swhy"
-        [ "$reup" = 1 ] && [ -f "$ENODIA_DIR/transport.sh" ] && sh "$ENODIA_DIR/transport.sh" slot-up "$id" >/dev/null 2>&1
+    retire=$reup
+    [ "$field:$val" != keep_when_off:1 ] || retire=0
+    if [ "$retire" = 1 ]; then slot_deactivate "$id" || return 1; fi
+    # A refused write leaves the old row authoritative. Restore its carrier before releasing the registry lock.
+    if ! _slots_write "$id" "$old_nb" "$old_t" "$old_cfg" "$old_fb" "$old_en" "$old_keep"; then
+        echo "$SLOTS_NOWRITE"
+        [ "$retire" != 1 ] || slot_restore_carrier "$id"
         return 1
     fi
-    # VPN выключен вручную — несущая выхода не поднимется (плагин при флаге отказывает, daemon-lib.sh::carrier_run), и «идёт по
-    # запасному пути» было бы неправдой: при выключенном VPN выход не ведёт никуда. Поднимет «Включить VPN».
-    if [ "$reup" = 1 ] && [ -f "$ENODIA_STATE/.vpn-off" ]; then
-        echo "[slots] слот №$id: $field обновлён; VPN выключен вручную — выход поднимется при включении"
-        return 0
-    fi
     if [ "$reup" = 1 ]; then
-        if [ -f "$ENODIA_DIR/transport.sh" ] && sh "$ENODIA_DIR/transport.sh" slot-up "$id" >/dev/null 2>&1; then
-            echo "[slots] слот №$id: $field обновлён, несущая перезапущена"
-        else
-            echo "[slots] слот №$id: $field обновлён, но несущая не поднялась — выход идёт по запасному пути"
+        if ! _cs_state=$(slot_apply "$id" slot_rebind report); then
+            printf '%s\n' "$_cs_state"
+            return 1
         fi
+        case "$_cs_state" in
+            up) echo "[slots] слот №$id: $field обновлён, несущая перезапущена" ;;
+            off) echo "[slots] слот №$id: $field обновлён; VPN выключен вручную — выход поднимется при включении" ;;
+            *) echo "[slots] слот №$id: $field обновлён, но несущая не поднялась — выход идёт по запасному пути" ;;
+        esac
         return 0
     fi
     # fallback — политику ip rule держит mark-core (владелец правил слота): без переигровки у
     # выхода с УПАВШЕЙ несущей осталась бы прежняя политика (main вместо direct и наоборот).
-    if [ "$field" = fallback ] && [ "$old_en" = on ] && [ -f "$ENODIA_DIR/mark-core.sh" ]; then
-        _sfr=$(slot_rule "$id")
-        sh "$ENODIA_DIR/mark-core.sh" >/dev/null 2>&1
-        # A down exit's rule moved (direct ↔ the main tunnel): its established flows would ride the old way under ECM — only its own
-        # are flushed (ct-lib.sh; review s.153 r2). Only when the rule REALLY moved: a live exit keeps 100N, and with the VPN off
-        # mark-core changes nothing — and after a reboot there is no save rule, so ct-lib's fail-safe would tear the whole house
-        # (review s.153 r3).
-        [ "$(slot_rule "$id")" = "$_sfr" ] || ct_flush_slot "$id"
+    if [ "$field" = fallback ] || { [ -f "$ENODIA_STATE/.vpn-off" ] && [ -z "$(cmd_list_admitted)" ]; }; then
+        slot_apply "$id" slot_reconcile || return 1
     fi
     echo "[slots] слот №$id: $field обновлён"
 }
 
 # Переписать поле en (6-е) строки слота id: под локом, атомарно tmp+mv (как cmd_set).
 write_en() {
-    slots_lock_take || { echo "[slots] реестр занят другой операцией — повторите"; return 1; }
     line=$(slot_line "$1")
-    [ -n "$line" ] || { slots_lock_drop; return 1; }
+    [ -n "$line" ] || return 1
     _slots_write "$1" "$(printf '%s' "$line" | cut -f2)" "$(printf '%s' "$line" | cut -f3)" \
-                 "$(printf '%s' "$line" | cut -f4)" "$(printf '%s' "$line" | cut -f5)" "$2" \
-        || { slots_lock_drop; echo "$SLOTS_NOWRITE"; return 1; }
-    slots_lock_drop
+                 "$(printf '%s' "$line" | cut -f4)" "$(printf '%s' "$line" | cut -f5)" "$2" "$(printf '%s' "$line" | cut -f7)" \
+        || { echo "$SLOTS_NOWRITE"; return 1; }
+}
+
+slot_reconcile() {
+    [ -f "$ENODIA_DIR/mark-core.sh" ] || return 0
+    _scr_verb=slot-rules
+    if [ -f "$ENODIA_STATE/.vpn-off" ] && [ -z "$(cmd_list_admitted)" ]; then _scr_verb=slot-replay; fi
+    CT_SLOT_EDIT="$1" sh "$ENODIA_DIR/mark-core.sh" "$_scr_verb" >/dev/null 2>&1
+}
+
+slot_apply() (
+    _sa_pending="$SLOTS_PENDING.$1"; _sa_op="$2"
+    _sa_last=$(cat "$_sa_pending" 2>/dev/null)
+    [ "$_sa_last" != slot_rebind ] || _sa_op=slot_rebind
+    if _sa_result=$("$_sa_op" "$1") && rm -f "$_sa_pending"; then
+        [ "${3:-}" != report ] || printf '%s\n' "$_sa_result"
+        return 0
+    fi
+    [ "$_sa_last" = "$_sa_op" ] || printf '%s\n' "$_sa_op" > "$_sa_pending"
+    echo 'Настройки выхода сохранены, но не применены'
+    return 1
+)
+
+slot_retry() {
+    valid_id "$1" || return 1
+    _sp="$SLOTS_PENDING.$1"
+    [ -f "$_sp" ] || return 0
+    [ -n "$(slot_line "$1")" ] || { rm -f "$_sp"; return $?; }
+    case "$(cat "$_sp")" in
+        slot_rebind) slot_apply "$1" slot_rebind ;;
+        slot_reconcile) slot_apply "$1" slot_reconcile ;;
+        *) echo 'Настройки выхода сохранены, но не применены'; return 1 ;;
+    esac
+}
+
+cmd_retry_pending() {
+    set -- "$SLOTS_PENDING".[2-7]
+    [ -f "$1" ] || return 0
+    slots_lock_take 1 || return 0
+    trap 'slots_lock_drop' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    for _sp in "$@"; do
+        _pr_id=${_sp##*.}
+        slot_retry "$_pr_id" || :
+    done
+    return 0
 }
 # Переиграть ВЛАДЕЛЬЦЕВ слот-сетов после смены состояния слота (enable/disable/del).
 # ЗАЧЕМ (грабля, поймана на железе 2026-07-26): «какой сет наполнять» решают groups.sh/geo.sh в
@@ -882,36 +1150,24 @@ write_en() {
 # следующим редактированием правил/ребутом. Симметрично на enable: члены сидят в общем grp_vpn и
 # едут основным выходом, пока владелец не пересоберётся — «включил выход, а пул не поехал».
 # Зовём ТОЛЬКО тех владельцев, у кого реально есть привязка к этому слоту (иначе даром гоняем
-# сборку): groups — синхронно (дёшево, ровно как при правке группы), geo — ФОНОМ через тот же
-# пидфайл /tmp/enodia-geo.pid, что и CGI geo_apply (пересбор каталога ~1600 элементов держать в
-# CGI-запросе нельзя; geo.sh сам сериализуется ls_lock).
-rebind_owners() {
-    id="$1"
+# сборку). A busy owner queues its scoped rebuild. The next retry finishes publication after both owners respond.
+rebind_owners() (
+    [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || exit 0
+    id="$1"; _rb_fail=''
     # Гарды `-f`, а НЕ `-x` (класс Б5-9): все три зовутся через `sh`, бит выполнения им не нужен,
     # а снятый (заливка по scp/base64, ручная копия, чужой архиватор) означал бы ТИХИЙ пропуск
     # пересборки — привязанные к выходу группы/гео/устройства остались бы в осиротевшем сете без
     # mangle, то есть молча поехали мимо выхода. Ровно ради этого rebind_owners и существует.
     if [ -f "$ENODIA_DIR/groups.sh" ] && [ -s "$ENODIA_STATE/groups/groups.tsv" ] &&
        awk -F"$TAB" -v s="$id" '$4==s{f=1} END{exit !f}' "$ENODIA_STATE/groups/groups.tsv" 2>/dev/null; then
-        sh "$ENODIA_DIR/groups.sh" apply >/dev/null 2>&1 || true
-    fi
-    # Устройства, целиком привязанные к ЭТОМУ выходу (.fullvpn-ips, 2-я колонка): их марку ставит
-    # VPN_FORCE, и без пересборки выключение выхода означало бы «марка есть, ip rule нет» =
-    # устройство молча ушло НАПРЯМУЮ мимо VPN. Дёшево и синхронно, как groups.
-    if [ -f "$ENODIA_DIR/apply-bypass.sh" ] && [ -s "$ENODIA_STATE/.fullvpn-ips" ] &&
-       awk -F"$TAB" -v s="s$id" '$2==s{f=1} END{exit !f}' "$ENODIA_STATE/.fullvpn-ips" 2>/dev/null; then
-        sh "$ENODIA_DIR/apply-bypass.sh" force-rebind >/dev/null 2>&1 || true
+        sh "$ENODIA_DIR/groups.sh" rebind >/dev/null || _rb_fail=groups
     fi
     if [ -f "$ENODIA_DIR/geo.sh" ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ] &&
        awk -F"$TAB" -v s="$id" '$5==s{f=1} END{exit !f}' "$ENODIA_STATE/geo/actions.tsv" 2>/dev/null; then
-        if [ -x /sbin/start-stop-daemon ]; then
-            rm -f /tmp/enodia-geo.pid 2>/dev/null
-            start-stop-daemon -S -b -m -p /tmp/enodia-geo.pid -x /bin/sh -- "$ENODIA_DIR/geo.sh" apply >/dev/null 2>&1
-        else
-            ( sh "$ENODIA_DIR/geo.sh" apply >/dev/null 2>&1 & )
-        fi
+        sh "$ENODIA_DIR/geo.sh" rebind >/dev/null || _rb_fail="$_rb_fail geo"
     fi
-}
+    [ -z "$_rb_fail" ]
+)
 
 # Ввести слот В СТРОЙ: поднять несущую + переиграть владельцев слот-сетов. ОБЩЕЕ для создания
 # (cmd_add пишет строку сразу en=on) и включения (cmd_toggle on) — «выход есть и он on» обязан
@@ -927,127 +1183,162 @@ slot_deactivate() {
     [ -f "$ENODIA_DIR/transport.sh" ] || return 0
     # 2 = nothing of a plugin to take down (no slot layer, or a transport this code does not know): slot-up raised nothing either.
     # Only a real refusal keeps the exit — else it could be neither disabled nor deleted, and «повторите» would never help.
-    sh "$ENODIA_DIR/transport.sh" slot-down "$1" >/dev/null 2>&1 && return 0
+    CT_SLOT_EDIT=defer sh "$ENODIA_DIR/transport.sh" slot-down "$1" carrier >/dev/null 2>&1 && return 0
     [ "$?" = 2 ] && return 0
     echo "[slots] выход №$1 не снят — настройки сохранены, повторите операцию"
     return 1
+}
+slot_restore_carrier() {
+    [ -f "$ENODIA_DIR/transport.sh" ] || return 0
+    # The old rules are still installed. Restore the carrier within the edit's retirement scope.
+    CT_SLOT_EDIT=defer sh "$ENODIA_DIR/transport.sh" slot-up "$1" carrier >/dev/null 2>&1
+    ct_flush_slot "$1" origin
 }
 slot_road_clash() {
     [ -f "$ENODIA_DIR/road.sh" ] || return 0
     _scl=$(sh "$ENODIA_DIR/road.sh" clash "$1" "$2" 2>/dev/null)
     [ -z "$_scl" ] || { echo "[slots] выход №$1 служит дорогой, а новый конфиг идёт к серверу $_scl, который уже едет по дороге — выберите конфиг к другому серверу"; return 1; }
 }
-slot_activate() {
-    id="$1"
-    if [ -f "$ENODIA_DIR/transport.sh" ]; then sh "$ENODIA_DIR/transport.sh" slot-up "$id" >/dev/null 2>&1
-    else [ -f "$ENODIA_DIR/mark-core.sh" ] && sh "$ENODIA_DIR/mark-core.sh" >/dev/null 2>&1; fi
-    rebind_owners "$id"   # привязанные пулы обязаны переехать в сет ЭТОГО выхода
+slot_rebind() (
+    _sr_id="$1"; _sr_en=$(slot_line "$1" | cut -f6)
+    _sr_rc=0; _sr_state=''
+    [ -n "$(slot_rows admitted "$_sr_id")" ] || CT_SLOT_EDIT=defer cmd_unwire "$_sr_id" || _sr_rc=1
+    rebind_owners "$_sr_id" || _sr_rc=1
+    if [ "$_sr_rc" = 0 ]; then
+        if [ -f "$ENODIA_DIR/transport.sh" ]; then
+            _sr_state=$(CT_SLOT_EDIT=defer sh "$ENODIA_DIR/transport.sh" slot-rebind "$_sr_id" "$_sr_en" 2>/dev/null) || _sr_rc=1
+        elif [ -f "$ENODIA_DIR/mark-core.sh" ]; then
+            CT_SLOT_EDIT=defer sh "$ENODIA_DIR/mark-core.sh" slot-replay >/dev/null 2>&1 || _sr_rc=1
+        fi
+    fi
+    # Retire the edited mark. Other marks keep their conntrack entries, but a carrier teardown can end sessions it carried.
+    ct_flush_slot "$_sr_id" origin
+    [ "$_sr_rc" != 0 ] || [ -z "$_sr_state" ] || printf '%s\n' "$_sr_state"
+    return "$_sr_rc"
+)
+
+
+# The registry lock spans old-row teardown, publication and the set owners' retry.
+slot_disable() {
+    _sd_id=$1; shift
+    slot_road_guard "$_sd_id" "выключайте выход" || return 1
+    if [ "$(slot_line "$_sd_id" | cut -f6)" = on ]; then slot_deactivate "$_sd_id" || return 1; fi
+    if ! "$@"; then slot_restore_carrier "$_sd_id"; return 1; fi
+    slot_apply "$_sd_id" slot_rebind
 }
 
 cmd_toggle() {
     id="$1"; en="$2"
     valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
-    [ -n "$(slot_line "$id")" ] || { echo "[slots] нет слота №$id"; return 1; }
-    TRANSPORT_SH="$ENODIA_DIR/transport.sh"
+    _tl=$(slot_line "$id")
+    [ -n "$_tl" ] || { echo "[slots] нет слота №$id"; return 1; }
     if [ "$en" = on ]; then
+        _tl_kind=$(printf '%s' "$_tl" | cut -f3); _tl_name=$(printf '%s' "$_tl" | cut -f4)
+        if [ "$_tl_kind" = awg ] && { ! valid_config "$_tl_name" || [ ! -f "$AWG_CONFIGS/$_tl_name.conf" ]; }; then
+            echo "Нет конфига AmneziaWG для выхода №$id — выберите сервер."
+            return 1
+        fi
         # Выход, заведённый ДО гарда (или приехавший импортом бэкапа), мог получить занятый ключ: включение
         # — та же точка назначения, что add/set, и отказывает той же причиной, не трогая реестр.
-        _tl=$(slot_line "$id")
-        slot_key_guard "$(printf '%s' "$_tl" | cut -f3)" "$(printf '%s' "$_tl" | cut -f4)" "$id" || return 1
-        if [ "$(printf '%s' "$_tl" | cut -f3)" = awg ]; then slot_road_clash "$id" "$(printf '%s' "$_tl" | cut -f4)" || return 1; fi
+        slot_config_present "$_tl_kind" "$_tl_name" && slot_key_guard "$_tl_kind" "$_tl_name" "$id" || return 1
+        if [ "$_tl_kind" = awg ]; then slot_road_clash "$id" "$_tl_name" || return 1; fi
         # Already on (a second tab): its daemon runs and is counted in the memory already — no second admission.
-        if [ "$(printf '%s' "$_tl" | cut -f6)" != on ]; then slot_ram_guard "$(printf '%s' "$_tl" | cut -f3)" || return 1; fi
+        if [ "$(printf '%s' "$_tl" | cut -f6)" != on ]; then slot_ram_guard "$_tl_kind" || return 1; fi
         # Порядок: сперва пишем on (диспетч slot-up в плагин ТРЕБУЕТ включённый слот —
         # _slot_dispatch читает поле en), затем ввод в строй. Запись не прошла (реестр занят) —
         # НЕ активируем: диспетч всё равно увидел бы off, а мы отрапортовали бы «включён».
         write_en "$id" on || return 1
-        slot_activate "$id"
+        slot_apply "$id" slot_rebind || return 1
         echo "[slots] слот №$id включён"
     else
-        slot_road_guard "$id" "выключайте выход" || return 1
-        # Порядок: slot-down ПОКА слот ещё on (диспетч требует on: плагин снимает свою несущую/
-        # десинк), ПОТОМ пишем off и снимаем ядро-следы (mark/ip rule) — cmd_unwire.
-        # Already off (a second tab, a repeated click): the dispatch refuses an off exit, so only the idempotent cleanup below runs.
-        if [ "$(slot_line "$id" | cut -f6)" = on ]; then slot_deactivate "$id" || return 1; fi
-        if ! write_en "$id" off; then   # still `on` in the registry, and its carrier is down already — bring it back
-            [ -f "$TRANSPORT_SH" ] && sh "$TRANSPORT_SH" slot-up "$id" >/dev/null 2>&1
-            return 1
-        fi
-        cmd_unwire "$id"
-        rebind_owners "$id"   # иначе пул выхода останется в осиротевшем сете = НАПРЯМУЮ мимо VPN
+        slot_disable "$id" write_en "$id" off || return 1
         echo "[slots] слот №$id выключен"
     fi
 }
 
 # Снять СЛЕДЫ слота из ядра: MARK/ACCEPT его сетов в mangle + ip rule его марки. Сеты и
 # таблицу НЕ трогаем (сеты — собственность groups/geo, несущую слота опустит её плагин в Ф1+).
-# После снятия mangle-правил ОБЯЗАТЕЛЕН conntrack -F: NSS/ECM-offload держит старый маршрут
-# для установленных соединений (грабля проекта). Сброс — только соединений ЭТОГО выхода (ct-lib.sh: марка 0xN сохранена в conntrack), не всего дома.
+# Offloaded flows can keep their old route after unwiring. Retire them by the exit's saved ct mark.
 cmd_unwire() {
     id="$1"
     valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
     for sset in "grp_vpn_s$id" "geo_vpn_s$id"; do
-        for chain in PREROUTING OUTPUT; do
+        for chain in PREROUTING OUTPUT ENODIA_SLOT_OUT; do
             while iptables -t mangle -D "$chain" -m set --match-set "$sset" dst -j ACCEPT 2>/dev/null; do :; done
             while iptables -t mangle -D "$chain" -m set --match-set "$sset" dst -j MARK --set-mark "0x$id" 2>/dev/null; do :; done
         done
     done
-    ip rule del fwmark "0x$id" table "100$id" 2>/dev/null || true
-    # fallback=main держит правило слота в table 1000 (FALLBACK-AWARE в mark-core) — снимаем
-    # ОБЕ формы (без pref: матч по fwmark 0xN однозначен, основной 0x1 не заденем).
-    ip rule del fwmark "0x$id" table 1000 2>/dev/null || true
-    ct_flush_slot "$id"   # only this exit's flows (ct-lib.sh): the house keeps its connections
+    [ ! -f "$ENODIA_DIR/mark-core.sh" ] || sh "$ENODIA_DIR/mark-core.sh" slot-unrule "$id" >/dev/null 2>&1 || return 1
+    ct_flush_slot "$id" origin
 }
 
 cmd_del() {
     id="$1"
     valid_id "$id" || { echo "[slots] id = $MIN_ID..$MAX_ID"; return 1; }
     line=$(slot_line "$id"); [ -n "$line" ] || { echo "[slots] нет слота №$id"; return 1; }
+    _drefs=$(fallback_dependants "$id")
+    [ -z "$_drefs" ] || { echo "На этот выход ссылаются: $_drefs"; return 1; }
     slot_road_guard "$id" "удаляйте выход" || return 1
-    # Включённый слот — сперва опустить несущую/десинк через оркестратор (строка ещё on, диспетч
-    # работает), потом снять ядро-следы и удалить из реестра.
-    if [ "$(printf '%s' "$line" | cut -f6)" = on ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
+    # Keep an off row until the owners have moved its bindings. A failed rebind can then be retried.
+    if [ "$(printf '%s' "$line" | cut -f6)" = on ]; then
         slot_deactivate "$id" || return 1
+        if ! write_en "$id" off; then
+            slot_restore_carrier "$id"
+            return 1
+        fi
     fi
-    cmd_unwire "$id"
-    # без полей = удалить строку (последняя ⇒ файл убираем целиком). Not removed — the registry is busy for longer than the wait,
-    # or the write did not land: the exit is still in the registry, «удалён» would be a lie; an enabled one gets back the carrier
-    # and the rules taken off above.
-    _dwhy=""
-    if ! slots_lock_take; then _dwhy="[slots] реестр занят другой операцией — повторите"
-    elif ! _slots_write "$id"; then slots_lock_drop; _dwhy=$SLOTS_NOWRITE
-    else slots_lock_drop; fi
-    if [ -n "$_dwhy" ]; then
-        echo "$_dwhy"
-        [ "$(printf '%s' "$line" | cut -f6)" = on ] && slot_activate "$id" >/dev/null 2>&1
-        return 1
-    fi
-    # Реестра слота больше нет — привязки (groups.slot/geo.slot) осиротели: переигрываем
-    # владельцев ПОСЛЕ удаления строки, чтобы гейт увидел «слота нет» и вернул пул на основной.
-    rebind_owners "$id"
+    slot_apply "$id" slot_rebind || return 1
+    _slots_write "$id" || { echo "$SLOTS_NOWRITE"; return 1; }
     echo "[slots] слот №$id удалён (правила сняты)"
+}
+
+cmd_downgrade_fallbacks() {
+    _df_core="$ENODIA_DIR/mark-core.sh"
+    if [ -s "$SLOTS_FILE" ]; then
+        lbl_commit_out "$SLOTS_FILE" awk -F "$TAB" -v OFS="$TAB" '$5 ~ /^[0-9]+$/ {$5="main"} {print}' "$SLOTS_FILE" || return 1
+    fi
+    sh "$_df_core" slot-downgrade
+}
+
+refresh_registered_config() {   # exit id, kind, file observed by the importer
+    [ "$(slot_line "$1" | cut -f3,4,6)" = "$2$TAB$3${TAB}on" ] ||
+        { echo '[slots] выход изменился — обновление конфига пропущено'; return 1; }
+    cmd_set "$1" config "$3"
 }
 
 case "$1" in
     list)         cmd_list ;;
     list-enabled) cmd_list_enabled ;;
+    list-admitted) cmd_list_admitted "$2" ;;
+    validate-registry) cmd_validate_registry "$2" ;;
     list-json)    cmd_list_json ;;
     state)        cmd_state ;;
+    retry)        slots_mutate slot_retry "$2" && echo 'Настройки выхода применены' ;;
+    retry-pending) cmd_retry_pending ;;
+    slot-plan)    cmd_slot_plan "$2" ;;
+    downgrade-fallbacks) slots_mutate cmd_downgrade_fallbacks ;;
     carriers)     cmd_carriers ;;
     configs)      cmd_configs "$2" ;;
     show)         slot_line "$2" ;;
     restore-registry) shift; cmd_restore_registry "$@" ;;
+    dispatch-carrier) shift; slots_mutate slot_dispatch_carrier "$@" ;;
     domains)      cmd_domains "$2" "$3" ;;
     route)        cmd_route "$2" "$3" ;;
-    add)          cmd_add "$2" "$3" "$4" "$5" ;;
+    add)          slots_mutate cmd_add "$2" "$3" "$4" "$5" "$6" ;;
     free)         slot_free_id || { echo "$SLOTS_FULL"; exit 1; } ;;
-    set)          cmd_set "$2" "$3" "$4" ;;
-    enable)       cmd_toggle "$2" on ;;
-    disable)      cmd_toggle "$2" off ;;
-    del)          cmd_del "$2" ;;
+    set)          slots_mutate cmd_set "$2" "$3" "$4" ;;
+    enable)       slots_mutate cmd_toggle "$2" on ;;
+    disable)      slots_mutate cmd_toggle "$2" off ;;
+    del)          slots_mutate cmd_del "$2" ;;
     unwire)       cmd_unwire "$2" ;;
     rename-config) cmd_rename_config "$2" "$3" "$4" ;;
-    key-holder)   cmd_key_holder "$2" "$3" "$4" ;;
+    key-holder)   cmd_key_holder "$2" "$3" "$4" "$5" ;;
+    live-awg-keys) cmd_live_awg_keys ;;
+    # Switch → road map → registry (here) → subscription.
+    delete-config|prune-sub)
+        [ -f "$ENODIA_DIR/subs-import.sh" ] || { echo 'Обновите скрипты роутера и повторите удаление.'; exit 1; }
+        slots_mutate sh "$ENODIA_DIR/subs-import.sh" "$@" ;;
+    refresh-config) slots_mutate refresh_registered_config "$2" "$3" "$4" ;;
     key-map)      cmd_key_map ;;
     holders)      cmd_holders "$2" "$3" "$4" ;;
     *) echo "usage: $0 list|list-enabled|list-json|state|carriers|configs <транспорт>|show <id>|domains <id|0> [кап]|route <id|0> <домен>|add <имя> <транспорт> [конфиг] [fallback]|set <id> <поле> <знач>|enable <id>|disable <id>|del <id>|unwire <id>|rename-config <транспорт> <старое> <новое>|key-holder <конфиг> <main|2..7> [live]|key-map|holders <транспорт> <конфиг> [on]"; exit 2 ;;

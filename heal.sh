@@ -230,6 +230,10 @@ fi
 
 cd "$ENODIA_DIR" || exit 1
 
+if [ -f ./gh-update.sh ]; then
+    sh ./gh-update.sh fetch-reap 3>&- || echo "    [!] не удалось снять правило прямой загрузки с GitHub"
+fi
+
 # АКТИВНЫЙ ТРАНСПОРТ читаем В САМОМ НАЧАЛЕ (флаг переживает ребут; нет файла => awg). Раньше он
 # читался только перед секцией 5.6, а секция 2 БЕЗУСЛОВНО прописывала dnsmasq ТУННЕЛЬНЫЙ DNS из
 # awg.conf — даже когда несёт xray/hy2/byedpi/zapret. Цена: на буте альт-установки резолвер весь
@@ -798,14 +802,14 @@ fi
 # ВЫКЛЮЧЕННЫЙ VPN гасит и доп-выходы: их ip rule снимает тот же `vpn-toggle off` (обе формы
 # марки, 0x2..0x7), а mark-core мы выше не звали — поднимать несущие слотов было бы работой
 # вхолостую и следами в ядре там, где обещали «как сток». Транспорта нет вовсе — слот тем более.
-if skip_vpn; then
-    echo "$(why_skip) — доп-выходы (слоты) не поднимаю"
-elif [ -f ./slots.sh ] && [ -n "$(sh ./slots.sh list-enabled 2>/dev/null)" ]; then
+if [ -f ./slots.sh ] && [ -n "$(sh ./slots.sh list-admitted 2>/dev/null)" ]; then
     echo "--- slots: доп-выходы (несущие + слот-марки) ---"
     # `3>&-` — как у фоновых перекачек выше: слоты поднимают ПОСТОЯННЫХ демонов (hev/xray/
     # hysteria/ciadpi), и унесённый ими fd 3 (в режиме replay это stdout вызывателя) держал бы
     # трубу вызывателя открытой НАВСЕГДА (ревью 11).
     [ -f ./transport.sh ] && sh ./transport.sh slots-up 3>&-
+elif skip_vpn; then
+    echo "$(why_skip) — доп-выходы (слоты) не поднимаю"
 fi
 
 # 5.13c. «Доступ домой» (роутер как VPN-СЕРВЕР, vpn-server.sh). Несущая awgs0 и её правила живут
@@ -929,6 +933,11 @@ if [ -f "$ENODIA_DIR/tasks.sh" ] && [ -d "$ENODIA_STATE/tasks" ]; then
     echo "--- задачи: расписание из настроек ---"
     sh "$ENODIA_DIR/tasks.sh" apply 2>&1 3>&- || true
     [ "$REPLAY" = 0 ] && sh "$ENODIA_DIR/tasks.sh" boot 2>&1 3>&- || true
+fi
+
+# The saved rotation policy also applies when restoring settings while VPN is off.
+if [ -f "$ENODIA_DIR/clean.sh" ] && [ -f "$ENODIA_STATE/.stocklogs-mode" ]; then
+    sh "$ENODIA_DIR/clean.sh" stocklogs-apply 2>&1 3>&- || true
 fi
 
 # 5.19. THE STOCK SETTINGS BACKUP (stock-backup.sh). The person turned the stock's copy off to free the flash; a firmware update

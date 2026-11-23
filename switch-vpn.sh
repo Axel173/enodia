@@ -1075,11 +1075,16 @@ do_failover() {
     # 1) Немедленно вернуть интернет/публичный DNS (см. шапку функции).
     safety_off
 
-    # 2) Перебор резервов по алфавиту; первый с handshake — наш.
+    # 2) Favourites first, then the original file order. The first handshake wins.
     tried=""
     _fo_dirty=0
     _fo_off=0
-    for f in "$CONFIGS_DIR"/*.conf; do
+    if command -v server_candidates >/dev/null 2>&1; then
+        _fo_files=$(server_candidates awg "$CONFIGS_DIR"/*.conf)
+    else
+        _fo_files=$(printf '%s\n' "$CONFIGS_DIR"/*.conf)
+    fi
+    while IFS= read -r f <&8; do
         [ -f "$f" ] || continue
         # ВЫКЛЮЧИЛИ ПОСРЕДИ ПЕРЕБОРА — дальше не пробуем: каждый кандидат = awg_setup с firewall reload и демон к VPS при «выключенном»
         # VPN, и так минутами (ревью ветки, круг 2). Исходный конфиг возвращаем ниже, несущую не поднимаем.
@@ -1137,7 +1142,9 @@ To return to ${cur_name:-the previous one} manually: panel :8088 -> the VPN card
             return 0
         fi
         tried="$tried $name"
-    done
+    done 8<<EOF
+$_fo_files
+EOF
 
     # ПЕРЕБОР ПРЕРВАН «Отключить VPN» (или выключили сразу после него) — на диск возвращаем исходный конфиг (снимок ЭТОГО прогона),
     # а awg0 для мониторинга НЕ поднимаем: при выключенном VPN его не бывает даже тёплым. Писем о прямом режиме не шлём.
@@ -1304,6 +1311,29 @@ case "$1" in
         # перебрать резервы и встать на первый рабочий. Код возврата (0=встали на
         # резерв / 1=прямой режим) watchdog читает, чтобы выставить своё состояние.
         do_failover
+        ;;
+    clear-selection)
+        [ -n "$2" ] || exit 2
+        acquire_lock
+        if [ "$(head -n 1 "$ACTIVE_NAME" 2>/dev/null | tr -d ' \r\n')" = "$2" ]; then
+            _clt=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
+            if [ ! -f "$ENODIA_STATE/.vpn-off" ] && [ "${_clt:-awg}" = awg ]; then
+                echo "нельзя удалить активный конфиг ($2) — сначала переключитесь на другой"
+                exit 1
+            fi
+            # The old server may still be warm while another transport carries.
+            if ip link show awg0 >/dev/null 2>&1; then
+                sh "$ENODIA_DIR/transport.sh" cold awg >/dev/null 2>&1
+                if ip link show awg0 >/dev/null 2>&1; then
+                    echo "не удалось остановить резерв AmneziaWG — повторите удаление"
+                    exit 1
+                fi
+            fi
+            if ! { rm -f "$ACTIVE_CONF" "$SHALIN_CONF" "$AWG0_CONF" && : > "$ACTIVE_NAME"; } 2>/dev/null; then
+                echo "не удалось снять выбор AmneziaWG — повторите удаление"
+                exit 1
+            fi
+        fi
         ;;
     stage)
         # РАЗЛОЖИТЬ конфиг БЕЗ переключения — зеркало того, что панель делает для xray/hy2

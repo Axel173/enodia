@@ -33,13 +33,22 @@ REM не запускаем. Всё лежит в %LOCALAPPDATA%\enodia\uv (уд
 REM Вшить Python в архив проекта отвергнуто (+100 МБ, чужие уязвимости на нас), exe-сборку
 REM тоже (антивирусы, платная подпись). Нет сети — прежняя ОСТАНОВКА с объяснением.
 set "PYEXE="
-where py >nul 2>nul && set "PYEXE=py -3"
+where py >nul 2>nul || goto python
+REM The Python install manager can be on PATH but fail before starting Python (Windows 8.1).
+REM Number every output line, including blanks. Only version 3 followed by a successful exit is accepted.
+set "PY_PROBE="
+for /f "tokens=1 delims=:" %%V in ('^(call py -3 -c "import sys;print(sys.version_info[0])" 2^>nul ^&^& echo ENODIA_PY_OK^) ^| findstr /n "^" ^| findstr /r /x /c:"1:3" /c:"2:ENODIA_PY_OK *"') do (
+    if "%%V"=="1" set "PY_PROBE=3"
+    if "%%V"=="2" if defined PY_PROBE set "PYEXE=py -3"
+)
 if defined PYEXE goto haspy
+
+:python
 REM `python` в PATH Windows 10/11 по умолчанию — ЗАГЛУШКА Microsoft Store: она ничего не
 REM запускает, открывает магазин и выходит с кодом 49. Поэтому мало найти файл — надо
 REM УБЕДИТЬСЯ, что он работает: настоящий интерпретатор ответит на -V нулём.
 where python >nul 2>nul || goto uvsetup
-python -V >nul 2>nul || goto uvsetup
+call python -V >nul 2>nul || goto uvsetup
 set "PYEXE=python"
 
 :haspy
@@ -62,6 +71,8 @@ if errorlevel 1 pause
 goto done
 
 :uvsetup
+REM Use the Windows version in brackets (6.3 on Windows 8.1).
+for /f "tokens=2 delims=[]" %%V in ('ver') do for /f "tokens=2 delims=. " %%M in ("%%V") do if %%M LSS 10 goto legacy_python
 REM Архитектура — по двум переменным: 32-битный cmd на 64-битной Windows видит x86 в
 REM PROCESSOR_ARCHITECTURE, а настоящую — в PROCESSOR_ARCHITEW6432. x86 без второй — это
 REM настоящая 32-битная Windows: у uv для неё своя сборка (i686).
@@ -131,6 +142,17 @@ echo   "Add python.exe to PATH", then run enodia-setup.bat again. If Python is
 echo   installed but invisible, disable the Microsoft Store alias in
 echo   Settings - Apps - Advanced app settings - App execution aliases.
 echo.
+goto no_python_pause
+
+:legacy_python
+echo.
+echo   Установите Python 3.11 с https://www.python.org/downloads/release/python-3119/
+echo   Отметьте "Add python.exe to PATH" и заново запустите enodia-setup.bat.
+echo.
+echo   Install Python 3.11 from https://www.python.org/downloads/release/python-3119/
+echo   Tick "Add python.exe to PATH" and run enodia-setup.bat again.
+echo.
+:no_python_pause
 REM Окно НЕ закрываем: при запуске двойным кликом консоль исчезает вместе с текстом, и
 REM человек видит только мигнувший чёрный прямоугольник — то есть ничего.
 pause

@@ -131,6 +131,7 @@ pi_free_kb() {
 
 LOCK_MINE=0
 DL_HOLD_MINE=0
+PI_FALLBACK_LOCK=''
 pi_unlock() {
     # A signal can arrive during switch_hold's recheck or just after it unlinks the lock.
     if [ "$LOCK_MINE" = 1 ] ||
@@ -141,6 +142,7 @@ pi_unlock() {
     return 0
 }
 pi_cleanup() {
+    [ -z "$PI_FALLBACK_LOCK" ] || lbl_lock_drop "$PI_FALLBACK_LOCK"
     pi_unlock
     [ -n "$T" ] && rm -rf "$T" 2>/dev/null
     [ "$PI_OWN" = 1 ] && rm -rf "$PI_LOCKD" 2>/dev/null
@@ -612,6 +614,14 @@ cmd_install() {
         pi_space_ok || return 1
     else
         pi_lock
+    fi
+    if [ "$MODE" = rollback ] && grep -q '^    downgrade-fallbacks)' "$ENODIA_DIR/slots.sh" 2>/dev/null &&
+       ! grep -q '^    slot-plan)' "$SRC/slots.sh" 2>/dev/null; then
+        [ "$LOCK_MINE" = 1 ] || [ "$DL_HOLD_MINE" = 1 ] || { stop 'не удалось взять лок смены транспорта'; return 1; }
+        . "$ENODIA_DIR/label-lib.sh"
+        lbl_lock_take /tmp/enodia-fallback-handover.lock '(gh-update|pkg-install)\.sh' || return 1
+        PI_FALLBACK_LOCK=/tmp/enodia-fallback-handover.lock
+        sh "$ENODIA_DIR/slots.sh" downgrade-fallbacks || { stop 'не удалось убрать цепочки запасных выходов'; return 1; }
     fi
     # Без снимка (набор не менялся) возвращать нечем — и незачем: замена свелась бы к правам. Сбой в такой замене — гонка с чужой
     # записью, и честнее сказать о ней, чем «вернуть» несуществующий снимок.

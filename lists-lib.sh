@@ -159,7 +159,7 @@ snap_write() {
 # доп. проход (тяжёлые закачки второй раз не тянем). Лок в /tmp (ребут чистит сам); убитого
 # держателя детектим по /proc — устаревший лок снимаем `rm -rf` (внутри pid-файл, rmdir не возьмёт).
 # ls_lock_take <lockdir> <dirtyfile> [payload] → 0 = лок взят (вызывающий обязан ls_lock_drop),
-#                                               1 = держатель жив/лок не взять (dirty помечен).
+#                                               1 = dirty queued; 2 = could not record the request.
 # _lock_stale <lockdir> [окно_сек] → 0 = лок ТОЧНО протух (держатель мёртв / каталог старше окна),
 #                                    1 = считаем живым.
 # ПОЧЕМУ не прежнее «нет pid-файла ⇒ протух»: между `mkdir` и записью ПИДа есть окно в несколько
@@ -181,15 +181,32 @@ ls_lock_take() {
 	_ld="$1"; _df="$2"; _dp="$3"
 	if ! mkdir "$_ld" 2>/dev/null; then
 		if ! _lock_stale "$_ld"; then
-			printf '%s' "$_dp" > "$_df" 2>/dev/null; return 1   # держатель жив → он переиграет
+			printf '%s' "$_dp" > "$_df" 2>/dev/null || return 2
+			# The holder may have released between mkdir and the notification.
+			[ -d "$_ld" ] && return 1
+			mkdir "$_ld" 2>/dev/null || return 1
+		else
+			rm -rf "$_ld" 2>/dev/null
+			mkdir "$_ld" 2>/dev/null || { printf '%s' "$_dp" > "$_df" 2>/dev/null && return 1; return 2; }
 		fi
-		rm -rf "$_ld" 2>/dev/null
-		mkdir "$_ld" 2>/dev/null || { printf '%s' "$_dp" > "$_df" 2>/dev/null; return 1; }
 	fi
-	echo $$ > "$_ld/pid"
-	return 0
+	echo $$ > "$_ld/pid" && return 0
+	rm -f "$_ld/pid" 2>/dev/null; rmdir "$_ld" 2>/dev/null
+	return 2
 }
-ls_lock_drop() { rm -f "$1/pid" 2>/dev/null; rmdir "$1" 2>/dev/null; }
+
+ls_lock_drop() {
+	[ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] || return 0
+	rm -f "$1/pid" 2>/dev/null; rmdir "$1" 2>/dev/null
+}
+
+# Drain requests under the owner's lock. Recheck after releasing to cover a writer at the handoff.
+ls_replay_again() {
+	[ -f "$2" ] || [ -f "$2.rebind" ] || {
+		ls_lock_drop "$1"
+		{ [ -f "$2" ] || [ -f "$2.rebind" ]; } && ls_lock_take "$1" /dev/null
+	}
+}
 
 _san() { printf '%s' "$1" | tr -d "$TAB\r\n"; }
 

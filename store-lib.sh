@@ -1,5 +1,29 @@
 #!/bin/sh
 # store-lib.sh — ЕДИНСТВЕННЫЙ ответ на вопрос «где лежит бинарь».
+
+# Reclaim process-owned workspaces. The caller supplies an exact prefix
+# in the router's RAM filesystem; links never count as workspaces.
+store_pid_live() {
+    case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ -d "/proc/$1" ]
+}
+store_tmp_pid_sweep() (
+    for _stp_dir in "$1".[0-9]*; do
+        _stp_pid=${_stp_dir##*.}
+        case "$_stp_pid" in ''|0*|*[!0-9]*) continue ;; esac
+        [ -d "$_stp_dir" ] && [ ! -L "$_stp_dir" ] && ! store_pid_live "$_stp_pid" || continue
+        rm -rf "$_stp_dir"
+    done
+    return 0
+)
+
+# Caller owns the namespace and verifies that the worker is gone before removing it.
+store_tmp_dir_expired() {
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    _stde_mtime=$(date -r "$1" +%s 2>/dev/null)
+    case "$_stde_mtime" in ''|0|*[!0-9]*) return 1 ;; esac
+    [ "$(age_since "$_stde_mtime")" -gt "$2" ]
+}
 #
 # ЗАЧЕМ. На BE7000 /data = 20.6 МБ, и львиную долю занимают ДВА файла: xray 7.56 МБ и
 # hysteria 4.55 МБ. Внешний накопитель снимает потолок «все протоколы разом». Но проект

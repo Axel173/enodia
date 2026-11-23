@@ -64,6 +64,7 @@ ST=/tmp/enodia-warp.json; PIDF=/tmp/enodia-warp.pid
 STARTF=/tmp/enodia-warp.start                          # the pid of the front verb that is launching a job right now (busy)
 STARTL=/tmp/enodia-warp-start.lock                     # «is a job alive?» and «the start is mine» are ONE step under it (take_start)
 REGL=/tmp/enodia-warp-reg.lock                         # one writer of the record at a time (reg_lock)
+WARP_SWITCH_LOCK=/tmp/enodia-switching.lock            # shared with saved-config deletion and rename
 HOLDF=/tmp/enodia-warp.hold                            # the config whose exits an own-key pick keeps DOWN right now (cmd_holds)
 DEVF=/tmp/enodia-warp-dev.conf                         # RAM, 600: the other device's config until the panel takes it (once)
 DEV_TTL=${ENODIA_WARP_DEV_TTL:-600}                    # …and no longer than this: nobody came for it — it is removed
@@ -282,6 +283,8 @@ warp_keys() {
         _wk=$(cfg_pub "$ENODIA_STATE/configs/$_wpn.conf"); [ -n "$_wk" ] || return 1
         printf '%s\n' "$_wk"
     done
+    _w_live=$(sh "$ENODIA_DIR/slots.sh" live-awg-keys 2>/dev/null) || return 1
+    printf '%s\n' "$_w_live" | cut -f2
     return 0
 }
 # The records whose key no WARP config holds any more are dropped — a deleted config takes its token with it. «Could not check» is
@@ -689,16 +692,43 @@ target() {
     if [ "$(cat "$ENODIA_STATE/.active" 2>/dev/null | tr -d ' \r\n')" = "$1" ]; then
         _wtm="«$1» выбран сервером AmneziaWG для основного канала — сперва выберите там другой"; return 1
     fi
-    _wsrc="$ENODIA_STATE/configs/$1.conf"; _wcur=$(cfg_port "$_wsrc"); _wopub=$(cfg_pub "$_wsrc"); _wold=$(reg_line "$_wopub")
+    _wsrc="$ENODIA_STATE/configs/$1.conf"
+    _wrev=$(md5sum < "$_wsrc" 2>/dev/null) || { _wtm="не удалось прочитать конфиг «$1»"; return 1; }
+    _wcur=$(cfg_port "$_wsrc"); _wopub=$(cfg_pub "$_wsrc"); _wold=$(reg_line "$_wopub")
     [ -n "$_wcur" ] || { _wtm="в конфиге «$1» нет порта сервера"; return 1; }
     return 0
 }
-# Write the text of $W/new over the config $_wnm (600, next to it + mv)… A config DELETED while the work ran (a probe lasts up to
-# a minute and a half) is not written: the write used to bring it back, under a fresh registration (review s.122).
-still_there() { [ -f "$_wsrc" ] || fail "конфиг «$_wnm» удалён, пока шла работа — ничего не записано"; }
+# The delete owner holds the switch lock through unlink and registration pruning.
+# Stage before taking it and keep it through the revision check, publish and record.
+warp_cfg_mutate() (
+    command -v switch_hold >/dev/null 2>&1 && switch_hold "$WARP_SWITCH_LOCK" 5 0 ||
+        { echo 'идёт смена транспорта или сервера — повторите'; exit 1; }
+    trap 'rm -f "$WARP_SWITCH_LOCK"' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    "$@"
+)
+conf_apply() {
+    _wc_stage=$1; shift
+    [ -f "$_wsrc" ] || { echo "конфиг «$_wnm» удалён, пока шла работа — ничего не записано"; exit 1; }
+    [ "$(md5sum < "$_wsrc" 2>/dev/null)" = "$_wrev" ] &&
+        [ "$(cat "$ENODIA_STATE/.active" 2>/dev/null | tr -d ' \r\n')" != "$_wnm" ] ||
+        { echo "конфиг «$_wnm» изменён или выбран, пока шла работа — ничего не записано"; exit 1; }
+    if [ -n "$_wc_stage" ]; then
+        mv -f "$_wc_stage" "$_wsrc" || { echo 'не удалось записать конфиг (место на разделе?)'; exit 1; }
+    fi
+    [ "$#" = 0 ] || reg_put "$@" || :
+}
 conf_write() {
-    still_there
-    ( umask 077; cp "$W/new" "$_wsrc.$$" ) && mv "$_wsrc.$$" "$_wsrc" || { rm -f "$_wsrc.$$"; fail "не удалось записать конфиг (место на разделе?)"; }
+    _wc_err=$(
+        _wc_stage="$_wsrc.$$"
+        trap 'rm -f "$_wc_stage"' EXIT
+        trap 'exit 1' HUP INT TERM PIPE
+        ( umask 077; cp "$W/new" "$_wc_stage" ) || { echo 'не удалось записать конфиг (место на разделе?)'; exit 1; }
+        warp_cfg_mutate conf_apply "$_wc_stage" "$@"
+    ) || fail "$_wc_err"
+}
+conf_record() {
+    _wc_err=$(warp_cfg_mutate conf_apply '' "$@") || fail "$_wc_err"
 }
 # The config's new text ("$@" — conf_as's arguments) → $W/new, WHOLE OR NOT AT ALL: built in memory, committed by lbl_commit (the
 # file is compared with the text). `conf_as … > "$W/new" || fail` could not fail on the router — its awk exits 0 on a failed
@@ -710,8 +740,7 @@ conf_new() {
 # said what the config did not hold when the write failed — «ваша» over the router's masking, and a failed «вернуть собранную
 # роутером» turned the person's masking into `gen`, which the next «Получить заново» then replaced (review s.122).
 conf_save() {
-    conf_write
-    reg_put "$@"
+    conf_write "$@"
     say "перезапускаю выход"
     reup_exits "$_wnm"
 }
@@ -778,32 +807,37 @@ get_room() {   # $1 = rider (optional)
     fi
     return 0
 }
+warp_rider_expect() {   # rider, optional observed digest
+    [ -z "${2:-}" ] || lbl_cfg_matches "$ENODIA_STATE/configs/$1.conf" "$2" ||
+        { echo 'Конфиг изменился. Обновите список серверов.'; return 1; }
+}
 cmd_get() {
     if [ -n "$1" ]; then printf '%s' "$1" | grep -qE '^[A-Za-z0-9_.-]+$' && [ -f "$ENODIA_STATE/configs/$1.conf" ] \
         || { echo "[warp] нет конфига «$1»"; return 1; }; fi
+    _werr=$(warp_rider_expect "$1" "${2:-}") || { echo "[warp] $_werr"; return 1; }
     _wnm=$(next_name) || { echo "[warp] имена WARP … WARP-9 заняты — удалите ненужный конфиг"; return 1; }
     need_awg || return 1
     get_room "$1" || { echo "[warp] $_wtm"; return 1; }
     take_start || { echo "$BUSY_MSG"; return 1; }
-    start run "$1"
+    start run "$1" "${2:-}"
     echo "[warp] получаю WARP — обычно до 30 секунд"
 }
-cmd_run() {   # $1 = rider (optional)
-    _wnm=$(next_name) || fail "имена WARP … WARP-9 заняты — удалите ненужный конфиг"
-    get_room "$1" || fail "$_wtm"
-    work_dir
-    reg_new
-    _wep0=$_wep; _wmk0=quic; _wrot=1; _wswp=1
-    MK=wconf; pick ""
-    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но $(why_get) — конфиг не сохранён"
-    say "сохраняю конфиг (порт $_wport)"
-    mkdir -p "$ENODIA_STATE/configs" || fail "нет каталога конфигов"
+conf_create() (   # rider, observed digest; called under switch admission
+    _wlease=0; _wtmp=''
+    trap '[ -z "$_wtmp" ] || rm -f "$_wtmp"; [ "$_wlease" != 1 ] || sh "$ENODIA_DIR/subs-import.sh" row-unlock "$$" >/dev/null 2>&1' EXIT
+    trap 'exit 1' HUP INT TERM PIPE
+    if [ -n "${2:-}" ]; then
+        # A subscription can replace the rider without taking the switch lock.
+        sh "$ENODIA_DIR/subs-import.sh" row-lock "$$" >/dev/null 2>&1 ||
+            { echo 'идёт обновление подписок — повторите через минуту'; return 1; }
+        _wlease=1
+        warp_rider_expect "$1" "$2" || return 1
+    fi
+    mkdir -p "$ENODIA_STATE/configs" || { echo 'нет каталога конфигов'; return 1; }
     _wtmp="$ENODIA_STATE/configs/$_wnm.conf.$$"
-    ( umask 077; cp "$W/conf" "$_wtmp" ) || { rm -f "$_wtmp"; fail "не удалось записать конфиг (место на разделе?)"; }
-    # THE NAME IS TAKEN AT THE WRITE, NO-CLOBBER (`set -C`, as the upload CGI takes its names). It was picked before the probe,
-    # which lasts up to a minute and a half: a config that appeared under it meanwhile (an upload, a rename, a backup's import in
-    # another tab) was REPLACED by this one — its key gone, the status «done» (review s.123, round 4). Taken ⇒ the next free name;
-    # a file the partition refuses to create is not «taken» (the same name would be offered for ever).
+    ( umask 077; cp "$W/conf" "$_wtmp" ) || { echo 'не удалось записать конфиг (место на разделе?)'; return 1; }
+    # Reserve the name without clobbering concurrent uploads. The switch lock
+    # keeps deletion out of the interval between reservation and publication.
     _wtk=0; _wtn=0
     while [ "$_wtn" -lt 10 ]; do
         _wtn=$((_wtn+1))
@@ -813,12 +847,30 @@ cmd_run() {   # $1 = rider (optional)
     done
     case "$_wtk" in
         1) ;;
-        2) rm -f "$_wtmp"; fail "имена WARP … WARP-9 заняты — удалите ненужный конфиг" ;;
-        *) rm -f "$_wtmp"; fail "не удалось записать конфиг (место на разделе?)" ;;
+        2) echo 'имена WARP … WARP-9 заняты — удалите ненужный конфиг'; return 1 ;;
+        *) echo 'не удалось записать конфиг (место на разделе?)'; return 1 ;;
     esac
-    mv "$_wtmp" "$ENODIA_STATE/configs/$_wnm.conf" || { rm -f "$_wtmp" "$ENODIA_STATE/configs/$_wnm.conf"; fail "не удалось записать конфиг (место на разделе?)"; }
+    mv "$_wtmp" "$ENODIA_STATE/configs/$_wnm.conf" || { echo 'не удалось записать конфиг (место на разделе?)'; return 1; }
+    _wtmp=''
+    reg_put "$_wpub" 1 "$_wrid" "$_wtok" "$(now_s)" "$_wport" "$_wcut" "$_wcolo" gen "$(now_s)" || :
+    printf '%s\n' "$_wnm"
+)
+warp_road_set() {   # rider, exit, observed digest
+    if [ -n "${3:-}" ]; then warp_cfg_mutate sh "$ENODIA_DIR/road.sh" set awg "$1" "$2" "$3"
+    else sh "$ENODIA_DIR/road.sh" set awg "$1" "$2"; fi
+}
+cmd_run() {   # $1 = rider (optional), $2 = observed digest
+    _wnm=$(next_name) || fail "имена WARP … WARP-9 заняты — удалите ненужный конфиг"
+    get_room "$1" || fail "$_wtm"
+    work_dir
+    reg_new
+    _wep0=$_wep; _wmk0=quic; _wrot=1; _wswp=1
+    MK=wconf; pick ""
+    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но $(why_get) — конфиг не сохранён"
+    say "сохраняю конфиг (порт $_wport)"
+    _wcreated=$(warp_cfg_mutate conf_create "$1" "${2:-}") || fail "$_wcreated"
+    _wnm=$_wcreated
     owned
-    reg_put "$_wpub" 1 "$_wrid" "$_wtok" "$(now_s)" "$_wport" "$_wcut" "$_wcolo" gen "$(now_s)"
     say "создаю выход"
     _wso=$(sh "$ENODIA_DIR/slots.sh" add "$_wnm" awg "$_wnm" main 2>&1)
     _wid=$(printf '%s\n' "$_wso" | sed -n 's/.*выход №\([2-7]\) .*создан.*/\1/p' | tail -n 1)
@@ -827,7 +879,7 @@ cmd_run() {   # $1 = rider (optional)
     [ -n "$_wid" ] || fail "конфиг «$_wnm» сохранён, а выход не создался: $(printf '%s' "$_wso" | tail -n 1 | sed 's/^\[slots\] //' | tr -d '"\\' | jtxt 600)"
     if [ -n "$1" ]; then
         say "прокладываю дорогу для $1"
-        _wro=$(sh "$ENODIA_DIR/road.sh" set awg "$1" "$_wid" 2>&1) \
+        _wro=$(warp_road_set "$1" "$_wid" "${2:-}" 2>&1) \
             || fail "WARP получен (выход №$_wid), а дорога не встала: $(printf '%s' "$_wro" | tail -n 1 | sed 's/^\[road\] //' | tr -d '"\\' | jtxt 600)"
     fi
     put "{\"state\":\"done\",\"op\":\"get\",\"name\":\"$_wnm\",\"exit\":\"$_wid\",\"rider\":\"$1\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"WARP получен: выход №$_wid${1:+, $1 едет через него}\"}"
@@ -864,8 +916,8 @@ cmd_repick() { target "$1" || { echo "[warp] $_wtm"; return 1; }; need_awg || re
 own_back() {
     [ "$_wodn" = 1 ] || return 0
     _wodn=0; rm -f "$HOLDF"; _wrf=""
-    [ ! -f "$ENODIA_STATE/.vpn-off" ] || return 0      # the VPN was switched off meanwhile: nothing is raised, as it should be
     for _wx in $(exits_of "$_wnm"); do
+        slot_admitted "$_wx" awg || continue
         sh "$ENODIA_DIR/transport.sh" slot-up "$_wx" >/dev/null 2>&1 || _wrf="$_wrf${_wrf:+, }№$_wx"
     done
 }
@@ -885,14 +937,12 @@ cmd_run_repick_own() {
     set -- "$_wopub" "${_wo:-0}" "$(printf '%s' "$_wold" | cut -f3)" "$(printf '%s' "$_wold" | cut -f4)" "$(printf '%s' "$_wold" | cut -f5)" \
         "$_wport" "$_wcut" "$_wcolo" "${_wi:--}" "$(now_s)"
     if same_conf; then
-        still_there
-        reg_put "$@"
+        conf_record "$@"
         own_back
         put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся$(reup_note)\"}"; exit 0
     fi
     conf_new "$_wsrc" "" "" "$_wepn:$_wport" "$_wi1n"
-    conf_write
-    reg_put "$@"
+    conf_write "$@"
     say "перезапускаю выход"
     # AN EXIT THAT IS UP RIGHT NOW (raised a moment before the hold stood; the hold could not be written; an exit moved to this
     # config meanwhile) would go through the plugin's WARM path in own_back — and keep the OLD port under a config and a status
@@ -935,8 +985,7 @@ cmd_run_repick() {
     if same_conf; then
         # …the record only: of a config that is STILL THERE. Deleted (and pruned) during the probe, it got its record back —
         # id and token for a key no config held — and the last word spoke of a deleted config (review s.123, round 4).
-        still_there
-        reg_put "$@"
+        conf_record "$@"
         put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся\"}"; exit 0
     fi
     conf_new "$_wsrc" "" "" "$_wepn:$_wport" "$_wi1n"
@@ -977,9 +1026,8 @@ cmd_run_reget() {
     # The order is the promise «never a config on a registration that was given back»: the new text is WRITTEN (a failed write —
     # `fail` returns the new registration, the old one is untouched), only then the registration is the config's, and only after
     # that the old one goes.
-    conf_write
+    conf_write "$_wpub" 1 "$_wrid" "$_wtok" "$(now_s)" "$_wport" "$_wcut" "$_wcolo" "$_wkind" "$(now_s)"
     owned
-    reg_put "$_wpub" 1 "$_wrid" "$_wtok" "$(now_s)" "$_wport" "$_wcut" "$_wcolo" "$_wkind" "$(now_s)"
     say "перезапускаю выход"
     reup_exits "$_wnm"
     # The old key is gone from THIS config — its record and its registration go too, unless another config still runs on that key
@@ -1157,7 +1205,7 @@ cmd_colo() {
 }
 
 case "$1" in
-    get)         cmd_get "$2" ;;
+    get)         cmd_get "$2" "${3:-}" ;;
     repick)      cmd_repick "$2" "$3" ;;
     running)     cmd_running ;;
     holds)       cmd_holds "$2" ;;
@@ -1170,7 +1218,7 @@ case "$1" in
     prune)       cmd_prune "$2" ;;
     run-give)    cmd_run_give "$2" ;;
     import)      cmd_import "$2" ;;
-    run)         cmd_run "$2" ;;
+    run)         cmd_run "$2" "${3:-}" ;;
     run-repick)  cmd_run_repick "$2" ;;
     run-repick-own) cmd_run_repick_own "$2" ;;
     run-reget)   cmd_run_reget "$2" ;;

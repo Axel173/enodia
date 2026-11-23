@@ -44,6 +44,7 @@ _ct_ecm_defunct() {
 
 # ct_flush — сбросить ВСЁ. Прежний `conntrack -F >/dev/null 2>&1 || true` слово в слово.
 ct_flush() {
+	[ "${CT_SLOT_EDIT:-}" != defer ] || return 0
 	if _ct_have_tool; then conntrack -F >/dev/null 2>&1 || true; return 0; fi
 	_ct_ecm_defunct || true
 	return 0
@@ -99,14 +100,39 @@ ct_flush_mark() {
 	return 0
 }
 
+# IP rule selectors shared by mark-core, reporting and scoped retirement. Prefs 110–115 are hop positions.
+slot_rule_rows() {
+	awk -v id="$1" '$2=="from" && $3=="all" && $4=="fwmark" && $5=="0x" id &&
+		($6=="lookup" || $6=="table") && $7 ~ /^100[02-7]$/ &&
+		($1=="9" id ":" || $1 ~ /^11[0-5]:$/) {print $1+0, $7}'
+}
+
+slot_route_default() { ip route show table "$1" 2>/dev/null | grep -q '^default[[:space:]]'; }   # not-wan: owned table
+slot_owned_default() {   # id, transport
+	case "$2" in awg) set -- "$1" "awg$1" ;; xray|hy2|byedpi) set -- "$1" "xtun$1" ;; *) return 1 ;; esac
+	ip route show table "100$1" 2>/dev/null | grep -qE "^default .*dev $2( |$)"   # not-wan: owned table
+}
+
+# If a carrier has just restarted, test its position even if its default was already withdrawn.
+slot_rule_path() (
+	while read -r _ct_pref _ct_table; do
+		[ -n "$_ct_table" ] || continue
+		if [ "$_ct_table" = "$1" ] || slot_route_default "$_ct_table"; then echo "$_ct_table"; exit 0; fi
+	done
+)
+
 # ct_flush_route <mark> <table> — the flows whose path goes through <table>: <mark> itself (asked even when its ip rule points
 # elsewhere right now — a down exit with fallback=main sends its mark to 1000 until it is back) and, by the kernel's own rules
 # (`ip rule`), every other mark and every destination (a road: `to <server> lookup 100N`) that leads into <table>.
-ct_flush_route() {
-	if ! _ct_have_tool || ! ct_mark_save check; then ct_flush; return 0; fi
+ct_flush_route() (
+	if ! _ct_have_tool || ! ct_mark_save check; then
+		if [ "$3" = strict ]; then ct_flush_mark "$1"; else ct_flush; fi
+		return 0
+	fi
 	ct_flush_mark "$1"
 	[ -n "$2" ] || return 0
-	ip rule show 2>/dev/null | awk -v t="$2" '{
+	_ct_rules=$(ip rule show 2>/dev/null) || return 0
+	printf '%s\n' "$_ct_rules" | awk -v t="$2" '{
 		l = ""; m = ""; d = ""
 		for (i = 1; i < NF; i++) {
 			if ($i == "lookup" || $i == "table") l = $(i + 1)
@@ -115,25 +141,35 @@ ct_flush_route() {
 		}
 		if (l != t) next
 		if (m != "") print "m " m; else if (d != "") print "d " d
-	}' | while read -r _ctk _ctv; do
+	}' | sort -u | while read -r _ctk _ctv; do
 		case "$_ctk" in
-			m) ct_flush_mark "${_ctv%%/*}" ;;
+			m) _ct_mark=${_ctv%%/*}
+			   [ "$_ct_mark" != "$1" ] || continue
+			   case "$_ct_mark" in 0x[2-7])
+			       _ct_path=$(printf '%s\n' "$_ct_rules" | slot_rule_rows "${_ct_mark#0x}" | slot_rule_path "$2")
+			       [ -z "$_ct_path" ] || [ "$_ct_path" = "$2" ] || continue ;;
+			   esac
+			   ct_flush_mark "$_ct_mark" ;;
 			d) ct_flush_dst "${_ctv%/32}" ;;
 		esac
 	done
 	return 0
-}
+)
 
-# ct_flush_slot <id> — an exit's flap: its mark 0x<id> and whatever rides its table 100<id>. A word that is not a number is a
-# caller's error — the global flush, not a silent no-op.
+# A carrier restart also affects users of its table. A policy change affects only the origin mark.
 ct_flush_slot() {
-	case "$1" in ''|*[!0-9]*) ct_flush; return 0 ;; esac
-	ct_flush_route "0x$1" "100$1"
+	case "$1" in [2-7]) ;; *) return 1 ;; esac
+	case "${CT_SLOT_EDIT:-}" in
+		defer) return 0 ;;
+		[2-7]) [ "$1" = "$CT_SLOT_EDIT" ] || return 0 ;;
+	esac
+	if [ "$2" = origin ]; then ct_flush_mark "0x$1"; else ct_flush_route "0x$1" "100$1" strict; fi
 }
 
 # ct_flush_src <ip> — точечно по ИСТОЧНИКУ (не рвём сессии всей сети). Без утилиты вырождается в
 # общий сброс акселерации — см. «честные границы» в шапке.
 ct_flush_src() {
+	[ "${CT_SLOT_EDIT:-}" != defer ] || return 0
 	[ -n "$1" ] || return 0
 	if _ct_have_tool; then conntrack -D --src "$1" >/dev/null 2>&1 || true; return 0; fi
 	_ct_ecm_defunct || true
@@ -154,6 +190,7 @@ ct_flush_src_n() {
 # ct_flush_dst <ip> [порт] — точечно по НАЗНАЧЕНИЮ (зациклившиеся сессии к endpoint'у VPS; с портом
 # — конкретный сервис, напр. обратный SSH релея поддержки).
 ct_flush_dst() {
+	[ "${CT_SLOT_EDIT:-}" != defer ] || return 0
 	[ -n "$1" ] || return 0
 	if _ct_have_tool; then
 		if [ -n "$2" ]; then conntrack -D -p tcp -d "$1" --dport "$2" >/dev/null 2>&1 || true

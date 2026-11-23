@@ -677,6 +677,7 @@ case "$1" in
     hotplug)   cmd_hotplug;   exit $? ;;
     hotplug-tick) cmd_hotplug_tick; exit $? ;;   # фон из cmd_hotplug: дождаться heal и дать тик сторожу
     doh-early) cmd_doh_early; exit $? ;;
+    etc-persistent) etc_persistent; exit $? ;;
     # Перенос наших имён в /tmp из прошлой эпохи БЕЗ запуска цели. Штатно миграция едет перед
     # КАЖДЫМ запуском цели (ram_mig ниже), но точечная заливка с ПК (`enodia.py --push`) целей не
     # запускает — и до ближайшего тика cron код НОВОЙ эпохи живёт рядом с пидфайлами СТАРОЙ. В это

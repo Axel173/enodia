@@ -954,13 +954,29 @@ read_subs_last() {
 # --- Идёт ли ПРЯМО СЕЙЧАС обновление подписок + итог последнего прогона. Лёгкий опрос для
 # прогресса кнопки ⟳ (панель обновляет подписки роутерным путём, а он фоновый и небыстрый:
 # ~20-30 с на подписку). Ради двух полей дёргать весь emit_prefs незачем.
-# «Идёт» = ЖИВ pid из лока subs-update.sh. Лок общий у cron и панели ⇒ прогресс видно и тогда,
-# когда прогон затеял cron, а человек в этот момент нажал ⟳ (его запуск лок просто отбросит).
+# The job owner retains its run lock while the state lock is free during carrier replay.
 # Сравнивать ts с часами БРАУЗЕРА нельзя (у роутера нет RTC) — панель ловит СМЕНУ ts.
 emit_subs_run() {
+	job=$(qv job)
+	if [ -n "$job" ]; then
+		case "$job" in *[!A-Za-z0-9]*) printf '{"error":"invalid job"}\n'; return ;; esac
+		[ "${#job}" = 6 ] || { printf '{"error":"invalid job"}\n'; return; }
+		row=$(sh "$D/subs-import.sh" refresh-status "$job" 2>/dev/null)
+		state=$(printf '%s\n' "$row" | cut -f1)
+		case "$state" in
+			running) printf '{"job":"%s","state":"running","running":true}\n' "$job"; return ;;
+			done|refused|error) ;;
+			*) printf '{"error":"refresh status unavailable"}\n'; return ;;
+		esac
+		ok=false; geo=false
+		[ "$(printf '%s\n' "$row" | cut -f2)" != 1 ] || ok=true
+		[ "$(printf '%s\n' "$row" | cut -f3)" != 1 ] || geo=true
+		msg=$(printf '%s\n' "$row" | cut -f4- | tr -d '\n' | jtxt 1000)
+		printf '{"job":"%s","state":"%s","running":false,"ok":%s,"msg":"%s","geo_notice":%s}\n' "$job" "$state" "$ok" "$msg" "$geo"
+		return
+	fi
 	run=false
-	p=$(cat /tmp/enodia-subs-update.lock/pid 2>/dev/null | tr -cd '0-9')
-	[ -n "$p" ] && [ -d "/proc/$p" ] && run=true
+	if [ -f "$D/subs-import.sh" ] && sh "$D/subs-import.sh" running >/dev/null 2>&1; then run=true; fi
 	read_subs_last
 	printf '{"running":%s,"ts":%s,"ok":%s,"msg":"%s","geo_notice":%s}\n' "$run" "${sl_ts:-0}" "$sl_ok" "$sl_msg" "$sl_geo"
 }
@@ -1358,45 +1374,37 @@ emit_tech() {
 		"$dsrc" "$dadr" "$dvia" "$dpro" "$dres" "$drel" "$dprx" "$dbin" "$dspl" "$mtu" "$mif" "$dsig"
 }
 
-# --- Кэш проверок серверов (.srv-checks, TSV key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts[⇥tms⇥via⇥dms⇥chb[⇥ncmp]]) → JSON-объект
-# key→{st,ms,method,cdn,mbps,kind,ts,tms,via,dms,chb,ncmp}. Пишет панель (action save_checks); тут только читаем. Хвост — «дорога к
-# серверу» (10.10.2026): st=blk — напрямую молчит, через туннель отвечает (tms); via — номер выхода-дороги, число ms — через неё,
-# dms — напрямую; chb — второе мнение «вердикт:блоков:ответили»; ncmp=1 — the silent server had nothing to be compared through
-# (cgi-bin/ping). Строка прежней формы (8 или 12 полей) — без хвоста. -----
+# A verdict exists only after the router measured these config bytes.
 emit_checks() {
-	F="$DS/.srv-checks"
-	printf '{'
-	first=1
-	if [ -f "$F" ]; then
-		TAB=$(printf '\t')
-		chb_on=0; [ -f "$DS/.chebur" ] && chb_on=1
-		while IFS="$TAB" read -r key st ms method cdn mbps kind ts tms via dms chb ncmp reason; do
-			case "$key" in 'awg|'*|'xray|'*|'hy2|'*) : ;; *) continue ;; esac
-			msj=$ms;   case "$msj" in ''|*[!0-9]*) msj=null ;; esac
-			mbj=$mbps; case "$mbj" in ''|*[!0-9.]*) mbj=null ;; esac
-			case "$cdn" in 1) cdj=true ;; *) cdj=false ;; esac
-			case "$st" in ok) stj=ok ;; blk) stj=blk ;; *) stj=dead ;; esac
-			# Discard old DNS diagnoses, which could also describe a hostname.
-			case "$st:$reason" in
-				inapplicable:ipv6_unreachable) stj=inapplicable; msj=null; mbj=null ;;
-				inapplicable:*|unknown:*) continue ;;
-				*) reason="" ;;
-			esac
-			tmj=$tms;  case "$tmj" in ''|*[!0-9]*) tmj=null ;; esac
-			dmj=$dms;  case "$dmj" in ''|*[!0-9]*) dmj=null ;; esac
-			case "$via" in [2-7]) ;; *) via="" ;; esac
-			printf '%s' "$chb" | grep -qE '^(blocked|clear|uncertain):[0-9]{1,3}:[0-9]{1,3}$' || chb=""
-			[ "$chb_on" = 1 ] || chb=""   # второе мнение выключено — ни следа его вердикта (кэш пишет панель, выключение его не чистит)
-			case "$kind" in speed) kj=speed ;; *) kj=ping ;; esac
-			case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
-			case "$method" in *[!A-Za-z0-9:._-]*|'') method="-" ;; esac
-			case "$ncmp" in 1) ncj=true ;; *) ncj=false ;; esac
-			[ "$first" = 1 ] || printf ','; first=0
-			printf '"%s":{"st":"%s","ms":%s,"method":"%s","cdn":%s,"mbps":%s,"kind":"%s","ts":%s,"tms":%s,"via":"%s","dms":%s,"chb":"%s","ncmp":%s,"reason":"%s"}' \
-				"$key" "$stj" "$msj" "$method" "$cdj" "$mbj" "$kj" "$ts" "$tmj" "$via" "$dmj" "$chb" "$ncj" "$reason"
-		done < "$F"
-	fi
-	printf '}\n'
+	{
+		if [ -f "$D/server-checks-lib.sh" ]; then . "$D/server-checks-lib.sh"; sc_rows; fi
+	} | awk -F '\t' -v chb_on="$([ -f "$DS/.chebur" ] && echo 1)" '
+	function num(v) { return (v ~ /^(0|[1-9][0-9]*)$/ ? v : "null") }
+	function sample(row,    st, method, mbps, chb) {
+	    $0=row
+	    st=($2=="ok" || $2=="blk" || $2=="inapplicable" ? $2 : "dead")
+	    method=($4 ~ /^[A-Za-z0-9:._-]+$/ ? $4 : "-")
+	    mbps=($6 ~ /^(0|[1-9][0-9]*)(\.[0-9]+)?$/ ? $6 : "null")
+	    chb=(chb_on && $12 ~ /^(blocked|clear|uncertain):[0-9]{1,3}:[0-9]{1,3}$/ ? $12 : "")
+	    return sprintf("\"st\":\"%s\",\"ms\":%s,\"method\":\"%s\",\"cdn\":%s,\"mbps\":%s,\"kind\":\"%s\",\"ts\":%s,\"tms\":%s,\"via\":\"%s\",\"dms\":%s,\"chb\":\"%s\",\"ncmp\":%s,\"reason\":\"%s\",\"scope\":\"%s\",\"rev\":\"%s\"", \
+	        st, num($3), method, ($5==1?"true":"false"), mbps, ($7=="speed"?"speed":"ping"), num($8), num($9), ($10~/^[2-7]$/?$10:""), \
+	        num($11), chb, ($13==1?"true":"false"), (st=="inapplicable"?$14:""), $15, $16)
+	}
+	$1 ~ /^(awg|xray|hy2)\|[A-Za-z0-9_.-]+$/ && length($16)==32 && $16 !~ /[^0-9a-f]/ && ($15=="endpoint" || $15=="egress") {
+	    if ($2=="unknown" || ($2=="inapplicable" && $14!="ipv6_unreachable")) next
+	    if ($15=="endpoint") endpoints[$1]=$0
+	    rank=($15=="egress" ? 2 : 1)
+	    if (rank>=priority[$1]) { rows[$1]=$0; priority[$1]=rank }
+	}
+	END {
+	    printf "{"
+	    for (k in rows) {
+	        printf "%s\"%s\":{%s", (n++ ? "," : ""), k, sample(rows[k])
+	        if (priority[k]==2 && k in endpoints) printf ",\"endpoint\":{%s}", sample(endpoints[k])
+	        printf "}"
+	    }
+	    print "}"
+	}'
 }
 
 # «ЗАДАЧИ» (cron manager): every view is built by tasks.sh — the owner validates and answers in JSON, this CGI only carries.

@@ -810,6 +810,7 @@ _wanted_pass() {
 # refetch=1 (update) перекачивает кэш; refetch=0 (apply) собирает из существующего кэша (быстро).
 # _build_pass — ОДИН проход; ВСЕГДА под локом do_build (см. ниже).
 _build_pass() {
+	[ -z "$2" ] || export CT_SLOT_EDIT=defer
 	_refetch="$1"
 	GEO_SNAPW=""
 	# Инвалидация по версии резолвера: сменилась логика fetch_v2fly → устаревший доменный кэш/снимок
@@ -830,7 +831,7 @@ _build_pass() {
 	for _sn in 2 3 4 5 6 7; do : > "$RAM/.agg-vpn-s$_sn"; : > "$RAM/.dom-vpn-s$_sn"; done
 	_any_slot=0
 	_en_slots=" "
-	[ -f "$ENODIA_DIR/slots.sh" ] && _en_slots=" $(sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | cut -f1 | tr '\n' ' ') "
+	[ -f "$ENODIA_DIR/slots.sh" ] && _en_slots=" $(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null | cut -f1 | tr '\n' ' ') "
 	if [ -s "$REG" ]; then
 		while IFS="$TAB" read -r _k _a _c _t _s; do
 			[ -n "$_k" ] || continue
@@ -886,15 +887,18 @@ _build_pass() {
 	# Слот-агрегаты: сорт+дедуп, сет наполняем если есть члены (CIDR или домены — dnsmasq требует
 	# СУЩЕСТВУЮЩИЙ сет до рестарта, set_sync его создаёт и пустым) ИЛИ сет уже жив (иначе IP отвязанной
 	# категории залипли бы в старом сете — зеркало groups.sh). Снимок на флеш — офлайн-ребут переживает.
+	_osn=''
 	for _sn in 2 3 4 5 6 7; do
 		_sf="$RAM/.agg-vpn-s$_sn"; _df="$RAM/.dom-vpn-s$_sn"
 		sort_inplace "$_sf"
 		sort_inplace "$_df"
+		if [ -s "$_sf" ] || [ -s "$_df" ]; then _osn="$_osn geo_vpn_s$_sn"; fi   # members ⇒ the exit must carry this set (set_slot_need)
 		if [ -s "$_sf" ] || [ -s "$_df" ] || ipset list -n 2>/dev/null | grep -qx "geo_vpn_s$_sn"; then
 			set_sync "geo_vpn_s$_sn" "$_sf" "$_df" || _gfail="$_gfail geo_vpn_s$_sn"
 		fi
 		snap_q "$GEO/.snap-vpn-s$_sn" "$_sf"
 	done
+	! command -v set_slot_need >/dev/null 2>&1 || set_slot_need geo $_osn
 	# ДОМЕНЫ: дедуп + dnsmasq-conf (сеты geo_vpn/geo_out уже созданы set_sync выше — dnsmasq требует их).
 	sort_inplace "$_dv"
 	sort_inplace "$_do"
@@ -908,10 +912,10 @@ _build_pass() {
 	wire_rules
 	# Пул десинка изменился → досборка правил nfqws (zapret сам о нашем сете не узнает). Верб rewire
 	# идемпотентен и НЕ поднимает демон, когда десинк выключен, — звать безопасно всегда.
-	[ -f "$ENODIA_DIR/zapret.sh" ] && sh "$ENODIA_DIR/zapret.sh" rewire >/dev/null 2>&1
+	[ -n "$2" ] || { [ ! -f "$ENODIA_DIR/zapret.sh" ] || sh "$ENODIA_DIR/zapret.sh" rewire >/dev/null 2>&1; }
 	# Есть привязки к слотам → переиграть слоты через ОРКЕСТРАТОР (zapret-слот ставит ACCEPT+NFQUEUE
 	# на geo_vpn_s<N>). stdout глушим: _build_pass бежит в $(...) do_build — чужой вывод сбил бы сводку.
-	if [ "$_any_slot" = 1 ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
+	if [ -z "$2" ] && [ "$_any_slot" = 1 ] && [ -f "$ENODIA_DIR/transport.sh" ]; then
 		sh "$ENODIA_DIR/transport.sh" slots-up >/dev/null 2>&1
 	fi
 	# Цепочку CIDR-DROP держим только пока есть что блокировать по CIDR (домен-блок независим — dnsmasq).
@@ -919,7 +923,7 @@ _build_pass() {
 	if [ "$_bn" -gt 0 ]; then geo_block_wire; else geo_block_teardown; fi
 	dns_reload
 	# NSS/ECM-offload держит установленные соединения на старом маршруте до таймаута — сброс обязателен.
-	ct_flush
+	[ -n "$2" ] || ct_flush
 	# the consumers' keys ride every refetch (boot, daily, «Обновить»); AFTER the routing above — they must not delay it
 	if [ "$_refetch" = 1 ]; then _wanted_pass 1 >/dev/null 2>&1; fi
 	rm -f "$_vpn" "$_out" "$_blk" "$_dsy" "$_dv" "$_do" "$_db" "$_dd" 2>/dev/null
@@ -940,8 +944,10 @@ _build_pass() {
 # запрошенная перекачка не теряется (dirty=1 ⇒ повтор с refetch, а не «тихий apply из кэша»).
 # Печатаем сводку ПОСЛЕДНЕГО прохода (панель кладёт stdout в .msg — две строки сбили бы i18n).
 do_build() {
-	_want="$1"
-	if ! ls_lock_take "$GEO_LOCK" "$GEO_DIRTY" "$_want"; then
+	_want="$1"; _rebind="$2"
+	if [ -n "$_rebind" ]; then
+		ls_lock_take "$GEO_LOCK" "$GEO_DIRTY.rebind" 1 || return $?
+	elif ! ls_lock_take "$GEO_LOCK" "$GEO_DIRTY" "$_want"; then
 		echo 'гео: сборка уже идёт — учту свежий выбор в ней'
 		return 0
 	fi
@@ -949,14 +955,17 @@ do_build() {
 	trap 'exit 1' INT TERM HUP PIPE
 	_sum=''; _rc=0
 	while :; do
-		rm -f "$GEO_DIRTY" 2>/dev/null   # сброс ДО чтения реестра: пойманный dirty ⇒ реестр прочитан ПОСЛЕ мутации
-		_sum=$(_build_pass "$_want"); _rc=$?
-		[ -f "$GEO_DIRTY" ] || break
-		_want=$(cat "$GEO_DIRTY" 2>/dev/null | tr -d ' \r\n'); [ "$_want" = 1 ] || _want=0
+		if [ -f "$GEO_DIRTY" ]; then
+			_rebind=''
+			[ "$(cat "$GEO_DIRTY" 2>/dev/null)" != 1 ] || _want=1
+		fi
+		rm -f "$GEO_DIRTY" "$GEO_DIRTY.rebind" 2>/dev/null
+		_sum=$(_build_pass "$_want" "$_rebind"); _rc=$?
+		[ -f "$GEO_DIRTY" ] || [ -f "$GEO_DIRTY.rebind" ] || ustate DONE
+		ls_replay_again "$GEO_LOCK" "$GEO_DIRTY" || break
+		_rebind=1; _want=0
 	done
-	ustate DONE
 	trap - EXIT INT TERM HUP PIPE
-	ls_lock_drop "$GEO_LOCK"
 	[ -z "$_sum" ] || echo "$_sum"
 	return $_rc   # провал заливки набора не должен читаться как «применено» (сводка это же и говорит)
 }
@@ -1347,8 +1356,10 @@ case "$1" in
 		if [ -f "$GEO_DIRTY" ]; then
 			case "$(cat "$GEO_DIRTY" 2>/dev/null | tr -d ' \r\n')" in 1) exec sh "$0" update ;; *) exec sh "$0" apply ;; esac
 		fi
+		[ ! -f "$GEO_DIRTY.rebind" ] || exec sh "$0" rebind
 		exit 0 ;;
 	apply)   do_build 0 ;;     # собрать из кэша (быстро; после смены действия)
+	rebind)  do_build 0 1 ;;
 	update)  resolve_upstream; set_source_urls; v2fly_enumerate; do_build 1 ;;   # SHA+даты → пиновка URL → перечислить v2fly (rf=baked) → перекачать (пиновано) + собрать
 	reapply) do_reapply ;;     # офлайн из снимка (boot)
 	# Только ЦЕПОЧКА «Блока» после сноса правил (firewall reload) — зовёт починка правил (`vpn-toggle.sh repair|rules`). Наборы в
@@ -1366,6 +1377,7 @@ case "$1" in
 		trap 'exit 1' INT TERM HUP PIPE
 		geo_block_wire
 		trap - EXIT INT TERM HUP PIPE; ls_lock_drop "$GEO_LOCK"
+		[ ! -f "$GEO_DIRTY.rebind" ] || exec sh "$0" rebind
 		exit 0 ;;
 	# Снесена ли цепочка «Блока», которая обязана стоять: 0 — стоит (или «Блока» нет), 3 — снесена, иное — не знаю (1 отдаёт любой
 	# общий отказ скрипта — «снесено» им быть не может). Признак «обязана» —

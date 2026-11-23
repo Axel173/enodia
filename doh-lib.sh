@@ -295,6 +295,14 @@ dns_now() {
 	_dnvia=tunnel
 	if [ "$_dnsrc" = stock ] || doh_direct_regime; then _dnvia=direct
 	elif [ "$_dnsrc" = doh ] && [ -f "$DOH_UNTUNNELED" ]; then _dnvia=direct; fi
+	if [ "$1" = anchors ]; then
+		if [ "$_dnsrc" = doh ] || doh_on_intent || doh_auto_active; then
+			doh_resolver_ips
+			printf '\n%s\n' "$(doh_bootstrap_ip)"
+		fi
+		[ "$_dnsrc" = doh ] || printf '%s\n' "$_dnadr"
+		return 0
+	fi
 	printf 'src=%s\naddr=%s\nvia=%s\n' "$_dnsrc" "$_dnadr" "$_dnvia"
 }
 
@@ -1150,7 +1158,13 @@ doh_anchor_state() {
 # сломает подъём): его зовут ИЗ up-пути несущей, когда `default` в table 1000 ещё не поставлен, —
 # doh_direct_regime в этот момент честно ответит «прямой», и туннельный якорь не встанет никогда.
 # Там режим называет ПЛАГИН, и он знает лучше сети.
+doh_road_rewire() {
+	[ ! -s "$ENODIA_STATE/.cfg-via" ] || [ ! -f "$ENODIA_DIR/road.sh" ] ||
+		sh "$ENODIA_DIR/road.sh" wire >/dev/null 2>&1
+}
+
 doh_anchor_apply() {
+	doh_road_rewire
 	if doh_direct_regime || [ -f "$DOH_UNTUNNELED" ]; then
 		doh_resolver_mark del; doh_resolver_bypass add
 	else
@@ -2474,8 +2488,10 @@ doh_apply_dns() {
 	else
 		rm -f "$DOH_AUTO_STAMP" 2>/dev/null       # авто больше не держит DNS (ушли в туннель/запрещён)
 		rm -f "$DOH_UNTUNNELED" "$DOH_RETUNNEL_STAMP" 2>/dev/null   # DoH выключен ⇒ и «уведён» не про что
+		doh_road_rewire
 		return 1
 	fi
+	doh_road_rewire
 	if doh_retired_resolver && doh_running && ! doh_live_catalog_key "$(doh_proto_now)" >/dev/null; then
 		doh_stop
 	fi

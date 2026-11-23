@@ -433,9 +433,25 @@ $(sh "$D/watchdog.sh" standing 2>/dev/null)
 EOF
 fi
 
-ex_on=0; ex_bad=0; ex_states=""
+ex_on=0; ex_bad=0; ex_states=""; ex_paths=""; ex_dead=""
+ex_kept=""; ex_kept_live=""; ex_kept_road_lost=""
 if [ -f "$D/slots.sh" ] && [ -s "$DS/.slots" ]; then
-	ex_states=$(sh "$D/slots.sh" state 2>/dev/null)   # id⇥state — kept: the road's mark below asks «does ITS exit carry» of the same answer
+	ex_states=$(sh "$D/slots.sh" state 2>/dev/null)   # id⇥state⇥path
+	ex_kept_rows=$(sh "$D/slots.sh" list-admitted off 2>/dev/null)
+	ex_kept=$(printf '%s\n' "$ex_kept_rows" | awk -F '\t' '$1~/^[2-7]$/ {printf "%s%s",sep,$1; sep=","}')
+	ex_kept_live=$(printf '%s\n' "$ex_states" | awk -F '\t' -v keep=",$ex_kept," '
+		index(keep, "," $1 ",") && $2=="up" && $3=="self" {printf "%s%s",sep,$1; sep=","}')
+	if [ "$voff" != 1 ] && [ -n "$ex_kept" ] && [ -f "$D/road.sh" ]; then
+		ex_kept_road_lost=$({ sh "$D/road.sh" list 2>/dev/null; printf '%s\n' "$ex_kept_rows"; } |
+			awk -F '\t' -v keep=",$ex_kept," '
+				NF==2 {road[$1]=$2; next}
+				$1~/^[2-7]$/ && (via=road[$2 "/" $3]) && !index(keep, "," via ",") {
+					printf "%s%s",sep,$1; sep=","
+				}')
+	fi
+	ex_paths=$(printf '%s\n' "$ex_states" | awk -F '\t' '
+		$1 ~ /^[2-7]$/ && $3 ~ /^(main|direct|[2-7])$/ {printf "%s\"%s\":\"%s\"", sep,$1,$3; sep=","}')
+	ex_dead=$(printf '%s\n' "$ex_states" | awk -F '\t' '$1 ~ /^[2-7]$/ && $2=="dead" {printf "%s%s",sep,$1; sep=","}')
 	for st in $(printf '%s\n' "$ex_states" | cut -f2); do
 		case "$st" in
 			off) ;;
@@ -475,5 +491,5 @@ if [ "$voff" = 0 ] && [ -f "$D/road.sh" ] &&
 		if [ -n "$_rdc" ] && [ -f "$D/warp.sh" ] && sh "$D/warp.sh" list 2>/dev/null | cut -f1 | grep -qxF "$_rdc"; then road_w=true; fi
 	fi
 fi
-printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"road":"%s","road_name_b64":"%s","road_warp":%s,"road_up":%s,"road_configured":"%s","tasks_n":%s,"tasks_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s}\n' \
-	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$road_id" "$road_nb" "$road_w" "$road_up" "$road_configured" "$tk_n" "$tk_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now"
+printf '{"transport":"%s","proto_label":"%s","config":"%s","config_file":"%s","sub_label":"%s","live":%s,"vpn_off":%s,"backend":%s,"carrier":"%s","standing":"%s","back":"%s","back_to":"%s","back_in":%s,"fo_mode":"%s","back_why":"%s","home_why":"%s","back_on_fail":"%s","back_on_fail_at":"%s","hs_age":%s,"ready":[%s],"installed":[%s],"configured":%s,"full_tunnel":%s,"support_active":%s,"events_unread":%s,"exits_on":%s,"exits_bad":%s,"exits_paths":{%s},"exits_dead":[%s],"road":"%s","road_name_b64":"%s","road_warp":%s,"road_up":%s,"road_configured":"%s","tasks_n":%s,"tasks_bad":%s,"model":"%s","fw":"%s","cpu_pct":%s,"ram_free":%s,"ram_total":%s,"disk_free":%s,"disk_total":%s,"disk_used":%s,"disk_used_pct":"%s","store_state":"%s","store_pct":%s,"store_free":%s,"store_total":%s,"ts":%s,"exits_kept":[%s],"exits_kept_live":[%s],"exits_kept_road_lost":[%s]}\n' \
+	"$t" "$label" "${cfg:-?}" "$cfg_file" "$sub_label" "${live:-0}" "$voff" "${backend:-0}" "$wd_carrier" "$fo_st" "$fo_back" "$fo_to" "$fo_in" "$fo_md" "$fo_why" "$fo_hw" "$fo_of" "$fo_ofa" "${hs_age:--1}" "$rj" "$ij" "$tcfg" "$ft" "$sup" "$ev_unread" "$ex_on" "$ex_bad" "$ex_paths" "$ex_dead" "$road_id" "$road_nb" "$road_w" "$road_up" "$road_configured" "$tk_n" "$tk_bad" "$model" "$fw" "${cpu:-0}" "${ramfree:-0}" "${ramtot:-0}" "${diskfree:-0}" "${disktot:-0}" "${diskused:-null}" "${diskpct:-?}" "$stst" "${storepct:-0}" "${storefree:-0}" "${storetot:-0}" "$now" "$ex_kept" "$ex_kept_live" "$ex_kept_road_lost"

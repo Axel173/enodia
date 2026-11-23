@@ -275,8 +275,8 @@
   try{ var _alS=JSON.parse(sessionStorage.getItem(ACT_LOG_KEY)||'[]'); if(Array.isArray(_alS)) ACT_LOG=_alS.filter(function(r){ return r && typeof r.m==='string'; }).slice(-ACT_LOG_MAX); }catch(e){}
   function actLogNode(r){
     var d=document.createElement('div');
-    // Время и текст — ОДНИМ текстовым узлом: перевод узнаёт префикс «[ЧЧ:ММ:СС] » и переводит строку за ним (разбор у i18nStr).
-    d.textContent='['+r.t+'] '+r.m;
+    // Translate the saved message at display time. Keep its timestamp visible.
+    d.textContent='['+r.t+'] '+routerMessageText(r.m);
     d.className='al-r'+(r.ok===false ? ' bad' : r.ok===true ? ' ok' : '');
     return d;
   }
@@ -324,10 +324,10 @@
     else if(state===true){ if(sp){sp.className='mk';sp.textContent='✓';} el.classList.add('ok'); }
     else { if(sp){sp.className='mk';sp.textContent='✕';} el.classList.add('err'); }
     if(mg){
-      mg.textContent=msg||'';
+      mg.textContent=routerMessageText(msg||'');
       if(detail){
         var note=document.createElement('span');
-        note.textContent=(LANG==='en' ? i18nStr(detail) : detail);
+        note.textContent=routerMessageText(detail);
         mg.appendChild(document.createTextNode(' · '));
         mg.appendChild(note);
       }
@@ -408,6 +408,13 @@
   // СТРОКА ПОД ЯЗЫК ПАНЕЛИ СРАЗУ — для мест, где накладной перевод бессилен: `<option>` со склейкой слов панели и имени,
   // которое написал человек (кириллическое имя откатило бы перевод всей подписи), и нативные вопросы.
   function trNow(s){ return LANG==='en' ? i18nStr(s) : s; }
+  function routerMessageText(s){
+    // Translate the tagged message first so line boundaries and anchored rules still match.
+    var shown=trNow(s);
+    if(typeof shown!=='string') return shown;
+    var text=shown.replace(/^((?:\[\d[\d:. ]*(?:[AaPp][Mm])?\]\s+)?(?:→\s+)?)\[[a-z0-9-]+\] (?=\s*\S)/, '$1');
+    return shown===s && text!==s ? trNow(text) : text;
+  }
   function askConfirm(msg){ return window.confirm(LANG==='en' ? i18nStr(msg) : msg); }
   // То же и для ЗАПРОСА ВВОДА: `window.prompt` — такой же нативный попап мимо DOM. Без обёртки
   // англоязычный получал переведённые подтверждения и русские вопросы «Новое имя подписки:» —
@@ -510,8 +517,28 @@
     el.setAttribute('data-hk', k);
     el.innerHTML=sg.map(function(x){ return '<span'+(x[1]?' class="sens"':'')+'>'+esc(x[0])+'</span>'; }).join('');
   }
+  // Status reports confirmed self paths and the installed fallback map in the same poll.
+  function offSlotState(c, n){
+    if((c.exitsKeptLive||[]).indexOf(+n)>=0) return {state:'up', path:'self'};
+    var path=(c.exitsPaths||{})[n];
+    if(/^[2-7]$/.test(path)) return {state:(c.exitsDead||[]).indexOf(+n)>=0 ? 'dead' : 'fallback', path:path};
+    return {state:'direct', path:'direct'};
+  }
   function heroWords(c, d, where){
     var isZ=(c.transport==='zapret'), ft=(d.full_tunnel===true||d.full_tunnel==='true'), fs=d.standing||'';
+    if(c.vpnOff){
+      var ids=(c.exitsKeptLive||[]).slice();
+      Object.keys(c.exitsPaths||{}).forEach(function(n){
+        var s=offSlotState(c, n);
+        if(s.state==='fallback' && ids.indexOf(+s.path)<0) ids.push(+s.path);
+      });
+      if(ids.length){
+        var multiple=ids.length>1, label=ids.sort().map(function(id){return '№'+id;}).join(', ');
+        return [(multiple ? 'VPN выключен · работают выходы ' : 'VPN выключен · работает выход ')+label,
+          multiple ? 'Привязанные правила продолжают работать через эти выходы.' :
+            'Привязанные правила продолжают работать через этот выход.'];
+      }
+    }
     if(!c.configured){
       // Ровно одна мысль на экран: что сейчас (роутер работает как обычно) и что дальше. Но
       // «дальше» РАЗНОЕ, и это не косметика: установка «только панель» кладёт бутстрап-десинк
@@ -621,6 +648,11 @@
     // «Выключено человеком» — ОТДЕЛЬНОЕ состояние, а не разновидность «не активен»:
     // тумблер снят руками и переживает ребут. Поле от роутера; старый CGI его не знает.
     cur.vpnOff = (d.vpn_off===1 || d.vpn_off==='1');
+    cur.exitsKept = slotKeepIds(d.exits_kept);
+    cur.exitsKeptLive = slotKeepIds(d.exits_kept_live);
+    cur.exitsKeptRoadLost = slotKeepIds(d.exits_kept_road_lost);
+    cur.exitsPaths = d.exits_paths||{};
+    cur.exitsDead = slotKeepIds(d.exits_dead);
     // Сервер, которым основной туннель выходит СЕЙЧАС, — им называется чип пути «в туннель» (`rpDir`), как «Амстердам» макета.
     cur.config = statusCfg(d, cur.configured);
     // Возраст рукопожатия активного AWG — ещё и для экрана сервера (srvStatsHtml): второго запроса статуса он не делает. Среди прочих
@@ -788,9 +820,15 @@
     cur.exitsBad=(d.exits_bad|0);
     var exInd=document.getElementById('exit-ind');
     if(exInd){
-      var exBad=cur.exitsBad;
+      var paths=cur.exitsPaths, dead=cur.exitsDead;
+      var affected=Object.keys(paths).filter(function(id){
+        return /^[2-7]$/.test(id) && (cur.vpnOff ? /^[2-7]$/.test(paths[id]) : slotPathLabel(paths[id]));
+      });
+      var exBad=cur.vpnOff ? affected.length : cur.exitsBad;
       exInd.style.display = exBad>0 ? 'inline-flex' : 'none';
       if(exBad>0) exInd.querySelector('span').textContent = exBad>1 ? (exBad+' '+plu(exBad,['выход','выхода','выходов'])+' не работают') : 'выход не работает';   // up to 6 exits since 05.10: «5 выходов»
+      exInd.title=affected.map(function(id){ return trNow('Выход №')+id+' · '+trNow(slotPathLabel(paths[id],dead.indexOf(+id)>=0)); }).join('\n');
+      if(exBad===1 && affected.length===1 && /^[2-7]$/.test(paths[affected[0]])) exInd.querySelector('span').textContent=slotPathLabel(paths[affected[0]],dead.indexOf(+affected[0])>=0);
     }
     // РЯД индикаторов гасим ВМЕСТЕ с ними. Пустой ряд не «ничего»: он лежит в колонке с
     // зазором 14 px, и при обоих скрытых индикаторах над шапкой оставалась дырка ровно в этот
@@ -1791,7 +1829,7 @@
   // тот же, что у «двух ответов про накопитель»). Порядок веток значим: СПЕРВА причины, которые
   // кнопкой не лечатся (компонент не поставлен, ядро без NFQUEUE), иначе выходит совет по кругу.
   // `short` живёт в строке списка и на карточке «Обзора», `long` — плашкой на экране самого выхода.
-  function slotBad(s){ var st=s.state||(s.enabled?'up':'off'); return !!(s.enabled && st!=='up' && st!=='idle'); }
+  function slotBad(s){ var st=s.state||(s.enabled?'up':'off'); return !!(s.enabled && st!=='up' && st!=='idle' && (!cur.vpnOff || s.keep_when_off)); }
   // КТО ДЕРЖИТ КЛЮЧ — словами. `h` — держатель от роутера: `main` (сервер AmneziaWG основного канала) или `s<N>` (выход №N). Один
   // ответ на отказ у выхода (`slotWhy`) и на пометку в выборе конфига (`slotCfgOpts`): формулировки разъезжаются с первой правки.
   // Держатель словами — ТЕ ЖЕ, что у роутера (slots.sh key_busy_msg): «сервер AmneziaWG основного канала», а не «сервер основного
@@ -1809,6 +1847,13 @@
   // выходу): строка рисовала крестик, на который роутер отвечал отказом (обход на железе 13.10.2026, выход №5 на сервере подписки).
   // Не то же, что `awg.held`: там КЛЮЧ (его может держать и другой конфиг с тем же ключом), здесь — сам файл.
   function cfgExits(tpt, name){ return slotAll.filter(function(s){ return s.transport===tpt && s.config===name; }).map(function(s){ return s.id; }); }
+  function cfgDeleteExits(tpt, name, held){
+    if(tpt!=='awg') return cfgExits(tpt, name);
+    var keys=held && held[name] ? String(held[name]).split(',') : [];
+    return slotAll.filter(function(s){
+      return s.transport==='awg' && s.enabled && (s.config===name || keys.indexOf('s'+s.id)>=0);
+    }).map(function(s){ return s.id; });
+  }
   // ДОРОГА К СЕРВЕРУ И WARP (road.sh, warp.sh) — панель только рисует ответы роутера: карта дорог (`roads` из /cgi-bin/list:
   // {"awg/<файл>":"<номер выхода>"}), какие конфиги — WARP (`warp`: {"<файл>":1|0}, 1 — с маскировкой I1; узнаёт роутер по ключу
   // сервера Cloudflare) и реестр выходов (`slotAll` из section=slots: у выхода — пассажиры `riders` и признак `warp`). Один разбор
@@ -1849,6 +1894,11 @@
   function slotWhy(s){
     var st=s.state||(s.enabled?'up':'off');
     var tl=SLOT_TPT_LABEL[s.transport]||s.transport;
+    if(/^[2-7]$/.test(s.path)){
+      var now='Сейчас: '+slotPathLabel(s.path,st==='dead');
+      return {short:now, long:now};
+    }
+    if(st==='dead') return {short:'не отвечает', long:'Несущая выхода не отвечает'};
     // Пустой installed = CGI старее фичи ⇒ про компоненты молчим и судим только по состоянию.
     var inst=cur.installed||[], rdy=cur.ready||[];
     if(inst.length && inst.indexOf(s.transport)<0)
@@ -1868,9 +1918,8 @@
       if(s.enabled && st==='fallback') return {short:'ключ занят — основным', long:kc+'. Пока ключ занят, его сайты идут основным туннелем'};
       return {short:'ключ занят', long:kc};
     }
-    if(st==='fallback') return {short:'идёт основным',  long:'несущая выхода не поднялась — его сайты идут основным туннелем'};
-    if(st==='direct')   return {short:'идёт напрямую',  long:'несущая выхода не поднялась — его сайты идут НАПРЯМУЮ, мимо VPN'};
-    if(st==='dead')     return {short:'не отвечает',    long:'несущая выхода не отвечает — его сайты не откроются; сторож перезапустит её в течение 2 минут'};
+    if(st==='fallback') return {short:'идёт основным',  long:'Сайты выхода идут основным туннелем'};
+    if(st==='direct')   return {short:'идёт напрямую',  long:'Сайты выхода идут напрямую, мимо VPN'};
     // `down` — у марки выхода нет `ip rule`: помеченное проваливается в main, то есть НАПРЯМУЮ. При выключенном тумблере VPN так и
     // задумано (cmd_off снимает правила всех марок), и «Починить правила» там отказывает — совет был бы по кругу.
     if(cur.vpnOff) return {short:'VPN выключен', long:'VPN выключен тумблером — у выхода нет правил, его трафик идёт напрямую'};
@@ -1912,7 +1961,7 @@
         h+='<div class="lempty">Выходов нет — весь трафик идёт основным путём. Дополнительный выход — это второй путь наружу (свой сервер или десинк) для выбранных сайтов и устройств.</div>';
       } else slots.forEach(function(s){
         var bad=slotBad(s), ds=slotDs(s, true);
-        var right = !s.enabled ? '<span class="chip">выключен</span>'
+        var right = s.unapplied ? '<span class="chip wr">не применено</span>' : !s.enabled ? '<span class="chip">выключен</span>'
                   : bad ? '<span class="chip wr">'+esc(slotWhy(s).short)+'</span>' : '';
         h+=lrowGo('exit:'+s.id,'открыть выход')
           + '<span class="dot'+(!s.enabled?' off':(bad?' warn':''))+'"></span>'
@@ -3649,7 +3698,9 @@
         el.style.color = 'var(--text-tertiary)';
         // An Amnezia Premium server is measured through its own tunnel (`tun`: the relay answers no probe) — no TCP probe or ping was
         // made, and the title must not say so (review s.136 r2, panel 10).
-        el.title = !srv ? '' : d.method==='tun' ? ('Сервер '+srv+': задержку сервера Amnezia Premium роутер меряет через сам туннель — сейчас туннель не ответил.')
+        // A multi-outbound Xray pool is measured through its tunnel too (cgi-bin/ping `pool:true`) — not a Premium key (review 9).
+        el.title = !srv ? '' : keyTunSilent(d) ? ('Сервер '+srv+': задержку сервера Amnezia Premium роутер меряет через сам туннель — сейчас туннель не ответил.')
+                 : d.method==='tun' ? 'Профиль с несколькими выходами роутер проверяет через сам туннель — сейчас туннель не ответил.'
                  : ('Сервер '+srv+' не ответил на TCP-пробу и ping. Часто это норма (UDP/QUIC-сервер или ICMP режут) — VPN может работать. Проверяйте по «Зарубежному IP».');
       } else {
         var nm=/^net:/.test(d.method||'');
@@ -3707,8 +3758,28 @@
     // выбор по `live` предлагал «выключить» на уже выключенном VPN: единственная дорога назад
     // ведёт через этот же тумблер, и она была закрыта. Флаг снимает только `vpn_on` — значит и
     // клик при флаге обязан быть `vpn_on`. Тот же признак красит hero (см. выше).
-    if(cur.live && !cur.vpnOff) postAction('vpn_off','Выключить VPN? Весь трафик пойдёт напрямую.','выключаю VPN…');
+    if(cur.live && !cur.vpnOff) postAction('vpn_off',vpnOffPrompt(cur.exitsKept,cur.exitsKeptLive,cur.exitsKeptRoadLost),'выключаю VPN…');
     else postAction('vpn_on', null, 'включаю VPN…');
+  }
+  function slotKeepIds(ids){
+    return Array.isArray(ids) ? ids.filter(function(id){return /^[2-7]$/.test(String(id));}) : [];
+  }
+  function vpnOffPrompt(ids,live,roadLost){
+    if(!ids || !ids.length) return 'Выключить VPN? Весь трафик пойдёт напрямую.';
+    var lost=(roadLost||[]).map(String);
+    var eligible=ids.filter(function(id){return lost.indexOf(String(id))<0;});
+    var active=eligible.filter(function(id){return (live||[]).some(function(n){return String(n)===String(id);});});
+    var label=active.map(function(id){return tkL('№','')+id;}).join(', ');
+    var prompt=tkL('Выключить VPN?', 'Turn off VPN?');
+    if(label) prompt+=tkL(' Выходы продолжат работать: '+label+'.', ' Exits will keep running: '+label+'.');
+    ids.forEach(function(id){
+      if(lost.indexOf(String(id))>=0) prompt+=tkL(' Выход №'+id+' станет недоступен, потому что его дорога выключится.',
+        ' Exit '+id+' will become unavailable because its road will turn off.');
+    });
+    if(active.length<eligible.length) prompt+=label || lost.length
+      ? tkL(' Часть настроенных выходов сейчас не работает.', ' Some exits set to keep running are currently unavailable.')
+      : tkL(' Настроенные выходы сейчас не работают.', ' The exits set to keep running are currently unavailable.');
+    return prompt;
   }
   if(vt){
     vt.addEventListener('click', vpnToggle);
@@ -3945,7 +4016,7 @@
           // holder's screen, where the exit gets another server or is turned off.
           var hx=(t==='awg' && grp.active!==nm) ? srvHeldByExit(grp.held, nm) : '';
           if(hx){ items.push({label:disp, data:true, note:' — занят: '+slotHeldBy(hx)+' →', muted:true, onClick:function(){ exitScrOpen(hx.slice(1)); }}); return; }
-          items.push({label:(grp.active===nm?'● ':'')+disp, data:true, onClick:function(){ if(grp.active!==nm) activateServer(t,nm,canAct,subs); }});
+          items.push({label:(grp.active===nm?'● ':'')+disp, data:true, onClick:function(){ if(grp.active!==nm) activateServer(t,nm,canAct,subs,cfgRev(d,t,nm)); }});
         });
         if(!list.length) items.push({label:'нет конфигов — добавьте в «Серверы»…', onClick:openServers});
       }
@@ -6332,79 +6403,92 @@
     });
   }
 
-  // ---- КЭШ проверок серверов (пинг/доступность/скорость) — ПЕРСИСТ НА РОУТЕРЕ (.srv-checks),
-  // виден со всех устройств и переживает перерисовку/перезагрузку панели. Ключ "<tpt>|<имя>".
-  // Значение сбрасывается ТОЛЬКО новой проверкой (перезапись), обновлением/удалением подписки
-  // или удалением+повторным добавлением сервера (chkDrop/chkDropTag). Запись на флеш дебаунсим
-  // (одна запись после пачки), тело — компактный TSV (килобайты). Показ — последнее измеренное
-  // (kind: ping|speed).
-  var CHK={}, chkSaveT=null, _chkOk=false;
-  function chkKey(tpt,name){ return tpt+'|'+name; }
-  // `_chkOk` — кэш с роутера принят ХОТЯ БЫ РАЗ. Отказ (роутер не ответил, `{need_login}`) не превращается в «пустой кэш»: экран
-  // проверки выдал бы его за «не проверялись», а первое же измерение отправило бы роутеру ЧАСТИЧНЫЙ кэш вместо полного
-  // (`save_checks` пишет файл целиком). Ответ сливается с памятью по времени замера: что новее — то и остаётся (прогон мог
-  // идти, пока кэш грузился; с другого устройства могли проверить позже). Итог — true/false: принят ли.
-  // СЛИЯНИЕ ДВУХ ЗАПИСЕЙ ОДНОГО СЕРВЕРА. Основа — новее по времени, но у записи ОДНА отметка на пинг и скорость, и свежий пинг
-  // с одного устройства не имеет права унести скорость, измеренную на другом, а скорость — пинг (ревью шага 3c-3, круг 2). Мёртвый
-  // сервер скорость снимает сам: у него она не наследуется.
-  function chkMerge(a, b){
-    var n=(+(a.ts||0) >= +(b.ts||0)) ? a : b, o=(n===a) ? b : a, m={}, k;
-    for(k in n) if(n.hasOwnProperty(k)) m[k]=n[k];
+  // Router-owned check records. Endpoint probes can update latency without replacing an egress verdict.
+  var CHK={}, _chkOk=false, _chkRequest=0, _cfgRevisions={};
+  function chkKey(tpt,name,rev){ return tpt+'|'+name+(rev ? '|'+rev : ''); }
+  function checkRev(rev){ return typeof rev==='string' && /^[0-9a-f]{32}$/.test(rev) ? rev : ''; }
+  function cfgRev(list,tpt,name){
+    return checkRev((list ? list.revisions||{} : _cfgRevisions)[chkKey(tpt,name)]);
+  }
+  function chkGet(tpt,name,rev){
+    rev=rev===undefined ? cfgRev(null,tpt,name) : checkRev(rev);
+    return rev ? CHK[chkKey(tpt,name,rev)] || null : null;
+  }
+  function chkNewer(cached, incoming){
+    return !cached || incoming && +(incoming.ts||0)>+(cached.ts||0) ? incoming : cached;
+  }
+  function chkEgress(rec){
+    if(rec.scope==='endpoint') return null;
+    if(rec.egress) return rec.egress;
+    if(!rec.endpoint) return rec;
+    var raw=Object.assign({},rec);
+    delete raw.endpoint;
+    return raw;
+  }
+  function chkEgressMerge(a,b){
+    var n=chkNewer(a,b), o=n===a ? b : a;
+    if(!o || n===o || +(n.ts||0)===+(o.ts||0)) return n;
+    var m=Object.assign({},n);
     if(m.mbps==null && m.st!=='dead' && !endpointInapplicable(m) && o.mbps!=null) m.mbps=o.mbps;
     if(m.ms==null && m.kind==='speed' && o.ms!=null){ m.ms=o.ms; m.method=o.method; m.cdn=o.cdn; }
     return m;
   }
-  function loadChecks(){ return fetchJson('/cgi-bin/data?section=checks').then(function(d){
+  function chkMerge(a, b){ // a is cached; compare endpoint and egress before projecting a display row
+    if(a.rev!==b.rev) return a;
+    var endpoint=chkNewer(a.scope==='endpoint' ? a : a.endpoint, b.scope==='endpoint' ? b : b.endpoint);
+    var egress=chkEgressMerge(chkEgress(a),chkEgress(b));
+    if(!endpoint || !egress) return egress || endpoint;
+    var row=Object.assign({},egress,{egress:egress,endpoint:endpoint,endpointTs:endpoint.ts});
+    if(row.st==='ok' && endpoint.st==='ok' && (endpoint.ts>=row.ts || row.ms==null)){
+      ['ms','method','cdn','tms','via','dms','chb'].forEach(function(f){ row[f]=endpoint[f]; });
+    }
+    return row;
+  }
+  function loadChecks(accept){
+    var request=++_chkRequest;
+    function current(){ return request===_chkRequest && (!accept || accept()); }
+    return fetchJson('/cgi-bin/data?section=checks').then(function(d){
+      if(!current()) return false;
       if(!d || typeof d!=='object' || d.error || d.need_login) return false;
-      for(var k in CHK){ if(CHK.hasOwnProperty(k)) d[k]=d[k] ? chkMerge(CHK[k], d[k]) : CHK[k]; }
-      for(var g in d){ if(d.hasOwnProperty(g)){ var gt=chkGoneTs(g); if(gt && +(d[g].ts||0) <= gt) delete d[g]; } }
-      CHK=d; _chkOk=true; return true;
-    }, function(){ return false; }); }
-  function chkTsv(){ var o=[]; for(var k in CHK){ var c=CHK[k]||{};
-      o.push([k,(c.st||''),(c.ms==null?'-':c.ms),(c.method||'-'),(c.cdn?1:0),(c.mbps==null?'-':c.mbps),(c.kind||'ping'),(c.ts||0),
-              (c.tms==null?'-':c.tms),(c.via||'-'),(c.dms==null?'-':c.dms),(c.chb||'-'),(c.ncmp?1:0),(c.reason||'-')].join('\t')); }
-    return o.join('\n'); }
-  function saveChecks(){ if(chkSaveT) clearTimeout(chkSaveT);
-    // .catch ОБЯЗАТЕЛЕН, как у layoutSave: это ТИХИЙ фоновый персист, а не действие человека.
-    // Без него отказ POST'а (роутер занят/перезагружается) улетал в глобальный
-    // unhandledrejection и рисовал тост «ошибка: …» посреди спокойного просмотра — при том что
-    // ничего из нажатого не падало. Кэш проверок переживёт: перезапишется следующим измерением.
-    chkSaveT=setTimeout(function(){ chkSaveT=null;
-      // ЧТЕНИЕ → СЛИЯНИЕ → ЗАПИСЬ перед КАЖДОЙ записью: файл на роутере один на все устройства и пишется целиком, и запись «из памяти
-      // этой вкладки» уносила бы замеры, сделанные с другого устройства после её загрузки. Кэш не взяли — не пишем вовсе.
-      loadChecks().then(function(ok){
-        if(ok) subPost({action:'save_checks', data:b64utf8(chkTsv())}).catch(function(){}); }); }, 700); }
-  // Слить измерение в запись кэша: пинг НЕ затирает скорость и наоборот (в карточке видны ОБА). Явный
-  // ключ в rec (напр. mbps:null у мёртвого) переопределяет прошлое; отсутствующий — сохраняем из prev.
-  function chkSet(tpt,name,rec){ var k=chkKey(tpt,name), prev=CHK[k]||{}, m={};
-    for(var p in prev) m[p]=prev[p]; for(var q in rec) m[q]=rec[q];
-    m.reason=rec.reason||'';
-    m.ts=Math.floor(Date.now()/1000); CHK[k]=m; chkPaintKey(tpt,name); saveChecks(); }
-  // НАДГРОБИЯ СБРОШЕННЫХ ЗАПИСЕЙ: ключ (или префикс подписки) → время сброса. Чтение перед каждой записью (saveChecks) возвращало бы
-  // с роутера только что сброшенную запись: удалённый и заново добавленный сервер показывал бы старый ✗, а мусор копился бы до потолка
-  // файла, отрезающего свежие строки (подтверждающий круг ревью шага 3c-3). Запись роутера НОВЕЕ сброса — сервер добавили и проверили
-  // заново — остаётся. Надгробия живут до перезагрузки страницы: после неё сброшенного нет и на роутере.
-  // Подписка сбрасывается по ВЛАДЕЛЬЦУ сервера, а не по префиксу имени: «liberty» ⊂ «liberty-vpn», и префикс `sub-liberty-` унёс бы кэш
-  // соседней подписки (класс ownerTag). Известные теги — из ответа списка серверов (`srvListTake`) и из самих сбросов.
-  var _chkGone={}, _chkGoneTag={}, _subTagsKnown=[], _subPremKnown=[];
-  function chkOwner(k){
-    if(k.indexOf('xray|sub-')!==0) return '';
-    var tags=_subTagsKnown.slice(), t;
-    for(t in _chkGoneTag){ if(_chkGoneTag.hasOwnProperty(t) && tags.indexOf(t)<0) tags.push(t); }
-    return ownerTag(k.slice(5), tags);
+      Object.keys(d).forEach(function(k){
+        var rec=d[k], rev=checkRev(rec && rec.rev);
+        if(!rev) return;
+        var key=k+'|'+rev;
+        CHK[key]=chkMerge(CHK[key]||rec,rec);
+      });
+      _chkOk=true; return true;
+    }, function(){ return false; });
   }
-  function chkGoneTs(k){
-    var t=_chkGone.hasOwnProperty(k) ? _chkGone[k] : 0, o=chkOwner(k);
-    if(o && _chkGoneTag.hasOwnProperty(o) && _chkGoneTag[o]>t) t=_chkGoneTag[o];
-    return t;
+  var chkSaveWarnAt=0;
+  function chkSet(tpt,name,rec,reply){
+    if(reply && reply.saved===false){
+      var msg=tkL('Результат проверки не сохранён на роутере.', 'Check result was not saved on the router.');
+      chkPaintKey(tpt,name);
+      Array.prototype.forEach.call(pingSpans(tpt,name), function(s){ s.textContent=tkL('Не сохранено', 'Not saved'); s.title=msg; });
+      var now=Date.now();
+      if(!chkSaveWarnAt || now-chkSaveWarnAt>=5000){ logLine(msg, false); chkSaveWarnAt=now; }
+      return;
+    }
+    if(!reply || !checkRev(reply.rev)) return null;
+    rec.rev=reply.rev;
+    rec.reason=rec.reason||'';
+    rec.ts=Number(reply.ts)||0;
+    var k=chkKey(tpt,name,rec.rev);
+    CHK[k]=chkMerge(CHK[k]||rec,rec);
+    chkPaintKey(tpt,name);
+    return CHK[k];
   }
-  function chkDrop(tpt,name){ var k=chkKey(tpt,name); _chkGone[k]=Math.floor(Date.now()/1000); if(CHK[k]) delete CHK[k]; saveChecks(); }
-  // Сбросить кэш всех серверов подписки <tag> (перед обновлением/удалением): ключи "xray|sub-<tag>-…". Запись на роутер — всегда:
-  // у этой вкладки ключей могло не быть, а на роутере они есть (проверяли с другого устройства).
+  var _subTagsKnown=[], _subPremKnown=[];
+  function chkDrop(tpt,name,rev){
+    ++_chkRequest;
+    var k=chkKey(tpt,name,rev);
+    if(rev) delete CHK[k];
+    else for(var p in CHK) if(p.indexOf(k+'|')===0) delete CHK[p];
+  }
   function chkDropTag(tag){
-    _chkGoneTag[tag]=Math.floor(Date.now()/1000);
-    for(var k in CHK){ if(CHK.hasOwnProperty(k) && chkOwner(k)===tag) delete CHK[k]; }
-    saveChecks(); }
+    ++_chkRequest;
+    for(var k in CHK) if(ownerTag(k.split('|')[1], _subTagsKnown)===tag) delete CHK[k];
+  }
   // Чистый рендер записи кэша в спан .srv-ping (без сети). Последнее измеренное: скорость
   // (↓ Мбит/с) или пинг (мс / ✓ / ✗). ✗ — коротко (экономим место), полный текст в title.
   // РАЗМЕТКА ЗАПИСИ — чистая функция (без узла): её же рисует легенда экрана «Проверка серверов», и образец «как читается число»
@@ -6418,6 +6502,9 @@
   // КАК ЗАМЕРЕН ПИНГ — одна подпись на строку списка и на экран сервера: «(icmp)» или «(:порт)», иначе пусто.
   // `tun` — the tunnel's own delay (an Amnezia Premium AmneziaWG server: its relay answers no ping; cgi-bin/ping prem_ms).
   function pingSuffix(c){ var m=(c && c.method)||''; return m==='icmp' ? ' (icmp)' : m==='tun' ? ' (через туннель)' : (/^net:/.test(m) ? ' (:'+m.slice(4)+')' : ''); }
+  // «Ключ не везёт» — ONLY an Amnezia Premium key measured through its own tunnel (cgi-bin/ping prem_ms). An Xray EGRESS record carries
+  // method `tun` too (server-checks-lib.sh::sc_egress, the panel's own record): a dead exit of an ordinary server is not a key (review 8).
+  function keyTunSilent(c){ return !!(c && c.method==='tun' && c.scope!=='egress' && !c.pool); }
   function recView(c){
     if(!c) return null;
     if(endpointInapplicable(c)) return {html:'<span style="color:var(--text-warning)">'+esc(endpointLabel())+'</span>', tip:endpointText(c)};
@@ -6447,7 +6534,7 @@
       // An Amnezia Premium server measured through its own tunnel and silent (method `tun` with no number, cgi-bin/ping prem_ms): the
       // KEY does not carry. Neither the relay's silence nor a second opinion about the relay — one address for every country, and it
       // carried another country the same minute (walk 15.10.2026: DE read «из России доступен»).
-      if(c.method==='tun'){ parts.push('<span style="color:var(--text-warning)">ключ не везёт</span>'); tips.push('через туннель на ключе Amnezia ответа нет — ключ не везёт; узел Amnezia тут ни при чём, он один у всех стран. Новый ключ — на экране сервера'); }
+      if(keyTunSilent(c)){ parts.push('<span style="color:var(--text-warning)">ключ не везёт</span>'); tips.push('через туннель на ключе Amnezia ответа нет — ключ не везёт; узел Amnezia тут ни при чём, он один у всех стран. Новый ключ — на экране сервера'); }
       else if(cb && cb.v==='blocked'){ parts.push('<span style="color:var(--text-warning)">похоже, блокировка ('+cb.b+' из '+cb.n+')</span>'); tips.push('туннеля для сравнения нет, а второе мнение видит блокировку у провайдеров России'); }
       else if(cb && cb.v==='clear'){ parts.push('<span style="color:var(--text-warning)">из России доступен</span>'); tips.push('второе мнение до сервера доходит — режет ваш провайдер или сбой на вашей стороне'); }
       else { parts.push('<span style="color:var(--text-warning)">✗</span>'+recVia(c)); tips.push(c.via ? 'через дорогу сервер не отвечает: лежит дорога или сам сервер' : (c.ncmp ? 'сервер не отвечает, и сравнить не с чем: туннеля AmneziaWG к другому серверу при проверке не было' : 'сервер не отвечает или не даёт интернета (пинг мог врать)')); }
@@ -6483,11 +6570,14 @@
   // двойных кавычек селектора достаточно экранировать сам `"` и `\`.
   function selVal(s){ return String(s).replace(/[\\"]/g, '\\$&'); }
   function pingSpans(tpt,name){ return document.querySelectorAll('.srv-ping[data-tpt="'+selVal(tpt)+'"][data-name="'+selVal(name)+'"]'); }
-  function chkPaintKey(tpt,name){ var c=CHK[chkKey(tpt,name)];
-    Array.prototype.forEach.call(pingSpans(tpt,name), function(s){ paintRec(s,c); }); }
+  function chkPaintKey(tpt,name){ var c=chkGet(tpt,name);
+    Array.prototype.forEach.call(pingSpans(tpt,name), function(s){ paintRec(s,c); });
+    var body=document.getElementById('modal-body');
+    if(body && body._srvRecordRefresh) body._srvRecordRefresh();
+  }
   // Заполнить все спаны .srv-ping из кэша после перерисовки экрана («Серверы» и экран подписки).
   function hydrateChecks(root){ Array.prototype.forEach.call((root||document).querySelectorAll('.srv-ping[data-name]'), function(s){
-      var c=CHK[chkKey(s.getAttribute('data-tpt'), s.getAttribute('data-name'))]; if(c) paintRec(s,c); }); }
+      paintRec(s,chkGet(s.getAttribute('data-tpt'), s.getAttribute('data-name'))); }); }
   // ЗАПИСЬ КЭША ИЗ ОТВЕТА cgi-bin/ping — одна на фоновый обход и проверку сервера. Роутер различает и говорит сам: число напрямую;
   // молчит напрямую, а через работающий туннель отвечает (`blk` — «адрес заблокирован провайдером», не «не отвечает»); сервер на
   // дороге — число ЧЕРЕЗ НЕЁ (`via`/`vms`), прямое — рядом (`dms`); второе мнение (`chb`, только при включённом Cheburcheck);
@@ -6495,7 +6585,7 @@
   // Своей арифметики у панели нет.
   function chbOf(c){ var b=c && c.chb; return (b && b.state==='done' && /^(blocked|clear|uncertain)$/.test(b.verdict||'')) ? (b.verdict+':'+(b.blocked|0)+':'+(b.online|0)) : ''; }
   function pingRec(c){
-    var r={kind:'ping', via:'', tms:null, dms:null, chb:chbOf(c), cdn:0, ncmp:0, method:(c && c.method)||''};
+    var r={kind:'ping', scope:c&&c.pool?'egress':'endpoint', via:'', tms:null, dms:null, chb:chbOf(c), cdn:0, ncmp:0, method:(c && c.method)||''};
     if(endpointInapplicable(c)){ r.st='inapplicable'; r.reason=c.reason; r.ms=null; r.mbps=null; r.chb=''; r.method=''; return r; }
     // A bound check of an idle rider (`vprobe`) also has a road RTT.
     // Дорога ПОДНЯТА (`vup`) — сервер судят через неё; лежит — пакеты к нему идут напрямую (fail-open), и честное число — прямое
@@ -6510,39 +6600,44 @@
     if(c && c.blk){ r.st='blk'; r.tms=(c.tms!=null) ? c.tms : null; r.method=c.tmt||''; } else { r.st='dead'; if(c && c.ncmp===true) r.ncmp=1; }
     return r;
   }
-  // ЕДИНЫЙ проход проверки ОДНОГО сервера. xray (TCP): пинг → СРАЗУ реальный выход (xray-test.sh
-  // на временном socks-порту `port`; port=null → дефолтный), вердикт = выход. awg/hy2 (UDP-несущие):
-  // egress-теста без socks нет → только пинг (есть число ⇒ ✓ с числом, нет ⇒ ✗). Результат кладём
-  // в кэш (chkSet рисует + персистит). cb(ok, pingCfg, egressRes).
-  function checkOne(tpt, name, port, cb){
+  // A TCP Xray check follows endpoint reachability with a full egress test.
+  function checkOne(tpt, name, port, cb, expected){
+    var decided=expected===undefined ? cfgRev(null,tpt,name) : expected;
+    function remember(rec, reply){
+      var record=chkSet(tpt,name,rec,reply);
+      return decided && record && record.rev===decided && record.st==='dead' ? record.rev : '';
+    }
     var fpKey=chkKey(tpt,name);
     fetchJson('/cgi-bin/ping?one='+encodeURIComponent(name)+'&tpt='+encodeURIComponent(tpt)).then(function(d){
       var c=(d.configs||[])[0]||null;
-      if(endpointInapplicable(c)){ if(tpt==='xray') delete _srvFpTry[fpKey]; chkSet(tpt, name, pingRec(c)); cb(false, c, c); return; }
+      if(decided && (!c || c.rev!==decided)){ chkPaintKey(tpt,name); cb(false,c,null,true); return; }
+      if(endpointInapplicable(c)){ if(tpt==='xray') delete _srvFpTry[fpKey]; chkSet(tpt, name, pingRec(c), c); cb(false, c, c); return; }
       // Busy or skipped endpoint probes have no verdict to store.
       if(c && (c.method==='busy' || c.method==='idle')){ chkPaintKey(tpt, name); cb(false, c, null, true); return; }
       if(tpt!=='xray'){                                 // awg/hy2 — только пинг эндпоинта (UDP-несущая)
         var ur=pingRec(c);
-        chkSet(tpt, name, ur);
-        cb(ur.st==='ok', c, null, false, ur.st==='blk'); return;
+        chkSet(tpt, name, ur, c);
+        var unsaved=!!(c && c.saved===false);
+        cb(!unsaved && ur.st==='ok', c, null, unsaved, ur.st==='blk'); return;
       }
       var xr=pingRec(c);
       if(c && (c.proto==='udp' || xr.st!=='ok')){
         delete _srvFpTry[fpKey];
-        chkSet('xray', name, xr); cb(xr.st==='ok', c, null, false, xr.st==='blk'); return;
+        cb(xr.st==='ok', c, null, c.saved===false, xr.st==='blk', remember(xr,c)); return;
       }
-      tokPost('/cgi-bin/action', function(tok){ return 'action=test_xray_server&token='+encodeURIComponent(tok)+'&name='+encodeURIComponent(name)+(port?('&port='+port):''); })
+      if(c && c.saved===false) chkSet('xray', name, xr, c);
+      tokPost('/cgi-bin/action', function(tok){ return 'action=test_xray_server&token='+encodeURIComponent(tok)+'&name='+encodeURIComponent(name)+(port?('&port='+port):'')+(c&&c.rev?('&rev='+encodeURIComponent(c.rev)):''); })
         .then(function(r){ var ok=!!(r&&r.ok);
           // Порт занят другой проверкой — вердикта о СЕРВЕРЕ нет: кэш не трогаем, наверх — «без ответа». `nobin` — no xray on the
           // router (an in-place swap that failed, say): no verdict about the server either (review s.166 r2).
-          if(!r || r.busy || r.nobin){ chkPaintKey('xray', name); cb(false, c, r, true); return; }
-          xr.st=ok?'ok':'dead';
-          if(!ok) xr.mbps=null;
-          if(!ok && r.reality_fp) _srvFpTry[fpKey]=r.reality_fp;
+          if(!r || r.busy || r.nobin || r.stale || (c && c.rev && c.rev!==r.rev)){ chkPaintKey('xray', name); cb(false, c, r, true); return; }
+          if(!ok && r.reality_fp && r.saved!==false && checkRev(r.rev)) _srvFpTry[fpKey]=Object.assign({},r.reality_fp,{digest:r.rev});
           else delete _srvFpTry[fpKey];
-          chkSet('xray', name, xr);
+          if(c && checkRev(c.rev) && c.saved!==false) Object.assign(xr,{rev:c.rev,ts:Number(c.ts)||0});
+          var deadRev=remember({scope:'egress', st:ok?'ok':'dead', ms:ok ? r.ms : null, method:'tun', ncmp:0,
+            endpoint:xr.rev ? xr : null},r);
           srvScrRefresh('xray', name);
-          cb(ok, c, r||null); })
+          cb(ok && r.saved!==false, c, r, r.saved===false, false, deadRev); })
         // Роутер не ответил на тест выхода (он идёт секунды — окно шире, чем у пинга): вердикта нет, кэш не пишем (ревью пачки 2, круг 2).
         .catch(function(){ chkPaintKey('xray', name); cb(false, c, null, true); });
     }).catch(function(){                                 // роутер недоступен — не кэшируем dead, показываем ✗ временно
@@ -6630,7 +6725,7 @@
     Array.prototype.forEach.call(pingSpans(tpt,name), function(s){ s.textContent='тест ↓…'; s.style.color='var(--text-tertiary)'; });
     tokPost('/cgi-bin/action', function(tok){ return 'action=speedtest_xray_server&token='+encodeURIComponent(tok)+'&name='+encodeURIComponent(name); })
       .then(function(r){
-        if(r && r.ok){ chkSet(tpt, name, {st:'ok', mbps:r.mbps, kind:'speed'}); cb(true, r.mbps, null); }   // merge: прошлый пинг сохраняем
+        if(r && r.ok){ chkSet(tpt, name, {st:'ok', mbps:r.mbps, kind:'speed', scope:'egress'}, r); cb(true, r.mbps, null); }   // merge: прошлый пинг сохраняем
         else if(r && r.busy){ chkPaintKey(tpt, name); cb(false, null, r.msg||'временный порт занят другой проверкой', !!r.mem); }
         else { var msg=(r&&r.msg)||'не удалось';
           Array.prototype.forEach.call(pingSpans(tpt,name), function(s){ s.textContent='✗'; s.style.color='var(--text-warning)'; s.title='скорость: '+msg; });
@@ -8112,9 +8207,17 @@
       "A subscription server's name is set by the subscription: it finds this server by that name on every update — it would create a renamed one anew and delete this one.",
     "«default» — служебное имя установщика: им помечен первый конфиг, и он же — «дом» резерва по умолчанию. Переименовать его нельзя.":
       "«default» is the installer's service name: it marks the first config and is the default failover «home». It can't be renamed.",
-    "Имя — любое, с эмодзи и флагами. Файл на роутере — латиницей: кириллица транслитом, флаг страны — кодом (🇩🇪 → DE). Резерв перебирает серверы по алфавиту файлов — новое имя меняет и место сервера в этой очереди.":
-      "Any name, with emoji and flags. The file on the router is in Latin: Cyrillic is transliterated, a country flag becomes its code (🇩🇪 → DE). Failover goes through servers in alphabetical order of their files — a new name also moves the server in that queue.",
+    "Имя — любое, с эмодзи и флагами. Файл на роутере — латиницей: кириллица транслитом, флаг страны — кодом (🇩🇪 → DE). Резерв сначала проверяет избранное, затем остальные серверы по алфавиту файлов.":
+      "Any name, with emoji and flags. The router transliterates Cyrillic and uses country codes for flags (🇩🇪 → DE). Failover tries favourites first, then the remaining servers in filename order.",
+    "Сначала выберите сервер AmneziaWG в «Соединение → Серверы и конфиги».":"First select an AmneziaWG server under «Connection → Servers and configs».",
     "Активный конфиг AmneziaWG удалить нельзя — сначала выберите другой.":"The active AmneziaWG config can't be deleted — select another one first.",
+    "идёт смена транспорта или сервера — повторите удаление":"A transport or server change is in progress. Try deleting again.",
+    "идёт смена транспорта или сервера — повторите":"A transport or server change is in progress. Try again.",
+    "Уже идёт обновление подписок. Повторите после его завершения.":"A subscription refresh is already running. Try again when it finishes.",
+    "Обновление подписки прервано.":"The subscription refresh was interrupted.",
+    "Нет результата обновления подписки.":"No subscription refresh result is available.",
+    "не удалось остановить резерв AmneziaWG — повторите удаление":"Could not stop the AmneziaWG standby. Try deleting again.",
+    "не удалось снять выбор AmneziaWG — повторите удаление":"Could not clear the AmneziaWG selection. Try deleting again.",
     "Этот конфиг сейчас несёт трафик — удалить его можно, переключившись на другой.":"This config is carrying traffic right now — you can delete it after switching to another one.",
     "Ключи и конфиг целиком AmneziaWG панель не показывает и не правит:":"The panel neither shows nor edits AmneziaWG keys or the whole config:",
     "принимает конфиг только целиком, и полуправка оставила бы интерфейс без рукопожатия. Поправленный конфиг загрузите заново — файлом или ссылкой на «Серверах»: панель спросит, заменить ли им этот.":
@@ -8217,7 +8320,29 @@
     "Редактора конфига у AmneziaWG нет":"AmneziaWG has no config editor",
     "принимает конфиг только целиком, и полуправка оставила бы интерфейс без рукопожатия. Поправленный конфиг загрузите заново — панель спросит, заменить ли им прежний. Endpoint и MTU — на экране сервера.":"accepts a config only as a whole, and a partial edit would leave the interface without a handshake. Upload the fixed config again — the panel will ask whether to replace the old one. Endpoint and MTU are on the server screen.",
     "Дополнительные выходы (ещё пути наружу, до шести) живут своим экраном раздела «Соединение»: список серверов и список выходов отвечают на разные вопросы.":"Additional exits (more ways out, up to six) live on their own screen in «Connection»: the server list and the exit list answer different questions.",
-    "Поиск сервера или группы":"Search servers or groups",
+    "Поиск сервера, страны или группы":"Search servers, countries or groups",
+    "Избранное":"Favourites",
+    "из всех подписок и своих":"from subscriptions and your own servers",
+    "В избранное":"Add to favourites",
+    "Убрать из избранного":"Remove from favourites",
+    "Показать или скрыть избранное":"Show or hide favourites",
+    "избранное недоступно — обновите роутер":"Favourites are unavailable. Update the router.",
+    "не удалось открыть избранное":"Could not open favourites",
+    "избранное сейчас меняется — повторите":"Favourites are being updated. Try again.",
+    "не удалось сохранить избранное":"Could not save favourites",
+    "Скачайте подписку заново.":"Download the subscription again.",
+    "Ссылка подписки изменилась — скачайте подписку заново.":"The subscription URL has changed. Download the subscription again.",
+    "Конфиг используется резервом AmneziaWG — сначала выберите другой сервер.":"The AmneziaWG standby is using this configuration. Select another server first.",
+    "Имена серверов сейчас меняются — повторите удаление.":"Server names are being updated. Try deleting again.",
+    "Избранное сейчас меняется — повторите удаление.":"Favourites are being updated. Try deleting again.",
+    "Не удалось подготовить обновление имён и избранного.":"Could not prepare the server names and favourites update.",
+    "Не удалось подготовить удаление имени сервера подписки.":"Could not prepare the subscription server name removal.",
+    "Не удалось подготовить удаление дороги к серверу.":"Could not prepare the server road removal.",
+    "Идёт смена транспорта или сервера — повторите восстановление.":"A transport or server switch is in progress. Try restoring again.",
+    "Идёт обновление подписок — повторите восстановление.":"Subscriptions are updating. Try restoring again.",
+    "Конфиг удалён. Не удалось полностью обновить список серверов.":"The configuration was deleted. The server list could not be fully updated.",
+    "Конфиг удалён. Не удалось обновить дорогу к серверу.":"The configuration was deleted. The server road could not be updated.",
+    "не удалось перенести отметку избранного":"Could not move the favourite",
     "Активный закреплён сверху и не уезжает при поиске и сортировке. Бейдж собирается из самого конфига: протокол · защита · транспорт · flow.":"The active server is pinned on top and stays put when you search or sort. The badge is built from the config itself: protocol · security · transport · flow.",
     "добавлены вручную":"added manually","ещё не скачивалась":"not downloaded yet",
     "Имя конфига берётся из ремарки ссылки, а без неё — из адреса сервера; кириллица — транслитом («Нидерланды» → «Niderlandy»), флаг страны — её кодом (🇳🇱 → NL): роутер хранит имена латиницей. В ссылке нет":"The config name comes from the link's remark, or without one from the server address; Cyrillic is transliterated (a Russian «Netherlands» becomes «Niderlandy») and a country flag becomes its code (🇳🇱 → NL): the router keeps names in Latin. If the link has no",
@@ -8687,6 +8812,11 @@
     "Показаны":"Shown","Можно вернуть":"Can be brought back",
     "Все карточки выключены — на «Обзоре» осталась только шапка. Верните нужные ниже.":"Every card is off — only the header is left on «Overview». Bring back the ones you need below.",
     "Все карточки на главной — выключать ничего не пришлось.":"Every card is on the overview — nothing had to be turned off.",
+    "Конфиг изменился или его версия неизвестна. Обновите список серверов.":"The config changed or its revision is unknown. Reload the server list.",
+    "Конфиг изменился. Обновите список серверов.":"The config changed. Reload the server list.",
+    "Нет подписок для обновления.":"There are no subscriptions to refresh.",
+    "Не удалось сохранить результат обновления подписок.":"Could not save the subscription refresh result.",
+    "Идёт смена транспорта или сервера — повторите включение VPN.":"A transport or server change is in progress. Try turning VPN on again.",
     "колода ещё не собрана — перезагрузите страницу":"the deck is not assembled yet — reload the page",
     "Вернуть как было":"Restore defaults","Вернуть":"Bring back",
     "роутер этого не умеет":"this router cannot do it",
@@ -9231,7 +9361,7 @@
     "выбрать →":"choose →","активен":"active","Активный сервер":"Active server",
     "Обновить все":"Update all","Перезабрать все подписки":"Re-fetch all subscriptions","Свои":"Own",
     "сервер не отвечает или не даёт интернета (пинг мог врать)":"server not responding or no internet (ping may have lied)",
-    "URL подписки":"Subscription URL","метка":"label","Поиск сервера или группы…":"Search server or group…",
+    "URL подписки":"Subscription URL","метка":"label","Поиск сервера, страны или группы…":"Search for a server, country or group…",
     "Действия":"Actions","Действия с сервером":"Server actions","Действия с подпиской":"Subscription actions",
     "Меню подписки":"Subscription menu",
     "Удалить конфиг":"Delete config","Изменить конфиг":"Edit config",
@@ -9533,6 +9663,32 @@
     "страховка на случай мёртвого источника: докачаются, но до этого маршрутизация останется без запасного списка":"a safety net for a dead source: they will be re-downloaded, but until then routing has no fallback list",
     "лежат в /tmp — на флеше не освободят ни байта, зато снимут нагрузку с ОЗУ":"they live in /tmp — this frees no flash at all, but does free RAM",
     "Системный лог роутера":"Router system log",
+    "Как в прошивке":"Firmware default",
+    "Сжимать сразу":"Compress immediately",
+    "Не хранить на флеше":"Keep off flash",
+    "Около 4 МБ на флеше. История переживает перезагрузку.":"About 4 MB on flash. History survives a reboot.",
+    "Обычно около 0,5 МБ на флеше. История переживает перезагрузку.":"Typically about 0.5 MB on flash. History survives a reboot.",
+    "Около 3 МБ ОЗУ на новый архив. Он исчезает при перезагрузке.":"About 3 MB of RAM for the new archive. A reboot clears it.",
+    "В этой прошивке нет поддерживаемого правила ротации системного лога.":"This firmware has no supported system log rotation rule.",
+    "У системного лога своё правило ротации. Измените его вручную.":"The system log uses a custom rotation rule. Edit it manually.",
+    "Выберите режим системного лога.":"Select a system log mode.",
+    "Режим системного лога сохранён.":"System log mode saved.",
+    "Сжатие включено, но не удалось убрать лишние архивы системного лога. Выберите этот режим ещё раз.":"Compression is enabled, but the extra system log archives could not be removed. Select this mode again.",
+    "Подписка прочитана частично":"Subscription partially read",
+    "обновляю подписку…":"updating the subscription…",
+    "обновление подписки прервано":"the subscription update was interrupted",
+    "не удалось найти обновление подписки":"could not find the subscription update",
+    "Идёт обновление подписок — повторите удаление.":"Subscriptions are updating. Try deleting again.",
+    "Не удалось проверить ключ работающего AmneziaWG — повторите удаление.":"Could not verify the running AmneziaWG key. Try deleting again.",
+    "Обновите скрипты роутера и повторите удаление.":"Update the router scripts and try deleting again.",
+    "меняю режим системного лога…":"changing system log mode…",
+    "Режим системного лога уже меняется. Повторите через несколько секунд.":"The system log mode is already changing. Try again in a few seconds.",
+    "Не удалось сохранить исходное правило ротации.":"Could not save the original rotation rule.",
+    "Не удалось сжать предыдущий архив системного лога.":"Could not compress the previous system log archive.",
+    "Не удалось подготовить каталог архива в ОЗУ.":"Could not prepare the archive directory in RAM.",
+    "Не удалось применить режим системного лога.":"Could not apply the system log mode.",
+    "Не удалось сохранить режим системного лога.":"Could not save the system log mode.",
+    "Сохранённый выбор будет применён при следующем запуске.":"The saved choice will be applied on the next startup.",
     // Подтверждения чистки собираются из ПРЕДЛОЖЕНИЙ (можно выбрать обе рискованные группы),
     // поэтому и переводятся по предложению, а общий хвост «Продолжить?» — отдельной парой.
     "Снимки списков и гео будут удалены. До следующей удачной закачки маршрутизации не на что будет откатиться.":"List and geo snapshots will be deleted. Until the next successful download, routing has no fallback list.",
@@ -9553,6 +9709,7 @@
     "Роутер не ответил — проверка не прошла. Повторите.":"The router did not answer — the check failed. Try again.",
     "Проверить не удалось: роутер ответил не то. Если вход в панель истёк — обновите страницу.":"Could not check: the router answered something else. If your panel sign-in expired, reload the page.",
     "Есть обновление:":"Update available:","Установлена актуальная версия.":"The latest version is installed.","На GitHub:":"On GitHub:",
+    "Не успели проверить обновления — повторите попытку":"The update check timed out. Please try again.",
     "На GitHub нет описания релиза — этим каналом обновления сейчас не публикуются.":"GitHub has no release description — updates are not published through this channel right now.",
     "GitHub не ответил — проверьте интернет и повторите.":"GitHub did not answer — check the internet and try again.",
     "Установить обновление":"Install the update","Источник:":"Source:","ветка или тег":"branch or tag",
@@ -10113,12 +10270,17 @@
     "Роутер перезагрузился — настройки он применил при загрузке":"The router rebooted — it applied the settings while booting",
     "Прошлый импорт применён — теперь можно восстановить свой файл":"The previous import has been applied — you can restore your file now",
     "применение прошлого импорта ещё идёт — дождитесь его конца":"the previous import is still being applied — wait for it to finish",
+    "уже идёт восстановление — дождитесь его конца":"a restore is already in progress — wait for it to finish",
+    "Не удалось восстановить избранное. Повторите импорт.":"Could not restore favourites. Try importing again.",
     "сбой импорта":"import failed",
     "сбой импорта — нет связи с роутером":"import failed — no connection to the router",
     // ответы cgi-bin/backup (отказы импорта) и его предупреждения о том, что здесь не заработает
     "пустой или слишком большой архив (>2 МБ)":"empty or too large archive (>2 MB)",
     "нет места в /tmp":"no space in /tmp",
     "битый или пустой архив (base64)":"broken or empty archive (base64)",
+    "Архив пуст.":"The archive is empty.",
+    "Архив превышает предел: 8 МиБ в файле или 32 МиБ после распаковки.":"The archive exceeds the limit of 8 MiB compressed or 32 MiB unpacked.",
+    "Архив получен не полностью. Загрузите файл ещё раз.":"The archive did not arrive in full. Upload the file again.",
     "архив содержит небезопасные пути — отклонён":"the archive contains unsafe paths — rejected",
     "архив содержит симлинки/спецфайлы — отклонён":"the archive contains symlinks/special files — rejected",
     "архив содержит ссылки на другие файлы — отклонён":"the archive contains links to other files — rejected",
@@ -10157,7 +10319,6 @@
     "меняю расписание обновления…":"changing update schedule…",
     "меняю автообновление подписок…":"changing subscription auto-update…",
     "обновляю подписки на роутере…":"updating subscriptions on the router…",
-    "обновляю подписки на роутере — результат появится через минуту":"updating subscriptions on the router — the result will appear in a minute",
     "подписок нет — добавьте подписку в списке серверов":"no subscriptions — add one in the server list",
     "subs-update.sh не установлен (обновите скрипты роутера)":"subs-update.sh isn't installed (update the router scripts)",
     "откатываю…":"rolling back…","отправляю тест-письмо…":"sending a test email…",
@@ -10491,6 +10652,15 @@
     "не удалось обновить экран выхода":"could not refresh the exit screen",
     "роутер не ответил — открываю список выходов":"the router did not answer — opening the exit list",
     "Если выход упадёт":"If the exit goes down","его сайты вернутся в главный туннель":"its sites return to the main tunnel",
+    "Запасным может быть только туннельный выход":"Only a tunnel exit can be a fallback",
+    "Работать при выключенном VPN":"Keep running when VPN is off",
+    "Работа при выключенном VPN":"Runs with VPN off",
+    "Привязанные правила продолжают работать через эти выходы.":"Their assigned rules continue to use these exits.",
+    "Привязанные правила продолжают работать через этот выход.":"Its assigned rules continue to use this exit.",
+    "Настройки выхода сохранены, но не применены":"Exit settings were saved but could not be applied",
+    "не применено":"not applied",
+    "Для выхода Zapret запасной путь — основной выход или напрямую":"A Zapret exit can only fall back to the main exit or go direct",
+    "Идёт обновление или смена транспорта — повторите позже":"An update or transport switch is in progress. Try again later.",
     "мимо VPN, без шифрования":"bypassing the VPN, unencrypted","Быстрая привязка":"Quick bind",
     "Привязать сайты можно у включённого выхода.":"Sites can be bound only to an enabled exit.",
     "Готовый набор — гео-категория сервиса: её сайты пойдут через этот выход.":"A ready-made set is a service's geo category: its sites will go through this exit.",
@@ -10501,9 +10671,12 @@
     // Честный статус выхода (state из slots.sh): пилюля в шапке + причина строкой под выходом.
     "выход не работает":"an exit is down",
     "Дополнительный выход включён, но его несущая не поднялась — привязанные сайты идут запасным путём. Нажмите, чтобы открыть «Дополнительные выходы»":"An additional exit is on, but its carrier didn't come up — the sites bound to it take the fallback path. Click to open «Additional exits»",
-    "несущая выхода не поднялась — его сайты идут основным туннелем":"the exit's carrier didn't come up — its sites go through the main tunnel",
-    "несущая выхода не поднялась — его сайты идут НАПРЯМУЮ, мимо VPN":"the exit's carrier didn't come up — its sites go DIRECTLY, bypassing the VPN",
-    "несущая выхода не отвечает — его сайты не откроются; сторож перезапустит её в течение 2 минут":"the exit's carrier isn't responding — its sites won't open; the watchdog will restart it within 2 minutes",
+    "Сайты выхода идут основным туннелем":"The exit’s sites go through the main tunnel",
+    "Сайты выхода идут напрямую, мимо VPN":"The exit’s sites go directly, bypassing the VPN",
+    "Несущая выхода не отвечает":"The exit's carrier isn't responding",
+    "Повторить применение":"Retry applying",
+    "применяю настройки выхода":"applying exit settings",
+    "Настройки выхода применены":"Exit settings applied",
     "правил выхода нет — его трафик идёт напрямую; нажмите «Починить правила» в шапке":"the exit's rules are missing — its traffic goes direct; press «Repair rules» in the header",
     "VPN выключен тумблером — у выхода нет правил, его трафик идёт напрямую":"the VPN is switched off — the exit has no rules, its traffic goes direct",
     "ядро этого роутера не умеет NFQUEUE — этот выход здесь не поднимется; обход без VPS даёт ByeDPI":"this router's kernel has no NFQUEUE — this exit will never come up here; for a VPS-free bypass use ByeDPI",
@@ -12253,6 +12426,8 @@
     [/^активный сервер «(.+)» получил новый ключ Amnezia — VPN выключен вручную, применится при включении$/,"the active server «$1» got a new Amnezia key — the VPN is turned off by hand, it applies when it is turned on"],
     [/^слот №(\d+): (\S+) обновлён, несущая перезапущена$/,"slot #$1: $2 updated, the carrier restarted"],
     [/^слот №(\d+): (\S+) обновлён, но несущая не поднялась — выход идёт по запасному пути$/,"slot #$1: $2 updated, but the carrier did not come up — the exit goes by its fallback"],
+    [/^VPN выключен · работает выход №([2-7])$/,"VPN off · exit $1 is active"],
+    [/^VPN выключен · работают выходы (№[2-7](?:, №[2-7])+)$/,function(m, ids){return "VPN off · active exits "+ids.replace(/№/g,'');}],
     // An exit restarted on the new key: «выход №N: сервер «X» получил новый ключ Amnezia — <the registry's last line>», the tail by its own rule.
     [/^выход №(\d+): сервер «(.+)» получил новый ключ Amnezia — (.+)$/,function(m, n, x, t){ var e=i18nStr(t); return e!==t ? "exit #"+n+": server «"+x+"» got a new Amnezia key — "+e : m; }],
     [/^(?=|«)(.+) — новый ключ отложен до следующей попытки$/,function(m, a){ var e=i18nStr(a); return e!==a ? e+" — the new key is kept for the next try" : m; }],
@@ -12284,6 +12459,7 @@
     [/, выбрано стран (\d+)/g,", countries picked $1"],[/устройств (\?) из (\?)/g,"devices $1 of $2"],
     [/: пропущена \(([^()]*)\)/g,function(m, w){ var t=i18nStr(w); return t!==w ? ": skipped ("+t+")" : m; }],
     [/\(Amnezia не ответила\)/g,"(Amnezia did not answer)"],
+    [/^Профиль с несколькими выходами роутер проверяет через сам туннель — сейчас туннель не ответил\.$/,"The router checks a multi-outbound profile through the tunnel itself — the tunnel did not answer now."],
     [/^Сервер (\S+): задержку сервера Amnezia Premium роутер меряет через сам туннель — сейчас туннель не ответил\.$/,"Server $1: the router measures an Amnezia Premium server's delay through the tunnel itself — the tunnel did not answer now."],
     ["стран пока не выбрано","no countries picked yet"],[/устройств (\d+) из (\d+)/g,"devices $1 of $2"],["Amnezia ещё не ответила","Amnezia has not answered yet"],
     // ─── Дорога к серверу, WARP, второе мнение (10.10.2026): склейки с числами и именами, шаги и отказы роутера — ПЕРВЫМИ ───
@@ -12326,7 +12502,9 @@
     [/^\[road\] этот конфиг сам служит дорогой \(выход №([2-7])\) — дорога бывает только в один шаг$/,"[road] this config serves as a road itself (exit #$1) — a road is only one step"],
     [/^(\[warp\] |)«([^«»]*)» сам служит дорогой \(выход №([2-7])\) — дорога бывает только в один шаг$/,"$1«$2» serves as a road itself (exit #$3) — a road is only one step"],
     [/^(\[warp\] |\[slots\] |)мест нет: заняты все (\d+) доп-выходов$/,"$1no room: all $2 extra exits are taken"],
+    [/^не удалось прочитать конфиг «([^«»]*)»$/,"Could not read config «$1»."],
     [/^конфиг «([^«»]*)» удалён, пока шла работа — ничего не записано$/,"the config «$1» was deleted while the work ran — nothing is written"],
+    [/^конфиг «([^«»]*)» изменён или выбран, пока шла работа — ничего не записано$/,"Config «$1» changed or was selected during the operation. Nothing was saved."],
     [/^\[road\] дорога уже через выход №([2-7])$/,"[road] the road already goes via exit #$1"],
     // ПАМЯТЬ НА ЕЩЁ ОДИН GO-ДЕМОН (daemon-lib.sh::daemon_ram_room, ревью с.166 р1): отказ выхода (slots.sh) и проверки сервера
     // (xray-test.sh). Числа — правилом; полный отказ выхода — ВЫШЕ общего куска «мало свободной памяти (…)».
@@ -12366,7 +12544,17 @@
     // Две оговорки записи сводки подписок (subs-update.sh, 13.10.2026): серверы, которые ушли из подписки, но заняты и потому
     // оставлены, и новый конфиг активного сервера, который роутер не применил, — каждая после «;», запись может нести обе. СТОЯТ
     // ЗДЕСЬ, выше токенов: короткое «применён» → «applied» ниже по списку успевало первым, и вся сводка оставалась русской.
+    [/^Конфиг для выхода не найден — выберите сервер\.$/,"The exit config could not be found. Choose a server."],
+    [/^сервер «(.+)» оставлен: занят выходом\/дорогой или выбран для подключения$/,"Server «$1» was kept because it is in use by an exit or road, or selected for connection"],
     [/; занятых оставлено (\d+)/g,"; kept in use: $1"],
+    [/сохранено (\d+) серверов; остальные не сохранены: мало места на разделе настроек/g,"saved $1 servers; the rest could not be saved because the settings volume is low on space"],
+    [/сохранено (\d+) серверов; остальные не сохранены: не удалось проверить свободное место/g,"saved $1 servers; the rest could not be saved because available space could not be checked"],
+    [/сохранено (\d+) серверов; остальные не сохранены: не удалось записать конфиг/g,"saved $1 servers; the rest could not be saved after a config write failed"],
+    [/сохранено (\d+) серверов; остальные не сохранены: не удалось сохранить имена серверов/g,"saved $1 servers; the rest could not be saved after their names could not be recorded"],
+    [/; не удалось сохранить имена серверов/g,"; could not save server names"],
+    [/прочитано (\d+), остальное не дошло — прежние серверы сохранены/g,"read $1, the rest did not arrive and previously saved servers were kept"],
+    [/обновляю подписку… прочитано (\d+)/g,"updating the subscription… $1 read"],
+    [/Нет конфига AmneziaWG для выхода №(\d+) — выберите сервер\./g,"AmneziaWG exit $1 has no configuration. Select a server."],
     [/; не удалось снять устаревшие конфиги/g,"; could not remove obsolete configs"],
     ["правила провайдера по geosite/geoip не применяются — разделение делает роутер","the router handles split routing, so the provider’s geosite/geoip rules are skipped"],
     [/; новый конфиг активного сервера не применён, прежний не отвечает — роутер в прямом режиме/g,"; the active server's new config was not applied and the previous one does not answer — the router is in direct mode"],
@@ -13053,6 +13241,7 @@
     [/^скорость (\d+)\/(\d+)$/,"speed $1/$2"],
     // Вопрос экрана выхода (шаг 3c-1): прежде он жил в меню блока выходов и по-английски оставался русским целиком.
     [/^Удалить выход «([^»]*)»\? Привязанные к нему группы вернутся на основной транспорт\.$/,"Delete exit «$1»? Groups bound to it will return to the main transport."],
+    ["Роутер не сообщил результат обновления.","The router did not report an update result."],
     ["прогон завершён","run finished"],["не удалось запустить обновление","failed to start the update"],
     // хвост строки — СВОДКА, которую напечатал роутер (.subs-last): переводим её токенами
     ["(новых","(new"],[", изменено",", changed"],[", снято",", removed"],
@@ -13229,6 +13418,7 @@
     ["операция уже выполняется","operation already in progress"],
     ["VPN глобально ВКЛЮЧЁН.","VPN globally ENABLED."],
     ["VPN глобально ВЫКЛЮЧЕН.","VPN globally DISABLED."],
+    ["Выбранные доп-выходы продолжают работать.","Selected additional exits continue running."],
     ["Трафик идёт через провайдера.","Traffic goes through the ISP."],
     ["Не забудьте: ipconfig /flushdns на клиентах.","Remember: ipconfig /flushdns on the clients."],
     ["Трафик идёт через провайдера (включая доп-выходы).","Traffic goes through the ISP (extra exits included)."],
@@ -13529,6 +13719,8 @@
     [" лёг на внешний накопитель"," went to the external drive"],
     // Экран «Компоненты»: имя строки «что можно снять» для читалки (`aria-label`) и подсказка накопителя в сведении плана.
     [/^Снять «/,"Remove «"],["» — освободит ","» — frees "],[/^свободно там /,"free there: "],
+    [/^Ещё 1 обновление — будет предложено после установки недостающих файлов$/,"1 more update — offered after the missing files are installed"],
+    [/^Ещё (\d+) обновлен(?:ия|ий) — будут предложены после установки недостающих файлов$/,"$1 more updates — offered after the missing files are installed"],
     ["Применить изменения?","Apply changes?"],["Снимем с роутера: ","Will remove from the router: "],["Скачаем и поставим: ","Will download and install: "],["Поставим из загруженных файлов: ","Will install from the uploaded files: "],["Обновим: ","Will update: "],
     ["Обновление заменит файлы, но работающий компонент перейдёт на новую сборку только после перезапуска — кнопкой «Перезапустить» в его строке, а где её нет — перезагрузкой роутера.","The update replaces the files, but a running component switches to the new build only after a restart — with the «Restart» button in its row, or, where there is none, by rebooting the router."],
     ["Активную несущую и дополнительные выходы операция не переключает.","The operation does not switch the active carrier or the extra exits."],
@@ -13594,6 +13786,7 @@
     [/под распаковку пакета в \/tmp свободно (\d+) КБ, нужно ≥ (\d+)/,"for unpacking the package /tmp has $1 KB free, needs ≥ $2"],
     [/релиз (\S+) \(код (\d+)\): подпись сошлась, качаю (\S+) \((\d+) байт\)/,"release $1 (code $2): the signature matches, downloading $3 ($4 bytes)"],
     [/пакет не скачался: /,"the package did not download: "],
+    ["Другая проверка обновления уже идёт","Another update check is running"],
     [/пакет пришёл не того размера \((\d+) байт вместо (\d+)\)/,"the package arrived with the wrong size ($1 bytes instead of $2)"],
     [/^repair кончился с кодом (\d+)$/,"repair ended with code $1"],
     ["sha256 пакета не совпал с подписанным описанием","the package sha256 does not match the signed description"],
@@ -13703,6 +13896,10 @@
     [/готово: обновлено (\d+), ошибок (\d+)\. Бэкап: /,"done: updated $1, errors $2. Backup: "],
     ["имена в /tmp приведены к префиксу","names in /tmp brought to the prefix"],
     [/^GitHub напрямую не отвечает — пробую через локальный десинк \(([^)]*)\)$/,"GitHub is not answering directly — trying through the local desync ($1)"],
+    ["GitHub по обычному маршруту не отвечает — пробую через WAN напрямую","GitHub is unreachable on the usual route. Trying the WAN connection."],
+    ["Прямой канал GitHub занят другой загрузкой","Another download is using the direct GitHub connection."],
+    ["Нет flock — прямой канал GitHub недоступен","The direct GitHub connection requires flock."],
+    ["Не удалось снять правило прямой загрузки с GitHub","Could not remove the direct GitHub download rule."],
     ["ВНИМАНИЕ: перенос имён в /tmp не прошёл — проверьте ram-lib.sh","WARNING: moving names in /tmp failed — check ram-lib.sh"],
     ["бутстрап пересобран (","bootstrap rebuilt ("],
     ["ВНИМАНИЕ: бутстрап не пересобрался — проверьте ","WARNING: the bootstrap was not rebuilt — check "],
@@ -14151,6 +14348,10 @@
   }
   function i18nStr(s){
     if(Object.prototype.hasOwnProperty.call(I18N_EN,s)) return I18N_EN[s];
+    var exitPath=s.match(/^(Выход недоступен · Сейчас: |Сейчас: |Если упадёт: )?через выход №([2-7])( \(не отвечает\))?$/);
+    if(exitPath) return ({'Выход недоступен · Сейчас: ':'Exit down · Now: via exit ', 'Сейчас: ':'Now: via exit ', 'Если упадёт: ':'On failure: via exit '}[exitPath[1]]||'Via exit ')+exitPath[2]+(exitPath[3]?' (not responding)':'');
+    var graphError=s.match(/^(Цикл запасных выходов|Запасной выход не найден|На этот выход ссылаются): ([№2-7 →,]+)$/);
+    if(graphError) return {'Цикл запасных выходов':'Fallback loop', 'Запасной выход не найден':'Fallback exit not found', 'На этот выход ссылаются':'Used as a fallback by exits'}[graphError[1]]+': '+graphError[2].replace('№','');
     // Журнал действий: logLine() добавляет «[ЧЧ:ММ:СС] » перед сообщением (в тосте таймстампа нет).
     // Без этого ни один exact-ключ в ЖУРНАЛЕ не совпал бы (в строке-узле таймстамп-префикс). Отрезаем
     // его, переводим само сообщение (точный ключ ИЛИ правила) и возвращаем таймстамп на место. Формат
@@ -14278,6 +14479,7 @@
     document.documentElement.setAttribute('lang', LANG);
     try{ localStorage.setItem('enodia_lang', LANG); }catch(e){}
     translateTree(document.body);
+    Array.prototype.forEach.call(document.querySelectorAll(ACT_LOG_SEL), actLogFill);
     docTitle();
   }
   // Глобальный наблюдатель: переводит КАЖДЫЙ ре-рендер (шапка/трафик/модалки) — только добавленные
@@ -14296,6 +14498,7 @@
     }).observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:I18N_ATTRS});
   }
   if(LANG==='en') translateTree(document.body);   // перевести уже отрендеренный статический HTML
+  if(lgb) actLogFill(lgb);
 
   // «(?)» в HTML-строках модалок: ставим плейсхолдер <span class="help-slot" data-tip="…"> —
   // hydrateHelp меняет его на живой mkHelp. Observer на #modal-body гидрирует автоматом после
@@ -14381,6 +14584,22 @@
       return body;
     });
   }
+  function pollSubRelay(job){
+    return new Promise(function(resolve, reject){
+      var missed=0;
+      function poll(){
+        subPost({action:'import_sub_status', job:job}).then(function(d){
+          if(!d || !d.running){ resolve(d || {ok:false}); return; }
+          missed=0;
+          setBusy(true,'обновляю подписку…'+(d.read ? ' прочитано '+d.read : ''));
+          setTimeout(poll, 1500);
+        },function(e){
+          if(++missed>=5) reject(e); else setTimeout(poll, 1500);
+        });
+      }
+      poll();
+    });
+  }
   // Relay an older installation's download byte-for-byte to the router importer.
   function syncSubServersFront(tag, label, done, quiet){
     setBusy(true,'скачиваю подписку…'); logLine('→ подписка «'+label+'»: скачиваю', null);
@@ -14388,12 +14607,17 @@
       if(!d || !d.ok) throw new Error((d&&d.msg)||'подписка недоступна');
       var bytes=Uint8Array.from(atob(d.data),function(c){ return c.charCodeAt(0); });
       return tokSend(function(tok){
-        var head='action=import_sub_body&tag='+encodeURIComponent(tag)+'&token='+encodeURIComponent(tok)+'\n';
+        var head='action=import_sub_body&tag='+encodeURIComponent(tag)+'&token='+encodeURIComponent(tok)
+          +(d.rev?'&rev='+encodeURIComponent(d.rev):'')+'\n';
         return {url:'/cgi-bin/action',type:'application/x-enodia-subscription',body:new Blob([head,bytes])};
       });
     }).then(function(d){
+      if(d && d.ok && d.job) return pollSubRelay(d.job);
+      return d || {ok:false};
+    }).then(function(d){
       if(d.refused) d.refused.split('\n').forEach(function(reason){ logLine(reason, false); });
-      var line=(d.ok?'подписка ':'подписка: ')+(d.msg||('«'+label+'»: не удалось запустить обновление'));
+      var line=d.msg || ('подписка «'+label+'»: не удалось запустить обновление');
+      if(d.ok && d.msg) line='подписка '+line;
       var notice=geoNotice(d);
       logLine(line, !!d.ok);
       if(notice) logLine(notice, null);
@@ -14407,17 +14631,36 @@
     });
   }
   // ── Обновление подписки РОУТЕРНЫМ путём (тот же, которым ходит cron) ─────────
+  // The router publishes admission and completion in the scope of this request.
+  function subsRunPoll(job, cb){
+    var tries=0, url='/cgi-bin/data?section=subs_run&job='+encodeURIComponent(job);
+    subsRunPoll.active=poll;
+    function retry(){
+      if(subsRunPoll.active!==poll) return;
+      if(tries>=140){ subsRunPoll.active=null; cb({}, true); return; }
+      setTimeout(poll, 2500);
+    }
+    function poll(){
+      if(subsRunPoll.active!==poll) return;
+      tries++;
+      fetchJson(url).then(function(s){
+        if(subsRunPoll.active!==poll) return;
+        if(s && s.job===job && !s.running && /^(done|refused|error)$/.test(s.state)){
+          subsRunPoll.active=null; cb(s, false); return;
+        }
+        retry();
+      }, retry);
+    }
+    poll();
+  }
   // Роутер хранит имена и проверяет каждый профиль тем же путём, что и cron.
   function runSubsUpdate(tag, label, done, fallback){
     if(tag) chkDropTag(tag);   // обновление сбрасывает запомненные пинг/скорость серверов подписки
-    var ts0=0, who=tag?('подписка «'+label+'»'):'подписки';
+    var who=tag?('подписка «'+label+'»'):'подписки';
     setBusy(true,'обновляю подписки на роутере…');
     logLine('→ '+who+': обновляю на роутере', null);
-    fetchJson('/cgi-bin/data?section=subs_run').then(function(s){ ts0=(s&&s.ts)||0; }, function(){})
-      .then(function(){
-        var par={action:'subs_update_now'}; if(tag) par.tag=tag;
-        return subPost(par);
-      }).then(function(d){
+    var par={action:'subs_update_now'}; if(tag) par.tag=tag;
+    subPost(par).then(function(d){
         if(!d || !d.ok){
           var m=(d&&d.msg)||'';
           if(fallback && m.indexOf('subs-update.sh')>=0){
@@ -14425,7 +14668,8 @@
           }
           throw new Error(m||'не удалось запустить обновление');
         }
-        subsRunPoll(ts0, function(st, fresh, timedout){
+        if(!/^[A-Za-z0-9]{6}$/.test(d.job||'')) throw new Error(tkL('Роутер не сообщил номер обновления.', 'The router did not return a refresh ID.'));
+        subsRunPoll(d.job, function(st, timedout){
           setBusy(false);
           // КАРТОЧКА «ПОДПИСКИ» УСТАРЕВАЕТ ЗДЕСЬ, а не в момент нажатия. Прогон ФОНОВЫЙ: общий
           // `ovcInvalidate` из postAction сработал бы, когда закачки ещё не было, и карточка
@@ -14436,6 +14680,13 @@
           if(timedout){
             logLine(who+': прогон идёт дольше обычного — итог появится на экране «Подписки»', null);
             showToast('обновление идёт дольше обычного', 'busy'); if(done) done(false); return;
+          }
+          if(st.state!=='done'){
+            var err=st.msg||'Роутер не сообщил результат обновления.';
+            logLine(err, false);
+            showToast(err, false);
+            if(done) done(false);
+            return;
           }
           // Итог печатает САМ роутер (сводка .subs-last: серверов/новых/изменено/снято) —
           // панель его не пересчитывает, иначе завела бы третью версию правды. МЕТКУ сводка
@@ -15654,6 +15905,7 @@
   function filterSubs(q){
     q=(q||'').trim().toLowerCase();
     var mb=document.getElementById('modal-body'); if(!mb) return;
+    if(mb._srvCountryFilter){ mb._srvCountryFilter(q); return; }
     Array.prototype.forEach.call(mb.querySelectorAll('.sub-acc'), function(acc){
       var rows=acc.querySelectorAll('.sub-body .srv2'), any=false;
       Array.prototype.forEach.call(rows, function(r){
@@ -15748,7 +16000,7 @@
   }
   function srvRowOpen(cls, tpt, name, act, canAct, extra){
     return '<div class="lrow '+cls+(act?' active':' cl')+(canAct?'':' dis')+'" data-tpt="'+tpt+'" data-name="'+esc(name)+'" data-act="'+(canAct?'1':'0')+'"'+(extra||'')+'>'
-      + '<span class="dot'+recDot(CHK[chkKey(tpt,name)])+'"></span>';
+      + '<span class="dot'+recDot(chkGet(tpt,name))+'"></span>';
   }
   // Имя сервера — ДАННЫЕ (ремарка подписки бывает кириллицей): перевод его не трогает (`translate="no"`), режим стримера размывает.
   function srvNm(t){ return '<div class="nm sens" translate="no">'+esc(t)+'</div>'; }
@@ -15761,12 +16013,280 @@
   // СЕРВЕР ПОДПИСКИ в этих строках (`o`): AmneziaWG с обычным WireGuard и Hysteria2 приезжают в подписке вместе с Xray. На
   // «Серверах» — хвост «↳ подписка «…»» (`o.sub`): откуда сервер взялся и кто его меняет, тот же, что у закреплённого активного
   // Xray. На экране самой подписки (`o.ep`) хвост повторял бы заголовок — там под именем адрес сервера: по нему его и узнают.
+  var srvFavKeys=null, srvRegionNames={};
+  function srvCountryLabel(code){
+    if(!code) return LANG==='en'?'No country':'без страны';
+    var codes=' AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ '
+      +'CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR '
+      +'GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP '
+      +'KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ '
+      +'NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK '
+      +'SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW ';
+    if(codes.indexOf(' '+code+' ')<0) return '';
+    if(typeof Intl.DisplayNames!=='function') return code;
+    var loc=LANG==='en'?'en':'ru';
+    if(!srvRegionNames[loc]) srvRegionNames[loc]=new Intl.DisplayNames([loc],{type:'region',fallback:'none'});
+    return srvRegionNames[loc].of(code)||'';
+  }
+  function srvCountryCode(name){
+    var flag=String(name||'').match(/[\u{1f1e6}-\u{1f1ff}]{2}/u);
+    if(flag){
+      var code=Array.from(flag[0],function(c){return String.fromCharCode(c.codePointAt(0)-0x1f1e6+65);}).join('');
+      if(srvCountryLabel(code)) return code;
+    }
+    var tokens=/(?:^|[^\p{L}\p{N}])([A-Za-z]{2})(?=$|[^\p{L}\p{N}])/gu, hit;
+    while((hit=tokens.exec(String(name||'')))){ var country=hit[1].toUpperCase(); if(srvCountryLabel(country)) return country; }
+    return '';
+  }
+  function srvCountryFlag(code){
+    return code ? String.fromCodePoint(0x1f1e6+code.charCodeAt(0)-65,0x1f1e6+code.charCodeAt(1)-65) : '🌐';
+  }
+  function srvCountryCount(key,list,subs){
+    var counts=new Map();
+    list.forEach(function(name){ var cc=srvCountryCode(cfgDisp(key,name,subs)); counts.set(cc,(counts.get(cc)||0)+1); });
+    return Array.from(counts,function(row){return {code:row[0], count:row[1]};})
+      .sort(function(a,b){return b.count-a.count || a.code.localeCompare(b.code);});
+  }
+  function srvCountryBar(key, list, subs, selected, more){
+    var counts=srvCountryCount(key,list,subs);
+    if(!counts.length) return '';
+    var main=counts.filter(function(row){return row.code;});
+    var unknown=counts.find(function(row){return !row.code;});
+    function chip(r){
+      var pressed=selected.has(r.code), label=srvCountryLabel(r.code), text=srvCountryFlag(r.code)+' '+(r.code?'':label+' · ')+r.count;
+      return '<button type="button" translate="no" class="chip'+(pressed?' acc':'')+'" data-srv-country="'+r.code
+        +'" aria-pressed="'+pressed+'" aria-label="'+esc(label+' · '+r.count)+'" title="'+esc(label)+'">'+esc(text)+'</button>';
+    }
+    var visible=main.filter(function(row,i){return more||i<8||selected.has(row.code);});
+    var h=visible.map(chip).join('');
+    if(main.length>8) h+='<button type="button" translate="no" class="chip" data-srv-more-countries aria-expanded="'+more+'">'
+      +esc(more?(LANG==='en'?'Show fewer countries':'Свернуть страны'):(LANG==='en'?'More ':'ещё ')+(main.length-visible.length)+' ▾')+'</button>';
+    return h+(unknown?chip(unknown):'');
+  }
+  var _srvPages=new Map(), _srvPageSeq=0;
+  function srvPageBody(page,names,mount){
+    if(!mount) return '';
+    var rest=names.length-page.limit;
+    return names.slice(0,page.limit).map(page.row).join('')
+      +(rest>0?'<button type="button" class="btn gh srv-page-more" translate="no" data-srv-page-more>'
+        +esc((LANG==='en'?'Show ':'Показать ещё ')+Math.min(rest,30)+(LANG==='en'?' more':''))+'</button>':'');
+  }
+  function srvPagedRows(items,tpt,row,lazy){
+    if(items.length<=30&&!lazy) return items.map(row).join('');
+    var id=String(++_srvPageSeq), page={names:items.slice(),visible:items,limit:30,tpt:tpt,row:row};
+    _srvPages.set(id,page);
+    return '<div class="srv-page" data-srv-page="'+id+'">'+srvPageBody(page,items,!lazy)+'</div>';
+  }
+  function srvPageRefs(root){
+    if(!root) return [];
+    return Array.from(root.querySelectorAll('[data-srv-page]')).map(function(node){ return _srvPages.get(node.getAttribute('data-srv-page')); })
+      .filter(Boolean);
+  }
+  function srvPageUpdate(page){
+    if(!page.node) return;
+    var names=page.visible, mount=!page.group||page.group.open;
+    var signature=mount?names.slice(0,page.limit).join('\u0000')+'|'+names.length:'';
+    if(page.signature===signature) return;
+    page.signature=signature;
+    page.node.innerHTML=srvPageBody(page,names,mount);
+    page.wire();
+  }
+  function wireSrvPages(body,d,repaint){
+    Array.prototype.forEach.call(body.querySelectorAll('[data-srv-page]'),function(node){
+      var page=_srvPages.get(node.getAttribute('data-srv-page'));
+      if(!page) return;
+      page.node=node;
+      page.group=node.parentElement.classList.contains('srv-country-rows')?node.parentElement.parentElement:null;
+      page.wire=function(){ wireSrvCards(node,d,repaint); hydrateChecks(node); };
+      page.signature=page.group&&!page.group.open?'':page.visible.slice(0,page.limit).join('\u0000')+'|'+page.visible.length;
+      if(page.group) page.group.addEventListener('toggle',function(){ srvPageUpdate(page); });
+      node.addEventListener('click',function(e){
+        if(!e.target.hasAttribute('data-srv-page-more')) return;
+        var next=page.limit; page.limit+=30; srvPageUpdate(page);
+        var rows=node.querySelectorAll('.srv,.srv2'), row=rows[next];
+        if(row){ var focus=row.querySelector('.srv-chev'); if(focus) focus.focus({preventScroll:true}); }
+      });
+    });
+  }
+  function srvItemsIn(root,tpt){
+    var out=new Map();
+    function add(kind,name){ if(!tpt || tpt===kind) out.set(kind+'/'+name,{tpt:kind,name:name,rev:cfgRev(null,kind,name)}); }
+    if(root) Array.prototype.forEach.call(root.querySelectorAll('.srv[data-tpt],.srv2[data-tpt]'),function(row){
+      add(row.getAttribute('data-tpt'),row.getAttribute('data-name'));
+    });
+    srvPageRefs(root).forEach(function(page){ page.names.forEach(function(name){add(page.tpt,name);}); });
+    return Array.from(out.values());
+  }
+  function srvSortPages(root,compare){
+    var count=0;
+    srvPageRefs(root).forEach(function(page){
+      if(page.tpt!=='xray') return;
+      var visible=new Set(page.visible);
+      page.names.sort(compare);
+      page.visible=page.names.filter(function(n){return visible.has(n);});
+      srvPageUpdate(page);
+      count+=page.names.length;
+    });
+    return count;
+  }
+  function srvCountryTitle(cc,names){
+    var best=Infinity, title=srvCountryFlag(cc)+' '+srvCountryLabel(cc)+' · '+names.length;
+    names.forEach(function(name){var c=chkGet('xray',name); if(srvWorking(c) && c.ms!=null) best=Math.min(best,c.ms);});
+    return title+(isFinite(best)?' · '+best+(LANG==='en'?' ms':' мс'):'');
+  }
+  function srvCountryRows(items, grp, sub){
+    function row(name){ return serverCard(name,grp,cfgDisp('xray',name,[sub])); }
+    if(items.length<=50) return srvPagedRows(items,'xray',row,false);
+    var groups=new Map();
+    items.forEach(function(name){
+      var code=srvCountryCode(cfgDisp('xray',name,[sub]));
+      if(!groups.has(code)) groups.set(code,[]);
+      groups.get(code).push(name);
+    });
+    return Array.from(groups,function(pair,i){
+      var cc=pair[0], names=pair[1], title=srvCountryTitle(cc,names);
+      return '<details class="srv-country-group" data-country="'+cc+'"'+(i?'':' open')+'>'
+        +'<summary translate="no">'+esc(title)+'</summary><div class="srv-country-rows">'+srvPagedRows(names,'xray',row,!!i)+'</div></details>';
+    }).join('');
+  }
+  function srvWorking(c){ return !!(c && c.st==='ok' && c.reason!=='ipv6_unreachable'); }
+  function srvServerModes(key,list,mode){
+    var base=key+'/', fav=0, checked=0, working=0;
+    list.forEach(function(n){
+      if(srvFavKeys && srvFavKeys.indexOf(base+n)>=0) fav++;
+      var c=chkGet(key,n);
+      if(c && (c.st || c.reason)) checked++;
+      if(srvWorking(c)) working++;
+    });
+    function btn(k,label,count){
+      var on=mode===k;
+      return '<button type="button" class="seg'+(on?' on':'')+'" data-srv-mode="'+k
+        +'" aria-pressed="'+on+'">'+esc(label)+' · '+count+'</button>';
+    }
+    return '<div class="segbar srv-mode" translate="no" role="group" aria-label="'+(LANG==='en'?'Show servers':'Показать серверы')+'">'
+      +btn('all',LANG==='en'?'All':'Все',list.length)
+      +(srvFavKeys?btn('fav',LANG==='en'?'★ Favourites':'★ Избранное',fav):'')
+      +(checked?btn('working',LANG==='en'?'Working':'Рабочие',working):'')+'</div>';
+  }
+  function wireSrvCountries(body,d,tab){
+    var state=body._srvFilters||(body._srvFilters={countries:{}, expanded:{}, modes:{}});
+    var bar=body.querySelector('.srv-country-bar'), byTab=state.countries, expanded=state.expanded, modes=state.modes, current=tab, q='', recordTimer=null;
+    if(!bar) return function(){};
+    function chosen(){ return byTab[current]||(byTab[current]=new Set()); }
+    function rows(root){ return root ? Array.from(root.querySelectorAll('.srv[data-country], .srv2[data-country]')) : []; }
+    function apply(text){
+      q=text;
+      var pane=body.querySelector('.srv-tab-panel[data-tab="'+current+'"]');
+      if(!pane) return;
+      var selected=chosen(), mode=modes[current]||'all', filtering=!!q||selected.size>0||mode!=='all';
+      function matches(code,name,text,groupMatch,favGroup){
+        var scope=!selected.size||selected.has(code);
+        if(mode==='working') scope=scope && srvWorking(chkGet(current,name));
+        if(mode==='fav') scope=scope && !!favGroup;
+        return scope && (!q||groupMatch||text.toLowerCase().indexOf(q)>=0||
+          srvCountryLabel(code).toLowerCase().indexOf(q)>=0||code.toLowerCase()===q);
+      }
+      function show(r, groupMatch, favGroup){
+        var hit=matches(r.getAttribute('data-country')||'',r.getAttribute('data-name'),r.textContent||'',groupMatch,favGroup);
+        r.style.display=hit?'':'none';
+        return hit;
+      }
+      function pageFilter(page,labels,favGroup){
+        page.visible=filtering ? page.names.filter(function(n){
+          var disp=cfgDisp(current,n,d.subs||[]), meta=(current==='xray'?xrayMeta[n]:hy2Meta[n])||{};
+          return matches(srvCountryCode(disp),n,disp+' '+(meta.host||ownVal(awgEp,n)||''),labels,favGroup);
+        }) : page.names;
+      }
+      var grouped=new Set();
+      var pagesGrouped=new Set();
+      Array.prototype.forEach.call(pane.querySelectorAll('.sub-acc'),function(g){
+        var h=g.querySelector('.sub-hd .nm'), label=((g.getAttribute('data-label')||'')+' '+(h?h.textContent:'')).toLowerCase();
+        var visible=false, labels=label.indexOf(q)>=0;
+        var favGroup=g.getAttribute('data-tag')==='__fav_'+current+'__';
+        srvPageRefs(g).forEach(function(page){
+          pagesGrouped.add(page);
+          pageFilter(page,labels,favGroup);
+          visible=visible||page.visible.length>0;
+          if(page.group){
+            if(filtering) page.group.open=page.visible.length>0;
+            var title=page.group.querySelector('summary');
+            if(title) title.textContent=srvCountryTitle(page.group.getAttribute('data-country')||'',page.visible);
+          }
+          srvPageUpdate(page);
+        });
+        rows(g).forEach(function(r){
+          grouped.add(r);
+          visible=show(r,labels,favGroup)||visible;
+        });
+        Array.prototype.forEach.call(g.querySelectorAll('.srv-country-group'),function(c,i){
+          var ref=srvPageRefs(c)[0];
+          var any=ref ? ref.visible.length>0 : rows(c).some(function(r){return r.style.display!=='none';});
+          c.hidden=!any;
+          if(filtering) c.open=any;
+          else if(c._srvFiltered) c.open=i===0;
+          c._srvFiltered=filtering;
+          if(ref) srvPageUpdate(ref);
+        });
+        g.style.display=!filtering || visible ? '' : 'none';
+        sectOpenSet(g,filtering?visible:subOpen(g.getAttribute('data-tag')));
+      });
+      srvPageRefs(pane).forEach(function(page){ if(!pagesGrouped.has(page)){ pageFilter(page,false,false); srvPageUpdate(page); } });
+      var pinned=new Set(rows(pane.querySelector('.srv-pinned')));
+      rows(pane).forEach(function(r){ if(!grouped.has(r)&&!pinned.has(r)) show(r,false); });
+    }
+    function paint(){
+      var list=(d[current]&&d[current].servers)||[];
+      bar.innerHTML=(list.length?srvServerModes(current,list,modes[current]||'all'):'')
+        +srvCountryBar(current,list,d.subs||[],chosen(),!!expanded[current]);
+    }
+    bar.addEventListener('click',function(e){
+      var btn=e.target, code=btn.getAttribute('data-srv-country'), mode=btn.getAttribute('data-srv-mode');
+      if(code!==null){
+        var selected=chosen();
+        if(selected.has(code)) selected.delete(code); else selected.add(code);
+      } else if(mode!==null) modes[current]=mode;
+      else if(btn.hasAttribute('data-srv-more-countries')) expanded[current]=!expanded[current];
+      else return;
+      paint(); apply(q);
+      var next=bar.querySelector(code!==null?'[data-srv-country="'+code+'"]':
+        mode!==null?'[data-srv-mode="'+mode+'"]':'[data-srv-more-countries]');
+      if(next) next.focus();
+    });
+    body._srvCountryFilter=apply;
+    body._srvRecordRefresh=function(){
+      if(!bar.isConnected) return;
+      if(recordTimer!==null) return;
+      recordTimer=setTimeout(function(){
+        recordTimer=null;
+        if(bar.isConnected && screenAlive(body)){ paint(); apply(q); }
+      },120);
+    };
+    paint();
+    return function(key){ current=key; paint(); apply(q); };
+  }
+  function srvFavBtn(tpt, name){
+    if(!srvFavKeys) return '';
+    var on=srvFavKeys.indexOf(tpt+'/'+name)>=0, title=on?'Убрать из избранного':'В избранное';
+    return '<button type="button" class="btn sm gh srv-fav'+(on?' on':'')+'" data-tpt="'+tpt+'" data-name="'+esc(name)
+      + '" aria-pressed="'+on+'" title="'+title+'" aria-label="'+title+'">'+(on?'★':'☆')+'</button>';
+  }
+  function srvFavGroup(key, grp, list, subs){
+    if(!srvFavKeys) return '';
+    var prefix=key+'/', rows=srvFavKeys.filter(function(k){ return k.indexOf(prefix)===0 && list.indexOf(k.slice(prefix.length))>=0; });
+    if(!rows.length) return '';
+    return grpSectHtml({tag:'__fav_'+key+'__', label:'Избранное', kind:'fav', ic:'i-star', n:rows.length, nm:'Избранное', ds:'из всех подписок и своих',
+      body:srvPagedRows(rows.map(function(k){return k.slice(prefix.length);}),key,function(name){
+        var disp=cfgDisp(key,name,subs), sub=subLabelOf(name,subs);
+        return key==='xray' ? serverCard(name,grp,disp,sub) : serverRow(key,name,grp,disp,{ep:true,sub:sub});
+      },false)});
+  }
   function serverRow(key, name, grp, disp, o){
     o=o||{};
     var act = name===grp.active, canAct = canActivate(grp);
     var rd = (key==='awg') ? cfgRiders(name) : [], rv = roadOf(name, key);
     // An Amnezia Premium server has no ✕: a country is taken away on the subscription's screen (its server screen has no «Удалить» either).
-    var canDel = !(act && (key==='awg' || key===cur.transport)) && !rd.length && !cfgExits(key, name).length && !isPremSrv(name);
+    var carrying=act && key===cur.transport && (key!=='awg' || !cur.vpnOff);
+    var canDel = !carrying && !rd.length && !cfgDeleteExits(key, name, grp.held).length && !isPremSrv(name);
     var m = key==='hy2' ? (hy2Meta[name]||{}) : {};
     var ds = m.host ? '<span class="mono">'+esc(m.host)+'</span>'+(m.obfs?' · '+esc(m.obfs):'') : '';
     // WARP узнаёт роутер (по ключу сервера Cloudflare): под именем — «Cloudflare», у дороги — кого она везёт (макет).
@@ -15779,7 +16299,7 @@
     var st = act ? '<span class="chip'+(canAct?' acc':'')+'">'+actLbl(canAct)+'</span>'
            : hx ? '<span class="chip">занят: '+esc(slotHeldBy(hx))+'</span>'
                  : '<button type="button" class="chip srv-pick"'+(canAct ? ' aria-label="'+esc('Выбрать «'+(disp||name)+'»')+'"' : '')+'>'+(canAct?'выбрать →':notReadyLbl(grp))+'</button>';
-    return srvRowOpen('srv', key, name, act, canAct)
+    return srvRowOpen('srv', key, name, act, canAct, ' data-country="'+srvCountryCode(disp||name)+'"')
       + '<div class="grow">'+srvNm(disp||name)+'<div class="ds">'+ds
       + '<span class="srv-ping" data-tpt="'+key+'" data-name="'+esc(name)+'"></span>'
       + (o.sub ? '<span class="srv-tail">↳ <span>подписка</span> «<span class="sens" translate="no">'+esc(o.sub)+'</span>»</span>' : '')
@@ -15787,6 +16307,7 @@
       + (rv ? '<span class="srv-tail">↳ <span>через выход</span> «'+roadExitHtml(rv)+'»</span>' : '')
       + (rd.length ? '<span class="srv-tail"><span>дорога для</span> '+ridersHtml(rd)+'</span>' : '')+'</div></div>'
       + '<span class="srv-r">'+(gl ? '<span class="badge">'+esc(gl)+'</span> ' : '')+st
+      + srvFavBtn(key, name)
       + (key==='hy2' ? '<button type="button" class="btn sm gh srv-edit" data-tpt="hy2" data-name="'+esc(name)+'" title="Изменить конфиг" aria-label="'+esc('Изменить конфиг «'+(disp||name)+'»')+'">✎</button>' : '')
       + (canDel ? '<button type="button" class="btn sm gh srv-del" data-tpt="'+key+'" data-name="'+esc(name)+'" title="Удалить конфиг" aria-label="'+esc('Удалить конфиг «'+(disp||name)+'»')+'">✕</button>' : '')
       + '</span>'+srvChev(key, name, disp)+'</div>';
@@ -15810,16 +16331,17 @@
   // там «активен» говорит заголовок, в списке группы — чип.
   function serverCard(name, grp, disp, subLabel, pinned){
     var act = name===grp.active, canAct = canActivate(grp);
-    var meta=xrayMeta[name]||{}, host=meta.host||'';
+    var meta=xrayMeta[name], host=meta&&meta.host||'';
     var canDel = !(act && cur.transport==='xray') && !cfgExits('xray', name).length && !isPremSrv(name);
-    var ds = host ? '<span class="mono">'+esc(host)+'</span>' : '';
-    if(subLabel) ds += (ds?' · ':'')+'↳ <span>подписка</span> «<span class="sens" translate="no">'+esc(subLabel)+'</span>»';
+    var ds = '<span class="mono srv-meta-host">'+esc(host)+'</span>';
+    if(subLabel) ds += '<span class="srv-meta-sep"'+(host?'':' hidden')+'> · </span>↳ <span>подписка</span> «<span class="sens" translate="no">'+esc(subLabel)+'</span>»';
     var st = !canAct ? '<span class="chip">'+(act?actLbl(false):notReadyLbl(grp))+'</span>'
-           : (act&&!pinned ? '<span class="chip acc">активен</span>' : '')+'<span class="badge">'+esc(protoBadge(meta))+'</span>';
-    return srvRowOpen('srv2', 'xray', name, act, canAct, ' data-del="'+(canDel?'1':'0')+'"')
-      + '<div class="grow">'+srvNm(disp||name)+(ds?'<div class="ds">'+ds+'</div>':'')+'</div>'
+           : (act&&!pinned ? '<span class="chip acc">активен</span>' : '')+'<span class="badge srv-meta-proto"'+(meta?'':' hidden')+'>'+esc(meta?protoBadge(meta):'')+'</span>';
+    return srvRowOpen('srv2', 'xray', name, act, canAct, ' data-del="'+(canDel?'1':'0')+'" data-country="'+srvCountryCode(disp||name)+'"')
+      + '<div class="grow">'+srvNm(disp||name)+'<div class="ds srv-meta-detail"'+(host||subLabel?'':' hidden')+'>'+ds+'</div></div>'
       + '<span class="srv-r">'+st
       + '<span class="chip srv-ping'+(act&&canAct?' acc':'')+'" data-tpt="xray" data-name="'+esc(name)+'"></span>'
+      + srvFavBtn('xray', name)
       + '<button type="button" class="btn sm gh srv2-menu" data-name="'+esc(name)+'" data-del="'+(canDel?'1':'0')+'" title="Действия" aria-label="'+esc('Действия с сервером «'+(disp||name)+'»')+'">⋮</button>'
       + '</span>'+srvChev('xray', name, disp)+'</div>';
   }
@@ -15852,7 +16374,7 @@
   function subListControls(nSubs, nSrv){
     if(!(nSubs>0) && !(nSrv>0)) return '';
     return '<div class="srv-tools">'
-      + (nSubs>0 ? '<div class="inrow grow"><input class="sub-search" type="search" placeholder="Поиск сервера или группы…" aria-label="Поиск сервера или группы" spellcheck="false" autocomplete="off"></div>'
+      + (nSrv>0 ? '<div class="inrow grow"><input class="sub-search" type="search" placeholder="Поиск сервера, страны или группы…" aria-label="Поиск сервера, страны или группы" spellcheck="false" autocomplete="off"></div>'
                  + '<button type="button" class="btn gh sub-refresh-all" title="Перезабрать все подписки">'+icUse('i-refresh','s','',true)+'Обновить все</button>'
                  : '<span class="grow"></span>')
       + (nSrv>0 ? '<button id="srv-speed-btn" type="button" class="btn gh" title="Тест скорости ВСЕХ xray-серверов (реальный трафик через VPS, по одному)">Скорость всех</button>'
@@ -15885,8 +16407,8 @@
     return '<div class="sect sub-acc'+(open?' open':'')+'" data-tag="'+esc(o.tag)+'" data-label="'+esc(o.label)+'">'
       + sectHeadHtml({hcls:'sub-hd', hattr:' data-tag="'+esc(o.tag)+'"', ic:o.ic, nm:o.nm, ds:o.ds, cnt:o.n, ccls:'sub-cnt', open:open,
           // Кнопки шапки называют СВОЮ группу: одинаковые «Меню подписки» в каждой шапке читалка не различала (ревью пачки 2, круг 2).
-          act:'<button type="button" class="btn sm gh grp-menu sub-act" data-tag="'+esc(o.tag)+'"'+(o.kind==='sub'?' data-label="'+esc(o.label)+'"':'')+(o.prem?' data-prem="1"':'')+' data-kind="'+o.kind+'" title="'+(o.kind==='sub'?'Действия с подпиской':'Действия')+'" aria-label="'+esc(o.kind==='sub' ? 'Меню подписки «'+o.label+'»' : 'Меню своих серверов')+'">⋮</button>',
-          tlabel:(o.kind==='sub' ? 'Показать или скрыть серверы подписки «'+o.label+'»' : 'Показать или скрыть свои серверы')})
+          act:o.kind==='fav'?'':'<button type="button" class="btn sm gh grp-menu sub-act" data-tag="'+esc(o.tag)+'"'+(o.kind==='sub'?' data-label="'+esc(o.label)+'"':'')+(o.prem?' data-prem="1"':'')+' data-kind="'+o.kind+'" title="'+(o.kind==='sub'?'Действия с подпиской':'Действия')+'" aria-label="'+esc(o.kind==='sub' ? 'Меню подписки «'+o.label+'»' : 'Меню своих серверов')+'">⋮</button>',
+          tlabel:(o.kind==='fav' ? 'Показать или скрыть избранное' : o.kind==='sub' ? 'Показать или скрыть серверы подписки «'+o.label+'»' : 'Показать или скрыть свои серверы')})
       + '<div class="b sub-body">'+o.body+'</div></div>';
   }
   // Возраст подписки под её именем — отметки закачки из `section=subs` (их пишет роутер). Не ответила — строки нет вовсе.
@@ -15902,13 +16424,13 @@
     var prem=s.kind==='premium';
     return grpSectHtml({tag:s.tag, label:s.label, kind:'sub', prem:prem, ic:'i-list', n:items.length,
       nm:'<span>Подписка</span> «<span class="sens" translate="no">'+esc(s.label)+'</span>»', ds:prem ? 'Amnezia Premium' : subAgeText(si, now),
-      body: items.length ? items.map(function(nm){ return serverCard(nm, grp, cfgDisp('xray',nm,[s])); }).join('')
+      body: items.length ? srvCountryRows(items,grp,s)
                          : '<div class="lempty">'+(prem ? 'пусто — страны отмечают на экране подписки' : 'пусто — обновите подписку (⋮ → Обновить серверы)')+'</div>'});
   }
   // «Свои» — ручные (не-подписочные) xray-конфиги.
   function ownAccHtml(own, grp){
     return grpSectHtml({tag:'__own__', label:'Свои', kind:'own', ic:'i-at', n:own.length, nm:'Свои', ds:'добавлены вручную',
-      body: own.map(function(nm){ return serverCard(nm, grp, cfgDisp('xray',nm,[])); }).join('')});
+      body: srvPagedRows(own,'xray',function(nm){ return serverCard(nm, grp, cfgDisp('xray',nm,[])); },false)});
   }
   // Серверы Xray: ЗАКРЕПЛЁННЫЙ активный — своей карточкой сверху, дальше группы по подпискам (в ручном порядке subGroupOrder) и
   // «Свои». Группировка — по владельцу sub-<tag>- (longest-prefix). info — подписки из `section=subs` (возраст), now — их часы.
@@ -15930,6 +16452,7 @@
       h+='<div class="card wfull srv-pinned"><div class="ct">Активный сервер</div>'+serverCard(pinned, grp, cfgDisp('xray', pinned, subs), subLabelOf(pinned, subs), true)
         + '<div class="tiny" style="margin-top:9px">Активный закреплён сверху и не уезжает при поиске и сортировке. Бейдж собирается из самого конфига: протокол · защита · транспорт · flow.</div></div>';
     }
+    h+=srvFavGroup('xray',grp,list,subs);
     var tags=subs.map(function(s){return s.tag;}); if(own.length) tags.push('__own__');
     subGroupOrder(tags).forEach(function(t){
       if(t==='__own__') h+=ownAccHtml(own, grp);
@@ -15976,11 +16499,12 @@
     grp=grp||{}; subs=subs||[];
     var list=grp.servers||[], h='';
     if(key==='xray') h=subListControls(subs.length, list.length)+xrayServers(grp, list, subs, info, now);
-    else h='<div class="card w2"><div class="ct">Конфиги '+names[key]+' <span class="sub dotb">'+srvStatus(grp)+'</span></div>'
-      + (list.length ? list.map(function(name){
+    else h=srvFavGroup(key,grp,list,subs)+'<div class="card w2"><div class="ct">Конфиги '+names[key]+' <span class="sub dotb">'+srvStatus(grp)+'</span></div>'
+      + (list.length ? srvPagedRows(list,key,function(name){
           // Настоящее имя (эмодзи/флаги) — и у Hysteria2: её конфиг может приехать из подписки (иначе «sub-de-nidjerlandy»).
           // Сервер подписки стоит в этом же плоском списке (их единицы, а не десятки, как у Xray) — хвостом сказано, чей он.
-          return serverRow(key, name, grp, cfgDisp(key, name, subs), {sub:subLabelOf(name, subs)}); }).join('') : '<div class="lempty">нет конфигов</div>')
+          return serverRow(key, name, grp, cfgDisp(key, name, subs), {sub:subLabelOf(name, subs)});
+        },false) : '<div class="lempty">нет конфигов</div>')
       + '<div class="tiny" style="margin-top:10px">'+(key==='awg'
           ? 'У активного конфига крестика нет — удалить то, на чём стоит несущая, нельзя. У конфига, который служит дорогой другому серверу, — тоже.'
           : 'Имена могут прийти из подписки вместе с флагами. «✎» — редактор конфига: форма и сырой YAML; у AmneziaWG его нет.')+'</div></div>';
@@ -15994,7 +16518,7 @@
   // а после захода на «Серверы» — показом (ревью с.98, круг 3). Ответ-отказ (вход, ошибка) кэшей не трогает.
   function listNamesTake(d){
     if(!d || typeof d!=='object' || d.error || d.need_login) return;
-    subNames = d.names||{}; cfgNames = d.cfgnames||{};
+    subNames = d.names||{}; cfgNames = d.cfgnames||{}; _cfgRevisions=d.revisions||{};
     _subTagsKnown = (d.subs||[]).map(function(s){ return s && s.tag; }).filter(function(t){ return !!t; });
     // …and which of them are Amnezia Premium (the router's `kind`): their servers' screens say other things (export, a new config).
     _subPremKnown = (d.subs||[]).filter(function(s){ return s && s.tag && s.kind==='premium'; }).map(function(s){ return s.tag; });
@@ -16006,6 +16530,7 @@
   // Читают его «Серверы» и экран подписки; второй разбор разошёлся бы с первым.
   function srvListTake(d){
     listNamesTake(d);
+    srvFavKeys=Array.isArray(d.favourites)?d.favourites:null;
     xrayMeta = (d.xray && d.xray.meta) || {};   // host/sni/fp по конфигу (host — под именем)
     hy2Meta = (d.hy2 && d.hy2.meta) || {};      // host (сервер:порт) и obfs — строка Hysteria2 под именем
     awgGen = (d.awg && d.awg.gen) || {};        // поколение протокола конфига AmneziaWG (transport-awg.sh conf-gen) — бейдж строки
@@ -16015,22 +16540,136 @@
     // в бэкенде и рисовал ложное «недоступен» — по этому флагу гейтим кнопки заранее (engineMissing).
     srvBin={awg:!(d.awg&&d.awg.bin===false), xray:!(d.xray&&d.xray.bin===false), hy2:!(d.hy2&&d.hy2.bin===false)};
   }
+  function srvMetaNotice(d){
+    return d.xray && d.xray.meta_pending>0 ? '<div class="tiny srv-meta-progress" role="status"></div>' : '';
+  }
+  function srvListDigest(d){
+    var snapshot=Object.assign({},d,{xray:Object.assign({},d.xray)});
+    delete snapshot.xray.meta_pending;
+    return JSON.stringify(snapshot, function(key, value){
+      if(!value || typeof value!=='object' || Array.isArray(value)) return value;
+      var sorted=Object.create(null);
+      Object.keys(value).sort().forEach(function(k){ sorted[k]=value[k]; });
+      return sorted;
+    });
+  }
+  var _srvRequest=0, _srvForeground=0, _srvWrite=null;
+  function srvScreenRequest(work, apply, fail, passive){
+    if(passive && _srvForeground) return Promise.resolve(false);
+    var id=++_srvRequest, nav=_navGen;
+    if(!passive) _srvForeground=id;
+    function current(){ return id===_srvRequest && nav===_navGen; }
+    function done(){ if(_srvForeground===id) _srvForeground=0; }
+    var answer;
+    try { answer=work(current); } catch(err){ answer=Promise.reject(err); }
+    return Promise.resolve(answer).then(function(reply){
+      return current() ? apply(reply,current,id) : false;
+    }).catch(function(err){
+      return current() && fail ? fail(err) : false;
+    }).finally(done);
+  }
+  function srvScreenRead(requireAges){
+    function read(){
+      var ages=fetchJson('/cgi-bin/data?section=subs');
+      return Promise.all([fetchJson('/cgi-bin/list'), requireAges ? ages : ages.catch(function(){ return null; })]);
+    }
+    return _srvWrite ? _srvWrite.then(read,read) : read();
+  }
+  function srvAgesRead(){
+    return fetchJson('/cgi-bin/data?section=subs').catch(function(){ return null; });
+  }
+  function srvMetaFollow(body, d, repaint, initialSubs){
+    var line=body.querySelector('.srv-meta-progress');
+    if(!line || body._srvMetaLine===line) return;
+    body._srvMetaLine=line;
+    var delay=3000, digest=srvListDigest(d), ages=JSON.stringify(initialSubs && initialSubs.subs), latest=null;
+    var recoverAges=false;
+    function alive(){ return body._srvMetaLine===line && line.isConnected && screenAlive(body); }
+    function next(n){
+      if(!alive()) return;
+      if(!latest && !recoverAges && n===0){ line.hidden=true; return; }
+      line.textContent=LANG==='en'?'Reading server details… '+n:'Дочитываю сведения о серверах… '+n;
+      setTimeout(function(){
+        if(!alive()) return;
+        if(latest && latest.id!==_srvRequest) latest=null;
+        srvScreenRequest(function(){
+          if(latest) return latest.reply;
+          if(!recoverAges) return srvScreenRead();
+          // A refresh seen by the recovered age read may have replaced the saved profiles.
+          return srvAgesRead().then(function(sd){
+            if(!sd || !Array.isArray(sd.subs)) return [null,sd];
+            return fetchJson('/cgi-bin/list').then(function(list){ return [list,sd]; });
+          });
+        }, function(reply,current,id){
+          if(!alive()) return true;
+          var list=reply[0], sd=reply[1];
+          if(!sd || !Array.isArray(sd.subs)){
+            recoverAges=true;
+            return false;
+          }
+          if(!list || !list.xray || list.error || list.need_login) return false;
+          recoverAges=false;
+          if(srvListDigest(list)!==digest || ages!==JSON.stringify(sd.subs)){
+            latest={id:id,reply:reply};
+            return repaint(list,sd,current);
+          }
+          latest=null;
+          next(+list.xray.meta_pending||0);
+          return true;
+        }, null, true).then(function(applied){ if(!applied) next(n); });
+      }, delay);
+      delay=Math.min(10000, delay+2000);
+    }
+    next(d.xray.meta_pending);
+  }
   // ПРОВОДКА СТРОК И КАРТОЧЕК СЕРВЕРОВ — одна на два экрана: «Серверы» и экран подписки рисуют одни и те же
   // `.srv`/`.srv2` (serverRow/serverCard), и вторая копия проводки разошлась бы с первой на первом новом пункте
   // меню. `repaint` — перерисовка ТОГО экрана, где нажали (ответы роутера): удаление с экрана подписки не уводит на «Серверы».
   // Редактор конфига — карточка экрана сервера (openSrvScr), у него свой адрес и свой «назад».
+  function cfgRevisionMissing(){
+    showToast(tkL('Обновите список, чтобы получить версию конфига.', 'Reload the list to get the config revision.'), false);
+  }
+  function cfgActionParams(list,tpt,name){
+    var rev=cfgRev(list,tpt,name);
+    if(rev) return {name:name,rev:rev};
+    cfgRevisionMissing();
+    return null;
+  }
   function wireSrvCards(body, d, repaint){
+    Array.prototype.forEach.call(body.querySelectorAll('.srv-fav'), function(el){
+      el.addEventListener('click', function(e){
+        e.stopPropagation();
+        var screen=document.getElementById('modal-body');
+        if(el.disabled || screen._srvStar) return;
+        var on=el.getAttribute('aria-pressed')!=='true', kind=el.getAttribute('data-tpt');
+        var params=cfgActionParams(d,kind,el.getAttribute('data-name'));
+        if(!params) return;
+        el.disabled=true; screen._srvStar=true;
+        srvScreenRequest(function(){
+          var request=subPost(Object.assign(params,{action:'set_server_fav',kind:kind,on:on?'1':'0'}));
+          _srvWrite=request;
+          function settled(){ if(_srvWrite===request) _srvWrite=null; }
+          request.then(settled,settled);
+          return request;
+        }, function(r){
+          if(r && r.ok) repaint(); else showToast(r&&r.msg||'не удалось сохранить избранное', false);
+        }, function(){ showToast('не удалось сохранить избранное', false); })
+          .then(function(){ el.disabled=false; screen._srvStar=false; });
+      });
+    });
     // Активация плоских строк awg/hy2 (.srv) и xray-карточек (.srv2) — общий activateServer.
     Array.prototype.forEach.call(body.querySelectorAll('.srv'), function(el){
       el.addEventListener('click', function(){
         if(el.classList.contains('active')) return;
-        activateServer(el.getAttribute('data-tpt'), el.getAttribute('data-name'), el.getAttribute('data-act')==='1', d.subs);
+        var kind=el.getAttribute('data-tpt'), name=el.getAttribute('data-name');
+        activateServer(kind, name, el.getAttribute('data-act')==='1', d.subs, cfgRev(d,kind,name));
       });
     });
     Array.prototype.forEach.call(body.querySelectorAll('.srv2'), function(el){
       el.addEventListener('click', function(){
         if(el.classList.contains('active')) return;
-        activateServer('xray', el.getAttribute('data-name'), el.getAttribute('data-act')==='1', d.subs);
+        var name=el.getAttribute('data-name');
+        activateServer('xray', name, el.getAttribute('data-act')==='1', d.subs, cfgRev(d,'xray',name));
       });
     });
     // ⋮ на карточке: проверка, скорость, экран сервера (конфиг, имя) + удаление (если не активная несущая).
@@ -16041,7 +16680,7 @@
         var row=el.parentNode; while(row && !(row.classList && row.classList.contains('srv2'))) row=row.parentNode;
         var items=[];
         if(row && !row.classList.contains('active'))
-          items.push({label:'Сделать активным', onClick:function(){ activateServer('xray', name, row.getAttribute('data-act')==='1', d.subs); }});
+          items.push({label:'Сделать активным', onClick:function(){ activateServer('xray', name, row.getAttribute('data-act')==='1', d.subs, cfgRev(d,'xray',name)); }});
         // An Amnezia Premium server's screen has neither an editor nor an export (its VLESS is a chain the form and a link cannot
         // carry): the menu promises neither — «Открыть сервер» leads to it (walk 14.10.2026).
         var pm=isPremSrv(name);
@@ -16052,7 +16691,8 @@
         if(!pm) items.push({label:'Экспорт конфига', onClick:function(){ openAt(function(){ srvScrGo('xray', name); }, 'srv-exp'); }});
         if(canDel) items.push({label:'Удалить конфиг', danger:true, onClick:function(){
           var dn=cfgDisp('xray', name, d.subs);
-          postAction('del_xray_server', 'Удалить конфиг «'+dn+'» (Xray)? Файл удалится с роутера.', 'удаляю «'+dn+'»', {name:name}, function(d){ if(d && d.ok) chkDrop('xray',name); repaint(); });
+          var params=cfgActionParams(d,'xray',name); if(!params) return;
+          postAction('del_xray_server', 'Удалить конфиг «'+dn+'» (Xray)? Файл удалится с роутера.', 'удаляю «'+dn+'»', params, function(d){ if(d && d.ok) chkDrop('xray',name,params.rev); repaint(); });
         }});
         openMenu(el, items);
       });
@@ -16066,7 +16706,8 @@
         if(busy) return;
         var tpt=el.getAttribute('data-tpt'), name=el.getAttribute('data-name');
         var act = tpt==='awg'?'del_server':(tpt==='xray'?'del_xray_server':'del_hy2_server'), dn=cfgDisp(tpt, name, d.subs);
-        postAction(act, cfgDelAsk(tpt, name, dn), 'удаляю «'+dn+'»', {name:name}, function(d){ if(d && d.ok) chkDrop(tpt,name); repaint(); });
+        var params=cfgActionParams(d,tpt,name); if(!params) return;
+        postAction(act, cfgDelAsk(tpt, name, dn), 'удаляю «'+dn+'»', params, function(d){ if(d && d.ok) chkDrop(tpt,name,params.rev); repaint(); });
       });
     });
     // «✎» строки — экран сервера (у всех трёх транспортов: у AmneziaWG там имя, проверка и несекретное из конфига).
@@ -16085,7 +16726,8 @@
   // Вкладка, где человек был последним, и место в списке при уходе на экран сервера: «назад» возвращает туда же (прежде — на вкладку
   // транспорта и в начало списка из 119 серверов; ревью пачки 2).
   var _srvTabLast=null, _srvBack=null;
-  function openServers(){
+  function openServers(meta){
+    meta=meta && meta.list ? meta : null;
     // Активная вкладка транспорта, если экран «Серверы» уже открыт: ре-рендер после действия
     // (удаление/правка/«Обновить все») НЕ должен сбрасывать пользователя на вкладку текущего
     // транспорта. Читаем ДО того, как openModal/loading затрут содержимое modal-body.
@@ -16096,12 +16738,13 @@
     // Запомненные вкладка, место и поиск — только для «назад» С ЭКРАНА СЕРВЕРА: свежий заход («Сменить сервер») открывает вкладку
     // текущего транспорта с начала (ревью пачки 2, круг 2).
     var _fromSrv=(navSplit(_navKey).r==='cn-server'), _back=_fromSrv ? _srvBack : null; _srvBack=null;
-    openModal(null, {route:'cn-servers', deck:true});
-    var body=document.getElementById('modal-body'); loading(body);
+    if(meta && !navShows('cn-servers')) return false;
+    if(!meta) openModal(null, {route:'cn-servers', deck:true});
+    var body=document.getElementById('modal-body');
+    if(!meta){ body._srvCountryFilter=null; body._srvRecordRefresh=null; loading(body); }
     // Возраст подписок (строка под именем группы) знает `section=subs`; не ответила она — экран тот же, строки возраста нет.
     // Реестр выходов — ради дорог (имя выхода-дороги, кого везёт WARP); не ответил — строки без этих хвостов, экран тот же.
-    Promise.all([fetchJson('/cgi-bin/list'), fetchJson('/cgi-bin/data?section=subs').then(function(x){ return x; }, function(){ return null; }),
-                 refreshEnabledSlots()]).then(function(r){
+    function paint(r, current){
       var d=r[0], sd=r[1];
       if(!screenAlive(body)) return;   // ответ доехал, когда человек уже на другом экране
       srvListTake(d);
@@ -16117,6 +16760,7 @@
              :((cur.transport==='awg'||cur.transport==='xray'||cur.transport==='hy2')?cur.transport:'xray');
       _srvTabLast=tab;
       var backY=_back ? _back.y : null;
+      _srvPages.clear();
       // Вкладки — `Tabs` макета (пилюли, число серверов в подписи). «Проверить все» — справа, у ВСЕХ вкладок; прячем его, когда у
       // текущей вкладки конфигов нет: жать не по чему, а молчаливый клик («проверил ноль серверов») читается как «панель не отвечает».
       function tabBtn(k,label,n){ return '<button type="button" class="srv-tab'+(k===tab?' on':'')+'" data-tab="'+k+'" aria-pressed="'+(k===tab?'true':'false')+'">'+esc(label)+(n?' · '+n:'')+'</button>'; }
@@ -16125,11 +16769,15 @@
         + '<div class="srv-top"><div class="tabs2" role="group" aria-label="Транспорт">'+tabBtn('awg','AmneziaWG',awgN)+tabBtn('xray','Xray',xrN)+tabBtn('hy2','Hysteria2',hyN)+'</div>'
         +   '<span class="grow"></span>'
         +   '<button id="srv-ping-btn" type="button" class="btn gh"'+(tabN(tab)?'':' style="display:none"')+' title="Пинг серверов текущей вкладки: xray — пинг+реальный выход, awg/hy2 — пинг эндпоинта">'+icUse('i-refresh','s','',true)+'<span class="lbl">Проверить все</span></button></div>'
+        + '<div class="srv-country-bar wfull"></div>'
+        + srvSweepHtml()
         + '<div class="tiny srv-hint" data-tab="xray"'+(tab==='xray'?'':' hidden')+'>Клик по серверу — активировать. Действия — в меню «⋮».</div>'
         + '<div class="tiny srv-hint" data-tab="other"'+(tab==='xray'?' hidden':'')+'>Клик по серверу — активировать; «›» — экран сервера.</div>'
+        + srvMetaNotice(d)
         + srvPanes('awg', d.awg, d.subs, tab, subInfo, subNow) + srvPanes('xray', d.xray, d.subs, tab, subInfo, subNow) + srvPanes('hy2', d.hy2, d.subs, tab, subInfo, subNow)
         + noteBox('Дополнительные выходы (ещё пути наружу, до шести) живут своим экраном раздела «Соединение»: список серверов и список выходов отвечают на разные вопросы.','info')
         + '</div>';
+      var countryTab=wireSrvCountries(body,d,tab);
       // Переключение вкладок: показать выбранную, скрыть остальные; «Проверить все» — по числу конфигов выбранной.
       Array.prototype.forEach.call(body.querySelectorAll('.srv-tab'), function(tb){
         tb.addEventListener('click', function(){
@@ -16139,6 +16787,7 @@
           var pb=document.getElementById('srv-ping-btn'); if(pb) pb.style.display=tabN(k)?'':'none';
           Array.prototype.forEach.call(body.querySelectorAll('.srv-hint'), function(x){ x.hidden=(x.getAttribute('data-tab')!==(k==='xray'?'xray':'other')); });
           _srvTabLast=k;
+          countryTab(k);
         });
       });
       Array.prototype.forEach.call(body.querySelectorAll('.dz'), function(dz){
@@ -16209,6 +16858,10 @@
       var subSearch=body.querySelector('.sub-search');
       if(subSearch) subSearch.addEventListener('input', function(){ filterSubs(subSearch.value); });
       wireSrvCards(body, d, navIfShown('cn-servers', openServers));
+      wireSrvPages(body, d, navIfShown('cn-servers', openServers));
+      srvMetaFollow(body, d, function(list, ages, accept){ return openServers({list:list, subs:ages||sd, accept:accept}); }, sd);
+      srvSweepPaint(body);
+      loadChecks(current).then(function(loaded){ if(loaded && current() && screenAlive(body) && body._srvRecordRefresh){ hydrateChecks(body); body._srvRecordRefresh(); } });
       var pb=document.getElementById('srv-ping-btn');
       if(pb) pb.addEventListener('click', checkAllServers);
       var sb=document.getElementById('srv-speed-btn');
@@ -16224,8 +16877,14 @@
       hydrateChecks(body);   // подтянуть запомненные пинг/скорость из кэша (.srv-checks на роутере)
       var rq=(_back && _back.q) || _prevQ;
       if(rq && subSearch){ subSearch.value=rq; filterSubs(rq); }
+      else if(meta && body._srvCountryFilter) body._srvCountryFilter('');
       if(backY) window.scrollTo(0, backY);
-    }).catch(function(){ if(screenAlive(body)) oops(body,'не удалось получить списки серверов'); });
+      return true;
+    }
+    if(meta) return meta.accept() && paint([meta.list,meta.subs],meta.accept);
+    return srvScreenRequest(function(current){
+      return Promise.all([srvScreenRead(), refreshEnabledSlots(current)]).then(function(r){ return r[0]; });
+    }, paint, function(){ if(screenAlive(body)) oops(body,'не удалось получить списки серверов'); return false; });
   }
   // ЭКРАН «ПОДПИСКИ» (шаг 3c-1). Подписки жили на вкладке Xray у «Серверов», расписание их обновления — в
   // «Настройках», а остаток и срок — только на карточке «Обзора»: три места на один вопрос «что с моими подписками».
@@ -16329,41 +16988,50 @@
   // «Удалить» было бы неправдой о действии, которое удалось, — а молчание роутера не уводит с экрана: перерисовка
   // просто не случилась. Список встаёт ЗАМЕНОЙ адреса только вместо адреса подписки: из «Обзора» сюда приходят кликом,
   // и замена стёрла бы «Обзор» из истории.
-  function subScrOpen(tag){
+  function subScrOpen(tag, meta){
     var rep=(tag==null);
+    if(meta && !navShows('cn-sub')) return false;
     if(rep) tag=navSplit(_navKey).a;
     tag=String(tag==null?'':tag);
     if(!subTagOk(tag)){ if(!rep) openSubs(); return; }
     if(!rep) _sclDraft=null;   // a fresh open of the screen starts from the router's word (the app card's draft lives across redraws only)
-    var g=++_navGen;
-    _navPend=true;
+    if(!meta){ ++_navGen; _navPend=true; }
     // Отказ сети и ответ не той формы (`{need_login}` с кодом 200, `{error}` старого CGI) — один исход: подписки мы не узнали.
     function fail(){
-      if(rep){ showToast('не удалось обновить экран подписки', false); return; }
+      if(rep){ if(!meta) showToast('не удалось обновить экран подписки', false); return false; }
       showToast('роутер не ответил — открываю список подписок', false); if(navSplit(location.hash).r==='cn-sub') navReplace('cn-subs'); openSubs();
     }
     // Реестр выходов — тоже: по нему строки знают, что конфиг держит выход (нет «✕» и «Удалить конфиг» — cfgExits), а дороги — свои
     // хвосты. Экран, открытый перезагрузкой страницы или прямым адресом, жил с пустым реестром и предлагал удаление, в котором
     // роутер откажет (ревью с.133). Не ответил — строки без этого знания, экран тот же (refreshEnabledSlots не отвергается).
-    Promise.all([fetchJson('/cgi-bin/data?section=subs'), fetchJson('/cgi-bin/list'), refreshEnabledSlots()]).then(function(r){
-      if(g!==_navGen) return;      // пока ждали роутер, человек ушёл — его выбор важнее
+    function shown(){ return !rep || navShows('cn-sub'); }
+    function paint(r,current){
       _navPend=false;
-      if(rep && !navShows('cn-sub')) return;   // за время ответа поверх экрана встал шаг без адреса — не сносим его
-      var d=r[0], l=r[1];
-      if(!d || !d.subs || !l || typeof l!=='object' || l.error || l.need_login){ fail(); return; }
+      if(!shown()) return false;
+      var l=r[0], d=r[1];
+      if(!d || !d.subs || !l || typeof l!=='object' || l.error || l.need_login) return fail();
       // Движка подписок у роутера нет — это ответ «не умеет», а не «твоей подписки нет»: список скажет об этом сам.
       if(d.engine===false){ if(navSplit(location.hash).r==='cn-sub') navReplace('cn-subs'); openSubs(); return; }
       var s=d.subs.filter(function(x){ return x.tag===tag; })[0];
       if(!s){ if(!rep) showToast('подписка не найдена на роутере', false); if(navSplit(location.hash).r==='cn-sub') navReplace('cn-subs'); openSubs(); return; }
-      openSub(s, d.now|0, l, d.subs);
-    }, function(){ if(g!==_navGen) return; _navPend=false; fail(); });
+      return loadChecks(current).then(function(){
+        if(!current() || !shown()) return false;
+        openSub(s, d.now|0, l, d.subs, d);
+        return true;
+      });
+    }
+    if(meta) return paint([meta.list,meta.subs],meta.accept);
+    return srvScreenRequest(function(current){
+      return Promise.all([srvScreenRead(true), refreshEnabledSlots(current)]).then(function(r){ return r[0]; });
+    }, paint, function(){ _navPend=false; return fail(); });
   }
   // ЭКРАН ПОДПИСКИ: её числа (та же строка, что в списке, только без перехода), действия и серверы. Серверы — та же
   // сетка карточек, что у группы на вкладке Xray, и в той же разметке `.sub-acc`: групповые проверка и скорость
   // находят группу по ней, копий этих прогонов нет. Hysteria2 той же подписки — строками ниже: роутер считает её
   // серверы по ОБОИМ семействам, и сетка из одного Xray разошлась бы с его числом в строке.
   // `all` — подписки из ответа `section=subs`: метку соседа знает и он, даже когда /cgi-bin/list её не отдал.
-  function openSub(s, now, l, all){
+  function openSub(s, now, l, all, sd){
+    _srvPages.clear();
     var tag=s.tag, label=s.label||s.tag, fsig=focusMark();
     // Заголовок — «Подписка «метка»» (макет), как у выхода: слово переводим СРАЗУ (`trNow`) — накладной перевод гасит узел, где
     // остался кириллический хвост метки (её пишет человек); метка — как есть, заголовок под меткой стримера (ревью пачки 5, круг 2).
@@ -16403,20 +17071,25 @@
       + (n ? '<button type="button" class="btn sm gh" data-sa="check">Проверить</button>' : '')
       + (xs.length ? '<button type="button" class="btn sm gh" data-sa="speed">Тест скорости</button>' : '')
       + '</div>'
+      + srvSweepHtml()
+      + (xs.length ? srvMetaNotice(l) : '')
       + (n ? '' : '<div class="lempty">пусто — обновите подписку («Обновить серверы»)</div>')
-      + '<div class="sub-body">'+xs.map(function(nm){ return serverCard(nm, gx, subDisp(nm,[s])); }).join('')+'</div>'
+      + '<div class="sub-body">'+srvCountryRows(xs,gx,s)+'</div>'
       // AmneziaWG (и обычный WireGuard) той же подписки — строками под своим заголовком, как Hysteria2: строка та же, что на вкладке
       // AmneziaWG «Серверов» (точка последней проверки, бейдж поколения, «выбрать →», крестик), под именем — адрес сервера.
-      + (aw.length ? '<div class="wt" style="margin-top:14px">AmneziaWG</div>'+aw.map(function(nm){ return serverRow('awg', nm, ga, subDisp(nm,[s]), {ep:true}); }).join('') : '')
-      + (hs.length ? '<div class="wt" style="margin-top:14px">Hysteria2</div>'+hs.map(function(nm){ return serverRow('hy2', nm, gh, subDisp(nm,[s])); }).join('') : '')
+      + (aw.length ? '<div class="wt" style="margin-top:14px">AmneziaWG</div>'+srvPagedRows(aw,'awg',function(nm){ return serverRow('awg', nm, ga, subDisp(nm,[s]), {ep:true}); },false) : '')
+      + (hs.length ? '<div class="wt" style="margin-top:14px">Hysteria2</div>'+srvPagedRows(hs,'hy2',function(nm){ return serverRow('hy2', nm, gh, subDisp(nm,[s])); },false) : '')
       // Две правды AmneziaWG, которых у Xray нет, — рядом со списком: меняет эти серверы только подписка, и что её обновление
       // делает с активным; а два адреса одной учётной записи (3x-ui отдаёт строку на каждый внешний адрес) — это ОДИН ключ.
       + (aw.length ? '<div style="margin-top:12px">'+noteBox('<b>AmneziaWG из подписки.</b> Редактора у этих серверов нет, как у любого AmneziaWG: меняет их только подписка. Активный сервер изменился — роутер сменит конфиг сам и вернёт прежний, если новый не поднялся. Два сервера с одной учётной записью и разными адресами — это один ключ: основным и выходом одновременно они не встанут, второй адрес — запасной.','info')+'</div>' : '')
       + '</div>';
     body.innerHTML=h+'</div>';
     wireSrvCards(body, l, navIfShown('cn-sub', subScrOpen));
+    wireSrvPages(body, l, navIfShown('cn-sub', subScrOpen));
+    srvMetaFollow(body, l, function(list, ages, current){ return ages && subScrOpen(null,{list:list,subs:ages,accept:current}); }, sd);
+    srvSweepPaint(body);
     if(scl) subClientWire(body, tag, label, scl, spre, sdr);
-    hydrateChecks(body);   // запомненные пинг и скорость серверов (.srv-checks на роутере)
+    hydrateChecks(body);   // subscription rows use the router records read with this view
     focusBack(body, fsig);
     body.addEventListener('click', function(ev){
       for(var el=ev.target; el && el!==body; el=el.parentNode){
@@ -17029,7 +17702,7 @@
   function srvFlag(s){ s=String(s||''); var m=/^((?:\uD83C[\uDDE6-\uDDFF]){2})\s*/.exec(s); return m ? {flag:m[1], rest:(s.slice(m[0].length)||s)} : {flag:'', rest:s}; }
   // Числа экрана — из кэша проверок (тот же, что красит строки «Серверов»), рукопожатие — из статуса (только у активного AWG).
   function srvStatsHtml(tpt, name, act){
-    var k=chkKey(tpt,name), c=CHK[k]||null;
+    var k=chkKey(tpt,name), c=chkGet(tpt,name);
     function cell(l, v, wr){ return '<div class="s"><div class="l">'+l+'</div><div class="v'+(wr?' wr':'')+'">'+v+'</div></div>'; }
     var run=_srvRun[k]||'', ping;
     if(!run && endpointInapplicable(c)) return cell('Пинг', esc(endpointLabel()), true)+srvStatsTail(tpt, name, act, c);
@@ -17052,13 +17725,14 @@
     }
     if(run==='check') ping='проверяю…';
     else if(c && c.ms!=null) ping=c.ms+' мс'+pingSuffix(c)+(c.cdn?' · CDN':'');
-    else if(c && c.st==='dead' && c.kind!=='speed') ping=(c.method==='tun') ? 'ключ не везёт' : 'нет ответа';   // `tun` silent — the Premium key does not carry (recView)
+    else if(c && c.st==='dead' && c.kind!=='speed') ping=keyTunSilent(c) ? 'ключ не везёт' : 'нет ответа';   // `tun` silent — the Premium key does not carry (recView)
     else if(c && c.st==='ok' && c.kind==='ping') ping='✓';
     else ping='—';
     var h=cell((tpt==='xray' || isPremSrv(name)) ? 'Пинг' : 'Пинг эндпоинта', esc(ping), !run && !!(c && c.st==='dead' && c.ms==null && c.kind!=='speed'));
     if(tpt==='xray'){
       var dead=!!(c && c.st==='dead' && c.kind==='ping');
-      h+=cell('Реальный выход', run==='check' ? 'проверяю…' : (dead ? 'нет' : (_srvExit[k] ? '<span class="mono sens">'+esc(_srvExit[k])+'</span>' : '—')), !run && dead);
+      var ip=_srvExit[chkKey(tpt,name,cfgRev(null,tpt,name))];
+      h+=cell('Реальный выход', run==='check' ? 'проверяю…' : (dead ? 'нет' : (ip ? '<span class="mono sens">'+esc(ip)+'</span>' : '—')), !run && dead);
       h+=cell('Скорость', run==='speed' ? 'меряю…' : ((c && c.mbps!=null) ? esc(c.mbps+' Мбит/с') : '—'));
     }
     // Роутер старше поля `obfs` о нём молчит — «нет» соврало бы про сервер с salamander: прочерк.
@@ -17086,24 +17760,19 @@
     if(name.toLowerCase()==='default') return kv+'<div class="cline">«default» — служебное имя установщика: им помечен первый конфиг, и он же — «дом» резерва по умолчанию. Переименовать его нельзя.</div>';
     return '<div class="lnkrow nm" style="margin:0"><input id="srv-nm" class="inp" spellcheck="false" autocomplete="off" maxlength="120" aria-label="Новое имя" aria-describedby="srv-nm-p srv-nm-d" value="'+esc(cfgDisp(tpt, name))+'"><button type="button" class="btn" data-sv="ren">Переименовать</button></div>'
       + '<div class="cline sens" id="srv-nm-p" aria-live="polite" hidden></div>'
-      + '<div class="cline" id="srv-nm-d">Имя — любое, с эмодзи и флагами. Файл на роутере — латиницей: кириллица транслитом, флаг страны — кодом (🇩🇪 → DE). Резерв перебирает серверы по алфавиту файлов — новое имя меняет и место сервера в этой очереди.</div>';
+      + '<div class="cline" id="srv-nm-d">Имя — любое, с эмодзи и флагами. Файл на роутере — латиницей: кириллица транслитом, флаг страны — кодом (🇩🇪 → DE). Резерв сначала проверяет избранное, затем остальные серверы по алфавиту файлов.</div>';
   }
   var RE_CFG_NAME=/^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$/;
-  // КЭШ ПРОВЕРОК ЕДЕТ ЗА ИМЕНЕМ: ключ записи — транспорт и имя. Старый ключ хороним надгробием: без него ЭТА вкладка при следующей
-  // записи вернула бы его с роутера (чтение → слияние → запись, разбор у loadChecks); другие открытые вкладки надгробия не знают и
-  // старый ключ вернуть могут — он безвреден (сервера с таким именем нет) и уйдёт со следующим сбросом. Запись переносится под новое имя.
   function chkRename(tpt, oldn, newn){
-    var ko=chkKey(tpt,oldn), kn=chkKey(tpt,newn), c=CHK[ko];
-    // Новый ключ мог быть надгробием прошлого переименования (туда и обратно) или удалённого сервера с этим именем: надгробие снимаем,
-    // иначе чтение перед записью (loadChecks) стёрло бы переносимую запись (ревью пачки 2).
-    _chkGone[ko]=Math.floor(Date.now()/1000); delete _chkGone[kn];
-    // Время замера — ЗАМЕРА: переименование проверкой не было («Проверен 0 с назад» у проверки пятидневной давности и свежий кэш для
-    // автопинга; ревью пачки 2, круг 2). Надгробие нового ключа снято строкой выше — чтение перед записью запись не сотрёт.
-    // Цена решения известна (круг 3): ДРУГАЯ открытая вкладка, где сервер с новым именем когда-то удалили, своим сохранением кэша может
-    // стереть перенесённую запись — редкая гонка двух вкладок стоит одной повторной проверки, а «проверен только что» — вранья каждому.
-    if(c){ var m={}; for(var p in c) m[p]=c[p]; CHK[kn]=m; delete CHK[ko]; }
-    if(_srvExit[ko]){ _srvExit[kn]=_srvExit[ko]; delete _srvExit[ko]; }
-    saveChecks();
+    ++_chkRequest;
+    var ko=chkKey(tpt,oldn)+'|', kn=chkKey(tpt,newn)+'|';
+    [CHK,_srvExit].forEach(function(records){
+      Object.keys(records).forEach(function(k){
+        if(k.indexOf(ko)!==0) return;
+        records[kn+k.slice(ko.length)]=records[k];
+        delete records[k];
+      });
+    });
   }
   function openSrvScr(tpt, name, d, editorReady){
     // Сервер подписки — по ВЛАДЕЛЬЦУ (длиннейший известный тег), а не по префиксу: свой файл «sub-test» живёт в «Своих» и переименовывается.
@@ -17125,8 +17794,8 @@
     // …and a config an exit merely HOLDS (its registry line names it): the exit would go on by its working copy and could not come
     // up after a restart. The router refuses that deletion (cgi-bin/action held_refuse) — the screen does not offer it and says why,
     // with a door to the exit (hardware walk 12.10.2026: «Удалить конфиг» on a WARP config under its exit).
-    var hex=cfgExits(tpt, name);
-    var canDel=!(act && (tpt==='awg' || tpt===cur.transport)) && !rdr.length;
+    var hex=cfgDeleteExits(tpt, name, grp.held);
+    var canDel=!(act && tpt===cur.transport && (tpt!=='awg' || !cur.vpnOff)) && !rdr.length;
     var meta=(tpt==='xray') ? (xrayMeta[name]||{}) : {};
     if(hex.length) canDel=false;
     // AN AMNEZIA PREMIUM SERVER IS NOT DELETED HERE (user's decision 14.10.2026, mockup cn-server-prem): a country is taken away by its
@@ -17160,12 +17829,14 @@
       + (tpt==='xray' ? '<div id="srv-reality" style="margin-top:9px" hidden></div>' : '')
       + (tpt==='xray' ? '<div class="tiny" style="margin-top:9px">У Xray «проверить» — это реальный выход через временный socks на свободном порту: конфиг с живым эндпоинтом, но мёртвым outbound так не спрячется. Тест скорости — четыре потока через VPS, около 12 секунд, меряет потолок канала роутер↔VPS (телефон покажет меньше).</div>' : '')
       + '</div>';
-    // Адрес заблокирован — сразу под шапкой, за ним второе мнение (если включено, у любого сервера); сервер на дороге — карточка
-    // дороги здесь же.
-    var crec=CHK[chkKey(tpt,name)]||null, roadOk=srvRoadOk(tpt, name), via=roadOk && roadOf(name, tpt);
+    // Адрес заблокирован — сразу под шапкой, за ним второе мнение (если включено, у любого сервера), за ними карточка дороги — у
+    // ЛЮБОГО сервера здесь, во всю строку. The road answers «адрес заблокирован», so it stands under it. One place for every state:
+    // an AWG server without a road used to get it late, after the export card (sixth on a phone, «нет дороги» — tester 22.11), and
+    // a two-column card in the dense deck changed column when the check result added the block card above (it «jumped» on a PC).
+    var crec=chkGet(tpt,name)||null, roadOk=srvRoadOk(tpt, name), via=roadOk && roadOf(name, tpt);
     h+=srvBlkHtml(tpt, name, crec, act);
     h+='<div id="srv-chb" hidden></div>';
-    if(roadOk && (via || tpt!=='awg')) h+=srvRoadHtml(tpt, name, crec);
+    if(roadOk) h+=srvRoadHtml(tpt, name, crec);
     var del=canDel ? '<button type="button" class="btn bad" data-sv="del">'+icUse('i-trash','s','',true)+(tpt==='awg' ? 'Удалить конфиг' : 'Удалить')+'</button>' : '';
     var why=(!canDel && !prem) ? '<div class="cline">'+(rdr.length ? '<span>Конфиг служит дорогой:</span> '+ridersHtml(rdr)+'<span>. Удалить его можно, когда по нему никто не едет.</span>'
                                    : hex.length ? '<span>Конфиг держит</span> <span class="nbr"><button type="button" class="ilink" data-cact="exit:'+hex[0]+'">выход №'+hex[0]+'</button><span>.</span></span> <span>Удалить его можно, когда выход удалён или переведён на другой сервер.</span>'
@@ -17200,7 +17871,6 @@
            : subAwg ? '<div class="cline">Проверяется пинг эндпоинта — как у любого сервера AmneziaWG.</div>'
                   : '<div style="margin-top:11px">'+noteBox('У AmneziaWG проверяется пинг эндпоинта, а не выход: демон один на интерфейс, поднять его временно на другом порту нельзя. Поэтому «сервер отвечает» здесь значит меньше, чем у Xray, — и панель не выдаёт одно за другое.', 'info')+'</div>')+'</div>';
       h+=expH;
-      if(roadOk && !via) h+=srvRoadHtml(tpt, name, crec);
       // WARP без маскировки (I1): провайдер пропускает рукопожатие чистого WireGuard и обрывает поток после него (замер 10.10.2026).
       if(isWarp(name) && warpMap[name]===0) h+=noteBox('<b>В конфиге WARP нет маскировки</b> (строки <span class="mono kw">I1</span>): многие провайдеры пропускают рукопожатие чистого WireGuard, а потом обрывают поток. Свой WARP роутер получит с маскировкой — «Серверы» → «Получить WARP».', 'warn');
       if(via) h+=noteBox('<b>Дорога — в один шаг.</b> Выход, который служит дорогой, сам по дороге не ездит, и сервер не может ехать по выходу, который на нём же и стоит: роутер откажет словами.', 'info');
@@ -17247,7 +17917,9 @@
     function roadPick(t){ var b=t; while(b && b!==wrap && !(b.getAttribute && b.getAttribute('data-road')!=null)) b=b.parentNode;
       if(!b || b===wrap) return false;
       var v=b.getAttribute('data-road');
-      if(v==='warp') openWarp(tpt==='awg' ? name : ''); else srvRoadSet(tpt, name, v);
+      var rev=cfgRev(d,tpt,name);
+      if(v==='warp') openWarp(tpt==='awg' ? name : '', tpt==='awg' ? rev : '');
+      else srvRoadSet(tpt, name, v, rev);
       return true; }
     wrap.addEventListener('keydown', function(e){ if((e.key==='Enter' || e.key===' ') && e.target && e.target.getAttribute && e.target.getAttribute('data-road')!=null){ e.preventDefault(); roadPick(e.target); } });
     wrap.addEventListener('click', function(e){
@@ -17255,7 +17927,7 @@
       var b=e.target; while(b && b!==wrap && !(b.getAttribute && b.getAttribute('data-sv'))) b=b.parentNode;
       if(!b || b===wrap) return;
       var v=b.getAttribute('data-sv');
-      if(v==='use') activateServer(tpt, name, canAct, subs);
+      if(v==='use') activateServer(tpt, name, canAct, subs, cfgRev(d,tpt,name));
       else if(v==='check') srvCheck(tpt, name);
       else if(v==='reality') srvFpApply(tpt, name);
       // «Взять новый» of an Amnezia Premium server: the router asks Amnezia for a fresh config of the same country (a new key) and
@@ -17272,7 +17944,14 @@
           premPollStart();
         }, function(){ showToast('роутер не ответил', false); b.disabled=false; if(srvHere(tpt, name)) rep(); });   // only ITS screen: another one may hold an unsaved edit (review s.136 r3, panel 6)
       }
-      else if(v==='viawarp'){ var wx=warpExitFor(name, tpt); if(wx) srvRoadSet(tpt, name, String(wx.id)); else openWarp(tpt==='awg' ? name : ''); }
+      else if(v==='viawarp'){
+        var rev=checkRev(b.getAttribute('data-rev'));
+        if(!rev){ cfgRevisionMissing(); return; }
+        var wx=warpExitFor(name, tpt);
+        if(wx) srvRoadSet(tpt, name, String(wx.id), rev);
+        else if(tpt==='awg') openWarp(name, rev);
+        else openWarp('');
+      }
       else if(v==='chb') srvChbCheck(body);
       else if(v==='chblink'){ var cu=chbUrl(_chbHost); if(cu) window.open(cu, '_blank', 'noopener,noreferrer'); }
       else if(v==='speed') speedServer(name);   // числа перерисует конец прогона (srvRunSet)
@@ -17280,8 +17959,9 @@
         if(_srvRun[chkKey(tpt,name)]){ showToast('«'+disp+'» сейчас проверяется — дождитесь итога', false); return; }
         var da=(tpt==='awg')?'del_server':(tpt==='xray'?'del_xray_server':'del_hy2_server'), dn=disp;
         // Кэш сбрасывается при любом успехе, а уводит «наверх» только экран ЭТОГО сервера: человек мог уйти, пока роутер думал.
-        postAction(da, cfgDelAsk(tpt, name, dn), 'удаляю «'+dn+'»', {name:name},
-          function(r){ if(r && r.ok){ chkDrop(tpt, name); if(srvHere(tpt, name)) navUp(); } });
+        var params=cfgActionParams(d,tpt,name); if(!params) return;
+        postAction(da, cfgDelAsk(tpt, name, dn), 'удаляю «'+dn+'»', params,
+          function(r){ if(r && r.ok){ chkDrop(tpt, name,params.rev); if(srvHere(tpt, name)) navUp(); } });
       }
       else if(v==='ren') srvRename(tpt, name);
       else if(v==='exp') srvExpShow(tpt, name);
@@ -17526,15 +18206,17 @@
     // Дорога стоит, а выход в кандидаты не годится (выключили мимо панели, сменили конфиг) — показываем её как есть: выбор на роутере.
     if(via && !seen) t+=optTile('data-road', via, true, 'i-route', '<span>через</span> '+roadExitHtml(via), 'этот выход сейчас дорогой служить не может — выберите другой или «напрямую»');
     if(!cands.length && !via) t+=optTile('data-road', 'warp', false, 'i-route', 'через WARP', 'выхода WARP ещё нет — откроется «WARP от Cloudflare»');
-    return '<div class="card" id="srv-road"><div class="wt">Дорога к серверу</div><div class="opt c2">'+t+'</div>'
+    return '<div class="card wfull" id="srv-road"><div class="wt">Дорога к серверу</div><div class="opt c2">'+t+'</div>'
       + '<div class="cline">'+(via
           ? 'Если дорога упадёт, пакеты к серверу пойдут напрямую, к заблокированному адресу: сервер станет недоступен, а интернет без VPN не пропадёт. Сторож чинит дорогу — перезапускает её выход — и не переключает сервер и не пишет, что тот умер.'
           : 'Нужна, когда провайдер заблокировал адрес сервера. Если дорога упадёт, пакеты к серверу пойдут напрямую — интернет не пропадёт, сервер станет недоступен, пока сторож её не поднимет.')+'</div></div>';
   }
   // Задать дорогу (пусто — напрямую): проверки и отказ словами — у роутера (road.sh). Удалось — сервер сразу проверяется заново: число
   // через дорогу (или напрямую) появится без второго нажатия.
-  function srvRoadSet(tpt, name, id){
-    postAction(tpt==='awg' ? 'road_set' : 'road_set_typed', null, id ? 'прокладываю дорогу' : 'снимаю дорогу', {kind:tpt, name:name, id:id}, function(r){
+  function srvRoadSet(tpt, name, id, rev){
+    var args={kind:tpt, name:name, id:id};
+    if(rev) args.rev=rev;
+    postAction(tpt==='awg' ? 'road_set' : 'road_set_typed', null, id ? 'прокладываю дорогу' : 'снимаю дорогу', args, function(r){
       if(r && r.ok) srvCheck(tpt, name);
       navIfShown('cn-server', srvScrOpen)();
     });
@@ -17549,10 +18231,11 @@
     if(endpointInapplicable(c)) return '<div class="card w2" id="srv-blk">'+noteBox(esc(endpointText(c)), 'warn')+'</div>';
     if(!c || roadOf(name, tpt)) return '';
     var can=srvRoadOk(tpt, name), wx=can ? warpExitFor(name, tpt) : null;
+    var warpButton='<div class="acts"><button type="button" class="btn pri" data-sv="viawarp" data-rev="'+checkRev(c.rev)+'">'+icUse('i-route','s','',true)+'Подключать через WARP</button></div>';
     if(c.st==='dead' && c.ncmp && can && !(act && cur.transport==='awg' && vpnCarries())){
       return '<div class="card w2" id="srv-blk"><div class="wt">Не отвечает: сервер или провайдер?</div>'
         + noteBox('<b>Сервер молчит, а спросить его другим путём роутеру нечем.</b> Выключенный сервер от адреса, который не пускает провайдер, панель отличает так: спрашивает сервер ещё и через работающий туннель AmneziaWG к другому серверу. При проверке такого туннеля не было.', 'info')
-        + '<div class="acts"><button type="button" class="btn pri" data-sv="viawarp">'+icUse('i-route','s','',true)+'Подключать через WARP</button></div>'
+        + warpButton
         + '<div class="cline">'+(wx ? '<span>Сервер поедет через выход</span> «'+slotNmHtml(wx)+'»<span>: роутер проложит дорогу, и панель сразу проверит сервер через неё.</span> '
                                     : '<span>WARP роутер получает у Cloudflare сам, ваш сервер для этого не нужен: кнопка откроет «WARP от Cloudflare».</span> ')
         + '<span>Ответит через WARP — адрес блокирует провайдер, и дорога это решает. Не ответит — дело в сервере либо не поднялась сама дорога (её выход — в «Дополнительных выходах»): дорогу снимет плитка «напрямую».</span></div></div>';
@@ -17560,7 +18243,7 @@
     if(c.st!=='blk') return '';
     return '<div class="card w2" id="srv-blk"><div class="wt">Адрес заблокирован провайдером</div>'
       + noteBox('<b>Сервер работает — ваш провайдер не пускает к его адресу.</b> Напрямую он молчит на всех портах, а через работающий туннель отвечает. В публичных списках блокировок такого адреса обычно нет: узнать можно только так.', 'warn')
-      + (can ? '<div class="acts"><button type="button" class="btn pri" data-sv="viawarp">'+icUse('i-route','s','',true)+'Подключать через WARP</button></div>' : '')
+      + (can ? warpButton : '')
       + '<div class="cline">'+(can ? (wx ? '<span>Сервер поедет через выход</span> «'+slotNmHtml(wx)+'»<span>: роутер проложит дорогу, и панель сразу проверит сервер через неё.</span> '
                                             : '<span>Выхода WARP ещё нет — кнопка сначала откроет «WARP от Cloudflare».</span> ') : '')
       + '<span>Другой путь — попросить у хостера новый адрес: блокируют адрес, а не сервер.</span></div></div>';
@@ -17685,7 +18368,7 @@
   // перерисовывает их на месте. Только когда текст сменился: тик статуса зовёт это раз в 10 с, а пересоздание узла уносило бы фокус
   // с кнопки (сверка — с той же строкой, что нарисовала узел, а не с innerHTML: браузер отдаёт свою сериализацию).
   function srvRecCards(body, tpt, name, act){
-    var c=CHK[chkKey(tpt,name)]||null, hd=body.querySelector('#srv-head');
+    var c=chkGet(tpt,name)||null, hd=body.querySelector('#srv-head');
     function sync(id, html, after){
       var el=body.querySelector('#'+id);
       if(el && el._h===html) return;
@@ -17700,7 +18383,7 @@
     var st=body.querySelector('#srv-stats'); if(!st) return;
     st.innerHTML=srvStatsHtml(tpt, name, act);
     if(tpt==='xray') srvFpPaint(body, name);
-    srvColoLoad(body, CHK[chkKey(tpt,name)]);
+    srvColoLoad(body, chkGet(tpt,name));
     srvChbLoad(body);
     srvRecCards(body, tpt, name, act);
     // Кнопки прогона — заперты, пока идёт СВОЙ прогон этого сервера: `data-na` держит их запертыми и после конца чужой занятости.
@@ -17724,7 +18407,7 @@
     var el=body.querySelector('#srv-reality'); if(!el) return;
     var s=_srvShown, k=chkKey('xray',name), hint=_srvFpTry[k], back=_srvFpBack[k], h='';
     var fp=back||hint;
-    if(fp && srvFpForm(s) && s.ed.fpRev===fp.rev){
+    if(fp && srvFpForm(s) && s.ed.fpRev===fp.rev && (back || cfgRev(null,'xray',name)===fp.digest)){
       var words=back ? tkL('TLS-отпечаток изменён. Было: ', 'TLS fingerprint changed. Previous: ')+back.from
         : fp.class==='intermittent' ? tkL('Похоже, этот TLS-отпечаток иногда мешает соединению REALITY.', 'This TLS fingerprint may intermittently prevent the REALITY connection.')
         : tkL('Похоже, соединение REALITY не установилось из-за TLS-отпечатка.', 'The TLS fingerprint may have prevented the REALITY connection.');
@@ -17739,7 +18422,7 @@
     if(busy || _navPend || testSweepRun || speedSweepRun || srvRunXray() || !srvHere(tpt,name)) return;
     var s=_srvShown, k=chkKey(tpt,name), hint=_srvFpTry[k], back=_srvFpBack[k];
     var fp=back||hint;
-    if(!fp || !srvFpForm(s) || s.ed.fpRev!==fp.rev) return;
+    if(!fp || !srvFpForm(s) || s.ed.fpRev!==fp.rev || (!back && cfgRev(null,'xray',name)!==fp.digest)) return;
     if(srvDirty(s)){ showToast(tkL('Сначала сохраните или отмените правки.', 'Save or discard your edits first.'), false); return; }
     if(back) srvScrOpen(null, save); else save(s.ed);
     function save(ed){
@@ -17816,8 +18499,11 @@
     if(testSweepRun||speedSweepRun){ showToast('идёт групповая проверка — дождитесь окончания',false); return; }
     // Без вердикта (роутер не ответил, порт занят) прежний «Реальный выход» не стираем: о сервере ничего нового не сказано.
     if(tpt==='xray'){ checkServer(name, function(ok, c, r, unknown){
-      var k=chkKey('xray',name);
-      if(ok && r && r.ip) _srvExit[k]=r.ip; else if(!unknown) delete _srvExit[k];
+      var rev=checkRev(r && r.rev) || checkRev(c && c.rev), k=chkKey('xray',name);
+      if(rev){
+        var key=chkKey('xray',name,rev);
+        if(ok && r && r.ip) _srvExit[key]=r.ip; else if(!unknown) delete _srvExit[key];
+      }
       srvScrRefresh('xray', name);
       var hint=_srvFpTry[k], back=_srvFpBack[k];
       if((hint || back) && srvHere(tpt,name)) subPost({action:'get_config_raw',kind:tpt,name:name,fp_only:1}).then(function(d){
@@ -17833,7 +18519,7 @@
     checkOne(tpt, name, null, function(ok, c, r, unknown, blocked){
       srvRunSet(tpt, name, null);
       if(endpointInapplicable(r)){ showToast(endpointText(r),false); logLine(endpointText(r),false); return; }
-      var m=ok ? '✓ «'+dn+'» отвечает'+(c&&c.ms!=null?(' · '+c.ms+' мс'):'') : (unknown ? pmNoMeasure(c, dn) : blocked ? '«'+dn+'»: адрес заблокирован провайдером — сервер отвечает через туннель' : (c && c.method==='tun') ? '✗ «'+dn+'»: ключ не везёт — через его туннель ответа нет' : '✗ «'+dn+'»: эндпоинт не отвечает');
+      var m=ok ? '✓ «'+dn+'» отвечает'+(c&&c.ms!=null?(' · '+c.ms+' мс'):'') : (unknown ? pmNoMeasure(c, dn) : blocked ? '«'+dn+'»: адрес заблокирован провайдером — сервер отвечает через туннель' : keyTunSilent(c) ? '✗ «'+dn+'»: ключ не везёт — через его туннель ответа нет' : '✗ «'+dn+'»: эндпоинт не отвечает');
       showToast(m, ok); logLine(m, ok);
     });
   }
@@ -17866,7 +18552,7 @@
   // — testSweepAbort (ставит closeModal): новые не стартуют, in-flight дорисуются, посчитанное остаётся.
   // Общий для «Проверить все» (checkAllServers) и группы (checkGroupLive) — DRY.
   function sweepChecks(items, ports, onProgress, onFinish){
-    var free=ports.slice(), C=free.length, msOf={}, unk={}, mem={}, told={}, again={};
+    var free=ports.slice(), C=free.length, msOf={}, unk={}, mem={}, told={}, again={}, dead=Object.create(null);
     var i=0,run=0,dn=0,tot=items.length,okN=0,inapplicable=0,end=false;
     items=items.slice();   // a server refused for memory goes to the end of OUR queue, not the caller's list
     // `mem` — the router answered «short of memory» (xray-test.sh admission, `busy` + `mem`): no verdict about the server either,
@@ -17875,7 +18561,7 @@
     // The first such answer turns the sweep to ONE check at a time and puts the server back once: six side by side on a tight router
     // waited for each other past the router's minute and were refused — a share of servers never checked (review s.166 r2). The same
     // for `queue` (the admission held by other runs the whole minute, memory not the reason — a slow start from a drive; s.166 r3).
-    function done(){ if(end) return; end=true; onFinish(okN, msOf, unk, mem, told, inapplicable); }
+    function done(){ if(end) return; end=true; onFinish(okN, msOf, unk, mem, told, inapplicable, dead); }
     function nx(){
       if(testSweepAbort||i>=items.length){ if(run===0) done(); return; }
       if(run>=C) return;
@@ -17885,12 +18571,13 @@
       // как мёртвый нельзя: он мог не ответить ни разу за весь свип).
       // `blocked` — адрес заблокирован провайдером: сервер ЖИВ (ответил через туннель) — не «мёртвый» для «Удалять мёртвые»;
       // числа нет — в сортировке он внизу, как сервер без замера (ревью с.118).
-      checkOne(it.tpt, it.name, port, function(ok, c, r, unknown, blocked){
+      checkOne(it.tpt, it.name, port, function(ok, c, r, unknown, blocked, deadRev){
         free.push(port); run--;
         if(!ok && r && r.busy && (r.mem || r.queue) && !again[it.name] && !testSweepAbort){ again[it.name]=1; C=1; items.push(it); nx(); return; }
         if(ok){ okN++; msOf[it.name]=(c&&c.ms!=null?c.ms:9e8); } else if(blocked){ msOf[it.name]=9e8; } else if(endpointInapplicable(r)){ inapplicable++; } else { msOf[it.name]=null; if(unknown) unk[it.name]=1; if(r && r.busy && r.mem) mem[it.name]=1; else if(r && (r.busy || r.nobin)) told[it.name]=1; }
+        if(!ok && !unknown && deadRev) dead[it.name]=deadRev;
         dn++; if(onProgress) onProgress(dn,tot,okN); nx();
-      });
+      }, it.rev);
     }
     if(!tot){ done(); return; }
     for(var k=0;k<C&&k<items.length;k++) nx();
@@ -17900,12 +18587,7 @@
   // Пул 6 портов (10812..10817; xray-test держит до 10819). Прерывание — закрытием модалки (testSweepAbort).
   // ---- Автопроверка серверов (pref autoping_min: 0/5/10/15). ГЛОБАЛЬНЫЙ фоновый таймер: тикает,
   //      пока открыта вкладка панели в браузере — НЕЗАВИСИМО от того, открыто ли окно «Серверы».
-  //      Цель: зашёл в панель → пинги серверов уже свежие, руками «Проверить все» жать не надо.
-  //      Тик = ping-only обход ВСЕХ серверов (латентность/доступность) с обновлением кэша .srv-checks;
-  //      при открытом окне «Серверы» chkSet заодно перекрашивает видимые спаны. ПОЧЕМУ ping-only, а не
-  //      полная проверка: реальный тест выхода (xray-test) гонит трафик через VPS — 130+ серверов каждые
-  //      5 мин недопустимо. Полный вердикт выхода (ловит CDN-фронт/битый ключ) остаётся за кнопкой
-  //      «Проверить все». Проба мёртвого сервера удешевлена (негативный кэш в cgi-bin/ping) → фон не давит роутер.
+  // Auto-ping measures endpoints. An explicit check supplies the egress verdict.
   var apTimer=null, apTimerMin=0, bgSweepRun=false, apLastSweep=0;
   // ПОКА ИДЁТ ОБНОВЛЕНИЕ, ФОН МОЛЧИТ (с.174): пинги пулом в четыре держали все места CGI веб-сервера, и клик «Установить обновление»
   // ~1,5 минуты ждал за ними в очереди; а посреди переигрыша настроек (выходы поднимаются заново) замер записал бы в кэш «не отвечает»
@@ -17916,11 +18598,7 @@
   // заходом отодвигал бы очередной фоновый обход без конца.
   function apStart(){ var m=PREFS.autoping_min||0; if(apTimer && apTimerMin===m) return; apStop(); if(m>0){ apTimer=setInterval(apTick, m*60000); apTimerMin=m; } }
   // Возраст кэша пингов: когда (unix-сек) обновлялся САМЫЙ свежий замер (0 = кэш пуст).
-  function chkNewestTs(){ var t=0; for(var k in CHK){ var c=CHK[k]; if(c && c.ts>t) t=c.ts; } return t; }
-  // Кэш «протух», если свежайший замер старше интервала автопинга. ОППОРТУНИСТИЧЕСКИЕ обходы (на входе в
-  // панель и на возврате к вкладке) идут ТОЛЬКО при протухшем кэше — иначе каждый заход в панель гнал бы
-  // пачку пингов по всем подпискам, хотя периодический тик и так держит их свежими (жалоба: лишняя нагрузка
-  // при первом заходе). Пустой кэш = протух (первый показ должен что-то намерить). autoping_min>0 гарантируют вызовы.
+  function chkNewestTs(){ var t=0; for(var k in CHK){ var c=CHK[k]; if(c) t=Math.max(t,c.ts||0,c.endpointTs||0); } return t; }
   function apStale(){ var ts=chkNewestTs(); if(!ts) return true; return (Date.now()/1000 - ts) >= (PREFS.autoping_min*60); }
   function apTick(){
     if(!(PREFS.autoping_min>0)){ apStop(); return; }
@@ -17929,16 +18607,13 @@
     autoPingSweep();
   }
   function updQuiet(){ return Date.now()<updBusyTill; }
-  // Один ping-only замер (без теста выхода) → запись в кэш. mbps НЕ трогаем (merge сохранит прошлую
-  // скорость). Для xray это пинг эндпоинта (доступность+латентность), не полный egress-вердикт.
   function bgPingOne(tpt, name, cb){
     fetchJson('/cgi-bin/ping?auto=1&one='+encodeURIComponent(name)+'&tpt='+encodeURIComponent(tpt)).then(function(d){
       if(d && d.dns_scan_busy){ if(cb) cb(false,true); return; }
       var c=(d.configs||[])[0]||null, r=pingRec(c);
       if(c && (c.method==='busy' || c.method==='idle')){ if(cb) cb(false); return; }   // the router did not measure now — no verdict (see checkOne)
-      // mbps не трогаем — merge сохранит прошлую скорость; у не ответившего её снимает сама запись (pingRec).
       if(r.st==='ok') delete r.mbps;
-      chkSet(tpt, name, r);
+      chkSet(tpt, name, r, c);
       if(cb) cb(r.st==='ok');
     }).catch(function(){ if(cb) cb(false); });
   }
@@ -18007,69 +18682,103 @@
     var grp=(d&&d[t])||null, act=grp&&grp.active;
     if(!grp || !act){ balReset(); return; }
     // Читаем ТОТ ЖЕ кэш, что рисует пинги в «Серверах» (chkSet его только что обновил).
-    var am=balMs(t,act);
+    var am=balMs(t,act,cfgRev(d,t,act));
     if(am==null){ balReset(); return; }                            // активный мёртв/неизвестен — не наше дело
     // ONE KIND OF NUMBER: an Amnezia Premium server's is its tunnel's own delay (`tun`: through the relay to the exit), the others' — a ping
     // to their endpoint; the difference of the two metrics read as a «gain» (review s.136 r3, panel 10).
-    var amt=balTun(t,act);
+    var amt=balTun(t,act,cfgRev(d,t,act));
     var best='', bm=null;
     (grp.servers||[]).forEach(function(n){
       // Конфиг, чей ключ держит ВЫХОД, основному не кандидат: роутер откажет (slots.sh key-holder), а балансер повторял бы
       // отказ каждые полчаса. Держатель «main» — сам основной (его конфиг или копия) — не помеха.
       if(t==='awg' && srvHeldByExit(grp.held, n)) return;
-      var ms=balMs(t,n);
-      if(ms!=null && balTun(t,n)===amt && (bm===null || ms<bm)){ bm=ms; best=n; }
+      var rev=cfgRev(d,t,n), ms=balMs(t,n,rev);
+      if(ms!=null && balTun(t,n,rev)===amt && (bm===null || ms<bm)){ bm=ms; best=n; }
     });
     if(!best || best===act || bm===null){ balReset(); return; }
     if(am-bm < BAL_GAIN_MS){ balReset(); return; }                 // выигрыш не стоит рестарта несущей
-    if(best!==balTarget){ balTarget=best; balStreak=1; return; }    // новая цель — стрик с нуля
+    var bestRev=cfgRev(d,t,best), target=chkKey(t,best,bestRev);
+    if(!bestRev){ balReset(); return; }
+    if(target!==balTarget){ balTarget=target; balStreak=1; return; } // новая цель — стрик с нуля
     if(++balStreak < BAL_STREAK) return;                            // ждём подтверждения следующим свипом
     balLastSwitch=Date.now(); balReset();
     var verb=(t==='awg'?'set_server':(t==='xray'?'set_xray_server':'set_hy2_server'));
     logLine('Балансер: «'+act+'» '+am+'мс → «'+best+'» '+bm+'мс (выигрыш '+(am-bm)+'мс) — переключаю', true);
-    postAction(verb, null, 'балансер → '+best, {name:best});
+    postAction(verb, null, 'балансер → '+best, {name:best,rev:bestRev});
   }
   // ms активного пинга сервера из кэша .srv-checks; null = мёртв/не мерян/протух.
-  function balTun(tpt,name){ var r=CHK[chkKey(tpt,name)]; return !!(r && r.method==='tun'); }
-  function balMs(tpt,name){
-    var r=CHK[chkKey(tpt,name)];
+  function balTun(tpt,name,rev){ var r=chkGet(tpt,name,rev); return !!(r && r.method==='tun'); }
+  function balMs(tpt,name,rev){
+    var r=chkGet(tpt,name,rev);
     if(!r || endpointInapplicable(r) || r.st!=='ok' || r.ms==null) return null;
     return parseInt(r.ms,10);
   }
   // ПОДПИСЬ КНОПКИ С ЗНАКОМ — в её `.lbl`, а не textContent всей кнопки (тот стёр бы знак); у кнопки без `.lbl` — как прежде.
   function btnSay(b, t){ if(!b) return; var l=b.querySelector('.lbl'); (l||b).textContent=t; }
+  function srvSweepText(done,total,working,stopping){
+    var prefix=stopping?(LANG==='en'?'Stopping…':'Останавливаю…'):(LANG==='en'?'Checking':'Проверка идёт');
+    return prefix+' · '+done+'/'+total+' · '+(LANG==='en'?'working ':'рабочих ')+working;
+  }
+  var srvSweep=null;
+  function srvSweepHtml(){
+    return '<div class="srv-bulk-progress wfull" hidden><span role="status" translate="no"></span>'
+      + '<button type="button" class="btn sm gh" id="srv-check-stop">Остановить</button></div>';
+  }
+  function srvSweepPaint(body){
+    body=body||document.getElementById('modal-body');
+    var progress=body && body.querySelector('.srv-bulk-progress');
+    if(!progress) return;
+    progress.hidden=!srvSweep;
+    var button=body.querySelector('#srv-ping-btn');
+    if(button){ button.disabled=!!srvSweep; btnSay(button, srvSweep?'проверяю…':'Проверить все'); }
+    var stop=progress.querySelector('#srv-check-stop');
+    if(!srvSweep){ stop.onclick=null; return; }
+    progress.querySelector('[role="status"]').textContent=srvSweepText(srvSweep.done,srvSweep.total,srvSweep.working,testSweepAbort);
+    stop.disabled=testSweepAbort;
+    stop.onclick=function(){ testSweepAbort=true; srvSweepPaint(); };
+  }
+  function srvSweepProgress(done,total,working){
+    srvSweep={done:done,total:total,working:working};
+    srvSweepPaint();
+  }
+  function srvSweepFinish(){
+    srvSweep=null;
+    testSweepRun=false;
+    srvSweepPaint();
+  }
   function checkAllServers(){
     if(busy || testSweepRun || speedSweepRun) return;
     if(srvRunRefuse()) return;
-    var btn=document.getElementById('srv-ping-btn');
     var tabEl=document.querySelector('#modal-body .srv-tab.on');
     var tab=tabEl?tabEl.getAttribute('data-tab'):'xray';
     if(tab==='xray' && engineMissing('xray')) return;   // xray-выход без бинаря — не гоняем, врало бы «недоступен»
     var panel=document.querySelector('#modal-body .srv-tab-panel[data-tab="'+tab+'"]');
     if(!panel){ showToast('нет вкладки для проверки', false); return; }
-    var items=[];
-    if(tab==='xray') [].slice.call(panel.querySelectorAll('.srv2')).forEach(function(c){ items.push({tpt:'xray', name:c.getAttribute('data-name')}); });
-    else [].slice.call(panel.querySelectorAll('.srv')).forEach(function(c){ items.push({tpt:tab, name:c.getAttribute('data-name')}); });
+    var items=srvItemsIn(panel,tab);
     if(!items.length){ showToast('нет серверов на этой вкладке', false); return; }
     Array.prototype.forEach.call(panel.querySelectorAll('.srv-ping'), function(s){ s.textContent='…'; s.style.color='var(--text-tertiary)'; s.title=''; });
     testSweepRun=true; testSweepAbort=false;
-    if(btn){ btn.disabled=true; btnSay(btn, 'проверяю…'); }
+    srvSweepProgress(0,items.length,0);
     var tlabel=(tab==='awg'?'AmneziaWG':(tab==='hy2'?'Hysteria2':'Xray'));
     logLine('→ проверка серверов ('+tlabel+', '+items.length+')', null);
     sweepChecks(items, [10812,10813,10814,10815,10816,10817],
-      function(dn,tot){ if(btn) btnSay(btn, 'проверка '+dn+'/'+tot); },
-      function(okN, msOf, unk, mem, told, inapplicable){
-        testSweepRun=false; if(btn){ btn.disabled=false; btnSay(btn, 'Проверить все'); }
+      srvSweepProgress,
+      function(okN, msOf, unk, mem, told, inapplicable, dead){
+        srvSweepFinish();
+        panel=document.querySelector('#modal-body .srv-tab-panel[data-tab="'+tab+'"]');
         var nUnk=0, nMem=0, nTold=0, uu; for(uu in unk){ if(mem[uu]) nMem++; else if(told[uu]) nTold++; else nUnk++; }
         // «Не ответил РОУТЕР» называем своими словами: без этого такие серверы выглядели как
         // мёртвые (и предлагались к удалению), хотя про них ничего не известно.
         var m='проверка: рабочих '+okN+' из '+items.length+(inapplicable?(' · '+sweepInapplicable(inapplicable)):'')+(nUnk?(' · без ответа роутера: '+nUnk):'')+(nTold?(' · не проверено: '+nTold):'')+(nMem?(' · не проверено, роутеру мало памяти: '+nMem):'')+(testSweepAbort?' (прервано)':'');
         showToast(m, okN>0); logLine(m, okN>0);
         // Сортировка «рабочие вверх» — только для xray-карточек (внутри каждой группы). Пропуск при abort.
-        if(PREFS.sort_after_test && !testSweepAbort && tab==='xray'){
+        if(panel && PREFS.sort_after_test && !testSweepAbort && tab==='xray'){
+          srvSortPages(panel,function(a,b){
+            var x=msOf[a], y=msOf[b]; return (x==null?Infinity:x)-(y==null?Infinity:y);
+          });
           var seen=[];
           [].slice.call(panel.querySelectorAll('.srv2')).forEach(function(ch){
-            var par=ch.parentElement; if(!par || seen.indexOf(par)>=0) return; seen.push(par);
+            var par=ch.parentElement; if(!par || par.hasAttribute('data-srv-page') || seen.indexOf(par)>=0) return; seen.push(par);
             var kids=[].slice.call(par.querySelectorAll(':scope > .srv2'));
             kids.sort(function(a,b){ var x=msOf[a.getAttribute('data-name')], y=msOf[b.getAttribute('data-name')]; return (x==null?Infinity:x)-(y==null?Infinity:y); });
             reorderInPlace(kids);
@@ -18077,17 +18786,15 @@
         }
         // «Удалять мёртвые» — только xray (у них есть реальный тест выхода). Пропуск при abort. Путь один с экраном проверки.
         if(PREFS.del_dead_after_test && !testSweepAbort && tab==='xray'){
-          sweepDelDead(msOf, unk, navIfShown('cn-servers', openServers));
+          sweepDelDead(dead, navIfShown('cn-servers', openServers));
         }
       });
   }
   // «УДАЛЯТЬ МЁРТВЫЕ» ПОСЛЕ ПРОВЕРКИ — один путь на вкладку «Серверов» и экран «Проверка серверов». Мёртвый — тот, о ком роутер
   // СКАЗАЛ «не работает». Сервер, чью проверку не удалось даже отправить (unk), в список удаления не попадает НИКОГДА: панель про
   // него ничего не знает, а удаление конфига необратимо. Активный (`act`) не трогаем. `after` — перерисовка показанного экрана.
-  function sweepDelDead(msOf, unk, after){
-    // …nor a server of an Amnezia Premium subscription: a country is removed on its subscription's screen, and a fresh key reads dead
-    // for ~2 min (review s.136, panel 2: a pick + «Проверить все» unpicked the country in silence).
-    var cand=[]; for(var nn in msOf){ if(msOf[nn]===null && !unk[nn] && !endpointInapplicable(CHK[chkKey('xray',nn)]) && !isPremSrv(nn)) cand.push(nn); }
+  function sweepDelDead(observed, after){
+    var cand=Object.keys(observed).filter(function(n){ return checkRev(observed[n]) && !isPremSrv(n); });
     if(!cand.length) return;
     // АКТИВНЫЙ — ПО СВЕЖЕМУ ОТВЕТУ РОУТЕРА, а не по отрисовке: пока шёл прогон, сервер мог сменить балансер или сторож, и защита
     // прежнего активного отдала бы на удаление нынешний — обрыв туннеля (ревью шага 3c-3, круг 1). Не узнали — не удаляем ничего.
@@ -18097,7 +18804,7 @@
       // посреди проверки недопустимы (ревью шага 3c-3, круг 2).
       if(!navHere(np) || busy || testSweepRun || speedSweepRun){ showToast('мёртвые серверы не удалены: пока роутер отвечал, экран сменился или начался другой прогон', false); return; }
       if(!l || typeof l!=='object' || l.error || l.need_login || !l.xray){ showToast('не удалось узнать активный сервер — мёртвые не удалены', false); return; }
-      var act=l.xray.active||'', dead=cand.filter(function(n){ return n!==act; });
+      var act=l.xray.active||'', dead=cand.filter(function(n){ return n!==act && cfgRev(l,'xray',n)===observed[n]; });
       if(!dead.length || !askConfirm('Удалить мёртвые серверы Xray ('+dead.length+')?\n\n'+dead.slice(0,15).join('\n')+(dead.length>15?'\n… и ещё '+(dead.length-15):'')+'\n\nАктивный сервер не трогается. Отменить нельзя.')) return;
       setBusy(true,'удаляю мёртвые…');
       // Удалённым считаем то, что роутер ПОДТВЕРДИЛ: отказ и сбой сети — не удаление, и кэш такого сервера не трогаем.
@@ -18107,9 +18814,9 @@
           setBusy(false);
           var m='удалено мёртвых: '+gone.length+(bad?(' · не удалось: '+bad):'');
           showToast(m, !bad); logLine(m, !bad);
-          gone.forEach(function(n){ chkDrop('xray',n); }); setTimeout(after, 400); return;
+          gone.forEach(function(n){ chkDrop('xray',n,observed[n]); }); setTimeout(after, 400); return;
         }
-        subPost({action:'del_xray_server', name:dead[j]}).then(function(r){ if(r && r.ok) gone.push(dead[j]); else bad++; delNext(j+1); }, function(){ bad++; delNext(j+1); });
+        subPost({action:'del_xray_server', name:dead[j], rev:observed[dead[j]]}).then(function(r){ if(r && r.ok) gone.push(dead[j]); else bad++; delNext(j+1); }, function(){ bad++; delNext(j+1); });
       })(0);
     }, function(){ showToast('не удалось узнать активный сервер — мёртвые не удалены', false); });
   }
@@ -18129,11 +18836,9 @@
     var acc=document.querySelector('#modal-body .sub-acc[data-tag="'+tag+'"]');
     if(!acc) return;
     sectOpenSet(acc, true);
-    var body=acc.querySelector('.sub-body'), cntEl=acc.querySelector('.sub-cnt');
-    var origCnt=cntEl?cntEl.textContent:'';
     // Строки Hysteria2 той же подписки (экран подписки) — тоже в проверку: «…» ставится всем `.srv-ping` группы, и
     // непроверенным оно висело бы до перерисовки (ревью шага 3c-1). На вкладке Xray таких строк нет — там как было.
-    var items=[].slice.call(acc.querySelectorAll('.srv2,.srv[data-tpt]')).map(function(c){return {tpt:(c.classList.contains('srv2')?'xray':c.getAttribute('data-tpt')), name:c.getAttribute('data-name')};});
+    var items=srvItemsIn(acc);
     if(!items.length){ showToast('в группе нет серверов', false); return; }
     // Бинарь спрашиваем ТОЛЬКО за Xray: его проверка — реальный выход через временный socks, а у Hysteria2 это пинг
     // эндпоинта, и он бинаря не требует. Прежний безусловный гейт запрещал проверку подписке без Xray-серверов.
@@ -18141,15 +18846,18 @@
     Array.prototype.forEach.call(acc.querySelectorAll('.srv-ping'), function(s){ s.textContent='…'; s.style.color='var(--text-tertiary)'; s.title=''; });
     testSweepRun=true; testSweepAbort=false;
     logLine('→ проверка группы ('+items.length+' серв.): пинг + реальный выход', null);
-    if(cntEl) cntEl.textContent='проверка 0/'+items.length;
+    srvSweepProgress(0,items.length,0);
     sweepChecks(items, [10812,10813,10814],
-      function(dn,tot,okN){ if(cntEl) cntEl.textContent='проверка '+dn+'/'+tot+(okN?(' · рабочих '+okN):''); },
+      srvSweepProgress,
       function(okN, msOf, unk, mem, told, inapplicable){
-        testSweepRun=false; if(cntEl) cntEl.textContent=origCnt;
+        srvSweepFinish();
+        acc=document.querySelector('#modal-body .sub-acc[data-tag="'+tag+'"]');
+        var body=acc && acc.querySelector('.sub-body');
         var nUnk=0, nMem=0, nTold=0, uu; for(uu in unk){ if(mem[uu]) nMem++; else if(told[uu]) nTold++; else nUnk++; }
         var m='проверка группы: рабочих '+okN+' из '+items.length+(inapplicable?(' · '+sweepInapplicable(inapplicable)):'')+(nUnk?(' · без ответа роутера: '+nUnk):'')+(nTold?(' · не проверено: '+nTold):'')+(nMem?(' · не проверено, роутеру мало памяти: '+nMem):'')+(testSweepAbort?' (прервано)':'');
         showToast(m, okN>0); logLine(m, okN>0);
-        if(sort){ var chips=[].slice.call(body.querySelectorAll(':scope > .srv2'));
+        if(sort && body && !testSweepAbort){ srvSortPages(acc,function(a,b){ var x=msOf[a], y=msOf[b]; return (x==null?Infinity:x)-(y==null?Infinity:y); });
+          var chips=[].slice.call(body.querySelectorAll(':scope > .srv2'));
           chips.sort(function(a,b){ var x=msOf[a.getAttribute('data-name')], y=msOf[b.getAttribute('data-name')]; return (x==null?Infinity:x)-(y==null?Infinity:y); });
           reorderInPlace(chips); }
       });
@@ -18158,12 +18866,13 @@
   //      было» — не гоняем сеть заново, лишь пере-упорядочиваем карточки по УЖЕ измеренному в CHK.
   //      metric='ping' → быстрые (мал. мс) вверх, без пинга/мёртвые — вниз; 'speed' → большие Мбит/с
   //      вверх, без замера — вниз. Активный закреплён отдельно (.srv-pinned, один в контейнере) — не трогаем.
-  function cmpCache(metric){
-    return function(a,b){
-      var ca=CHK[chkKey('xray',a.getAttribute('data-name'))]||{}, cb=CHK[chkKey('xray',b.getAttribute('data-name'))]||{};
+  function srvCacheCompare(metric,a,b){
+      var ca=chkGet('xray',a)||{}, cb=chkGet('xray',b)||{};
       if(metric==='speed'){ var xs=(ca.mbps!=null?+ca.mbps:-1), ys=(cb.mbps!=null?+cb.mbps:-1); return ys-xs; }
       var xp=(ca.st==='ok'&&ca.ms!=null?+ca.ms:Infinity), yp=(cb.st==='ok'&&cb.ms!=null?+cb.ms:Infinity); return xp-yp;
-    };
+  }
+  function cmpCache(metric){
+    return function(a,b){ return srvCacheCompare(metric,a.getAttribute('data-name'),b.getAttribute('data-name')); };
   }
   function sortCardsIn(par, metric){
     if(!par) return 0; var kids=[].slice.call(par.querySelectorAll(':scope > .srv2')); if(kids.length<2) return kids.length;
@@ -18172,14 +18881,15 @@
   function sortGroupByCache(tag, metric){
     var acc=document.querySelector('#modal-body .sub-acc[data-tag="'+tag+'"]'); if(!acc) return;
     sectOpenSet(acc, true);
-    var n=sortCardsIn(acc.querySelector('.sub-body'), metric);
+    var n=sortCardsIn(acc.querySelector('.sub-body'), metric)+srvSortPages(acc,function(a,b){return srvCacheCompare(metric,a,b);});
+    Array.prototype.forEach.call(acc.querySelectorAll('.srv-country-rows'),function(root){n+=sortCardsIn(root,metric);});
     showToast('сортировка по '+(metric==='speed'?'скорости':'пингу')+(n>1?'':' — недостаточно карточек'), n>1);
   }
   function sortXrayByCache(metric){
     var panel=document.querySelector('#modal-body .srv-tab-panel[data-tab="xray"]'); if(!panel) return;
-    var seen=[], tot=0;
+    var seen=[], tot=srvSortPages(panel,function(a,b){return srvCacheCompare(metric,a,b);});
     [].slice.call(panel.querySelectorAll('.srv2')).forEach(function(ch){
-      var par=ch.parentElement; if(!par||seen.indexOf(par)>=0) return; seen.push(par); tot+=sortCardsIn(par, metric);
+      var par=ch.parentElement; if(!par||par.hasAttribute('data-srv-page')||seen.indexOf(par)>=0) return; seen.push(par); tot+=sortCardsIn(par, metric);
     });
     showToast('сортировка по '+(metric==='speed'?'скорости':'пингу')+' ('+tot+')', tot>0);
   }
@@ -18203,7 +18913,7 @@
     if(!acc) return;
     sectOpenSet(acc, true);
     var body=acc.querySelector('.sub-body'), cntEl=acc.querySelector('.sub-cnt');
-    var names=[].slice.call(body.querySelectorAll('.srv2')).map(function(c){return c.getAttribute('data-name');});
+    var names=srvItemsIn(acc,'xray').map(function(c){return c.name;});
     if(!names.length){ showToast('в группе нет серверов', false); return; }
     if(!askConfirm('Тест скорости всех серверов группы ('+names.length+')?\n\nКаждый сервер качает пробный файл через VPS — это реальный трафик (до сотен МБ на сервер) и минуты времени. Идёт по одному. Уход с экрана прерывает прогон.')) return;
     var origCnt=cntEl?cntEl.textContent:'';
@@ -18235,7 +18945,8 @@
     if(srvRunRefuse()) return;
     if(engineMissing('xray')) return;   // скорость — только xray-socks; без бинаря не гоняем
     var btn=document.getElementById('srv-speed-btn');
-    var names=[].slice.call(document.querySelectorAll('#modal-body .srv-tab-panel[data-tab="xray"] .srv2')).map(function(c){return c.getAttribute('data-name');});
+    var panel=document.querySelector('#modal-body .srv-tab-panel[data-tab="xray"]');
+    var names=srvItemsIn(panel,'xray').map(function(c){return c.name;});
     if(!names.length){ showToast('нет xray-серверов', false); return; }
     speedAllRun(names, function(txt){ if(btn){ btn.disabled=true; btn.textContent=txt; } },
                 function(){ if(btn){ btn.disabled=false; btn.textContent='Скорость всех'; } });
@@ -18378,13 +19089,14 @@
   // Активация сервера (клик по карточке/строке). Общий путь для .srv (awg/hy2) и .srv2 (карточки).
   // canAct — из canActivate(grp): БИНАРЬ есть. Отсутствие секрет-конфига активации не мешает —
   // она его и создаёт (см. разбор у canActivate).
-  function activateServer(tpt, name, canAct, subs){
+  function activateServer(tpt, name, canAct, subs, rev){
     if(busy) return;
     if(!canAct){
       showToast(names[tpt]+' не установлен на роутере — поставьте его в «Компонентах»', false);
       logLine(names[tpt]+': транспорт не установлен (нет бинаря) — карточка «Компоненты»', false);
       return;
     }
+    if(!rev){ showToast(tkL('Обновите список, чтобы получить версию конфига.', 'Reload the list to get the config revision.'), false); return; }
     var act = tpt==='awg'?'set_server':(tpt==='xray'?'set_xray_server':'set_hy2_server');
     var msg;
     // AWG идёт по ОБЩЕЙ развилке, а не «всегда переключаем»: с d5432a0 выбор конфига при ЧУЖОЙ
@@ -18416,7 +19128,7 @@
     // 14.10.2026: «автооткат … → axel_dev-Ams3», the list still said «Германия · активен»). NOT INSIDE navLate's late window: the
     // mark is taken after goSec above, so a list opened since is always «another place» — there the first openModal throws NAV_STALE
     // and nothing was drawn (review s.136 r2, panel 1). A redraw-if-shown asks the place itself, so it runs after the window.
-    postAction(act, null, '«'+dn+'» → '+names[tpt], {name:name}, function(){ setTimeout(function(){ listWhenQuiet(subsRepaint); }, 0); });
+    postAction(act, null, '«'+dn+'» → '+names[tpt], {name:name,rev:rev}, function(){ setTimeout(function(){ listWhenQuiet(subsRepaint); }, 0); });
   }
 
   // ---- общий хелпер чтения JSON-секции ----
@@ -18600,8 +19312,13 @@
   // трафик по своему fallback: на основной туннель или НАПРЯМУЮ, но «в VPN» это не делает).
   var slotTptAll={};
   function slotTptRemember(list){ slotTptAll={}; (list||[]).forEach(function(s){ slotTptAll[String(s.id)]=s.transport; }); }
-  function slotIsDesync(slot){
+  function slotIsDesync(slot, selected){
     var n=String(slot||'').replace(/^s/,''); if(!n || n==='0') return false;
+    if(selected){
+      var s=cur.vpnOff ? offSlotState(cur, n) : rpSlotSt(n)||{};
+      if(s.state==='dead') return false;
+      if(/^[2-7]$/.test(s.path)) n=String(s.path);
+    }
     var t=slotTptAll[n];
     if(!t) enabledSlots.forEach(function(s){ if(String(s.id)===n) t=s.transport; });   // реестр ещё не приехал
     return !!SLOT_DESYNC_TPT[t];
@@ -18806,14 +19523,11 @@
   // МЕТКИ У ВЫХОДА НЕТ: выключен или удалён (rpSlotOff) либо это Zapret — он работает без метки, по адресу назначения: mark-core
   // не заводит ему `ip rule`, а rebuild_force/rebuild_dev ведут «через него» основным туннелем. Номер выхода переиспользуется, и
   // правило, записанное на №3, переживает пересоздание №3 как Zapret (ревью шага 4b, круг 2).
-  function slotNoMark(n){ return rpSlotOff(n) || (slotTptAll[String(n)] || (rpSlotSt(n)||{}).transport)==='zapret'; }
+  function slotNoMark(n){ return (!cur.vpnOff && rpSlotOff(n)) || (slotTptAll[String(n)] || (rpSlotSt(n)||{}).transport)==='zapret'; }
   function slotPath(n, failOpen){
-    // VPN выключен тумблером: cmd_off снимает `ip rule` всех меток — помеченное выходом идёт напрямую, что бы ни писал реестр,
-    // спрошенный раньше (тумблер опрос статуса видит раньше, чем экран перезапросит реестр).
-    if(cur.vpnOff) return 'direct';
     if(slotNoMark(n)) return failOpen ? 'direct' : vpnPath();
-    var s=rpSlotSt(n), st=(s && s.state) || '';
-    if(st==='fallback') return vpnPath();
+    var s=cur.vpnOff ? offSlotState(cur, n) : rpSlotSt(n), st=(s && s.state) || '';
+    if(st==='fallback') return /^[2-7]$/.test(s.path) ? 'slot' : vpnPath();
     if(st==='direct' || st==='down') return 'direct';
     if(st==='dead') return 'void';
     return 'slot';
@@ -18870,11 +19584,13 @@
                                       : {h:'<span>Напрямую, но без десинка: десинк на роутере сейчас недоступен, и режим «В десинк» ведёт просто напрямую.</span>', d:rpDir('direct')};
     if(w==='net-bypass') return {h:'<span>Напрямую — так велит режим сети</span>'+ss+'.', d:rpDir('direct')};
     if(dvWhoTunnel(w)){
-      var n=(w==='dev-force') ? slotNum(dev.fslot) : '', p=dvTunPath(dev, w), fb=!!n && (rpSlotSt(n)||{}).state==='fallback';
+      var n=(w==='dev-force') ? slotNum(dev.fslot) : '', p=dvTunPath(dev, w),
+        st=cur.vpnOff ? offSlotState(cur, n) : rpSlotSt(n)||{}, fb=!!n && st.state==='fallback' && !/^[2-7]$/.test(st.path);
       // Выход упал на основной (fallback), а тот не везёт: причина выхода «идёт основным туннелем» с чипом «в VPN» спорила бы с
       // лестницей и чипами своих правил того же экрана — путь говорит основной туннель (ревью шага 4b, круг 3).
       if(fb && p==='direct') return {h:'<span>Выход №</span>'+n+' <span>упал на основной туннель, а тот сейчас не везёт — трафик идёт напрямую.</span>', d:rpDir('direct')};
       if(fb && p==='void') return {h:'<span>Выход №</span>'+n+' <span>упал на основной туннель, а тот поднят, но не везёт — трафик не доходит никуда.</span>', d:rpDir('void')};
+      if(/^[2-7]$/.test(st.path)) return {h:'<span>'+esc(slotWhy(st).long)+'</span>', d:rpDirSlot(n, true)};
       var b=(n && !slotNoMark(n) && !cur.vpnOff) ? rpSlotBad(n) : null;
       // Выход устройства стоит в ядре РАНЬШЕ общей метки «весь трафик в VPN» и работает при нём. Десинк-выход (ByeDPI) — не
       // туннель: адрес не подменяется, путь прямой (разбор у slotIsDesync).
@@ -18936,7 +19652,8 @@
     if(n){
       var p=slotPath(n, port);
       // Выход не отвечает — его чип скажет «выход не работает»; не везёт основной туннель, куда откатился выход, — путь туннеля.
-      if(p==='slot' || (p==='void' && !cur.vpnOff && !slotNoMark(n) && (rpSlotSt(n)||{}).state==='dead')) return rpDirSlot(n, true);
+      if(p==='slot' || (p==='void' && !slotNoMark(n) &&
+          (cur.vpnOff ? offSlotState(cur, n) : rpSlotSt(n)||{}).state==='dead')) return rpDirSlot(n, true);
       return dvPathChip(p);
     }
     return dvPathChip(vpnPath());
@@ -19151,7 +19868,7 @@
     var ds, d, vp=vpnPath(), tp=dvWhoTunnel(w) ? dvTunPath(dev, w) : '', fn=slotNum(dev.fslot);
     if(w==='dev-bypass' && dev.keep){ ds='<span>'+gl.man+' '+unitF(gl.man,'правил')+'</span> · <span>действуют только добавленные вручную: сайты, адреса и группы основного туннеля</span>'+(gl.man ? dvPathTail(vp, true) : ''); d=gl.man ? dvPathChip(vp) : ''; }
     else if(dvWhoDirect(w)){ ds='<span>для этого устройства не действуют — оно идёт напрямую</span>'; d='<span class="chip">не действуют</span>'; }
-    else if(tp==='slot' && slotIsDesync(fn)){ ds='<span>не действуют — весь трафик устройства идёт через десинк-выход</span>'; d='<span class="chip">не действуют</span>'; }
+    else if(tp==='slot' && slotIsDesync(fn, true)){ ds='<span>не действуют — весь трафик устройства идёт через десинк-выход</span>'; d='<span class="chip">не действуют</span>'; }
     else if(tp==='slot'){ ds='<span>не нужны — весь трафик устройства и так идёт через выход</span>'; d='<span class="chip">не нужны</span>'; }
     else if(dvWhoTunnel(w)){ ds=(tp==='ok' ? '<span>не нужны — весь трафик устройства и так идёт в туннель</span>' : '<span>не нужны — весь трафик устройства забран режимом целиком</span>'+dvPathTail(tp, false)); d='<span class="chip">не нужны</span>'; }
     else { ds=gl.vpn ? '<span>'+gl.vpn+' '+unitF(gl.vpn,'правил')+'</span> · <span>сайты, адреса, группы, категории и общий список</span>'+dvPathTail(vp, true) : '<span>не заданы</span>'; d=gl.vpn ? dvPathChip(vp) : ''; }
@@ -19242,7 +19959,10 @@
   // Выходы — числом включённых и не везущих (`exits_on`/`exits_bad` статуса): упал выход устройства при открытом экране — ключ сменился,
   // реестр спрошен заново и путь перерисован (ревью шага 4b, круг 3).
   // Сервер — тоже факт чипа «в туннель» (`rpDir`): сменился (вручную, откатом, резервом) — чипы обязаны назвать новый (ревью пачки 5, круг 1).
-  function dvCurKey(){ return [cur.live, cur.configured, cur.vpnOff, cur.dead, cur.full, cur.transport, (cur.fo||{}).standing, cur.exitsOn, cur.exitsBad, vpnSrvName()].join('|'); }
+  function dvCurKey(){
+    var offPaths=cur.vpnOff ? JSON.stringify([cur.exitsKeptLive, cur.exitsPaths, cur.exitsDead]) : '';
+    return [cur.live, cur.configured, cur.vpnOff, cur.dead, cur.full, cur.transport, (cur.fo||{}).standing, cur.exitsOn, cur.exitsBad, vpnSrvName(), offPaths].join('|');
+  }
   // Перерисовать ФАКТЫ экрана по `_dvLast` — поверх, не трогая форм и кнопок: строку «Весь остальной трафик», «Наследует», лестницу,
   // хвост исключения и чипы своих правил и портов (они тоже факт пути — dvDirChip).
   function dvFactsPaint(){
@@ -20117,7 +20837,7 @@
   // мимо VPN (direct), никуда (dead — демон не слушает, down — правил нет). Причину словами даёт `slotWhy` — одна лестница с
   // экраном выходов.
   function rpSlotSt(n){ n=String(n); for(var i=0;i<enabledSlots.length;i++){ if(String(enabledSlots[i].id)===n) return enabledSlots[i]; } return null; }
-  function rpSlotBad(n){ var s=rpSlotSt(n); if(!s || !s.state) return null; var o={enabled:true, state:s.state, transport:s.transport, key_clash:s.key_clash||''}; return slotBad(o) ? slotWhy(o) : null; }
+  function rpSlotBad(n){ var s=rpSlotSt(n); if(!s || !s.state) return null; var o={enabled:true, state:s.state, path:s.path, transport:s.transport, key_clash:s.key_clash||''}; return slotBad(o) ? slotWhy(o) : null; }
   // ПОЧЕМУ ВЫХОД, ЗАПИСАННЫЙ В ПРАВИЛЕ, НЕ ВЕЗЁТ ЕГО — ОДНА лестница причин на три места (устройство, группа, категория), а
   // СЛОВА у каждого места свои: подлежащее в строке разное, а накладной перевод ищет ключ по ЦЕЛОМУ узлу. Порядок значим:
   // сперва то, чего выхода вовсе нет, потом режим, потом несущая.
@@ -20130,9 +20850,10 @@
   function slotOffKey(n, o){
     n=parseInt(String(n||'').replace(/^s/,''),10)||0; if(!n) return '';
     o=o||{};
+    if(cur.vpnOff && offSlotState(cur, n).state!=='direct') return o.mark && slotNoMark(n) ? 'zapret' : '';
     if(rpSlotOff(n)) return Object.prototype.hasOwnProperty.call(slotTptAll, String(n)) ? 'off' : 'gone';
+    if(cur.vpnOff) return 'vpnOff';
     if(o.full && cur.full) return 'full';
-    if(cur.vpnOff) return 'vpnOff';   // cmd_off гасит и выходы (`slots-down`): десинк-выход после этого не десинкует
     if(o.mark && slotNoMark(n)) return 'zapret';
     return rpSlotBad(n) ? 'bad' : '';
   }
@@ -20140,9 +20861,9 @@
   // трафик в VPN» (VPN_PORTS/VPN_DEV/VPN_FORCE устройства выше неё) — режим «целиком» его не отменяет.
   function rpDirSlot(slot, own){
     var n=parseInt(String(slot||'').replace(/^s/,''),10)||0;
-    if(!n || (!own && cur.full) || rpSlotOff(n)) return rpDir('vpn');
-    var sst=(rpSlotSt(n)||{}).state||'';
-    if(sst==='fallback') return rpDir('vpn');
+    if(!n || (!cur.vpnOff && ((!own && cur.full) || rpSlotOff(n)))) return rpDir('vpn');
+    var s=cur.vpnOff ? offSlotState(cur, n) : rpSlotSt(n)||{}, sst=s.state||'';
+    if(sst==='fallback') { if(!/^[2-7]$/.test(s.path)) return rpDir('vpn'); n=Number(s.path); }
     if(sst==='direct' || sst==='down') return rpDir('direct');
     if(sst==='dead') return rpDir('broken');
     var nm=devSlotName('s'+n), named=devSlotNamed('s'+n), dsy=slotIsDesync(n);
@@ -20178,8 +20899,9 @@
     }
     if(dir!=='vpn' && !/^s?[2-7]$/.test(String(dir))) return '';   // действие от версии новее панели — не выдумываем путь
     var n=parseInt(String(slot||dir||'').replace(/^s/,''),10)||0;
+    if(n && cur.vpnOff) return offSlotState(cur, n).state==='direct' ? 'direct' : 'slot';
     if(!n || cur.full || rpSlotOff(n)) return 'main';   // выключенный и удалённый выход groups.sh/geo.sh уводят в основной
-    if(cur.vpnOff) return 'direct';                     // cmd_off снимает `ip rule` всех марок и гасит выходы
+    if(/^[2-7]$/.test((rpSlotSt(n)||{}).path)) return 'slot';
     // Выход упал на ОСНОВНОЙ туннель — путь считает он; остальные состояния называет `rpDirSlot`.
     return (((rpSlotSt(n)||{}).state||'')==='fallback') ? 'main' : 'slot';
   }
@@ -20193,7 +20915,10 @@
   // «ПРАВИЛО И ПРАВДА ЕДЕТ ДЕСИНК-ВЫХОДОМ» — один ответ на сводку устройства и числа гео, и судит он ТЕМ ЖЕ ключом пути
   // (`rpDirKey`): выключенный и удалённый выход движок уводит в основной туннель, «весь трафик в VPN» отменяет выходы
   // общих правил, а выключенный тумблером VPN гасит их вместе с метками — во всех трёх случаях десинка нет вовсе.
-  function viaDesync(slot){ var n=parseInt(String(slot||'').replace(/^s/,''),10)||0; return !!n && rpDirKey('vpn', n)==='slot' && slotIsDesync(n); }
+  function viaDesync(slot){
+    var n=parseInt(String(slot||'').replace(/^s/,''),10)||0;
+    return !!n && rpDirKey('vpn', n)==='slot' && slotIsDesync(n, true);
+  }
   function rpBadge(kind){ return kind==='domain' ? '<span class="badge dns">по доменам</span>' : '<span class="badge">по адресам</span>'; }
   // ОТВЕТ НЕ ТОЙ ФОРМЫ (`{need_login}` с кодом 200, `{error}` старого CGI) — не «пусто»: разбор у ovcExits.
   function rpBadResp(d){ return !d || typeof d!=='object' || !!d.error || !!d.need_login; }
@@ -20307,6 +21032,7 @@
     // — «не поднят» вместо «поднимается», а у Zapret проверяла транспорт раньше `dead`.
     var fs=(cur.fo||{}).standing||'', isZ=(cur.transport==='zapret');
     if(cur.live===null){ txt='Роутер ещё не сообщил режим.'; k=''; }
+    else if(cur.vpnOff && (cur.exitsKept||[]).length){ txt='Всё, что не попало ни в одно правило ниже.'; k='direct'; norm=true; }
     else if(!cur.configured){ txt='Протокол не выбран — весь трафик идёт напрямую.'; k='direct'; }
     else if(cur.vpnOff){ txt=isZ ? 'Zapret выключен тумблером — десинка нет, весь трафик идёт напрямую.' : 'VPN выключен тумблером — правила «в VPN» сейчас не действуют, весь трафик идёт напрямую.'; k='direct'; }
     else if(cur.dead){
@@ -22430,14 +23156,14 @@
   // реестре его нет, а группа хранит номер (groups.sh/geo.sh уводят её в основной) — не отличить от «реестр не пришёл», и чип
   // рисовал удалённый выход рабочим (ревью шага 4a, круг 2).
   var _slotsKnown=false;
-  function refreshEnabledSlots(){
+  function refreshEnabledSlots(accept){
     // Resolves with «the registry arrived»: a caller that draws «no exit» from it must tell silence from an empty registry.
-    return fetchJson('/cgi-bin/data?section=slots').then(function(sd){ slotsTake(sd); return _slotsKnown; }).catch(function(){ return false; });
+    return fetchJson('/cgi-bin/data?section=slots').then(function(sd){ if(!accept || accept()) slotsTake(sd); return _slotsKnown; }).catch(function(){ return false; });
   }
   // ОТВЕТ section=slots → общие кэши: «номер выхода → транспорт» и включённые выходы для селектора «через» в
   // группах. Один разбор на всех читателей ответа (экраны выходов, редактор групп, правила подписки).
   function slotsTake(d){
-    if(d && d.engine!==false && d.slots){ var sl=d.slots; slotAll=sl; slotTptRemember(sl); enabledSlots=sl.filter(function(s){ return s.enabled; }).map(function(s){ return {id:s.id, name:slotName(s), named:slotNamed(s), transport:s.transport, state:s.state||'', key_clash:s.key_clash||''}; }); _slotsKnown=true; }
+    if(d && d.engine!==false && d.slots){ var sl=d.slots; slotAll=sl; slotTptRemember(sl); enabledSlots=sl.filter(function(s){ return s.enabled; }).map(function(s){ return {id:s.id, name:slotName(s), named:slotNamed(s), transport:s.transport, state:s.state||'', path:s.path||'', key_clash:s.key_clash||''}; }); _slotsKnown=true; }
     else { enabledSlots=[]; slotAll=[]; slotTptAll={}; _slotsKnown=!!(d && d.engine===false); }
   }
   function slotName(s){ return b64toUtf8(s.name_b64)||('выход '+s.id); }
@@ -22455,7 +23181,8 @@
     return esc(SLOT_TPT_LABEL[s.transport]||s.transport)
       + ((!short && s.config && s.config!=='-')?(' · <span class="sens" translate="no">'+esc(cfgDisp(s.transport, s.config))+'</span>'):'')
       + ' · <span>'+(s.groups|0)+' '+unitF(s.groups|0,'групп')+(((s.geo|0)>0)?(' · '+(s.geo|0)+' гео'):'')
-      + (short?'':(' · '+((s.fallback==='direct')?'сбой → напрямую':'сбой → основной')))+'</span>';
+      + (short||/^[2-7]$/.test(s.fallback)?'':(' · '+((s.fallback==='direct')?'сбой → напрямую':'сбой → основной')))+'</span>'
+      + (!short && /^[2-7]$/.test(s.fallback)?' · <span>Если упадёт: '+esc(slotPathLabel(s.fallback))+'</span>':'');
   }
   // ЭКРАН «ДОПОЛНИТЕЛЬНЫЕ ВЫХОДЫ» (шаг 3c-1). Выходы жили блоком под вкладками «Серверов», а это разные вопросы:
   // серверы — «к чему подключаться», выходы — «какой трафик каким путём идёт». Здесь — список и создание. Тумблер,
@@ -22484,8 +23211,9 @@
           + '<span class="dot'+(!s.enabled?' off':(bad?' warn':''))+'"></span>'
           + '<div class="grow"'+(s.enabled?'':' style="opacity:.55"')+'><div class="nm">'+slotNmHtml(s)+'</div><div class="ds">'+slotDs(s)
           // Выход без групп законен — он служит ДОРОГОЙ к серверу; бейдж «дорога» — единственное, что его отличает (макет).
-          + (slotRiders(s).length ? ' · <span>дорога для</span> '+ridersHtml(slotRiders(s)) : '')+'</div></div>'
-          + (!s.enabled ? '<span class="chip">выключен</span>' : bad ? '<span class="chip wr">'+esc(slotWhy(s).short)+'</span>' : (slotRiders(s).length ? '<span class="badge">дорога</span>' : ''))
+          + (slotRiders(s).length ? ' · <span>дорога для</span> '+ridersHtml(slotRiders(s)) : '')
+          + (s.keep_when_off ? ' · <span>Работа при выключенном VPN</span>' : '')+'</div></div>'
+          + (s.unapplied ? '<span class="chip wr">не применено</span>' : !s.enabled ? '<span class="chip">выключен</span>' : bad ? '<span class="chip wr">'+esc(slotWhy(s).short)+'</span>' : (slotRiders(s).length ? '<span class="badge">дорога</span>' : ''))
           + CHEV + '</div>';
       });
       h+='<div class="cline">Отдельный выход (десинк или доп-туннель) рядом с основным VPN. Привяжите к нему группу правил — её сайты пойдут этим путём, остальное останется в основном туннеле.</div>';
@@ -22538,6 +23266,16 @@
   }
   // ЭКРАН ВЫХОДА — всё управление одним выходом. Номер — в подписи карточки: имя пишет человек, а привязки держит номер.
   var SLOT_FB=[['main','через основной','его сайты вернутся в главный туннель','i-shield'],['direct','напрямую','мимо VPN, без шифрования','i-globe']];
+  function slotPathLabel(path,dead){
+    if(/^[2-7]$/.test(path)) return 'через выход №'+path+(dead?' (не отвечает)':'');
+    return path==='main' ? SLOT_FB[0][1] : path==='direct' ? SLOT_FB[1][1] : '';
+  }
+  function slotFallbackOptions(self, tpt){
+    if(tpt==='zapret') return SLOT_FB;
+    return SLOT_FB.concat(slotAll.filter(function(s){
+      return /^[2-7]$/.test(s.id) && String(s.id)!==self && /^(awg|xray|hy2|byedpi)$/.test(s.transport);
+    }).map(function(s){ return [String(s.id), slotPathLabel(s.id), b64toUtf8(s.name_b64), 'i-route']; }));
+  }
   // Знак движка на плитке: десинк — молния, свой сервер — щит (макет: плитки «Транспорт», «Транспорт выхода», выхода группы).
   function tptIc(t){ return (t==='zapret'||t==='byedpi') ? 'i-zap' : 'i-shield'; }
   // ПЛИТКА ПРИМЕНЁННОГО ВЫБОРА — то, что уже стоит на роутере, помечено `aria-current` (у плиток ФОРМЫ, где выбор ещё не
@@ -22549,7 +23287,8 @@
       + (ic ? '<span class="oi">'+icUse(ic, '', '', true)+'</span>' : '')+'<div class="t">'+t+'</div><div class="d">'+d+'</div></div>';
   }
   function openExit(s){
-    var id=String(s.id), nm=slotName(s), en=!!s.enabled, bad=slotBad(s), tpt=s.transport, fbNow=(s.fallback==='direct')?'direct':'main', fsig=focusMark();
+    var id=String(s.id), nm=slotName(s), en=!!s.enabled, bad=slotBad(s), tpt=s.transport, fbNow=String(s.fallback||'main'), fsig=focusMark();
+    if(tpt==='zapret' && fbNow!=='direct') fbNow='main';
     var desync=(tpt==='zapret'||tpt==='byedpi'), rep=navIfShown('cn-exit', exitScrOpen);
     // ВЫХОД-ДОРОГА (road.sh): по нему едут серверы — выключить, удалить и перевести его нельзя, пока они на нём (роутер откажет; панель
     // говорит это до клика и ведёт к серверу).
@@ -22563,10 +23302,13 @@
       + '<div class="lrow"><span class="dot'+(!en?' off':(bad?' warn':''))+'"></span>'
       +   '<div class="grow"><div class="nm">'+slotNmHtml(s)+'</div><div class="ds">'+slotDs(s)+'</div></div>'
       +   '<label class="sw" title="'+(rd.length ? 'выключить нельзя, пока по нему едут серверы' : 'включить/выключить выход')+'"><input type="checkbox" class="slot-tog"'+(en?' checked':'')+(rd.length ? ' disabled' : '')+'><i></i></label></div>'
+      + slotKeepRow(s.keep_when_off)
       // Почему выход не везёт — словами и с последствием (куда на самом деле идут его сайты). Молчать нельзя:
       // «включён, но не работает» — ровно тот случай, когда человек считает, что YouTube едет через десинк.
       // Занятый ключ — и у ВЫКЛЮЧЕННОГО выхода: включение откажет той же причиной, и узнать её лучше до клика.
       + ((bad || s.key_clash) ? '<div style="margin-top:8px">'+noteBox(esc(slotWhy(s).long),'warn')+'</div>' : '')
+      + (s.unapplied ? '<div style="margin-top:8px">'+noteBox('Настройки выхода сохранены, но не применены','warn')
+        + '<div class="acts"><button type="button" class="btn gh" data-xa="retry">Повторить применение</button></div></div>' : '')
       + '<div class="acts">'
       +   '<button type="button" class="btn gh" data-xa="rename">Переименовать</button>'
       // Сменить сервер выхода (awg/xray/hy2): «удалить и создать заново» теряет НОМЕР — привязки групп и гео
@@ -22580,7 +23322,7 @@
                    + '<span>: сервер остался бы без дороги. Сначала переключите его дорогу на «напрямую».</span></div>' : '')
       + '</div>';
     if(rd.length) h+='<div class="card"><div class="wt">Дорога для</div>'
-      + rd.map(function(n){ var key=riderKey(n), k=key.split('/'), c=CHK[chkKey(k[0], k[1])];
+      + rd.map(function(n){ var key=riderKey(n), k=key.split('/'), c=chkGet(k[0], k[1]);
           return lrowGo('srv:'+key, 'открыть сервер')+'<span class="dot'+recDot(c)+'"></span><div class="grow"><div class="nm">'+riderLabel(n)+'</div>'
             + '<div class="ds">'+esc(names[k[0]])+((c && c.st==='ok' && c.ms!=null) ? ' · <span>'+esc(c.ms+' мс')+'</span>'+(c.via ? ' <span>через дорогу</span>' : ' <span>напрямую</span>') : '')+'</div></div>'+CHEV+'</div>'; }).join('')
       + '<div class="cline">Дорогу выбирают на экране сервера, здесь — кто по ней едет.</div></div>';
@@ -22591,7 +23333,9 @@
       + '<div id="xc-dme"></div>'
       + '<div class="cline">Точку выбирает Cloudflare по адресу подключения. Окажется DME (Москва) — здесь встанет предупреждение: там Cloudflare с весны 2026 фильтрует адреса назначения, и дорога может не довезти.</div></div>';
     h+='<div class="card"><div class="wt">Если выход упадёт</div><div class="opt c2">'
-      + SLOT_FB.map(function(f){ return optTile('data-fb', f[0], f[0]===fbNow, f[3], f[1], f[2]); }).join('')
+      + slotFallbackOptions(id, tpt).map(function(f){
+        return optTile('data-fb', f[0], f[0]===fbNow, f[3], f[1], /^[2-7]$/.test(f[0])?'<span class="sens" translate="no">'+esc(f[2])+'</span>':f[2]);
+      }).join('')
       + '</div>'+(s.warp ? '<div class="cline">Это о сайтах, привязанных к выходу; у дороги их нет. Привязать можно, как к любому выходу, но WARP страну не меняет: сайты видят вас в вашей стране.</div>' : '')+'</div>';
     // Быстрая привязка — у ВКЛЮЧЁННОГО выхода. «Свой пул…» — для любого транспорта: slot_pool создаёт «в VPN»-группу,
     // сразу привязанную к выходу. Чипы-пресеты (гео-категории сервисов) — только у десинк-выхода: это «душит
@@ -22610,7 +23354,7 @@
       + '<div class="kv"><div class="grow"><div class="k">Группы правил</div><div class="v"><b>'+(s.groups|0)+'</b></div></div><button type="button" class="act" data-xa="groups">Группы</button></div>'
       + '<div class="kv"><div class="grow"><div class="k">Гео-категории</div><div class="v"><b>'+(s.geo|0)+'</b></div></div><button type="button" class="act" data-xa="geo">Гео-списки</button></div>'
       + '</div>';
-    if(desync) h+=noteBox('<b>Через десинк-выход трафик идёт напрямую и десинкуется — это не VPN:</b> адрес не подменяется и шифрования нет, ломается только распознавание DPI.','warn');
+    if(desync && !/^[2-7]$/.test(s.path)) h+=noteBox('<b>Через десинк-выход трафик идёт напрямую и десинкуется — это не VPN:</b> адрес не подменяется и шифрования нет, ломается только распознавание DPI.','warn');
     body.innerHTML=h+'</div>';
     wireCacts(body);   // пассажиры дороги — к экранам своих серверов
     focusBack(body, fsig);
@@ -22618,6 +23362,11 @@
     var tg=body.querySelector('.slot-tog');
     if(tg) tg.addEventListener('change', function(){
       swPost(tg, 'slot_toggle', null, (tg.checked?'включаю':'выключаю')+' выход', {id:id, enabled:tg.checked?1:0}, rep);
+    });
+    var keep=body.querySelector('.slot-keep');
+    if(keep) keep.addEventListener('change', function(){
+      swPost(keep, 'slot_set', null, tkL('сохраняю настройку выхода…', 'saving exit settings…'),
+        {id:id, field:'keep_when_off', value:keep.checked?1:0}, rep);
     });
     function pickFb(v){ if(v!==fbNow) postAction('slot_set', null, 'меняю запасной путь', {id:id, field:'fallback', value:v}, rep); }
     body.addEventListener('click', function(ev){
@@ -22629,6 +23378,7 @@
         if(xk){ var on=el.getAttribute('data-on')==='1'; postAction('geo_preset', null, (on?'отвязываю ':'привязываю ')+el.textContent, {key:xk, slot:id, on:on?0:1}, rep); return; }
         if(!xa) continue;
         if(xa==='rename') slotRename(id, nm, rep);
+        else if(xa==='retry') postAction('slot_retry', null, 'применяю настройки выхода', {id:id}, rep, rep);
         else if(xa==='cfg') slotChangeCfg(id, tpt, s.config||'', el, rep);
         else if(xa==='strategy'){ if(tpt==='byedpi') openByedpi(id, slotNamed(s) ? nm : '', slotNamed(s)); else openZapret(); }
         // После удаления — перерисовка показанного, а не `navUp`: колбэк приходит через секунду и зовётся и при отказе
@@ -22679,13 +23429,20 @@
   // Плитка выбора в форме: `.opt .o` с ролью кнопки (Enter и пробел даёт `slotAddForm`), выбранная — `.on`.
   var SLOT_TILE_D={zapret:'десинк напрямую', byedpi:'десинк через socks', awg:'свой сервер', xray:'свой сервер', hy2:'свой сервер'};
   // `sens` — подпись написал человек (имя выхода): под меткой стримера.
-  function slotTile(cls, attr, val, on, ic, t, d, sens){
+  function slotTile(cls, attr, val, on, ic, t, d, sens, sensDesc){
     return '<div class="o '+cls+(on?' on':'')+'" role="button" tabindex="0" '+attr+'="'+val+'"'+(on?' aria-pressed="true"':' aria-pressed="false"')+'>'
-      + (ic ? '<span class="oi">'+icUse(ic, '', '', true)+'</span>' : '')+'<div class="t">'+(sens ? '<span class="sens">'+esc(t)+'</span>' : esc(t))+'</div><div class="d">'+esc(d)+'</div></div>';
+      + (ic ? '<span class="oi">'+icUse(ic, '', '', true)+'</span>' : '')+'<div class="t">'+(sens ? '<span class="sens">'+esc(t)+'</span>' : esc(t))+'</div><div class="d">'
+      + (sensDesc ? '<span class="sens" translate="no">'+esc(d)+'</span>' : esc(d))+'</div></div>';
+  }
+  function slotKeepRow(checked){
+    return '<label class="lrow"><span class="grow nm">Работать при выключенном VPN</span>'+
+      '<span class="sw"><input class="slot-keep" type="checkbox"'+(checked?' checked':'')+'><i></i></span></label>';
   }
   function slotAddForm(box, capable){
     var tseg=capable.map(function(t){ return slotTile('sl-tpt', 'data-t', t, t===capable[0], tptIc(t), TNAMES[t]||t, SLOT_TILE_D[t]||''); }).join('');
-    var fseg=SLOT_FB.map(function(f){ return slotTile('sl-fb', 'data-fb', f[0], f[0]==='main', f[3], f[1], f[2]); }).join('');
+    var fseg=slotFallbackOptions('').map(function(f){
+      return slotTile('sl-fb', 'data-fb', f[0], f[0]==='main', f[3], f[1], f[2], false, /^[2-7]$/.test(f[0]));
+    }).join('');
     box.innerHTML='<label class="dsfld" style="margin:0 0 13px">Название<input id="slot-name" class="inp" type="text" placeholder="имя выхода, например «Нейронки-Германия»"></label>'
       + '<div class="wt">Транспорт выхода</div>'
       + '<div class="opt c5" style="margin-bottom:12px">'+tseg+'</div>'
@@ -22694,6 +23451,7 @@
       +   '<select id="slot-cfg" class="inp"><option value="">— загрузка… —</option></select></label></div>'
       + '<div class="wt">Если выход упадёт</div>'
       + '<div class="opt c2">'+fseg+'</div>'
+      + slotKeepRow(false)
       + '<div class="acts"><span class="grow"></span><button id="slot-create" type="button" class="btn pri">Создать выход</button></div>';
     var cfgByTpt={}, cfgHeld={};   // транспорт -> [имена конфигов]; занятые ключи AmneziaWG (оба — из /cgi-bin/list)
     function curTpt(){ var e=box.querySelector('.sl-tpt.on'); return e?e.getAttribute('data-t'):(capable[0]||''); }
@@ -22723,8 +23481,17 @@
       // Плитка — <div role="button">: Enter и пробел ей даём сами, пробел не прокручивает страницу.
       Array.prototype.forEach.call(nodes, function(n){ n.addEventListener('keydown', function(ev){ if(ev.key!=='Enter' && ev.key!==' ') return; ev.preventDefault(); n.click(); }); });
     }
-    pickIn('sl-tpt', function(){ fillCfg(); slotDupWarn(); });
+    function fillFallback(){
+      var zap=curTpt()==='zapret';
+      Array.prototype.forEach.call(box.querySelectorAll('.sl-fb'),function(el){
+        if (!/^[2-7]$/.test(el.getAttribute('data-fb'))) return;
+        if(zap && el.classList.contains('on')) box.querySelector('[data-fb="main"]').click();
+        el.style.display=zap?'none':'';
+      });
+    }
+    pickIn('sl-tpt', function(){ fillCfg(); slotDupWarn(); fillFallback(); });
     pickIn('sl-fb');
+    fillFallback();
     slotCfgList().then(function(m){
       cfgByTpt.awg=m.awg; cfgByTpt.xray=m.xray; cfgByTpt.hy2=m.hy2; cfgHeld=m.held;
       fillCfg();
@@ -22741,7 +23508,8 @@
         var sel=document.getElementById('slot-cfg'); cfg=sel?sel.value:'';
         if(!cfg){ logLine('выберите сервер/конфиг для выхода', false); return; }
       }
-      postAction('slot_add', null, 'создаю выход «'+nm+'»', {name:nm, transport:t, config:cfg, fallback:(fs?fs.getAttribute('data-fb'):'main')}, openExits);
+      postAction('slot_add', null, 'создаю выход «'+nm+'»', {name:nm, transport:t, config:cfg,
+        fallback:(fs?fs.getAttribute('data-fb'):'main'), keep_when_off:box.querySelector('.slot-keep').checked?1:0}, openExits);
     });
   }
   // Каталог конфигов по транспортам — ОДИН источник и для формы создания выхода, и для смены
@@ -23782,7 +24550,7 @@
       c.on++;
       if(c[a]==null) return;                       // незнакомое действие: в ведро не кладём, но включённым считаем
       var k=rpDirKey(a, it.slot);
-      if(a==='vpn' && k==='slot' && slotIsDesync(it.slot)) c.dsyexit++;
+      if(a==='vpn' && k==='slot' && slotIsDesync(it.slot, true)) c.dsyexit++;
       else { c[a]++; if(a==='vpn' && (k==='main' || k==='direct')) c.main++; }
     });
     return c;
@@ -25719,8 +26487,10 @@
     put(body.querySelector('#wp-st'), h);
     Array.prototype.forEach.call(body.querySelectorAll('[data-wpst]'), function(el){ put(el, (key && el.getAttribute('data-wpst')===key) ? h : ''); });
   }
-  function openWarp(rider){
+  var _wpRiderConfig=null;
+  function openWarp(rider, observedRev){
     // Без аргумента на показанном экране — перерисовка (аргумент — из адреса); свежий заход из другого экрана — без конфига.
+    var redraw=rider==null && navShows('cn-warp');
     if(rider==null) rider=navShows('cn-warp') ? navSplit(_navKey).a : '';
     rider=String(rider||'');
     if(rider && !RE_CFG_NAME.test(rider)) rider='';
@@ -25732,6 +26502,9 @@
     var ob=navShows('cn-warp') ? document.getElementById('modal-body') : null;
     if(ob && ob.querySelector('#wp-get')){ _wpOpn=riOpened(ob); _wpOpnG=ob._wpG; if(ob.querySelector('#wp-devconf details.vs-txt[open]')) _wpOpn['@devtxt']=1; }
     openModal(null, {route:'cn-warp', arg:rider, deck:true});
+    if(!redraw || !_wpRiderConfig || _wpRiderConfig.nav!==_navGen)
+      _wpRiderConfig={nav:_navGen, name:rider, rev:checkRev(observedRev)};
+    var fromCard=_wpRiderConfig;
     // Another visit of the screen (the show moved the address): nothing of the previous one comes back — neither the open fields
     // nor the pick of «Сразу подключить через него» (a fresh visit preselects the config its address names).
     if(_wpOpnG!==_navGen){ _wpOpn={}; _wpOpnG=_navGen; nwDraftDrop(['wp-rider']); }
@@ -25787,7 +26560,7 @@
       var mainNow=d.awg ? String(d.awg.active||'') : '';
       // Кого сразу везти: сперва заблокированные (ради них WARP и нужен), потом прочие AmneziaWG, которые могут ехать по дороге.
       var opts=awg.filter(function(n){ return srvRoadOk('awg', n); }), blk=[], oth=[];
-      opts.forEach(function(n){ var c=CHK[chkKey('awg', n)]; ((c && c.st==='blk') ? blk : oth).push(n); });
+      opts.forEach(function(n){ var c=chkGet('awg', n); ((c && c.st==='blk') ? blk : oth).push(n); });
       // The person's pick survives a redraw of this visit (a draft, written by the choice — nwDraftWire): a refusal redraws the
       // screen, and the select used to fall back to the address's config — the next click sent THAT one (review s.122).
       var pk=nwDraftGet('wp-rider', null), pick=(pk!==null && (pk==='' || opts.indexOf(pk)>=0)) ? pk : rider;
@@ -25867,8 +26640,13 @@
       if(gb) gb.addEventListener('click', function(){
         if(gb.disabled) return;
         fBtn=gb; fAlts=null;
-        var rs=document.getElementById('wp-rider');
-        job({action:'warp_get', rider:rs ? rs.value : ''}, 'получаю WARP');
+        var rs=document.getElementById('wp-rider'), name=rs ? rs.value : '';
+        var args={action:'warp_get', rider:name};
+        if(name){
+          args.rev=(name===fromCard.name && fromCard.rev) || cfgRev(d,'awg',name);
+          if(!args.rev){ cfgRevisionMissing(); return; }
+        }
+        job(args, 'получаю WARP');
       });
       body.addEventListener('click', function(ev){
         var b=ev.target; while(b && b!==body && !(b.getAttribute && b.getAttribute('data-wp'))) b=b.parentNode;
@@ -26060,7 +26838,7 @@
       var names=(l[t]&&l[t].servers)||[]; if(!names.length) return;
       var okN=0, dead=0, none=0, nop=0, blk=0, inapplicable=0, ts=0;
       names.forEach(function(n){
-        var c=CHK[chkKey(t,n)];
+        var c=chkGet(t,n);
         // ✓ без пинга и без скорости — не «рабочий»: выход у Xray на UDP-сети не проверялся (разбор у recView). Заблокированный
         // адрес — не «не отвечает»: сервер жив, не пускает провайдер.
         if(endpointInapplicable(c)) inapplicable++;
@@ -26120,9 +26898,8 @@
     // ДВА ОТВЕТА: настройки (автопроверка, балансер, «после проверки», адрес пробы) и список серверов (сводка и прогоны). Отказ
     // одного не прячет другое: без настроек — «роутер не сообщил», без списка — «список не получен», а не «серверов нет».
     var lp=(keep===true && _ckList) ? Promise.resolve(_ckList) : fetchJson('/cgi-bin/list').then(null, function(){ return null; });
-    // КЭШ ПРОВЕРОК — С РОУТЕРА при каждом открытии (обещание «с телефона те же числа»), кроме перерисовки и времени, когда в памяти
-    // есть несохранённое: идёт прогон или ждёт запись. Слияние по времени замера — у loadChecks.
-    var cp=(keep!==true && !testSweepRun && !speedSweepRun && !bgSweepRun && !chkSaveT) ? loadChecks() : Promise.resolve(null);
+    // Read the router's records when opening the screen. A sweep updates its own view.
+    var cp=(keep!==true && !testSweepRun && !speedSweepRun && !bgSweepRun) ? loadChecks() : Promise.resolve(null);
     // Второе мнение о блокировке — его переключатели (выкл по умолчанию); не ответил — карточка говорит «роутер не сообщил».
     var chp=subPost({action:'chebur_state'}).then(function(x){ return (x && typeof x.on==='boolean') ? x : null; }, function(){ return null; });
     Promise.all([loadPrefs(), lp, cp, chp]).then(function(r){
@@ -26206,7 +26983,14 @@
       var ce=document.getElementById('ck-chb'), ca=document.getElementById('ck-chba');
       // Выключили — ни следа: вердикты сервиса уходят и из кэша проверок этой вкладки (роутер их больше не отдаёт — cgi-bin/data).
       if(ce) ce.addEventListener('change', function(){ swPost(ce, 'chebur_set', null, ce.checked ? 'включаю второе мнение' : 'выключаю второе мнение', {what:ce.checked ? 'on' : 'off'}, function(d){
-        if(d && d.ok && !ce.checked){ var dirty=false; for(var k in CHK){ if(CHK.hasOwnProperty(k) && CHK[k] && CHK[k].chb){ CHK[k].chb=''; dirty=true; } } if(dirty){ saveChecks(); hydrateChecks(); } }
+        if(d && d.ok && !ce.checked){
+          var dirty=false;
+          Object.keys(CHK).forEach(function(k){
+            var row=CHK[k];
+            [row,row.egress,row.endpoint].forEach(function(sample){ if(sample && sample.chb){ sample.chb=''; dirty=true; } });
+          });
+          if(dirty) hydrateChecks();
+        }
         rep(); }); });
       if(ca) ca.addEventListener('change', function(){ swPost(ca, 'chebur_set', null, 'сохраняю настройку…', {what:ca.checked ? 'auto_on' : 'auto_off'}, rep); });
       [['ck-bal','balancer'],['ck-sort','sort_after_test'],['ck-dead','del_dead_after_test']].forEach(function(x){
@@ -26238,7 +27022,7 @@
     ['awg','xray','hy2'].forEach(function(t){
       var names=(l[t]&&l[t].servers)||[];
       if(!names.length || (t==='xray' && skipX)) return;
-      groups.push({t:t, items:names.map(function(n){ return {tpt:t, name:n}; })}); tot+=names.length;
+      groups.push({t:t, items:names.map(function(n){ return {tpt:t, name:n, rev:cfgRev(l,t,n)}; })}); tot+=names.length;
     });
     if(!tot){ showToast(skipX?'движок Xray не установлен на роутере — поставьте в «Компонентах»':'нет серверов для проверки', false); return; }
     var res={}, done=0, gi=0;
@@ -26252,7 +27036,7 @@
       var g=groups[gi++], base=done;
       sweepChecks(g.items, CK_PORTS,
         function(dn){ done=base+dn; ckProgress('проверка '+done+'/'+tot); },
-        function(okN, msOf, unk, mem, told, inapplicable){ var nU=0, nM=0, nT=0, u; for(u in unk){ if(mem[u]) nM++; else if(told && told[u]) nT++; else nU++; } res[g.t]={ok:okN, n:g.items.length, unk:nU, mem:nM, told:nT, inapplicable:inapplicable, msOf:msOf, unkOf:unk}; next(); });
+        function(okN, msOf, unk, mem, told, inapplicable, dead){ var nU=0, nM=0, nT=0, u; for(u in unk){ if(mem[u]) nM++; else if(told && told[u]) nT++; else nU++; } res[g.t]={ok:okN, n:g.items.length, unk:nU, mem:nM, told:nT, inapplicable:inapplicable, dead:dead}; next(); });
     })();
     function finish(){
       testSweepRun=false;
@@ -26263,7 +27047,7 @@
       var aborted=testSweepAbort;
       ckDone(m);
       // «Удалять мёртвые» — только Xray (у него есть реальный тест выхода) и не после прерванного прогона.
-      if(PREFS.del_dead_after_test && !aborted && res.xray) sweepDelDead(res.xray.msOf, res.xray.unkOf, navIfShown('cn-checks', openChecks));
+      if(PREFS.del_dead_after_test && !aborted && res.xray) sweepDelDead(res.xray.dead, navIfShown('cn-checks', openChecks));
     }
   }
   function ckSpeedAll(l){
@@ -28342,8 +29126,8 @@
     if(k!=='apply' && st==='cut') return CUT;
     if(k==='dl'){
       if(st==='now'){
-        if(!dl || !(Number(dl.got)>=0)) return '<div class="ds"><span>спрашиваю GitHub описание релиза</span></div>';
-        var got=Number(dl.got), tot=Number(dl.total)||0, el=up-(Number(dl.ts)||up), pct=tot ? got*100/tot : 0;
+        if(!dl) return '<div class="ds"><span>спрашиваю GitHub описание релиза</span></div>';
+        var got=Math.max(0,Number(dl.got)||0), tot=Number(dl.total)||0, el=up-(Number(dl.ts)||up), pct=tot ? got*100/tot : 0;
         // Скорость — ОДНИМ текстовым узлом с единицей («512 Б/с»): правило перевода видит единицу целиком, а «/» отдельным узлом
         // оставлял «Б/» по-русски (ревью с.175).
         return '<div class="ds">'+humanBytes(got)+' <span>из</span> '+humanBytes(tot)+' · '+Math.round(pct)+'%'+(el>=2 ? ' · '+humanBytes(got/el)+'/с' : '')+updBar(pct)+'</div>';
@@ -29067,13 +29851,30 @@
     DK_GROUPS.forEach(function(g){
       var b=Number(dk[g.k])||0, on=!!diskSel[g.id] && b>0;
       h+='<div class="lrow"><div class="grow"><div class="nm">'+g.l+' <span class="chip">'+humanBytes(b)+'</span></div>'
-        + '<div class="ds"><span>'+g.h+'</span>'+((g.code && onSt) ? ' · <span>лежат на накопителе: флеш роутера не освободят</span>' : '')+'</div></div>'
+        + '<div class="ds"><span>'+g.h+'</span>'+((g.code && onSt) ? ' · <span>лежат на накопителе: флеш роутера не освободят</span>' : '')+'</div>'
+        + (g.id==='stocklogs' ? dkStocklogsHtml(dk.stocklogs_mode) : '')+'</div>'
         + '<label class="sw"><input type="checkbox" data-dkc="'+g.id+'" aria-label="'+g.l+'"'+(on?' checked':'')+(b?'':' disabled')+'><i></i></label></div>';
     });
     var any=dkGain(dk).any;
     return h+'<div class="acts"><button type="button" class="btn" id="dk-clean-go" data-dk="clean" data-busy="1"'+(any?'':' data-na="1"')+((busy||!any)?' disabled':'')+'>'+esc(dkCleanLabel(dk))+'</button></div>'
       + dkLine('Сколько освободилось на самом деле, роутер скажет после чистки: заранее известен только вес файлов, а место считает файловая система.')
       + dkSbkHtml()+'</div>';
+  }
+  function dkStocklogsHtml(mode){
+    if(mode==='unavailable') return dkLine('В этой прошивке нет поддерживаемого правила ротации системного лога.');
+    if(mode==='custom') return dkLine('У системного лога своё правило ротации. Измените его вручную.');
+    var modes=[
+      ['stock','Как в прошивке','Около 4 МБ на флеше. История переживает перезагрузку.'],
+      ['compact','Сжимать сразу','Обычно около 0,5 МБ на флеше. История переживает перезагрузку.'],
+      ['ram','Не хранить на флеше','Около 3 МБ ОЗУ на новый архив. Он исчезает при перезагрузке.']
+    ];
+    var current=modes.filter(function(choice){ return choice[0]===mode; })[0];
+    if(!current) return '';
+    return '<div class="segbar" style="margin-top:8px;flex-wrap:wrap" role="group" aria-label="Системный лог роутера">'
+      + modes.map(function(choice){
+        var on=choice===current;
+        return '<button type="button" class="seg'+(on?' on':'')+'" data-dk="stocklogs:'+choice[0]+'" data-busy="1" aria-pressed="'+on+'"'+(busy?' disabled':'')+'>'+choice[1]+'</button>';
+      }).join('')+'</div>'+dkLine(current[2]);
   }
   // ---- КОПИЯ НАСТРОЕК ПРОШИВКИ (stock-backup.sh) — строкой ПОД чисткой, своей кнопкой с вопросом ----
   // Не мусор, а настройка прошивки с ценой: группой чистки её не сделать — переключатель там «выбрать», а здесь каждый шаг
@@ -29170,7 +29971,11 @@
         var a=x.getAttribute('data-dk'); if(!a) continue;
         // После переезда кнопки прежней не станет: карточка покажет противоположную («Вернуть» ⇄ «Перенести»). Фокус — на первую
         // кнопку карточки, а не на неё саму: у div фокуса нет, и браузер оставил бы его в BODY (ревью шага 6b, круг 1).
-        if(a==='off') go('Вернуть бинари протоколов на флеш роутера? Места на нём должно хватить.', 'store_disable', 'возвращаю…', {}, x, '#dk-store [data-dk]');
+        if(a.indexOf('stocklogs:')===0){
+          var mode=a.slice('stocklogs:'.length);
+          if(diskData && mode!==diskData.stocklogs_mode) go(null, 'disk_stocklogs', 'меняю режим системного лога…', {mode:mode}, x);
+        }
+        else if(a==='off') go('Вернуть бинари протоколов на флеш роутера? Места на нём должно хватить.', 'store_disable', 'возвращаю…', {}, x, '#dk-store [data-dk]');
         // ПРЕЖНИЙ ПРОПАЛ — перенос на другой накопитель забывает его тем же движением (движок перезаписывает маркер), и цена
         // обязана стоять В ВОПРОСЕ: после ответа роутера её назвать уже некому (снимок снят вместе с маркером).
         else if(a.indexOf('on:')===0) go(storeLost(storeData)
@@ -29364,6 +30169,12 @@
   }
   function pkgRowHtml(p){
     var sel=!!pkgSel[p.id], was=(p.state!=='absent'), dl=pkgDelta(p), id=esc(p.id), lb=esc(p.label||p.id), ds=[];
+    var old=p.state==='partial' && Array.isArray(p.old) ? p.old : [], oldNote='';
+    if(old.length){
+      var n=old.length, copy=n===1 ? 'Ещё 1 обновление — будет предложено' :
+        'Ещё '+n+' '+plu(n,['обновление','обновления','обновлений'])+' — будут предложены';
+      oldNote='<div class="ds" data-pk-old="'+id+'"><span>'+copy+' после установки недостающих файлов</span> · <span>'+esc(old.join(', '))+'</span></div>';
+    }
     // Гард (hold) запрещает СНЯТИЕ, а не установку: поставить связку можно всегда. Идёт установка — не меняется ничего.
     var lock=pkgRunning || (was && !!p.hold);
     if(PKG_DS[p.id]) ds.push(PKG_DS[p.id]);
@@ -29376,6 +30187,7 @@
       +   '<span class="chip sm '+(dl.k||'acc')+'" data-pkch="'+id+'"'+(dl.chip ? '' : ' hidden')+'>'+esc(dl.chip)+'</span></div>'
       + '<div class="ds">'+ds.map(function(x){ return '<span>'+esc(x)+'</span>'; }).join(' · ')+'</div>'
       + (p.state==='partial' ? '<div class="ds"><span class="wr">не хватает части файлов — такой протокол не поднимется; план доставит недостающее</span></div>' : '')
+      + oldNote
       // Запрет снятия (hold) обновление НЕ запирает: обновить включённое — ровно тот случай, ради которого кнопка (dot-proxy у
       // включённого DoH); держит его только идущая операция.
       + pkgUpdHtml(p, pkgRunning)
@@ -30298,35 +31110,28 @@
     if(busy){ showToast('панель занята — дождитесь конца', false); return; }
     if(!askConfirm('Восстановить настройки из «'+f.name+'»?\n\nСоответствующие текущие файлы/конфиги будут перезаписаны содержимым архива.')) return;
     setBusy(true,'импортирую настройки…'); logLine('→ импорт бэкапа '+f.name, null); bkT0=Date.now();
-    var rd=new FileReader();
-    rd.onload=function(){
-      // readAsDataURL → "data:...;base64,XXXX"; берём часть после запятой = чистый base64.
-      var s=String(rd.result||''), ci=s.indexOf(','), b64=(ci>=0)?s.substring(ci+1):s;
-      tokPost('/cgi-bin/backup', function(tok){
-        return 'token='+encodeURIComponent(tok)+'&content='+encodeURIComponent(b64);
-      }).then(function(d){
-        var ok=!!(d && d.ok);
-        // В журнал — своя короткая строка там, где роутер отдал счёт: его длинная фраза (с «обновите страницу» и предупреждениями) — для
-        // роутеров старше разбора, а экран сам следит за ходом.
-        logLine((ok && d.restored!=null) ? 'восстановлено объектов: '+Number(d.restored) : ((d && d.msg)||(ok ? 'готово' : 'ошибка')), ok);
-        bkRes=ok ? {ok:true, n:(d.restored!=null ? Number(d.restored) : null), warns:(Array.isArray(d.warns) ? d.warns : null), msg:String(d.msg||''),
-                    cert:(d.cert==='live' || d.cert==='stored') ? d.cert : ''}
-                 : {ok:false, msg:String((d && d.msg)||'ошибка')};
-        // Роутер старше хода применения фразы про ход не знает — тогда тост его словами, как раньше.
-        showToast(ok ? (d.restored!=null ? 'Настройки восстановлены — применяю правила…' : bkRes.msg) : bkRes.msg, ok);
-        if(ok){ bkRun={state:'RUNNING', running:true}; bkPollStart(); }
-        else bkProbe(false);   // отказ «применение прошлого ещё идёт» — следить за ним: по концу зона откроется
-        bkRepaint();
-      }).catch(function(e){
-        // Ответа нет или он не JSON — неизвестно, дошёл ли файл: спрашиваем ход применения, он и скажет (разбор в bkPoll).
-        var form=!!(e && e.name==='SyntaxError');
-        bkRes={ok:false, net:true, form:form}; bkRun={state:'RUNNING', running:true, lost:true};
-        logLine('сбой импорта', false); showToast(form ? 'сбой импорта — роутер ответил не то' : 'сбой импорта — нет связи с роутером', false);
-        bkPollStart(); bkRepaint(); })
-        .then(function(){ setBusy(false); });
-    };
-    rd.onerror=function(){ logLine(f.name+': файл не прочитан', false); showToast('файл не прочитан', false); setBusy(false); };
-    rd.readAsDataURL(f);
+    tokSend(function(tok){
+      return {url:'/cgi-bin/backup?token='+encodeURIComponent(tok),type:'application/x-enodia-backup',body:f};
+    }).then(function(d){
+      var ok=!!(d && d.ok);
+      // В журнал — своя короткая строка там, где роутер отдал счёт: его длинная фраза (с «обновите страницу» и предупреждениями) — для
+      // роутеров старше разбора, а экран сам следит за ходом.
+      logLine((ok && d.restored!=null) ? 'восстановлено объектов: '+Number(d.restored) : ((d && d.msg)||(ok ? 'готово' : 'ошибка')), ok);
+      bkRes=ok ? {ok:true, n:(d.restored!=null ? Number(d.restored) : null), warns:(Array.isArray(d.warns) ? d.warns : null), msg:String(d.msg||''),
+                  cert:(d.cert==='live' || d.cert==='stored') ? d.cert : ''}
+               : {ok:false, msg:String((d && d.msg)||'ошибка')};
+      // Роутер старше хода применения фразы про ход не знает — тогда тост его словами, как раньше.
+      showToast(ok ? (d.restored!=null ? 'Настройки восстановлены — применяю правила…' : bkRes.msg) : bkRes.msg, ok);
+      if(ok){ bkRun={state:'RUNNING', running:true}; bkPollStart(); }
+      else bkProbe(false);   // отказ «применение прошлого ещё идёт» — следить за ним: по концу зона откроется
+      bkRepaint();
+    }).catch(function(e){
+      // Ответа нет или он не JSON — неизвестно, дошёл ли файл: спрашиваем ход применения, он и скажет (разбор в bkPoll).
+      var form=!!(e && e.name==='SyntaxError');
+      bkRes={ok:false, net:true, form:form}; bkRun={state:'RUNNING', running:true, lost:true};
+      logLine('сбой импорта', false); showToast(form ? 'сбой импорта — роутер ответил не то' : 'сбой импорта — нет связи с роутером', false);
+      bkPollStart(); bkRepaint(); })
+      .then(function(){ setBusy(false); });
   }
 
   // ---- карточка «ByeDPI (десинк)»: пресеты + raw-аргументы ciadpi (.byedpi-args) ----

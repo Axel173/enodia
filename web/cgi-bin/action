@@ -108,13 +108,20 @@ sub_tag_free() {
 # «gone from the subscription»; a key over a link made the link's servers Premium ones nobody could remove. A key is changed by
 # adding a new subscription (the old one removed), as the mockup says.
 sub_link_of() { [ -f "$ENODIA_STATE/.subs" ] && grep "^$1$(printf '\t')" "$ENODIA_STATE/.subs" 2>/dev/null | head -n 1 | cut -d"$(printf '\t')" -f2; }
+subs_owner_write() {
+	sh "$ENODIA_DIR/subs-import.sh" "$@" >/dev/null 2>&1; _spr=$?
+	[ "$_spr" != 2 ] || fail "уже идёт обновление подписок — повторите"
+	return "$_spr"
+}
 subs_put() {
+	if [ -f "$ENODIA_DIR/subs-import.sh" ]; then subs_owner_write registry-put "$@"; return $?; fi
 	_spt=$(printf '\t')
 	( umask 077; lbl_commit_out "$ENODIA_STATE/.subs" lbl_without "$ENODIA_STATE/.subs" "^$1$_spt" "$1$_spt$2$_spt$3" ) 2>/dev/null || return 1
 	chmod 600 "$ENODIA_STATE/.subs" 2>/dev/null; return 0
 }
 subs_drop() {
 	[ -f "$ENODIA_STATE/.subs" ] || return 0
+	if [ -f "$ENODIA_DIR/subs-import.sh" ]; then subs_owner_write registry-del "$1"; return $?; fi
 	( umask 077; lbl_commit_out "$ENODIA_STATE/.subs" lbl_without "$ENODIA_STATE/.subs" "^$1$(printf '\t')" ) 2>/dev/null
 	chmod 600 "$ENODIA_STATE/.subs" 2>/dev/null; return 0
 }
@@ -188,7 +195,27 @@ hold_switch() {
 	trap 'drop_switch' EXIT
 	trap 'exit 1' INT TERM HUP PIPE
 }
-drop_switch() { _rc=$?; [ "$SWITCH_LOCK_MINE" = 1 ] && rm -f "$SWITCH_LOCK" 2>/dev/null; return "$_rc"; }
+drop_switch() {
+	_rc=$?
+	if [ "$ROW_LOCK_MINE" = 1 ]; then sh "$ENODIA_DIR/subs-import.sh" row-unlock "$$" >/dev/null 2>&1; fi
+	[ "$SWITCH_LOCK_MINE" != 1 ] || rm -f "$SWITCH_LOCK" 2>/dev/null
+	return "$_rc"
+}
+# A list action holds the existing config writer admissions while it acts.
+row_lock() {
+	[ "$SWITCH_LOCK_MINE" = 1 ] || fail "идёт смена транспорта или сервера — повторите действие"
+	sh "$ENODIA_DIR/subs-import.sh" row-lock "$$" >/dev/null 2>&1 || fail "Идёт обновление подписок — повторите действие."
+	ROW_LOCK_MINE=1
+}
+row_expect() {
+	_row_rev=$(field rev)
+	[ -n "$_row_rev" ] || return 0  # Older name-only selection API.
+	row_lock
+	. "$ENODIA_DIR/label-lib.sh"
+	_row_path=$(lbl_cfg_path "$1" "$2") &&
+		lbl_cfg_matches "$ENODIA_STATE/$_row_path" "$_row_rev" ||
+		fail "Конфиг изменился. Обновите список серверов."
+}
 
 # ВЕДЁТ ЛИ НЕСУЩУЮ ПРЯМО СЕЙЧАС тик сторожа или heal — они ведут её БЕЗ лока смены (перебор резервов идёт прямо в плагине).
 carrier_busy_now() {
@@ -388,10 +415,7 @@ owner_relay() {
 # on a predictable name would turn our write into a write into its target (the cap_run class); dirs of killed CGIs (a dead pid
 # in the name) are swept here, as cap_run does with its own.
 in_dir() {
-	for _ind in /tmp/enodia-cgi-in.*; do
-		[ -e "$_ind" ] || [ -L "$_ind" ] || continue
-		[ -d "/proc/${_ind##*.}" ] || rm -rf "$_ind" 2>/dev/null
-	done
+	if command -v store_tmp_pid_sweep >/dev/null 2>&1; then store_tmp_pid_sweep /tmp/enodia-cgi-in; fi
 	IN_DIR="/tmp/enodia-cgi-in.$$"; rm -rf "$IN_DIR" 2>/dev/null
 	( umask 077; mkdir "$IN_DIR" ) 2>/dev/null || fail "не удалось создать временный каталог"
 	trap 'rm -rf "$IN_DIR"' EXIT
@@ -403,18 +427,6 @@ in_dir() {
 slot_ids_of() {
 	[ -s "$ENODIA_STATE/.slots" ] && [ -f "$ENODIA_DIR/slots.sh" ] || return 0
 	sh "$ENODIA_DIR/slots.sh" holders "$1" "$2" 2>/dev/null | grep -E '^[2-7](,[2-7])*$' | head -n 1
-}
-# AN EXIT NAMES THIS CONFIG — it is not deleted: the exit goes on by its working copy, cannot come up after a restart or a reboot,
-# and its screen says nothing of it. Every «Получить WARP» makes such a pair, so the trap was one click away (hardware walk
-# 12.10.2026: «Удалить конфиг» on WARP-2 under exit №5). The first holder is named; the road guard covers only an exit somebody rides.
-road_delete() {
-	[ ! -f "$ENODIA_DIR/road.sh" ] || sh "$ENODIA_DIR/road.sh" del "$1" "$2" >/dev/null 2>&1 ||
-		fail "не удалось снять дорогу к серверу $2 — повторите удаление"
-}
-
-held_refuse() {   # $1 = transport, $2 = config name
-	_dhx=$(slot_ids_of "$1" "$2"); _dhx=${_dhx%%,*}
-	[ -z "$_dhx" ] || fail "конфиг $2 держит выход №$_dhx — сначала удалите выход или смените его сервер"
 }
 # cfg_mv <kind> <old> <new> [display] — a config FILE moves to a new name together with everything that names it: the exits'
 # registry (slots.sh rename-config), the active mark of its family, the display name (cfg-names.sh: the typed one when given, else
@@ -447,6 +459,9 @@ cfg_mv() {
 		[ "$_msl" -gt 0 ] && sh "$ENODIA_DIR/slots.sh" rename-config "$_mk" "$_mn" "$_mo" >/dev/null 2>&1
 		echo "err не удалось переименовать файл"; return 1
 	fi
+	if [ -f "$ENODIA_DIR/server-checks-lib.sh" ]; then
+		( . "$ENODIA_DIR/server-checks-lib.sh"; sc_move "$_mk" "$_mo.$_me" "$_mn.$_me" ) >/dev/null 2>&1
+	fi
 	_mac=$(cat "$_ma" 2>/dev/null | tr -d ' \r\n'); [ "$_mac" = "$_mo" ] && echo "$_mn" > "$_ma"
 	# Показ едет за файлом: набранное имя — новым показом, иначе прежний показ переезжает на новое имя файла. Сбой записи показа
 	# файл назад не возвращает (переименование уже состоялось), но ответ обязан это сказать (ревью с.95: успех без оговорки
@@ -460,6 +475,10 @@ cfg_mv() {
 		for _rf in .failover-home .last.bak.name; do
 			_rv=$(cat "$ENODIA_STATE/$_rf" 2>/dev/null | tr -d ' \r\n'); [ "$_rv" = "$_mo" ] && echo "$_mn" > "$ENODIA_STATE/$_rf"
 		done
+	fi
+	if [ -f "$ENODIA_DIR/server-favs.sh" ]; then
+		sh "$ENODIA_DIR/server-favs.sh" mv "$_mk/$_mo" "$_mk/$_mn" >/dev/null 2>&1 ||
+			echo "warn не удалось перенести отметку избранного"
 	fi
 	if [ -f "$ENODIA_DIR/apply-bypass.sh" ]; then
 		sh "$ENODIA_DIR/apply-bypass.sh" endpoint-mv "$_mk/$_mo" "$_mk/$_mn" >/dev/null 2>&1 ||
@@ -563,6 +582,17 @@ spawn_bg() {  # spawn_bg <pidfile> <argv для /bin/sh…>:  spawn_bg /tmp/enod
 		# Фолбэк тоже пишет пидфайл: по нему «идёт ли» судят гарды кнопок (`upd-busy`, `packages.sh busy`), и без него на прошивке
 		# без start-stop-daemon они не срабатывали никогда (ревью шага 6c, круг 2).
 		( sh "$@" >/dev/null 2>&1 & echo $! > "$pf" )
+	fi
+}
+
+relay_pid_live() {
+	_rp=$(cat "$1/pid" 2>/dev/null)
+	case "$_rp" in ''|*[!0-9]*) return 1 ;; esac
+	if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then
+		. "$ENODIA_DIR/daemon-lib.sh"
+		pid_runs "$_rp" 'subs-import\.sh.*relay-job'
+	else
+		kill -0 "$_rp" 2>/dev/null
 	fi
 }
 
@@ -1055,6 +1085,29 @@ doh_edit() {
 	esac
 }
 
+check_xray() {
+	_check_cfg="$ENODIA_STATE/xray-configs/$2.json"
+	if [ -f "$ENODIA_DIR/server-checks-lib.sh" ]; then . "$ENODIA_DIR/server-checks-lib.sh"; fi
+	_check_rev=$(sc_rev "$_check_cfg" 2>/dev/null)
+	_check_req=$(field rev)
+	if [ -n "$_check_req" ] && [ "$_check_req" != "$_check_rev" ]; then
+		printf '{"ok":false,"stale":true,"msg":"Конфиг изменился. Обновите список серверов."}\n'
+		return
+	fi
+	_check_reply=$(XRAY_TEST_EXPECTED="$_check_rev" sh "$ENODIA_DIR/xray-test.sh" "$@")
+	case "$_check_reply" in
+		*'"busy":true'*|*'"nobin":true'*|*'"stale":true'*) ;;
+		'{"ok":'*'}')
+			_check_saved=
+			if ! _check_ts=$(sc_egress "$_check_cfg" "$_check_rev" "$_check_reply" "$1" 2>/dev/null); then
+				_check_saved=',"saved":false'
+			fi
+			_check_reply="${_check_reply%\}},\"rev\":\"$_check_rev\"${_check_ts:+,\"ts\":$_check_ts}$_check_saved}"
+			;;
+	esac
+	printf '%s\n' "$_check_reply"
+}
+
 case "$act" in
 	dns_scan_start)
 		[ -f "$ENODIA_DIR/dns-scan.sh" ] || fail "Проверяльщик DNS не установлен (обновите скрипты)"
@@ -1379,7 +1432,7 @@ case "$act" in
 		# Необязательный порт временного socks: панель шлёт разные (10812..10819) для ПАРАЛЛЕЛЬНОГО
 		# теста группы серверов подписки. Строго валидируем (порт идёт в sed/netstat скрипта).
 		port=$(field port); case "$port" in 1081[2-9]) : ;; *) port=10812 ;; esac
-		sh "$ENODIA_DIR/xray-test.sh" egress "$name" "$port"   # режим — явным словом: конфиг «speed» иначе читался как режим
+		check_xray egress "$name" "$port"
 		exit 0 ;;
 
 	# --- ТЕСТ СКОРОСТИ xray-конфига: качает известный размер через socks конфига → Мбит/с.
@@ -1393,7 +1446,7 @@ case "$act" in
 		port=$(field port); case "$port" in 1081[2-9]) : ;; *) port=10812 ;; esac
 		streams=$(field streams); case "$streams" in ''|*[!0-9]*) streams=4 ;; esac
 		dur=$(field dur); case "$dur" in ''|*[!0-9]*) dur=12 ;; esac
-		sh "$ENODIA_DIR/xray-test.sh" speed "$name" "$port" "$streams" "$dur"
+		check_xray speed "$name" "$port" "$streams" "$dur"
 		exit 0 ;;
 
 	# --- Свои имена (оверрайд домен→IP): dns-hosts.sh валидирует домен/IP и пишет живой conf + reload.
@@ -1851,34 +1904,66 @@ case "$act" in
 		tag=$(field tag)
 		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
 		grep -q "^$tag$(printf '\t')" "$ENODIA_STATE/.subs" 2>/dev/null || fail "подписка не найдена"
+		rev=$(field rev)
+		[ "${#rev}" -eq 64 ] && ! printf '%s' "$rev" | grep -q '[^0-9a-f]' || fail "Скачайте подписку заново."
+		sh "$ENODIA_DIR/subs-import.sh" workspace-sweep >/dev/null 2>&1 </dev/null
 		in_dir
 		# Stream provider bytes into the importer input file, outside the shell's form buffer.
 		head -c "$relay_len" > "$IN_DIR/body" || fail "не удалось записать"
 		[ "$(wc -c < "$IN_DIR/body")" -eq "$relay_len" ] || fail "подписка недоступна или пустая"
-		cap_run subs-import.sh import-body "$tag" "$IN_DIR/body"; rc=$?
+		_relay=$(mktemp -d /tmp/enodia-subs-relay.XXXXXX 2>/dev/null) || fail "не удалось создать временный каталог"
+		trap 'rm -rf "$IN_DIR" "$_relay"' EXIT
+		printf '%s\n' "$$" > "$_relay/launch" || fail "не удалось подготовить обновление"
+		mv "$IN_DIR/body" "$_relay/body" || fail "не удалось записать"
+		spawn_bg "$_relay/pid" "$ENODIA_DIR/subs-import.sh" relay-job "$tag" "$_relay" "$rev" </dev/null
+		[ -s "$_relay/pid" ] || fail "не удалось запустить обновление"
+		trap 'rm -rf "$IN_DIR"' EXIT  # The worker owns the body now. Retain its terminal reply for repeated polls.
+		rm -f "$_relay/launch"
+		printf '{"ok":true,"job":"%s"}\n' "${_relay##*.}"
+		exit 0 ;;
+	import_sub_status)
+		job=$(field job)
+		case "$job" in *[!A-Za-z0-9]*) fail "не удалось найти обновление подписки" ;; esac
+		[ "${#job}" -eq 6 ] || fail "не удалось найти обновление подписки"
+		_relay="/tmp/enodia-subs-relay.$job"
+		[ -d "$_relay" ] && [ ! -L "$_relay" ] || fail "не удалось найти обновление подписки"
+		rc=$(cat "$_relay/exit" 2>/dev/null)
+		if [ -z "$rc" ]; then
+			if relay_pid_live "$_relay"; then
+				_read=$(cat "$_relay/progress" 2>/dev/null)
+				case "$_read" in ''|*[!0-9]*) _read=0 ;; esac
+				printf '{"ok":true,"running":true,"read":%s}\n' "$_read"
+				exit 0
+			fi
+			# The worker may have published its result just before the PID check.
+			rc=$(cat "$_relay/exit" 2>/dev/null)
+		fi
+		case "$rc" in ''|*[!0-9]*) fail "обновление подписки прервано" ;; esac
 		. "$ENODIA_DIR/xray-profile-lib.sh"
-		_result=$(printf '%s\n' "$CAP_OUT" | grep '^relay-result' | tail -n1)
+		_result=$(grep '^relay-result' "$_relay/result" 2>/dev/null | tail -n1)
 		_msg=$(printf '%s\n' "$_result" | cut -f3- | jtxt 1000)
 		_geo=false; [ "$(printf '%s\n' "$_result" | cut -f2)" != 1 ] || _geo=true
-		_rows=$(printf '%s\n' "$CAP_OUT" | sed -n 's/^  профиль \([0-9][0-9]* пропущен: .*\)$/Профиль Xray №\1/p')
-		printf '{"ok":%s,"code":%s,"geo_notice":%s,"msg":"%s","refused":' \
+		_rows=$(sed -n 's/^  профиль \([0-9][0-9]* пропущен: .*\)$/Профиль Xray №\1/p' "$_relay/result" | head -n 30)
+		printf '{"ok":%s,"running":false,"code":%s,"geo_notice":%s,"msg":"%s","refused":' \
 			"$([ "$rc" = 0 ] && echo true || echo false)" "$rc" "$_geo" "${_msg:-не удалось запустить обновление}"
 		xp_quote "$_rows"
 		printf '}\n'; exit 0 ;;
 
 	subs_update_now)
-		[ -f "$ENODIA_DIR/subs-update.sh" ] || fail "subs-update.sh не установлен (обновите скрипты роутера)"
+		[ -f "$ENODIA_DIR/subs-update.sh" ] && [ -f "$ENODIA_DIR/subs-import.sh" ] || fail "subs-update.sh не установлен (обновите скрипты роутера)"
 		[ -s "$ENODIA_STATE/.subs" ] || fail "подписок нет — добавьте подписку в списке серверов"
 		tag=$(field tag)
 		if [ -n "$tag" ]; then
 			echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
 			TAB=$(printf '\t')
 			grep -q "^$tag$TAB" "$ENODIA_STATE/.subs" 2>/dev/null || fail "подписка не найдена"
-			spawn_bg /tmp/enodia-subs-update-cgi.pid "$ENODIA_DIR/subs-update.sh" update "$tag"
-		else
-			spawn_bg /tmp/enodia-subs-update-cgi.pid "$ENODIA_DIR/subs-update.sh" update
 		fi
-		printf '{"ok":true,"code":0,"msg":"обновляю подписки на роутере — результат появится через минуту"}\n'; exit 0 ;;
+		sh "$ENODIA_DIR/subs-import.sh" workspace-sweep >/dev/null 2>&1 </dev/null
+		_refresh=$(mktemp -d /tmp/enodia-subs-refresh.XXXXXX 2>/dev/null) || fail "не удалось создать временный каталог"
+		job=${_refresh##*.}
+		spawn_bg "$_refresh/pid" "$ENODIA_DIR/subs-import.sh" refresh-job "$tag" "$job" </dev/null
+		[ -s "$_refresh/pid" ] || fail "не удалось запустить обновление"
+		printf '{"ok":true,"code":0,"job":"%s"}\n' "$job"; exit 0 ;;
 
 	# --- Раскладка панели → .panel-layout: порядок и свёрнутость карточек «Обзора», ПОРЯДОК
 	# подписок, а с шага 2i редизайна ещё и СОСТАВ (`cardoff`) с ШИРИНОЙ (`cardw`) карточек.
@@ -1989,7 +2074,7 @@ EOF
 		elif [ -n "$bsl" ]; then
 			# slot-reload перезапускает ТОЛЬКО ciadpi выхода (hev/xtun/маршрут живы); выход выключен
 			# → плагин сам ответит no-op, стратегия применится при включении.
-			sh "$ENODIA_DIR/transport-byedpi.sh" slot-reload "$bsl" >/dev/null 2>&1 && msg="$msg, ciadpi выхода №$bsl перезапущен" || msg="$msg, но перезапуск ciadpi выхода не удался (см. журнал)"
+			sh "$ENODIA_DIR/transport.sh" slot-reload "$bsl" >/dev/null 2>&1 && msg="$msg, ciadpi выхода №$bsl перезапущен" || msg="$msg, но перезапуск ciadpi выхода не удался (см. журнал)"
 		else
 			cur=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
 			# VPN выключен тумблером — ByeDPI не несёт, и перезапускать нечего: плагин при флаге и сам откажет (daemon-lib.sh
@@ -2022,6 +2107,7 @@ EOF
 		# смены поверх друг друга, а тик сторожа — свою лестницу поверх ручной (замер BE7000 04.10.2026: смена AWG-сервера из
 		# панели шла без лока вовсе). Раскладка конфигов — под тем же: она пишет те же файлы, что смена.
 		hold_switch
+		row_expect awg "$name"
 		_ct=$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')
 		if { [ -n "$_ct" ] && [ "$_ct" != awg ]; } || vpn_is_off; then
 			cap_run switch-vpn.sh stage "$name"; code=$?; raw=$CAP_OUT
@@ -2055,6 +2141,7 @@ EOF
 		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя"
 		[ -f "$ENODIA_STATE/xray-configs/$name.json" ] || fail "нет xray-конфига $name"
 		hold_switch    # выбор сервера побеждает авто-failover (иначе цикл cmd_failover затирал .xray-active)
+		row_expect xray "$name"
 		cp "$ENODIA_STATE/xray-configs/$name.json" "$ENODIA_STATE/xray.json" 2>/dev/null \
 			&& chmod 600 "$ENODIA_STATE/xray.json" 2>/dev/null \
 			&& echo "$name" > "$ENODIA_STATE/.xray-active" || fail "не удалось активировать $name"
@@ -2096,6 +2183,7 @@ EOF
 		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя"
 		[ -f "$ENODIA_STATE/hy2-configs/$name.yaml" ] || fail "нет hy2-конфига $name"
 		hold_switch    # выбор сервера побеждает авто-failover (зеркало set_xray_server)
+		row_expect hy2 "$name"
 		cp "$ENODIA_STATE/hy2-configs/$name.yaml" "$ENODIA_STATE/hysteria.yaml" 2>/dev/null \
 			&& chmod 600 "$ENODIA_STATE/hysteria.yaml" 2>/dev/null \
 			&& echo "$name" > "$ENODIA_STATE/.hy2-active" || fail "не удалось активировать $name"
@@ -2121,55 +2209,27 @@ EOF
 		fi
 		exit 0 ;;
 
-	# --- Удалить конфиг (зеркало Action-Delete*Config в ПК-меню). Гард: нельзя удалить
-	# конфиг, который СЕЙЧАС несёт трафик. awg: .active особый (его читают switch/heal при
-	# подъёме несущей) → активный не удаляем вовсе. xray/hy2: блок лишь когда активен И этот
-	# транспорт включён; при удалении активного чистим и маркер .*-active. Имя — strict-regex
-	# (того же класса, что в set_*_server), `/` исключён → traversal невозможен.
-	del_server)
+	# Do not remove the carrying config. The AWG owner also removes the staged working copies.
+	set_server_fav)
+		[ -f "$ENODIA_DIR/server-favs.sh" ] || fail "избранное недоступно — обновите роутер"
+		case "$(field on)" in 0) _fav_verb=del ;; 1) _fav_verb=set ;; *) fail "неизвестное действие" ;; esac
+		[ -n "$(field rev)" ] || fail "Конфиг изменился или его версия неизвестна. Обновите список серверов."
+		hold_switch
+		row_expect "$(field kind)" "$(field name)"
+		cap_run server-favs.sh "$_fav_verb" "$(field kind)/$(field name)" || fail "$(printf '%s' "$CAP_OUT" | jesc 200)"
+		printf '{"ok":true,"code":0}\n'; exit 0 ;;
+	del_server|del_xray_server|del_hy2_server)
 		name=$(field name)
-		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя сервера"
-		[ -f "$ENODIA_STATE/configs/$name.conf" ] || fail "нет конфига $name"
-		active=$(cat "$ENODIA_STATE/.active" 2>/dev/null | tr -d ' \r\n')
-		[ "$name" = "$active" ] && fail "нельзя удалить активный конфиг ($name) — сначала переключитесь на другой"
-		# Конфиг служит ДОРОГОЙ (road.sh: на нём выход, по которому едут серверы) — удалить его значило бы снять дорогу у пассажиров молча.
-		if [ -f "$ENODIA_DIR/road.sh" ]; then
-			_dsv=$(sh "$ENODIA_DIR/road.sh" serves awg "$name" 2>/dev/null | tr -cd '0-9')
-			[ -n "$_dsv" ] && fail "конфиг $name служит дорогой (выход №$_dsv) — сначала переключите дорогу его пассажиров на «напрямую»"
-		fi
-		held_refuse awg "$name"
-		road_delete awg "$name"
-		rm -f "$ENODIA_STATE/configs/$name.conf" || fail "не удалось удалить $name"
-		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del awg "$name" >/dev/null 2>&1   # настоящее имя — вместе с файлом
-		[ -f "$ENODIA_DIR/warp.sh" ] && sh "$ENODIA_DIR/warp.sh" prune give >/dev/null 2>&1                # a WARP config takes its registration with it: the record here, the registration at Cloudflare (in the background)
-		printf '{"ok":true,"code":0,"msg":"awg-конфиг %s удалён"}\n' "$name"
+		case "$name" in ''|*[!A-Za-z0-9_.-]*) fail "недопустимое имя сервера" ;; esac
+		case "$act" in del_server) kind=awg ;; del_xray_server) kind=xray ;; del_hy2_server) kind=hy2 ;; esac
+		hold_switch
+		[ "$SWITCH_LOCK_MINE" = 1 ] && ! carrier_busy_now || fail "идёт смена транспорта или сервера — повторите удаление"
+		_delete_owner=road.sh
+		if [ ! -f "$ENODIA_DIR/road.sh" ] && [ ! -s "$ENODIA_STATE/.cfg-via" ]; then _delete_owner=slots.sh; fi
+		cap_run "$_delete_owner" delete-config "$kind" "$name" "$(field rev)" || fail "$(printf '%s' "$CAP_OUT" | tail -n 1 | jesc 300)"
+		_delete_msg=$(printf '%s' "${CAP_OUT:-$kind-конфиг $name удалён}" | jesc 600)
+		printf '{"ok":true,"code":0,"msg":"%s"}\n' "$_delete_msg"
 		exit 0 ;;
-	del_xray_server)
-		name=$(field name)
-		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя"
-		[ -f "$ENODIA_STATE/xray-configs/$name.json" ] || fail "нет xray-конфига $name"
-		active=$(cat "$ENODIA_STATE/.xray-active" 2>/dev/null | tr -d ' \r\n')
-		{ [ "$name" = "$active" ] && [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = xray ]; } \
-			&& fail "это активный конфиг при включённом Xray — сначала переключитесь на другой транспорт"
-		held_refuse xray "$name"
-		road_delete xray "$name"
-		rm -f "$ENODIA_STATE/xray-configs/$name.json" || fail "не удалось удалить конфиг"
-		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del xray "$name" >/dev/null 2>&1
-		[ "$name" = "$active" ] && rm -f "$ENODIA_STATE/.xray-active"
-		printf '{"ok":true,"code":0,"msg":"xray-конфиг %s удалён"}\n' "$name"; exit 0 ;;
-	del_hy2_server)
-		name=$(field name)
-		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя"
-		[ -f "$ENODIA_STATE/hy2-configs/$name.yaml" ] || fail "нет hy2-конфига $name"
-		active=$(cat "$ENODIA_STATE/.hy2-active" 2>/dev/null | tr -d ' \r\n')
-		{ [ "$name" = "$active" ] && [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = hy2 ]; } \
-			&& fail "это активный конфиг при включённой Hysteria2 — сначала переключитесь на другой транспорт"
-		held_refuse hy2 "$name"
-		road_delete hy2 "$name"
-		rm -f "$ENODIA_STATE/hy2-configs/$name.yaml" || fail "не удалось удалить конфиг"
-		[ -f "$ENODIA_DIR/cfg-names.sh" ] && sh "$ENODIA_DIR/cfg-names.sh" del hy2 "$name" >/dev/null 2>&1
-		[ "$name" = "$active" ] && rm -f "$ENODIA_STATE/.hy2-active"
-		printf '{"ok":true,"code":0,"msg":"hy2-конфиг %s удалён"}\n' "$name"; exit 0 ;;
 
 	# rename_config: ПЕРЕИМЕНОВАТЬ конфиг сервера (экран сервера в панели). Имя живёт не только в имени файла: активный
 	# (.active/.xray-active/.hy2-active), «дом» резерва AWG (.failover-home), откат смены (.last.bak.name) и выходы (.slots —
@@ -2332,7 +2392,18 @@ EOF
 			hy2)  cfg="$ENODIA_STATE/hy2-configs/$name.yaml";  live="$ENODIA_STATE/hysteria.yaml"; act="$ENODIA_STATE/.hy2-active";  tsh="transport-hy2.sh";  tname=hy2 ;;
 			*) fail "неизвестный тип (xray/hy2)" ;;
 		esac
+		# The lock comes BEFORE the write: «is it active / whose carrier» is read under it (a tab or the watchdog may have picked
+		# another server meanwhile — a copy over their working one would undo their choice; Xray and Hysteria2 share one socks and
+		# one hev), and a delete or a check of the same name cannot interleave. Refused ⇒ nothing was written, so say «repeat».
+		hold_switch
+		[ "$SWITCH_LOCK_MINE" = 1 ] || fail "идёт смена транспорта или сервера — повторите сохранение"
 		[ -f "$cfg" ] || fail "нет конфига $name (сначала загрузите)"
+		_expected_rev=$(field expected_rev)
+		if [ "$kind" = xray ] && [ -n "$_expected_rev" ]; then
+			row_lock
+			. "$ENODIA_DIR/xray-profile-lib.sh"
+			[ "$(xp_reality_rev "$cfg")" = "$_expected_rev" ] || fail "Конфиг изменился — проверьте параметры сервера"
+		fi
 		content=$(urldecode "$(field content)" | base64 -d 2>/dev/null | tr -d '\r')
 		[ -n "$content" ] || fail "пустой или битый конфиг (base64)"
 		_draft="${cfg%/*}/.enodia-edit.$$"
@@ -2351,22 +2422,8 @@ EOF
 		else
 			grep -qE '^[[:space:]]*server:' "$_draft" || { rm -f "$_draft"; fail "нет server: в YAML"; }
 		fi
-		_expected_rev=$(field expected_rev)
-		if [ "$kind" = xray ] && [ -n "$_expected_rev" ] && [ "$(xp_reality_rev "$cfg")" != "$_expected_rev" ]; then
-			rm -f "$_saved"; fail "Конфиг изменился — проверьте параметры сервера"
-		fi
 		mv "$_saved" "$cfg" && chmod 600 "$cfg" || { rm -f "$_saved"; fail "не удалось сохранить"; }
 		active=$(cat "$act" 2>/dev/null | tr -d ' \r\n')
-		if [ "$name" = "$active" ]; then
-			# Рабочая копия и перезапуск — ПОД ЛОКОМ СМЕНЫ, а «активен ли конфиг» и «чья несущая» перечитываем уже ПОД НИМ (ревью с.97):
-			# пока ждали, вкладка или сторож могли выбрать другой сервер или транспорт, и копия поверх их рабочей, как и down/up несущей,
-			# которую ведёт уже не этот транспорт, перебили бы чужой выбор (у Xray и Hysteria2 один socks и один hev). Между down и up
-			# несущей НЕТ: тик сторожа в это окно читает «health провалился» и уводит транспорт в cross-failover — правка конфига
-			# активного сервера сама себя отменяла бы. Конфиг УЖЕ записан: отказ лока обязан сказать это, а не «не вышло» (ревью с.96).
-			HS_FAIL_MSG="Конфиг $name сохранён, но не применён: идёт смена транспорта или сервера — сохраните его ещё раз через минуту"
-			hold_switch
-			active=$(cat "$act" 2>/dev/null | tr -d ' \r\n')
-		fi
 		_msg="Конфиг $name сохранён"; rc=0; _ok=true
 		if [ "$name" = "$active" ]; then
 			cp "$cfg" "$live" 2>/dev/null && chmod 600 "$live"
@@ -2410,6 +2467,8 @@ EOF
 			xray) [ -f "$ENODIA_DIR/xray-profile-lib.sh" ] || printf '%s' "$content" | grep -q '"outbounds"' || fail "не похоже на xray JSON (нет outbounds)" ;;
 			hy2)  printf '%s' "$content" | grep -qE '^[[:space:]]*server:' || fail "не похоже на hy2 YAML (нет server:)" ;;
 		esac
+		hold_switch
+		[ "$SWITCH_LOCK_MINE" = 1 ] || fail "идёт смена транспорта или сервера — повторите загрузку"
 		mkdir -p "$dir" 2>/dev/null
 		dst="$dir/$name.$ext"
 		# Черновик — СВОЙ у процесса и не под маской каталога (`*.conf` и т.п.): две вкладки, загружающие разом, не пишут друг другу.
@@ -2629,15 +2688,18 @@ EOF
 		TAB=$(printf '\t')
 		url=$(grep "^$tag$TAB" "$ENODIA_STATE/.subs" 2>/dev/null | head -1 | cut -d"$TAB" -f2)
 		echo "$url" | grep -qE '^https?://[^[:space:]]+$' || fail "подписка не найдена на роутере"
+		rev=$(sub_url_revision "$url")
 		# Одна копия закачки: тело тянет subs-update.sh (тот же путь, которым ходит cron) —
 		# иначе панельный и headless-путь разъехались бы по гарду/gzip-детекту. Ниже — прежний
 		# инлайн как фолбэк на случай дрейфа деплоя (скрипт ещё не залит).
 		# Гард `-f`, а не `-x`: зовём через `sh`, и снятый бит выполнения ТИХО уводил бы панель
 		# на фолбэк-путь вместо общего (класс Б7-2).
 		if [ -f "$ENODIA_DIR/subs-update.sh" ]; then
-			data=$(sh "$ENODIA_DIR/subs-update.sh" fetch "$tag" 2>/dev/null)
+			data=$(sh "$ENODIA_DIR/subs-update.sh" fetch "$tag" "$rev" 2>/dev/null); _fetched=$?
+			[ "$_fetched" != 3 ] || fail "прочитано 0, остальное не дошло — прежние серверы сохранены"
+			[ "$_fetched" != 4 ] || fail "Ссылка подписки изменилась — скачайте подписку заново."
 			[ -n "$data" ] || fail "подписка недоступна или пустая"
-			printf '{"ok":true,"code":0,"data":"%s"}\n' "$data"; exit 0
+			printf '{"ok":true,"code":0,"rev":"%s","data":"%s"}\n' "$rev" "$data"; exit 0
 		fi
 		sub_host_public "$url" || fail "URL подписки ведёт на приватный/локальный адрес — отказ (SSRF)"
 		# Дрейф деплоя (subs-update.sh ещё не залит) — тянем тем же ОБЩИМ слоем. Свой curl здесь
@@ -2646,10 +2708,12 @@ EOF
 		tmp="/tmp/enodia-sub.$$"
 		# …as the subscription's own app (subs-lib.sh sub_fetch_tag): a Happ-only provider refused the default client here, with no
 		# word of why (review s.171 r3). An older library without it — the plain request, as before.
-		if command -v sub_fetch_tag >/dev/null 2>&1; then sub_fetch_tag "$tag" "$url" "$tmp"; else sub_fetch "$url" "$tmp"; fi \
-			|| { rm -f "$tmp"; fail "подписка недоступна или пустая"; }
+		if command -v sub_fetch_tag >/dev/null 2>&1; then sub_fetch_tag "$tag" "$url" "$tmp"; else sub_fetch "$url" "$tmp"; fi
+		_fetched=$?
+		[ "${SUB_FETCH_PARTIAL:-0}" = 0 ] || { rm -f "$tmp"; fail "прочитано 0, остальное не дошло — прежние серверы сохранены"; }
+		[ "$_fetched" = 0 ] || { rm -f "$tmp"; fail "подписка недоступна или пустая"; }
 		data=$(base64 < "$tmp" | tr -d '\r\n'); rm -f "$tmp"
-		printf '{"ok":true,"code":0,"data":"%s"}\n' "$data"; exit 0 ;;
+		printf '{"ok":true,"code":0,"rev":"%s","data":"%s"}\n' "$rev" "$data"; exit 0 ;;
 	remove_sub)
 		tag=$(field tag)
 		echo "$tag" | grep -qE '^[a-z0-9-]{1,16}$' || fail "плохая метка подписки"
@@ -2690,7 +2754,7 @@ EOF
 		done
 		[ "$_kn" -le 8 ] || kept="$kept и ещё $((_kn-8))"
 		[ -z "$_kst" ] || fail "подписка удалена не до конца: занятые серверы не удалось переименовать ($(printf '%s' "$_kst" | jesc 200)) — она осталась без ссылки; повторите удаление"
-		subs_drop "$tag"
+		subs_drop "$tag" || fail "не удалось сохранить подписку — нет места?"
 		# …и счётчики провайдера (.sub-info, владелец — subs-lib.sh): строка ключуется ТЕГОМ, а
 		# теги люди заводят повторно — осиротевшая запись отдала бы новой подписке чужой остаток.
 		sub_info_drop "$tag"
@@ -2715,18 +2779,12 @@ EOF
 		# последнюю строку без \n (замер: 3 строки → 2 итерации) — то есть ПОСЛЕДНИЙ сервер
 		# подписки терял своё настоящее имя. `awk '{print}'` дописывает перевод строки любому
 		# последнему полю и ничего не меняет, если он уже есть.
-		lbl_commit_out "$NM" sub_names_with "$tag" "$names" 2>/dev/null || fail "не удалось сохранить имена — нет места?"
+		if [ -f "$ENODIA_DIR/subs-import.sh" ]; then
+			subs_owner_write names-replace "$tag" "$names" || fail "не удалось сохранить имена — нет места?"
+		else
+			lbl_commit_out "$NM" sub_names_with "$tag" "$names" 2>/dev/null || fail "не удалось сохранить имена — нет места?"
+		fi
 		printf '{"ok":true,"code":0,"msg":"имена сохранены"}\n'; exit 0 ;;
-	# save_checks: кэш проверок серверов (пинг/скорость). Панель шлёт ВЕСЬ кэш (data=b64 TSV
-	# key⇥st⇥ms⇥method⇥cdn⇥mbps⇥kind⇥ts[⇥tms⇥via⇥dms⇥chb[⇥ncmp]]). Полная замена — это хинты производительности, не критич-
-	# ные данные (last-writer-wins). Валидируем построчно (ключ + ≥8 полей), кап 2000 строк; значения проверяет читатель (data).
-	save_checks)
-		raw=$(urldecode "$(field data)" | base64 -d 2>/dev/null)
-		TAB=$(printf '\t')
-		F="$ENODIA_STATE/.srv-checks"
-		printf '%s\n' "$raw" | lbl_commit_out "$F" awk -F"$TAB" 'NR<=2000 && NF>=8 && $1 ~ /^(awg|xray|hy2)\|[A-Za-z0-9._-]+$/{print}' 2>/dev/null
-		chmod 600 "$F" 2>/dev/null
-		printf '{"ok":true,"code":0}\n'; exit 0 ;;
 
 	# --- Устройства: режим конкретного IP (split / bypass / force / desync) -----------
 	# Каждый режим взаимоисключающий: перед установкой нового снимаем
@@ -2966,14 +3024,16 @@ EOF
 		tpt=$(field transport); case "$tpt" in awg|xray|hy2|byedpi|zapret) ;; *) fail "неизвестный транспорт" ;; esac
 		cfg=$(field config); [ -n "$cfg" ] || cfg='-'
 		case "$cfg" in '-') ;; *[!A-Za-z0-9._-]*) fail "битое имя конфига" ;; esac
-		fb=$(field fallback); case "$fb" in main|direct) ;; *) fb=main ;; esac
-		run slots.sh add "$name" "$tpt" "$cfg" "$fb" ;;
-	slot_toggle|slot_del|slot_set)
+		fb=$(field fallback)
+		keep=$(field keep_when_off); case "$keep" in ''|0|1) ;; *) fail "нужно 0|1" ;; esac
+		run slots.sh add "$name" "$tpt" "$cfg" "$fb" "$keep" ;;
+	slot_toggle|slot_del|slot_set|slot_retry)
 		sid=$(field id); case "$sid" in [2-7]) ;; *) fail "битый id выхода" ;; esac
 		case "$act" in
 			slot_toggle) en=$(field enabled); case "$en" in 0|1) ;; *) fail "нужно 0|1" ;; esac
 			             if [ "$en" = 1 ]; then run slots.sh enable "$sid"; else run slots.sh disable "$sid"; fi ;;
 			slot_del)    run slots.sh del "$sid" ;;
+			slot_retry)  run slots.sh retry "$sid" ;;
 			slot_set)    fld=$(field field); val=$(urldecode "$(field value)")
 			             case "$fld" in
 			                 name)      [ -n "$val" ] || fail "нужно имя"; run slots.sh set "$sid" name "$val" ;;
@@ -2981,9 +3041,10 @@ EOF
 			                            run slots.sh set "$sid" transport "$val" ;;
 			                 config)    [ -n "$val" ] || val='-'; case "$val" in '-') ;; *[!A-Za-z0-9._-]*) fail "битое имя конфига" ;; esac
 			                            run slots.sh set "$sid" config "$val" ;;
-			                 fallback)  case "$val" in main|direct) ;; *) fail "fallback: main|direct" ;; esac
-			                            run slots.sh set "$sid" fallback "$val" ;;
-			                 *) fail "поле: name|transport|config|fallback" ;;
+			                 fallback)  run slots.sh set "$sid" fallback "$val" ;;
+			                 keep_when_off) case "$val" in 0|1) ;; *) fail "нужно 0|1" ;; esac
+			                                run slots.sh set "$sid" keep_when_off "$val" ;;
+			                 *) fail "поле: name|transport|config|fallback|keep_when_off" ;;
 			             esac ;;
 		esac ;;
 	# road_set: config's packets to its server go through exit <id> (empty = direct). Проверки
@@ -3002,7 +3063,9 @@ EOF
 		# Лок смены — как у смены сервера: снятие дороги переподнимает несущую (`transport.sh restart`), а он без лока шёл бы поверх
 		# лестницы сторожа (ревью с.118, круг 2; класс C127).
 		hold_switch
-		run road.sh set "$kind" "$name" "$rid" ;;
+		rev=$(field rev)
+		[ -z "$rev" ] || [ "$SWITCH_LOCK_MINE" = 1 ] || fail "идёт смена транспорта или сервера — повторите действие"
+		run road.sh set "$kind" "$name" "$rid" ${rev:+"$rev"} ;;
 	# chebur_*: ВТОРОЕ МНЕНИЕ О БЛОКИРОВКЕ (cheburcheck.sh) — переключатели, запуск проверки, её ответ. Opt-in, по умолчанию выкл:
 	# адрес сервера уходит стороннему российскому сервису, а панель ставят не только в России (решение человека 10.10.2026).
 	# Проверка — фоном у владельца (до ~80 с потока), панель опрашивает chebur_get.
@@ -3027,7 +3090,8 @@ EOF
 	warp_get)
 		rider=$(urldecode "$(field rider)")
 		[ -z "$rider" ] || echo "$rider" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя конфига"
-		warp_job; run warp.sh get "$rider" ;;
+		rev=$(field rev)
+		warp_job; run warp.sh get "$rider" ${rev:+"$rev"} ;;
 	warp_status)
 		owner_relay warp.sh status ;;
 	# What is known about every WARP config (the record of its registration — warp.sh info); the token stays on the router.
@@ -3368,6 +3432,10 @@ EOF
 		[ -n "$dout" ] || fail "чистка не отработала"
 		printf '%s\n' "$dout"; exit 0 ;;
 
+	disk_stocklogs)
+		mode=$(field mode)
+		case "$mode" in stock|compact|ram) run clean.sh stocklogs-set "$mode" ;; *) fail "Выберите режим системного лога." ;; esac ;;
+
 	# --- THE STOCK SETTINGS BACKUP (stock-backup.sh — the one owner of the stock flag and its copy). Through owner_relay: «off»
 	# is flag → removal → marker, and a closed tab (uhttpd's SIGKILL) must not cut it halfway; the owner answers one JSON line,
 	# a refusal by its code (`why`), which the panel words.
@@ -3590,36 +3658,36 @@ EOF
 		[ -f "$ENODIA_DIR/transport-byedpi.sh" ] || fail "transport-byedpi.sh не установлен (обновите панель)"
 		bsw=$(field slot); case "$bsw" in [2-7]) ;; *) bsw="" ;; esac
 		if [ -n "$bsw" ]; then
-			sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | grep -q "^$bsw	byedpi	" \
+			sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null | grep -q "^$bsw	byedpi	" \
 				|| fail "браузер-свип выхода возможен только когда выход ВКЛЮЧЁН"
 		else
 			[ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')" = byedpi ] || fail "браузер-свип возможен только когда ByeDPI несёт трафик — включите ByeDPI вверху панели"
 		fi
 		# VPN выключен тумблером — ByeDPI не несёт ни основным транспортом, ни выходом (их сняло «Отключить VPN»; в реестре лишь
 		# намерение), а плагин при флаге ciadpi не поднимет: свип мерил бы пустоту.
-		vpn_is_off && fail "браузер-свип возможен только когда ByeDPI несёт трафик — VPN сейчас выключен тумблером"
-		sh "$ENODIA_DIR/transport-byedpi.sh" sweep-begin "$bsw" >/dev/null 2>&1 \
+		[ -z "$bsw" ] && vpn_is_off && fail "браузер-свип возможен только когда ByeDPI несёт трафик — VPN сейчас выключен тумблером"
+		sh "$ENODIA_DIR/transport.sh" byedpi-sweep sweep-begin "$bsw" >/dev/null 2>&1 \
 			&& printf '{"ok":true,"code":0,"msg":"свип начат"}\n' || fail "не удалось начать свип"
 		exit 0 ;;
 	byedpi_sweep_apply)
 		bsw=$(field slot); case "$bsw" in [2-7]) ;; *) bsw="" ;; esac
 		if [ -n "$bsw" ]; then
-			sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | grep -q "^$bsw	byedpi	" || fail "выход выключен — свип прерван"
+			sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null | grep -q "^$bsw	byedpi	" || fail "выход выключен — свип прерван"
 		else
 			[ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null | tr -d ' \r\n')" = byedpi ] || fail "ByeDPI не активен — свип прерван"
 		fi
-		vpn_is_off && fail "VPN выключен — свип прерван"
+		[ -z "$bsw" ] && vpn_is_off && fail "VPN выключен — свип прерван"
 		args=$(urldecode "$(field args)")
 		args=$(printf '%s' "$args" | tr '\r\n' '  ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\{1,\}/ /g')
 		if [ -n "$args" ]; then
 			echo "$args" | grep -qE '^[A-Za-z0-9 +,.:/=_-]+$' || fail "недопустимые символы стратегии"
 		fi
-		if sh "$ENODIA_DIR/transport-byedpi.sh" sweep-apply "$args" "$bsw" >/dev/null 2>&1; then up=true; else up=false; fi
+		if sh "$ENODIA_DIR/transport.sh" byedpi-sweep sweep-apply "$bsw" "$args" >/dev/null 2>&1; then up=true; else up=false; fi
 		printf '{"ok":true,"code":0,"up":%s}\n' "$up"; exit 0 ;;
 	byedpi_sweep_end)
 		[ -f "$ENODIA_DIR/transport-byedpi.sh" ] || fail "transport-byedpi.sh не установлен"
 		bsw=$(field slot); case "$bsw" in [2-7]) ;; *) bsw="" ;; esac
-		sh "$ENODIA_DIR/transport-byedpi.sh" sweep-end "$bsw" >/dev/null 2>&1
+		sh "$ENODIA_DIR/transport.sh" byedpi-sweep sweep-end "$bsw" >/dev/null 2>&1
 		printf '{"ok":true,"code":0,"msg":"свип завершён, исходная стратегия восстановлена"}\n'; exit 0 ;;
 
 	# --- Zapret (десинк-direct, nfqws/NFQUEUE) — 5-й ТРАНСПОРТ (взаимоисключающий с туннелем). -----

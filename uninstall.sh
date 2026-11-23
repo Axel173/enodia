@@ -382,8 +382,8 @@ sweep_run() {        # $1 = count|del ; $2 = keep → цепочки ПАНЕЛ�
     # …and the guests' DNS DNAT of awg_setup.sh (guest_dns: to the router's dnsmasq, or the old form — to the tunnel's resolver): no
     # set, interface or chain of ours to know it by, and it outlived the removal (review s.152 r1 B-L2). Only a DNAT from the guest
     # subnet to port 53 matches — nothing of the stock's own.
-    # …and ct-lib.sh's ct-mark save rule (mangle POSTROUTING): no set, interface or chain either — known by its own comment.
-    _our="match-set ($_sp)|-[io] ($_if)|-j ($_jump)|^-A PREROUTING -s 192\\.168\\.33\\.0/24 .*--dport 53 -j DNAT |--comment enodia-ctmark( |\$)"
+    # The conntrack save and temporary GitHub fetch rules carry exact ownership comments.
+    _our="match-set ($_sp)|-[io] ($_if)|-j ($_jump)|^-A PREROUTING -s 192\\.168\\.33\\.0/24 .*--dport 53 -j DNAT |--comment enodia-(ctmark|byedpi-fetch)( |\$)"
     # Цепочки-родители перечислены явно: `-S` без имени отдаёт и наши собственные цепочки, а их
     # содержимое снимается вместе с ними ниже — считать его дважды значит соврать в плане.
     for _pr in "mangle PREROUTING" "mangle OUTPUT" "mangle POSTROUTING" "nat PREROUTING" \
@@ -1123,6 +1123,7 @@ cmd_deactivate() {
     # говорит «выключен вами», а её тумблер — это `vpn_on`, то есть и есть обещанное «включить обратно
     # отсюда же» (он же возвращает расписание: `cron-restore`). Сторож и heal с флагом тоже молчат.
     mkdir -p "$ENODIA_STATE" 2>/dev/null
+    : > "$ENODIA_STATE/.vpn-deactivated" || { set_state FAIL; return 1; }
     date +%s > "$ENODIA_STATE/.vpn-off" 2>/dev/null
     # «ДОСТУП ДОМОЙ» ВКЛЮЧЁН — ЭТО НАСТРОЙКА, А НЕ ОБВЯЗКА. `vpn-server.sh down` гасит сервер и стирает флаг `server/.on` (для
     # тумблера панели это и есть «выключить»), а «включить обратно» (`heal.sh replay`) поднимает сервер только по флагу — после
@@ -1184,6 +1185,9 @@ cmd_purge() {
     : > "$REPORT"
     set_state RUNNING
     log "=== ПОЛНОЕ УДАЛЕНИЕ: обвязка + панель + файлы ==="
+    if [ -d "$ENODIA_STATE" ]; then
+        : > "$ENODIA_STATE/.vpn-deactivated" || { set_state FAIL; return 1; }
+    fi
     step_jobs || { set_state FAIL; return 1; }           # ПЕРВЫМ: иначе доживающая задача пересоздаёт сеты и сниппеты ПОСЛЕ нас
     step_rules
     step_sweep          # то, что владелец не снял (его может не быть — ранние версии)
@@ -1194,6 +1198,13 @@ cmd_purge() {
     step_dnsmasq
     step_fwzone         # ДО вердикта: он про uci-след спрашивает (и только purge — см. шаг 4b)
     step_stockbak       # ДО вердикта и ДО сноса каталога настроек: метка «выключена вами» лежит там
+    if [ -f "$ENODIA_STATE/.stocklogs-mode" ] || [ -f "$ENODIA_STATE/.stocklogs-original" ]; then
+        if ! sh "$ENODIA_DIR/clean.sh" stocklogs-restore >> "$REPORT" 2>&1; then
+            log "Не удалось вернуть правило системного лога. Повторите удаление."
+            set_state FAIL
+            return 1
+        fi
+    fi
     step_hosts          # ДО вердикта: RAM-след ниже идёт последним, а вердикт про hosts спрашивает
     # Проверяем ДО стирания каталога: `set_state` пишет ВНУТРЬ $ENODIA_DIR, после rm писать будет
     # некуда, а отметка «снялось не всё» нужна ровно тому, кто потом придёт разбираться.

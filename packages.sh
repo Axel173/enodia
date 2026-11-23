@@ -133,8 +133,6 @@ bin_outdated() { [ "$(bst_field "$1" 2)" = outdated ]; }
 # связка того же плана (общий hev у Xray и ByeDPI) качала бы тот же файл второй раз — лишний шанс поймать 429 и «часть
 # компонентов не установилась» при уже заменённом файле (ревью ветки, круг 1). Зовётся в основном шелле движка, не в `$(…)`.
 bst_mark_fresh() { BST=$(printf '%s\n' "$BST" | awk -F'\t' -v OFS='\t' -v n="$1" '$1 == n && $2 == "outdated" { $2 = "current" } { print }'); }
-# Какой файл связки устарел (первый по порядку; пусто — ни один): его версии и называет строка «есть обновление».
-pkg_upd_bin() { for b in $(pkg_files "$1"); do have_bin "$b" && bin_outdated "$b" && { echo "$b"; return 0; }; done; return 0; }
 # Нужен ли файл плану: его нет ИЛИ он устарел ($1 — pkg_state связки ДО операции). Единственный ответ для веса и «доставим/
 # обновим» (закачка везёт то, что решил план, — P_FILES). ЧАСТИЧНОЙ связке — ТОЛЬКО недостающее: доставка hev к Xray с
 # устаревшим xray тянула бы и 8 МБ новой сборки, и на тесном флеше починка неподнимающегося транспорта превращалась в «снимите
@@ -632,12 +630,24 @@ cmd_list_json() {
         # cur — версия СТОЯЩЕГО (первый свой бинарь; пусто — не знаем), upd — стоит и хоть один файл устарел, run_old — работает
         # прежняя сборка до перезапуска. Строки версий — из манифеста, но экранируем всё равно: кэш лежит на флеше.
         _cur=$(bst_field "$(pkg_own "$p" | cut -d' ' -f1)" 3 | tr -d '"\\\r')
-        _upd=false; pkg_upd "$p" && _upd=true
         # ub/ucur/uver — КАКОЙ файл устарел и его версии: у связки из нескольких файлов устаревает не обязательно первый (у DoH
         # — dot-proxy при свежем https-dns-proxy, у Xray — общий hev), и строка «есть обновление A → B» по версиям первого
         # писала «A → A» (ревью ветки, круг 1). cur/ver остаются про главный файл — их показывает имя строки.
-        _ub=""; _uc=""; _uv=""
-        if [ "$_upd" = true ]; then _ub=$(pkg_upd_bin "$p"); _uc=$(bst_field "$_ub" 3 | tr -d '"\\\r'); _uv=$(bst_field "$_ub" 4 | tr -d '"\\\r'); fi
+        # Partial rows list every outdated member already installed. Complete rows offer the first one's update.
+        _upd=false; _ub=""; _uc=""; _uv=""; _old=""; _oldj=""
+        if [ "$_st" != absent ]; then
+            for b in $(pkg_files "$p"); do
+                have_bin "$b" && bin_outdated "$b" || continue
+                if [ "$_st" = installed ]; then
+                    _upd=true; _ub=$b
+                    _uc=$(bst_field "$_ub" 3 | tr -d '"\\\r')
+                    _uv=$(bst_field "$_ub" 4 | tr -d '"\\\r')
+                    break
+                fi
+                _old="$_old${_old:+,}\"$b\""
+            done
+        fi
+        if [ "$_st" = partial ]; then _oldj=",\"old\":[$_old]"; fi
         # run_old — a process of THIS component runs a replaced build: the Xray tunnel's stale hev is a file of Hysteria2 too, but not
         # its process (rst_comp). rst_units — WHAT a restart of this component would touch (units in restart order, only what can be
         # restarted now — rst_can): the panel names exactly that before asking and sends it back as the consent (cmd_restart).
@@ -656,8 +666,8 @@ cmd_list_json() {
         # из чего панель может узнать место жительства связки: иначе карточка «Xray» обещала бы
         # освободить 7.9 МБ ФЛЕША, а освободила бы флешку, и полоса не шевельнулась бы.
         # add_b у стоящей связки с обновлением — вес НОВЫХ сборок её устаревших файлов (тот же pkg_add_b, что у плана).
-        printf '{"id":"%s","label":"%s","state":"%s","ver":"%s","cur":"%s","upd":%s,"ub":"%s","ucur":"%s","uver":"%s","run_old":%s,"rst_units":[%s],"need":[%s],"add_b":%s,"add_data_b":%s,"del_b":%s,"del_data_b":%s,"hold":"%s","warn":"%s"}' \
-            "$p" "$(pkg_label "$p")" "$_st" "$_ver" "$_cur" "$_upd" "$_ub" "$_uc" "$_uv" "$_ro" "$_rsj" "$_need" \
+        printf '{"id":"%s","label":"%s","state":"%s","ver":"%s","cur":"%s","upd":%s,"ub":"%s","ucur":"%s","uver":"%s"%s,"run_old":%s,"rst_units":[%s],"need":[%s],"add_b":%s,"add_data_b":%s,"del_b":%s,"del_data_b":%s,"hold":"%s","warn":"%s"}' \
+            "$p" "$(pkg_label "$p")" "$_st" "$_ver" "$_cur" "$_upd" "$_ub" "$_uc" "$_uv" "$_oldj" "$_ro" "$_rsj" "$_need" \
             "$(pkg_add_b "$p")" "$(pkg_add_b "$p" data)" \
             "$(pkg_del_b "$p" "$p")" "$(pkg_del_b "$p" "$p" data)" "$_hold" "$_warn"
     done

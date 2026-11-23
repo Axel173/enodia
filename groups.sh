@@ -238,6 +238,7 @@ if [ -f "$ENODIA_DIR/lists-lib.sh" ]; then . "$ENODIA_DIR/lists-lib.sh"; fi
 if ! command -v ls_lock_take >/dev/null 2>&1; then
 	ls_lock_take() { return 0; }
 	ls_lock_drop() { return 0; }
+	ls_replay_again() { return 1; }
 fi
 GRP_LOCK=/tmp/.enodia-grp-apply.lock
 GRP_DIRTY=/tmp/.enodia-grp-apply.dirty
@@ -340,6 +341,7 @@ wire_rules() {
 # второй одновременный проход писал в них же ⇒ сеты собирались из полу-данных (ревью 04.08.2026).
 # Лок ниже это и так закрывает, но у него есть шим-ветка «лока нет» — там имена остаются защитой.
 _apply_pass() {
+	[ -z "$1" ] || export CT_SLOT_EDIT=defer
 	mkdir -p /tmp/dnsmasq.d 2>/dev/null
 	_tp="/tmp/.enodia-grp.$$"
 	_cv="$_tp-vpn.cidr"; _co="$_tp-out.cidr"; _pairs="$_tp-pairs"
@@ -353,7 +355,7 @@ _apply_pass() {
 	# едет ОСНОВНЫМ выходом (grp_vpn), а не молча напрямую: слот = АЛЬТЕРНАТИВНЫЙ выход, его отказ
 	# не должен ронять приватность «в VPN»-группы (семантика fallback=main).
 	_en_slots=" "
-	[ -f "$ENODIA_DIR/slots.sh" ] && _en_slots=" $(sh "$ENODIA_DIR/slots.sh" list-enabled 2>/dev/null | cut -f1 | tr '\n' ' ') "
+	[ -f "$ENODIA_DIR/slots.sh" ] && _en_slots=" $(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null | cut -f1 | tr '\n' ' ') "
 	# Поля реестра разделены TAB (имя — последнее поле, может содержать пробелы) → IFS=TAB на
 	# время разбора. Внутренний цикл по членам имеет СВОЙ редирект (< файл), поэтому за stdin
 	# с внешним не дерётся; IFS внутри возвращаем в дефолтный — члены разделены переводом строки.
@@ -413,18 +415,21 @@ _apply_pass() {
 	for _gid in $_dev_ids; do grp_sync "$(dev_set "$_gid")" "$_tp-dev-$_gid.cidr" "$_pairs" || _fail="$_fail $(dev_set "$_gid")"; done
 	# Слот-сеты: заполняем те, что имеют членов ИЛИ уже существуют (иначе IP, потерянные при
 	# отвязке группы от слота, залипли бы в старом сете). Пустой файл = пустой сет (воля юзера).
+	_gsn=''
 	for _n in 2 3 4 5 6 7; do
 		_sf="$_tp-vpn-s$_n.cidr"; _df="$_tp-vpn-s$_n.dom"
+		if [ -s "$_sf" ] || [ -s "$_df" ]; then _gsn="$_gsn grp_vpn_s$_n"; fi   # members ⇒ the exit must carry this set (set_slot_need)
 		if [ -s "$_sf" ] || [ -s "$_df" ] || ipset list -n 2>/dev/null | grep -qx "grp_vpn_s$_n"; then
 			grp_sync "grp_vpn_s$_n" "$_sf" "$_pairs" || _fail="$_fail grp_vpn_s$_n"   # домены наполнит dnsmasq — важно, что сет СОЗДАН (зеркало geo.sh)
 		fi
 	done
+	! command -v set_slot_need >/dev/null 2>&1 || set_slot_need grp $_gsn
 	wire_rules
 	dev_wire "$_dev_ids"
 	# Доп-выходы: есть привязки к слотам → переиграть слоты через ОРКЕСТРАТОР (zapret-слот ставит
 	# ACCEPT+NFQUEUE на свои сеты, non-zapret — марку через mark-core). Идемпотентно. Нет привязок
 	# → не зовём (панель без доп-выходов работает БАЙТ-В-БАЙТ как раньше).
-	[ "$_any_slot" = 1 ] && [ -f "$ENODIA_DIR/transport.sh" ] && sh "$ENODIA_DIR/transport.sh" slots-up >/dev/null 2>&1
+	[ -n "$1" ] || { [ "$_any_slot" != 1 ] || [ ! -f "$ENODIA_DIR/transport.sh" ] || sh "$ENODIA_DIR/transport.sh" slots-up >/dev/null 2>&1; }
 	dns_reload
 	# ПРОГРЕВ: пересборка сетов стёрла IP, которые dnsmasq успел туда положить. Без прогрева домен
 	# группы поедет НЕ ТУДА, пока клиент не перерезолвит (с DoH/кэшем — может и никогда). nslookup
@@ -440,7 +445,7 @@ _apply_pass() {
 	for _n in 2 3 4 5 6 7; do rm -f "$_tp-vpn-s$_n.cidr" "$_tp-vpn-s$_n.dom" 2>/dev/null; done
 	# NSS/ECM-offload держит УЖЕ установленные соединения на старом маршруте до таймаута —
 	# без сброса conntrack изменение группы «не применяется», пока сайт не отвиснет сам.
-	ct_flush
+	[ -n "$1" ] || ct_flush
 	# Провал ЗАЛИВКИ набора (нет памяти, набор занят) — не «успех с нулём адресов»: набор остался
 	# СТАРЫМ, и молчать об этом значит показать человеку «применено» там, где ничего не менялось.
 	if [ "$_fail" != "" ]; then
@@ -457,7 +462,10 @@ _apply_pass() {
 # реестр, схлопывая N кликов в ОДИН доп. проход. Печатаем сводку ПОСЛЕДНЕГО прохода — панель кладёт
 # stdout в .msg, и вторая строка сбила бы перевод.
 do_apply() {
-	if ! ls_lock_take "$GRP_LOCK" "$GRP_DIRTY" 1; then
+	_rebind="$1"
+	if [ -n "$_rebind" ]; then
+		ls_lock_take "$GRP_LOCK" "$GRP_DIRTY.rebind" 1 || return $?
+	elif ! ls_lock_take "$GRP_LOCK" "$GRP_DIRTY" 1; then
 		echo 'группы: сборка уже идёт — учту свежий состав в ней'
 		return 0
 	fi
@@ -465,12 +473,13 @@ do_apply() {
 	trap 'exit 1' INT TERM HUP PIPE
 	_sum=''; _rc=0
 	while :; do
-		rm -f "$GRP_DIRTY" 2>/dev/null   # сброс ДО чтения реестра: пойманный dirty ⇒ реестр прочитан ПОСЛЕ мутации
-		_sum=$(_apply_pass); _rc=$?
-		[ -f "$GRP_DIRTY" ] || break
+		[ ! -f "$GRP_DIRTY" ] || _rebind=''
+		rm -f "$GRP_DIRTY" "$GRP_DIRTY.rebind" 2>/dev/null
+		_sum=$(_apply_pass "$_rebind"); _rc=$?
+		ls_replay_again "$GRP_LOCK" "$GRP_DIRTY" || break
+		_rebind=1
 	done
 	trap - EXIT INT TERM HUP PIPE
-	ls_lock_drop "$GRP_LOCK"
 	[ -z "$_sum" ] || echo "$_sum"
 	return $_rc
 }
@@ -767,6 +776,7 @@ case "$1" in
 		;;
 
 	apply|reapply) do_apply ;;
+	rebind) do_apply 1 ;;
 
 	*)
 		echo "groups.sh — именованные группы правил «в VPN / мимо VPN»"

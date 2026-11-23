@@ -439,6 +439,15 @@
      группой (`.srv-r`), шеврон — последним. Классы `.srv`/`.srv2` вида не несут — это крючки проводки и прогонов. */
   .srv-r{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px;flex:0 1 auto;min-width:0}
   .srv-r .badge{white-space:normal;text-align:center}
+  .srv-r .srv-fav.on{color:var(--warn,#c98a00)}
+  .srv-country-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+  .srv-country-bar:empty{display:none}
+  .srv-country-group{min-width:0;border-top:1px solid var(--border-s)}
+  .srv-country-group>summary{cursor:pointer;padding:9px 4px;overflow-wrap:anywhere}
+  .srv-page{min-width:0}
+  .srv-page-more{margin:8px 0 2px;max-width:100%;white-space:normal}
+  .srv-bulk-progress:not([hidden]){display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;min-width:0}
+  .srv-bulk-progress span{min-width:0;overflow-wrap:anywhere}
   .srv-ping.chip:empty{display:none}
   .lrow.srv.active,.lrow.srv2.active{cursor:default}
   .lrow.dis>.grow{opacity:.6}
