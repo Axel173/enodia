@@ -475,6 +475,7 @@ step_run() {
     # the config's OWN port (a re-pick's first candidate) gets a second handshake: one lost packet must not move a working config —
     # the wait (TRY_HS) is shorter than WireGuard's own 5-s retry (review s.173 r2)
     _wyhf=1; [ "$_wyst" = port ] && [ -n "$_wycur" ] && _wyhf=2
+    [ "$1" != current ] || _wyhf=2
     { TRY_BUDGET=$_wyb TRY_HS_FIRST=$_wyhf sh "$ENODIA_DIR/transport-awg.sh" try-each "$TRACE" "$TRY_SECS" "$STOP_ERE" "$W/c$_wys/list" 2>/dev/null </dev/null
       echo "!rc $?"; } | while IFS= read -r _wyl; do
         case "$_wyl" in
@@ -525,10 +526,46 @@ best() {
     return 1
 }
 rnd() { _wyr=$(head -c 2 /dev/urandom | b2h); echo $(( 0x${_wyr:-0} )); }
-pick() {
-    _wport=""; _wcolo=""; _wcut=""; _wepn=""; _wmkn=""; _wi1n=""; _wwhy=""; _wyna=0; _wyw=""
-    _wys=0; _wyq=""; _wyd=""; _wyo=0; [ -n "$2" ] && _wyo=1; _wycur=$1
-    _wyt0=$(uptime_s); : > "$W/v"
+pick_subnet() {
+    # A manual search never borrows the registered endpoint or another pool.
+    # Rotate addresses before ports so a silent first address cannot consume the budget.
+    _wycurrent=0
+    _wybase=$(( $(rnd) % 254 ))
+    _wyips=""
+    case "$_wep0" in "$_wpool".*)
+        _wyhost=${_wep0#"$_wpool".}
+        case "$_wyhost" in ''|0*|*[!0-9]*|????*) ;; *) if [ "$_wyhost" -lt 255 ]; then _wyips=$_wep0; [ -z "$1" ] || _wycurrent=1; fi ;; esac ;;
+    esac
+    for _wyoffset in 0 67 131 193; do
+        _wyip="$_wpool.$(( (_wybase + _wyoffset) % 254 + 1 ))"
+        case " $_wyips " in *" $_wyip "*) ;; *) _wyips="${_wyips:+$_wyips }$_wyip" ;; esac
+    done
+    _wyfirst=${1:-${PORTS%% *}}
+    _wykinds=$_wmk0
+    if [ "$_wrot" = 1 ]; then
+        for _wykind in quic dns stun; do [ "$_wykind" = "$_wmk0" ] || _wykinds="$_wykinds $_wykind"; done
+        [ "$_wmku" != 1 ] || _wykinds="$_wykinds own"
+    fi
+    # Try a few addresses with each allowed masking before spending the remaining budget on ports.
+    for _wyround in first rest; do
+        for _wykind in $_wykinds; do
+            [ $(( $(uptime_s) - _wyt0 )) -lt "$PICK_BUDGET" ] || return 0
+            step_new pool
+            if [ "$_wyround" = first ]; then
+                for _wyip in $_wyips; do cand "$_wyip" "$_wyfirst" "$_wykind"; done
+            else
+                for _wp in $PORTS; do
+                    [ "$_wp" != "$_wyfirst" ] || continue
+                    for _wyip in $_wyips; do cand "$_wyip" "$_wp" "$_wykind"; done
+                done
+            fi
+            if [ "$_wyround:$_wykind:$_wycurrent" = "first:$_wmk0:1" ]; then step_run current; else step_run; fi
+            best && return 0
+        done
+    done
+    return 0
+}
+pick_auto() {
     # 1. the first server, its ports
     step_new port
     _wpl=$1; [ -n "$2" ] || for _wp in $PORTS; do [ "$_wp" = "$1" ] || _wpl="$_wpl $_wp"; done
@@ -577,6 +614,17 @@ pick() {
             best
         fi
     fi
+}
+pick() {
+    _wport=""; _wcolo=""; _wcut=""; _wepn=""; _wmkn=""; _wi1n=""; _wwhy=""; _wyna=0; _wyw=""
+    _wys=0; _wyq=""; _wyd=""; _wyo=0; [ -n "$2" ] && _wyo=1; _wycur=$1
+    _wyt0=$(uptime_s); : > "$W/v"
+    if [ -n "$_wpool" ]; then
+        pick_subnet "$1"
+    else
+        pick_auto "$@"
+        [ "$_wwhy" != skip ] || return 0
+    fi
     if [ -z "$_wyw" ]; then
         _wyna=$(awk -F"$TAB" '$4 != "skip" { print $1 }' "$W/v" | sort -u | grep -c '')
         if awk -F"$TAB" '$4 == "hs" { f = 1 } END { exit !f }' "$W/v"; then
@@ -618,7 +666,9 @@ pick_from_conf() {
 }
 same_conf() { [ "$_wport" = "$_wcur" ] && [ "$_wepn" = "$_wep0" ] && [ "$_wmkn" = own ]; }   # the pick kept the config as it is
 moved_msg() {   # what the pick changed in config $_wnm, in words
-    if [ "$_wepn" != "$_wep0" ]; then
+    if [ -n "$_wpool" ] && [ "$_wepn" != "$_wep0" ]; then
+        printf '«%s»: выбран адрес %s:%s' "$_wnm" "$_wepn" "$_wport"
+    elif [ "$_wepn" != "$_wep0" ]; then
         if awk -F"$TAB" -v a="$_wep0" '($1 "") == (a "") && $4 == "pass" { f = 1 } END { exit !f }' "$W/v" 2>/dev/null; then
             printf '«%s»: прежний адрес шёл через московский узел Cloudflare — теперь %s:%s' "$_wnm" "$_wepn" "$_wport"
         else printf '«%s»: адрес %s не подошёл — теперь %s:%s' "$_wnm" "$_wep0" "$_wepn" "$_wport"; fi   # silent or cut — both happen
@@ -819,7 +869,7 @@ cmd_get() {
     need_awg || return 1
     get_room "$1" || { echo "[warp] $_wtm"; return 1; }
     take_start || { echo "$BUSY_MSG"; return 1; }
-    start run "$1" "${2:-}"
+    if [ -n "$_wpool" ]; then start run-subnet "$1" "${2:-}" "$_wpool"; else start run "$1" "${2:-}"; fi
     echo "[warp] получаю WARP — обычно до 30 секунд"
 }
 conf_create() (   # rider, observed digest; called under switch admission
@@ -866,7 +916,7 @@ cmd_run() {   # $1 = rider (optional), $2 = observed digest
     reg_new
     _wep0=$_wep; _wmk0=quic; _wrot=1; _wswp=1
     MK=wconf; pick ""
-    [ -n "$_wport" ] || fail "Cloudflare выдал WARP, но $(why_get) — конфиг не сохранён"
+    [ -n "$_wport" ] || { [ -z "$_wpool" ] || fail "ни один из проверенных адресов подсети не прошёл — конфиг не сохранён"; fail "Cloudflare выдал WARP, но $(why_get) — конфиг не сохранён"; }
     say "сохраняю конфиг (порт $_wport)"
     _wcreated=$(warp_cfg_mutate conf_create "$1" "${2:-}") || fail "$_wcreated"
     _wnm=$_wcreated
@@ -882,7 +932,7 @@ cmd_run() {   # $1 = rider (optional), $2 = observed digest
         _wro=$(warp_road_set "$1" "$_wid" "${2:-}" 2>&1) \
             || fail "WARP получен (выход №$_wid), а дорога не встала: $(printf '%s' "$_wro" | tail -n 1 | sed 's/^\[road\] //' | tr -d '"\\' | jtxt 600)"
     fi
-    put "{\"state\":\"done\",\"op\":\"get\",\"name\":\"$_wnm\",\"exit\":\"$_wid\",\"rider\":\"$1\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"WARP получен: выход №$_wid${1:+, $1 едет через него}\"}"
+    put "{\"state\":\"done\",\"op\":\"get\",\"ep\":\"$_wepn\",\"name\":\"$_wnm\",\"exit\":\"$_wid\",\"rider\":\"$1\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"WARP получен: выход №$_wid${1:+, $1 едет через него}\"}"
     exit 0
 }
 
@@ -891,7 +941,7 @@ cmd_run() {   # $1 = rider (optional), $2 = observed digest
 cmd_repick() { target "$1" || { echo "[warp] $_wtm"; return 1; }; need_awg || return 1
     take_start || { echo "$BUSY_MSG"; return 1; }
     OP=repick
-    if [ "$2" = own ]; then start run-repick-own "$1"; else start run-repick "$1"; fi
+    if [ "$2" = own ]; then start run-repick-own "$1"; elif [ -n "$_wpool" ]; then start run-repick-subnet "$1" "$_wpool"; else start run-repick "$1"; fi
     echo "[warp] подбираю порт — до трёх минут"; }
 # THE PICK WITH THE CONFIG'S OWN KEY — for an exit that SHAKES HANDS AND CARRIES NOTHING (the watchdog's call, `repick <cfg>
 # own`). WHY (BE7000, 12.10.2026, the walk of 1.2.0-dev.8): the throwaway registration needs Cloudflare's API, and from an ISP
@@ -939,7 +989,7 @@ cmd_run_repick_own() {
     if same_conf; then
         conf_record "$@"
         own_back
-        put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся$(reup_note)\"}"; exit 0
+        put "{\"state\":\"done\",\"op\":\"repick\",\"ep\":\"$_wepn\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся$(reup_note)\"}"; exit 0
     fi
     conf_new "$_wsrc" "" "" "$_wepn:$_wport" "$_wi1n"
     conf_write "$@"
@@ -952,7 +1002,7 @@ cmd_run_repick_own() {
         [ -n "$_wxi" ] && [ -e "/sys/class/net/$_wxi" ] && sh "$ENODIA_DIR/transport.sh" slot-down "$_wx" >/dev/null 2>&1
     done
     own_back         # by the new text; a refusal above (the config deleted, no room for it) brings them back by the old one — the trap
-    put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"$(moved_msg)$(reup_note)\"}"
+    put "{\"state\":\"done\",\"op\":\"repick\",\"ep\":\"$_wepn\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"$(moved_msg)$(reup_note)\"}"
     exit 0
 }
 # Does an own-key pick keep the exits of config $1 down right now → 0. The answer of a LIVE job only: the name it wrote and its
@@ -977,7 +1027,7 @@ cmd_run_repick() {
     pick_from_conf
     MK=xconf; pick "$_wcur"
     give_back
-    [ -n "$_wport" ] || fail "$(why_own) — конфиг не изменён"
+    [ -n "$_wport" ] || { [ -z "$_wpool" ] || fail "ни один из проверенных адресов подсети не прошёл — конфиг не изменён"; fail "$(why_own) — конфиг не изменён"; }
     _wo=$(printf '%s' "$_wold" | cut -f2); _wi=$(printf '%s' "$_wold" | cut -f9); [ "$_wmkn" = own ] || _wi=gen
     # the record's new line (what this pick saw); written at once when the config does not change, after the config when it does
     set -- "$_wopub" "${_wo:-0}" "$(printf '%s' "$_wold" | cut -f3)" "$(printf '%s' "$_wold" | cut -f4)" "$(printf '%s' "$_wold" | cut -f5)" \
@@ -986,11 +1036,11 @@ cmd_run_repick() {
         # …the record only: of a config that is STILL THERE. Deleted (and pruned) during the probe, it got its record back —
         # id and token for a key no config held — and the last word spoke of a deleted config (review s.123, round 4).
         conf_record "$@"
-        put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся\"}"; exit 0
+        put "{\"state\":\"done\",\"op\":\"repick\",\"ep\":\"$_wepn\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"порт $_wport по-прежнему проходит — конфиг «$_wnm» не менялся\"}"; exit 0
     fi
     conf_new "$_wsrc" "" "" "$_wepn:$_wport" "$_wi1n"
     conf_save "$@"
-    put "{\"state\":\"done\",\"op\":\"repick\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"$(moved_msg)$(reup_note)\"}"
+    put "{\"state\":\"done\",\"op\":\"repick\",\"ep\":\"$_wepn\",\"name\":\"$_wnm\",\"port\":\"$_wport\",\"colo\":\"$_wcolo\",\"msg\":\"$(moved_msg)$(reup_note)\"}"
     exit 0
 }
 
@@ -1164,7 +1214,10 @@ cmd_list() {
 # record of its key; no record — a config that was uploaded (`own` 0, nothing else to say). `now` — the router's clock, for «when»
 # (0 — the clock is not real: the panel then says no age). The token never leaves the router.
 cmd_info() {
-    printf '{"now":%s,"items":[' "$(now_s)"
+    printf '{"now":%s,"pools":[' "$(now_s)"
+    _wsep=''
+    for _wprefix in $WARP_POOLS; do printf '%s"%s"' "$_wsep" "$_wprefix"; _wsep=,; done
+    printf '],"items":['
     _wfirst=1
     cmd_list | while IFS="$TAB" read -r _wn _wm; do
         [ -n "$_wn" ] || continue
@@ -1204,9 +1257,18 @@ cmd_colo() {
     printf '{"colo":"%s","warp":%s}\n' "$_wcl" "$(printf '%s\n' "$_wtr" | grep -qx 'warp=on' && echo true || echo false)"
 }
 
+# Only the two interactive jobs accept a subnet. The watchdog's own-key pick stays automatic.
+_wpool=''
 case "$1" in
-    get)         cmd_get "$2" "${3:-}" ;;
+    get-subnet|run-subnet|repick-subnet|run-repick-subnet)
+        _wanted=${4:-}; [ "$1" != run-repick-subnet ] || _wanted=${3:-}
+        for _wprefix in $WARP_POOLS; do [ "$_wanted" != "$_wprefix" ] || _wpool=$_wprefix; done
+        [ -n "$_wpool" ] || { echo '[warp] неизвестная подсеть WARP'; exit 1; } ;;
+esac
+case "$1" in
+    get|get-subnet) cmd_get "$2" "${3:-}" ;;
     repick)      cmd_repick "$2" "$3" ;;
+    repick-subnet) cmd_repick "$2" ;;
     running)     cmd_running ;;
     holds)       cmd_holds "$2" ;;
     reget)       cmd_reget "$2" ;;
@@ -1218,8 +1280,8 @@ case "$1" in
     prune)       cmd_prune "$2" ;;
     run-give)    cmd_run_give "$2" ;;
     import)      cmd_import "$2" ;;
-    run)         cmd_run "$2" "${3:-}" ;;
-    run-repick)  cmd_run_repick "$2" ;;
+    run|run-subnet) cmd_run "$2" "${3:-}" ;;
+    run-repick|run-repick-subnet) cmd_run_repick "$2" ;;
     run-repick-own) cmd_run_repick_own "$2" ;;
     run-reget)   cmd_run_reget "$2" ;;
     run-mask)    cmd_run_mask "$2" "$3" ;;

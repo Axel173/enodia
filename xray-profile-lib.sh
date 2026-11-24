@@ -408,6 +408,20 @@ xp_quote() {
         END { printf "\"" }'
 }
 xp_canonical_ob() {   # <outbound JSON> [form]
+    # A standalone link has no other outbounds to dial through, including a separate XHTTP download path.
+    if [ "${3:-}" = standalone ]; then
+        printf '%s\n' "$1" | xp_scan '
+        END {
+            scan()
+            for(i=2;i<n;i++) {
+                if(token[i+1]!=":") continue
+                if(key_at(i)=="\"dialerproxy\"" && token[i+2]~/^"./ && token[i+2]!="\"\"") exit 1
+                if(key_at(i)=="\"proxysettings\"" && token[i+2]=="{")
+                    for(j=i+3;j<closing[i+2];j=value_end(j+2)+2)
+                        if(key_at(j)=="\"tag\"" && token[j+2]~/^"./ && token[j+2]!="\"\"") exit 1
+            }
+        }' || return 1
+    fi
     _xco_outbound=$(xp_object "$1")
     _xco_proto=$(xp_read "$_xco_outbound" '@.protocol' | tr 'A-Z' 'a-z')
     printf '%s\n' "$_xco_proto" | xp_dialer_types >/dev/null || return 1
@@ -475,6 +489,22 @@ xp_view() {
     if [ -n "$_xpv_member" ] || [ -n "$(xp_endpoints "$_xpv_file")" ]; then _xpv_valid=true; fi
     printf '{"pool":%s,"valid":%s,"member":%s,"remark":' "$_xpv_pool" "$_xpv_valid" "${_xpv_member:-null}"
     xp_quote "$(xp_get "$_xpv_file" '@.remarks')"
+    if [ "$_xpv_pool" = true ] && [ "${2:-}" = export ]; then
+        # Keep editor metadata scalar. The export card can request each representable
+        # outbound of the same open file, retaining original indices across skipped rows.
+        printf ',"members":['
+        xp_read "$(xp_object "$(xp_get "$_xpv_file" '@')")" '@.outbounds[*]' | (
+            _xpv_i=0; _xpv_sep=''
+            while IFS= read -r _xpv_ob; do
+                if _xpv_m=$(xp_canonical_ob "$_xpv_ob" form standalone); then
+                    printf '%s{"index":%s,%s' "$_xpv_sep" "$_xpv_i" "${_xpv_m#\{}"
+                    _xpv_sep=,
+                fi
+                _xpv_i=$((_xpv_i+1))
+            done
+        )
+        printf ']'
+    fi
     printf '}\n'
 }
 xp_field() { xp_first "$1" | jsonfilter -e "@.$2" 2>/dev/null; }

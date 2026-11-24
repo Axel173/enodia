@@ -100,6 +100,16 @@ ct_flush_mark() {
 	return 0
 }
 
+# iproute2 can print a stock name for an exit table (1003 is wan_2_dns on BE10000 Pro).
+# Ask for table IDs before comparing rules. Older ip applets already report IDs and may not accept -N.
+slot_rules_show() {
+    if _ct_numeric=$(ip -N rule show 2>/dev/null) && [ -n "$_ct_numeric" ]; then
+        printf '%s\n' "$_ct_numeric"
+    else
+        ip rule show 2>/dev/null
+    fi
+}
+
 # IP rule selectors shared by mark-core, reporting and scoped retirement. Prefs 110–115 are hop positions.
 slot_rule_rows() {
 	awk -v id="$1" '$2=="from" && $3=="all" && $4=="fwmark" && $5=="0x" id &&
@@ -131,7 +141,7 @@ ct_flush_route() (
 	fi
 	ct_flush_mark "$1"
 	[ -n "$2" ] || return 0
-	_ct_rules=$(ip rule show 2>/dev/null) || return 0
+	_ct_rules=$(slot_rules_show) || return 0
 	printf '%s\n' "$_ct_rules" | awk -v t="$2" '{
 		l = ""; m = ""; d = ""
 		for (i = 1; i < NF; i++) {
@@ -140,7 +150,9 @@ ct_flush_route() (
 			if ($i == "to") d = $(i + 1)
 		}
 		if (l != t) next
-		if (m != "") print "m " m; else if (d != "") print "d " d
+		if (NF != 7 || $2 != "from" || $3 != "all" || ($6 != "lookup" && $6 != "table")) next
+		if ($4 == "fwmark" && m ~ /^0x[2-7]$/ && ($1 == "9" substr(m,3) ":" || $1 ~ /^11[0-5]:$/)) print "m " m
+		if ($4 == "to" && $1 ~ /^8[2-7]:$/ && t == 1000 + ($1-80) && d ~ /^[0-9.]+(\/32)?$/) print "d " d
 	}' | sort -u | while read -r _ctk _ctv; do
 		case "$_ctk" in
 			m) _ct_mark=${_ctv%%/*}

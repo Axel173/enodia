@@ -2325,7 +2325,7 @@ EOF
 			. "$ENODIA_DIR/xray-profile-lib.sh"
 			_rev=$(xp_reality_rev /proc/self/fd/3)
 			[ "$(field fp_only)" != 1 ] || { printf '{"ok":true,"fp_rev":"%s"}\n' "$_rev"; exit 0; }
-			_view=$(xp_view /proc/self/fd/3) || _view=null
+			_view=$(xp_view /proc/self/fd/3 "$(field view)") || _view=null
 		fi
 		b=$(base64 <&3 | tr -d '\r\n')
 		printf '{"ok":true,"code":0,"content":"%s","profile":%s,"fp_rev":"%s"}\n' "$b" "$_view" "$_rev"; exit 0 ;;
@@ -3087,11 +3087,13 @@ EOF
 	# владельца, панель опрашивает warp_status.
 	# `job` — the id the TAB gave the work it starts (hex): exported for the owner, which writes it into every status line of that
 	# work — the tab then knows its own job from one it merely sees running (warp.sh `JOB`). Not the form — no id, the work is nobody's.
-	warp_get)
+	warp_get|warp_get_subnet)
 		rider=$(urldecode "$(field rider)")
 		[ -z "$rider" ] || echo "$rider" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя конфига"
 		rev=$(field rev)
-		warp_job; run warp.sh get "$rider" ${rev:+"$rev"} ;;
+		warp_job
+		if [ "$act" = warp_get_subnet ]; then run warp.sh get-subnet "$rider" "$rev" "$(field pool)"; fi
+		run warp.sh get "$rider" ${rev:+"$rev"} ;;
 	warp_status)
 		owner_relay warp.sh status ;;
 	# What is known about every WARP config (the record of its registration — warp.sh info); the token stays on the router.
@@ -3099,12 +3101,13 @@ EOF
 		owner_relay warp.sh info ;;
 	# An existing WARP config: pick the port again · a new registration into it · its masking. The owner refuses in words (not WARP,
 	# the main channel's server, another WARP job runs); the work goes in the background, the panel polls warp_status.
-	warp_repick|warp_reget|warp_mask)
+	warp_repick|warp_repick_subnet|warp_reget|warp_mask)
 		name=$(urldecode "$(field name)")
 		echo "$name" | grep -qE '^[A-Za-z0-9_.-]+$' || fail "недопустимое имя конфига"
 		warp_job
 		case "$act" in
 			warp_repick) run warp.sh repick "$name" ;;
+			warp_repick_subnet) run warp.sh repick-subnet "$name" "" "$(field pool)" ;;
 			warp_reget)  run warp.sh reget "$name" ;;
 			warp_mask)
 				# `text` — the person's own masking, base64 (tags with `<` and `>`); absent or empty — the router's own. The form is

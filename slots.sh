@@ -56,6 +56,7 @@ ENODIA_BIN=${ENODIA_BIN:-/data/usr/app/enodia-bin}
 # правило стояло, а поток шёл по-старому через NSS/ECM. Шим = прежнее поведение (частичный
 # apply-scripts не должен падать), полноценный сброс живёт в самой библиотеке.
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
+command -v slot_rules_show >/dev/null 2>&1 || slot_rules_show() { ip rule show 2>/dev/null; }
 # Ожидание xtables-лока: ipt-lib.sh подменяет команду `iptables` и добавляет `-w`. Лок занят
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
@@ -515,7 +516,7 @@ slot_report() {   # id, transport, enabled
         else printf 'down\tunavailable\n'; fi
         return
     fi
-    _srl=$(ip rule show 2>/dev/null | slot_rule_rows "$1")
+    _srl=$(slot_rules_show | slot_rule_rows "$1")
     [ -n "$_srl" ] || { printf 'down\tunavailable\n'; return; }
     _srt=$(printf '%s\n' "$_srl" | slot_rule_path)
     case "$_srt" in

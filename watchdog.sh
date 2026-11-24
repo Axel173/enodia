@@ -88,6 +88,8 @@ if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
 # Ожидание xtables-лока: ipt-lib.sh подменяет команду `iptables` и добавляет `-w`. Лок занят
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
+if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
+command -v slot_rules_show >/dev/null 2>&1 || slot_rules_show() { ip rule show 2>/dev/null; }
 command -v probe_ext_ip >/dev/null 2>&1 || probe_ext_ip() { curl -s $1 --max-time "${2:-7}" https://api.ipify.org 2>/dev/null; }
 
 # Возраст отметки времени (clock-lib.sh): БЕЗ него весь этот файл судит по `now - ts`, а часы на
@@ -382,7 +384,7 @@ split_rules_wiped() {
 # снимают САМО правило `ip rule fwmark 0x1 table 1000` — маркированному трафику некуда
 # проваливаться, блэкхола нет, судить не о чем. Правило на месте + таблица пуста = дефект.
 carrier_rule_present() {
-    ip rule show 2>/dev/null | grep -qE 'fwmark 0x1(/\S+)? lookup 1000'
+    slot_rules_show | grep -qE 'fwmark 0x1(/\S+)? lookup 1000'
 }
 carrier_route_lost() {
     uses_marking "$1" || return 1                  # zapret несущей не держит — сторожить нечего
@@ -1300,7 +1302,7 @@ EOF
             # демон, упавший сам, проба обычно поднимает тем же тиком — и пара писем «недоступен»/«снова работает» о минуте,
             # которую никто не заметил, была бы шумом. Не поднялся — проба объявила эпизод сама (noanswer), `gone` её не дублирует.
             _sgone=0
-            if [ "$sfb" != direct ] && ip rule show 2>/dev/null | grep -qE "fwmark 0x$sid(/\S+)? lookup 100$sid"; then
+            if [ "$sfb" != direct ] && slot_rules_show | grep -qE "fwmark 0x$sid(/\S+)? lookup 100$sid"; then
                 _sgone=1
             fi
             # THE EXIT RIDES A ROAD THAT SHAKES HANDS AND CARRIES NOTHING (the cheap check above let it through). The return probe

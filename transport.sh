@@ -65,6 +65,7 @@ SWITCH_LOCK=/tmp/enodia-switching.lock
 # готов», после чего работает штатный fail-open. Без накопителя — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
+command -v slot_rules_show >/dev/null 2>&1 || slot_rules_show() { ip rule show 2>/dev/null; }
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$ENODIA_BIN/$1"; }
 
@@ -550,7 +551,7 @@ cmd_cold() {
 cmd_live() {
     # For keepers the settler checks lookups and roads with their owners (slot-off-clean, off-clean).
     if [ -z "$(sh "$SLOTS_SH" list-admitted off 2>/dev/null)" ]; then
-        ip rule show 2>/dev/null | grep -qE 'fwmark 0x[1-7] lookup (1000|100[2-7])' && return 0
+        slot_rules_show | grep -qE 'fwmark 0x[1-7] lookup (1000|100[2-7])' && return 0
         ip rule show 2>/dev/null | grep -qE '^8[2-7]:' && return 0
     fi
     for _lt in 1000 1002 1003 1004 1005 1006 1007; do

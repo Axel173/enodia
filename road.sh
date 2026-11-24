@@ -59,6 +59,7 @@ if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; else
     echo "[road] нет $ENODIA_DIR/label-lib.sh — обновите установку" >&2; exit 1
 fi
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
+command -v slot_rules_show >/dev/null 2>&1 || slot_rules_show() { ip rule show 2>/dev/null; }
 command -v ct_flush_dst >/dev/null 2>&1 || ct_flush_dst() { [ -n "$1" ] && conntrack -D -d "$1" >/dev/null 2>&1; return 0; }
 
 KEY_RE=$LBL_CFG_KEY_RE
@@ -325,7 +326,7 @@ road_view() {
 }
 # Our rules in the kernel now: `pref⇥address⇥table`, one line per rule (duplicates included — they are removed as stale).
 have_rules() {
-    _hrules=$(ip rule show 2>/dev/null) || return 1
+    _hrules=$(slot_rules_show) || return 1
     printf '%s\n' "$_hrules" | awk '$1 ~ /^8[2-7]:$/ { p = $1; sub(/:$/, "", p); t = ""; l = ""
     for (i = 2; i < NF; i++) { if ($i == "to") t = $(i+1); if ($i == "lookup" || $i == "table") l = $(i+1) }
     sub(/\/32$/, "", t); if (t != "") print p "\t" t "\t" l }'; }

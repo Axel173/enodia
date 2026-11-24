@@ -30,6 +30,7 @@ ENODIA_STATE=${ENODIA_STATE:-/data/usr/app/enodia-state}
 # правило стояло, а поток шёл по-старому через NSS/ECM. Шим = прежнее поведение (частичный
 # apply-scripts не должен падать), полноценный сброс живёт в самой библиотеке.
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
+command -v slot_rules_show >/dev/null 2>&1 || slot_rules_show() { ip -4 rule show 2>/dev/null; }
 if ! command -v ct_list_src >/dev/null 2>&1; then
     ct_list_src()   { [ -n "$1" ] && conntrack -L -s "$1" 2>/dev/null; return 0; }
 fi
@@ -290,9 +291,9 @@ ip_in_net() {
 # туннель не ведёт. GUEST_MAIN=1 — клиент под таким правилом.
 load_marks() {   # $1 = IP клиента
 	MARK_GO=" "; GUEST_MAIN=0; _lmip=$1
-	_lmr=$(ip -4 rule show 2>/dev/null | awk '{ p=$1; sub(/:$/, "", p); f=""; m=""; t=""
+	_lmr=$(slot_rules_show | awk '{ p=$1; sub(/:$/, "", p); f=""; m=""; t=""
 		for(i=2;i<=NF;i++){ if($i=="from"){ i++; f=$i } else if($i=="fwmark"){ i++; m=$i } else if($i=="lookup" || $i=="table"){ i++; t=$i } }
-		if(m!=""){ sub(/\/.*/, "", m); print "M " p " " m " " t } else if(f!="" && f!="all" && t=="main") print "F " p " " f }')
+		if(m!=""){ sub(/\/.*/, "", m); print "M " p " " m " " t } else if(f!="" && f!="all" && (t=="main" || t=="254")) print "F " p " " f }')
 	_lmin=""; _lmI=$IFS; IFS='
 '
 	for _lm in $_lmr; do

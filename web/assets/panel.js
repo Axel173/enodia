@@ -6435,11 +6435,13 @@
   }
   function chkMerge(a, b){ // a is cached; compare endpoint and egress before projecting a display row
     if(a.rev!==b.rev) return a;
-    var endpoint=chkNewer(a.scope==='endpoint' ? a : a.endpoint, b.scope==='endpoint' ? b : b.endpoint);
+    function direct(r){ return r.scope==='endpoint' ? r : (r.endpoint && r.endpoint.scope!=='egress' ? r.endpoint : null); }
+    var endpoint=chkNewer(direct(a),direct(b));
     var egress=chkEgressMerge(chkEgress(a),chkEgress(b));
     if(!endpoint || !egress) return egress || endpoint;
     var row=Object.assign({},egress,{egress:egress,endpoint:endpoint,endpointTs:endpoint.ts});
-    if(row.st==='ok' && endpoint.st==='ok' && (endpoint.ts>=row.ts || row.ms==null)){
+    // Prefer the endpoint RTT when both checks pass. The HTTPS duration stays in the egress record.
+    if(row.st==='ok' && endpoint.st==='ok' && endpoint.ms!=null){
       ['ms','method','cdn','tms','via','dms','chb'].forEach(function(f){ row[f]=endpoint[f]; });
     }
     return row;
@@ -6635,7 +6637,7 @@
           else delete _srvFpTry[fpKey];
           if(c && checkRev(c.rev) && c.saved!==false) Object.assign(xr,{rev:c.rev,ts:Number(c.ts)||0});
           var deadRev=remember({scope:'egress', st:ok?'ok':'dead', ms:ok ? r.ms : null, method:'tun', ncmp:0,
-            endpoint:xr.rev ? xr : null},r);
+            endpoint:xr.rev && xr.scope==='endpoint' ? xr : null},r);
           srvScrRefresh('xray', name);
           cb(ok && r.saved!==false, c, r, r.saved===false, false, deadRev); })
         // Роутер не ответил на тест выхода (он идёт секунды — окно шире, чем у пинга): вердикта нет, кэш не пишем (ревью пачки 2, круг 2).
@@ -7135,7 +7137,7 @@
     p.flow=account.flow; p.encryption=account.encryption||'none';
     p.aid=account.alterid||'0'; p.scy=account.security||'auto';
     var rs=ss.realitySettings||{};
-    if(rs.publicKey || rs.serverName){ p.sni=rs.serverName; p.fp=rs.fingerprint; p.pbk=rs.publicKey; p.sid=rs.shortId||''; if(rs.spiderX) p.spx=rs.spiderX; }
+    if(rs.password || rs.publicKey || rs.serverName){ p.sni=rs.serverName; p.fp=rs.fingerprint; p.pbk=rs.password||rs.publicKey; p.sid=rs.shortId||''; if(rs.spiderX) p.spx=rs.spiderX; }
     var ts=ss.tlsSettings||{};
     if(ts.serverName || ts.fingerprint || ts.alpn){ p.sni=ts.serverName||p.sni; p.fp=ts.fingerprint||p.fp; if(ts.alpn) p.alpn=(Object.prototype.toString.call(ts.alpn)==='[object Array]'?ts.alpn.join(','):String(ts.alpn)); }
     var ws=ss.wsSettings||{};
@@ -7286,6 +7288,7 @@
     return c(a)===c(b);
   }
   function xrayLinkOf(p, remark){
+    if(p.security==='reality' && !p.pbk) return '';
     try{
       var l=xrayLink(p, linkTxt(remark)), b=l ? parseXrayLink(l) : null;
       return (b && LINK_ASCII.test(l) && xraySame(b, p)) ? l : '';
@@ -7340,6 +7343,9 @@
       if(m.mux && m.mux.enabled!==true) delete m.mux;
       var ss=m.streamSettings;
       if(ss && typeof ss==='object'){
+        if(ss.realitySettings && ss.realitySettings.password){
+          ss.realitySettings.publicKey=ss.realitySettings.password; delete ss.realitySettings.password;
+        }
         if(ss.network==='splithttp'){ ss.network='xhttp'; if(ss.splithttpSettings && !ss.xhttpSettings){ ss.xhttpSettings=ss.splithttpSettings; delete ss.splithttpSettings; } }
         if(ss.network==='http') ss.network='h2';
       }
@@ -8922,6 +8928,16 @@
     "Пулы серверов по ссылке":"Server pools from a link",
     "Профиль с несколькими выходами остаётся одним сервером: доступный выход выбирает его балансировщик. Остальные профили сохраняют прежний выбор сервера, пока не изменятся его настройки.":"A profile with multiple exits stays one server: its balancer picks an available exit. Other profiles keep their previous server choice until its settings change.",
     "Профиль с несколькими выходами редактируется целиком в JSON":"A profile with multiple exits is edited as complete JSON",
+    "Выберите сервер":"Select a server",
+    "Подсеть WARP":"WARP subnet",
+    "Проверить адреса":"Check addresses",
+    "В режиме «Авто» роутер сам подберёт адрес. Если выбрана подсеть, проверит несколько IP только из неё.":"In Auto mode the router picks an address. Choose a subnet to test addresses only within it.",
+    "неизвестная подсеть WARP":"unknown WARP subnet",
+    "ни один из проверенных адресов подсети не прошёл — конфиг не сохранён":"none of the tested subnet addresses worked — no config was saved",
+    "ни один из проверенных адресов подсети не прошёл — конфиг не изменён":"none of the tested subnet addresses worked — the config was kept",
+    "Выбранная подсеть недоступна. Обновите экран или выберите «Авто».":"The selected subnet is unavailable. Refresh or select Auto.",
+    "[warp] неизвестная подсеть WARP":"[warp] unknown WARP subnet",
+    "Ссылка на отдельный сервер":"Individual server link",
     "Профиль JSON целиком":"Complete JSON profile",
     "Все выходы, балансировщик и пробы переносятся вместе в файле JSON. Ссылка на один выход не переносит этот профиль.":"All exits, the balancer and probes travel together in the JSON file. A link to one exit does not carry this profile.",
     "Панель уберёт конфиг с экрана, когда вы уйдёте.":"The panel will take the config off the screen when you leave.",
@@ -12474,6 +12490,9 @@
     [/^сохраняю конфиг \(порт (\d+)\)$/,"saving the config (port $1)"],
     [/^прокладываю дорогу для (\S+)$/,"laying the road for $1"],
     [/^WARP получен: выход №([2-7]), (\S+) едет через него$/,"WARP received: exit #$1, $2 rides it"],
+    [/^Проверить адреса в подсети ([0-9.]+\/24)\? Если найдётся подходящий адрес, роутер применит его к конфигу «(.+)» и при изменении перезапустит выход\.$/,"Check addresses in subnet $1? If an address works, the router will apply it to «\u0001$2» and restart the exit if it changes."],
+    [/^«([^«»]*)»: выбран адрес ([0-9.:]+); выход ([№0-9, ]+) не поднялся — откройте его в «Дополнительных выходах»$/,"«\u0001$1»: selected endpoint $2; exit $3 did not come up — open it in «Additional exits»"],
+    [/^«(.+)»: выбран адрес ([0-9.:]+)$/,"«$1»: selected endpoint $2"],
     [/^WARP получен: выход №([2-7])$/,"WARP received: exit #$1"],
     // THE TAIL IS ANOTHER OWNER'S REFUSAL (road.sh / slots.sh, said here without its «[road] » / «[slots] » prefix): a plain `$2`
     // carried it over in Russian, and a Russian tail keeps the WHOLE phrase Russian. It is translated by its owner's own rule —
@@ -17912,6 +17931,13 @@
     // Действия — делегатом на обёртке ЭКРАНА: кнопки Xray/Hysteria2 рождаются в карточке параметров после ответа роутера, а обёртка
     // пересоздаётся с каждым показом — провод не копится между экранами.
     var wrap=body.querySelector('.vwrap');
+    wrap.addEventListener('change', function(ev){
+      if(ev.target.id!=='srv-exp-member' || !_srvExp || _srvExp.k!==chkKey(tpt,name)) return;
+      var m=_srvExp, i=ev.target.value, member=i!=='' && m.members[Number(i)];
+      m.selected=i; m.link=member ? member.link : ''; m.sch=member ? SRV_EXP_SCH[member.params.proto] : '';
+      m.loss=member ? xrayLoss(m.doc, member.params) : [];
+      srvExpPaint(body, srvExpOpenHtml(m, srvExpOpts(tpt,name)), '#srv-exp-member');
+    });
     wireCacts(body);   // «Проверке серверов» в карточке второго мнения, пассажиры дороги
     // Плитки дороги — <div role="button">: клик и Enter/пробел ведут в одно место.
     function roadPick(t){ var b=t; while(b && b!==wrap && !(b.getAttribute && b.getAttribute('data-road')!=null)) b=b.parentNode;
@@ -18055,6 +18081,15 @@
       if(!p) m.refusal='member-schema';
       m.ext='.json';
       m.pool=!!(view && view.pool);
+      if(m.pool && doc && view.valid && Array.isArray(view.members)){
+        m.doc=doc;
+        m.members=[];
+        view.members.forEach(function(ob){
+          var params=xrayViewParams({valid:true, member:ob},raw);
+          var link=xrayLinkOf(params, ob.tag || ob.address);
+          if(link) m.members.push({label:(ob.tag ? ob.tag+' · ' : '')+ob.address+':'+ob.port, params:params, link:link});
+        });
+      }
       if(p && !p.profile){ m.sch=SRV_EXP_SCH[p.proto]||''; m.link=xrayLinkOf(p, disp); if(m.link) m.loss=xrayLoss(doc, p); }
       return m;
     }
@@ -18125,9 +18160,13 @@
       + '</span> <span class="mono kw">'+esc(m.ext)+'</span> <span>— конфиг как есть.</span></div>'+noteBox(KEEP, 'warn');
     // Ссылки нет — не «код не влез», а «собрать нечего»: причина своей плашкой, из действий остаётся файл.
     if(!m.link && !pool) h+='<div style="margin-top:11px">'+noteBox('Ссылку для этого конфига панель не соберёт: его сервер записан не так, как несёт ссылка. Конфиг целиком — в файле.', 'info')+'</div>';
+    if(pool && m.members && m.members.length){
+      h+='<label class="dsfld"><span>Ссылка на отдельный сервер</span><select id="srv-exp-member" class="inp sens"><option value="">Выберите сервер</option>'
+        +m.members.map(function(ob,i){ return '<option translate="no" value="'+i+'"'+(String(i)===m.selected?' selected':'')+'>'+esc(ob.label)+'</option>'; }).join('')+'</select></label>';
+    }
     h+=qh;
     if(m.loss.length){
-      var ls=m.loss.slice(0, SRV_EXP_LOSS_MAX).map(function(x){ return '<span class="mono kw">'+esc(x)+'</span>'; }).join(', ');
+      var ls=m.loss.slice(0, SRV_EXP_LOSS_MAX).map(function(x){ return '<span class="mono sens">'+esc(x)+'</span>'; }).join(', ');
       h+='<div class="cline"><span>В ссылку не попало:</span> '+ls+(m.loss.length>SRV_EXP_LOSS_MAX ? ' <span>и ещё</span> <b>'+(m.loss.length-SRV_EXP_LOSS_MAX)+'</b>' : '')+'<span>. Это несёт только файл.</span></div>';
     }
     h+='<div class="rr-acts" style="margin-top:12px"><span class="grow tiny">'+(pool ? 'Панель уберёт конфиг с экрана, когда вы уйдёте.' : awg ? 'Панель взяла конфиг с роутера по вашей кнопке и уберёт его с экрана, когда вы уйдёте.'
@@ -18170,7 +18209,7 @@
       var body=here(); if(!body) return;
       o.err=msg; srvExpPaint(body, srvExpClosedHtml(tpt, o), '[data-sv="exp"]');
     }
-    subPost({action:'get_config_raw', kind:tpt, name:name}).then(function(r){
+    subPost({action:'get_config_raw', kind:tpt, name:name, view:'export'}).then(function(r){
       var body=here(); if(!body) return;
       // Роутер старше этого действия для AmneziaWG (частичная заливка) отвечает «неизвестный тип» — говорим своими словами.
       if(!r || !r.ok){ refuse((r && /неизвестный тип/.test(r.msg||'')) ? 'роутер не умеет отдавать конфиг AmneziaWG — обновите Enodia' : 'не удалось прочитать конфиг: '+((r&&r.msg)||'ошибка')); return; }
@@ -26323,7 +26362,15 @@
   // said by the «Получить» card), so its buttons are locked like «Получить» itself (review s.123, round 3).
   // `slk===false` — the exits' registry did not arrive with THIS showing (the request failed): «no exit on it», «a road for
   // nobody» and the offer to create an exit would be the silence of the router told as a fact (review s.123, round 4).
-  function warpCardHtml(name, it, x, st, main, now, known, bin, slk){
+  function warpSubnetField(key, pools){
+    var selected=nwDraftGet(key,'');
+    pools=Array.isArray(pools) ? pools : [];
+    if(!pools.length && !selected) return '';
+    return '<label class="dsfld"><span>Подсеть WARP</span><select class="inp" id="'+esc(key)+'" data-nwd="'+esc(key)+'"><option value="">Авто</option>'
+      +(selected && pools.indexOf(selected)<0 ? '<option selected value="'+esc(selected)+'">'+esc(selected)+'.0/24</option>' : '')
+      +pools.map(function(p){ return '<option value="'+esc(p)+'"'+(selected===p?' selected':'')+'>'+esc(p)+'.0/24</option>'; }).join('')+'</select></label>';
+  }
+  function warpCardHtml(name, it, x, st, main, now, known, bin, slk, pools){
     var rd=cfgRiders(name), run=(st.state==='running'), own=!!(it && it.own), dis=(run || main || bin===false) ? ' disabled' : '', nq=esc(name);
     var noSl='роутер не ответил о выходах — обновите экран';
     function kv(k, v, btn){ return '<div class="kv"><div class="grow"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>'+(btn||'')+'</div>'; }
@@ -26354,7 +26401,9 @@
     }
     // The masking of a config whose record is unknown is unknown too: no «вернуть собранную роутером» on a guess.
     var gen=!!(it && it.i1==='gen');
-    h+='<div class="acts">'+wb('btn gh', 'repick', 'Подобрать порт заново', dis)+wb('btn gh', 'reget', 'Получить заново', dis)+'</div>'
+    h+='<details style="margin-top:13px" data-more="wp-repick-'+nq+'"><summary class="btn gh" data-wpk="repick-open:'+nq+'">Подобрать порт заново</summary>'
+      +warpSubnetField('wp-pool-'+name,pools)+'<div class="acts">'+wb('btn pri', 'repick', 'Проверить адреса', dis)+'</div></details>'
+      +'<div class="acts">'+wb('btn gh', 'reget', 'Получить заново', dis)+'</div>'
       // The job's step — in the card the job works on (`wpStLine`): with two cards on a phone the one line at the top of the
       // screen was a screen away from the button that was pressed.
       + '<div class="cline lead" data-wpst="'+nq+'"></div>'
@@ -26478,6 +26527,7 @@
   // word, kept until the next job. Written only when the text changed: the poll comes every 1.5 s, and a live region rewritten
   // with the same words is read out again each time.
   function wpStHtml(st){
+    if(st.state==='done' && st.ep && st.port) return '<span class="sens">'+esc(st.msg||'')+'</span> · <span class="mono sens">'+esc(st.ep)+':'+esc(st.port)+'</span>'+(st.colo ? ' · '+coloHtml(st.colo) : '');
     if(st.state!=='running' && st.state!=='error') return '';
     return (st.name ? '«<span class="sens" translate="no">'+esc(cfgDisp('awg', st.name))+'</span>»: ' : '')+'<span>'+esc(st.msg||(st.state==='running' ? 'работаю…' : ''))+'</span>';
   }
@@ -26572,6 +26622,8 @@
         + '<option value=""'+(pick ? '' : ' selected')+'>никого, только получить</option>';
       var h='<div class="vwrap"><div class="card w2"><div class="wt">Получить</div>'
         + '<label class="dsfld" style="margin-top:0">Сразу подключить через него<select id="wp-rider" class="inp" data-nwd="wp-rider">'+sel+'</select></label>'
+        + warpSubnetField('wp-get-pool',inf.pools)
+        + (inf.pools ? '<div class="tiny">В режиме «Авто» роутер сам подберёт адрес. Если выбрана подсеть, проверит несколько IP только из неё.</div>' : '')
         + '<div class="acts"><button type="button" class="btn pri" id="wp-get"'+((run || !bin) ? ' disabled' : '')+'>'+(wl.length ? 'Получить ещё один' : 'Получить WARP')+'</button></div>'
         + '<div class="cline lead" id="wp-st" aria-live="polite">'+(!bin ? 'нужен AmneziaWG — поставьте его в «Компонентах»' : '')+'</div>'
         + '<div class="cline">Роутер зарегистрируется у Cloudflare, найдёт адрес и порт, которые провайдер не режет, сохранит конфиг «WARP» (следующий — «WARP-2») и создаст выход без групп; выбранный сервер поедет через него. Обычно до 30 секунд, если провайдер мешает — до трёх минут.</div>'
@@ -26579,7 +26631,7 @@
         + '</div>';
       wl.forEach(function(n){
         var x=slotAll.filter(function(z){ return z.transport==='awg' && z.config===n; })[0]||null;
-        h+=warpCardHtml(n, byName[n]||null, x, st, n===mainNow, now, known, bin, slk);
+        h+=warpCardHtml(n, byName[n]||null, x, st, n===mainNow, now, known, bin, slk, inf.pools);
       });
       // The rule is the store's LINE for this address (as typed: bare or with /32) — a wider subnet a person wrote is theirs to
       // read; an answer that is not the stores' (a refusal, a login page) is «не ответил», not «правила нет».
@@ -26636,12 +26688,21 @@
         }, function(){ showToast('роутер не ответил', false); if(screenAlive(body)) rep(); });
         return true;
       }
+      function poolAvailable(pool){
+        if(Array.isArray(inf.pools) && inf.pools.indexOf(pool)>=0) return true;
+        showToast('Выбранная подсеть недоступна. Обновите экран или выберите «Авто».',false);
+        return false;
+      }
       var gb=document.getElementById('wp-get');
       if(gb) gb.addEventListener('click', function(){
         if(gb.disabled) return;
         fBtn=gb; fAlts=null;
         var rs=document.getElementById('wp-rider'), name=rs ? rs.value : '';
-        var args={action:'warp_get', rider:name};
+        var args={action:'warp_get', rider:name}, pool=body.querySelector('#wp-get-pool');
+        if(pool && pool.value){
+          if(!poolAvailable(pool.value)) return;
+          args.action='warp_get_subnet'; args.pool=pool.value;
+        }
         if(name){
           args.rev=(name===fromCard.name && fromCard.rev) || cfgRev(d,'awg',name);
           if(!args.rev){ cfgRevisionMissing(); return; }
@@ -26667,7 +26728,13 @@
           if(!postAction('slot_add', null, 'создаю выход '+dn, {name:n, transport:'awg', config:n, fallback:'main'}, rep, rep)) _wpFoc=was;
         }
         else if(v==='repick'){
-          if(askConfirm('Подобрать порт для '+dn+' заново? Роутер проверит порты, а если нужно — другие адреса и маскировки, пробным ключом — до трёх минут, работающий выход это не трогает. Конфиг изменится, только если его порт больше не проходит, идёт через московский узел Cloudflare или в конфиге прежняя маскировка роутера: тогда выход перезапустится.')) job({action:'warp_repick', name:n}, 'подбираю порт WARP');
+          var ps=document.getElementById('wp-pool-'+n), pool=ps && ps.value;
+          var params={action:'warp_repick', name:n};
+          if(pool){
+            if(!poolAvailable(pool)) return;
+            params.action='warp_repick_subnet'; params.pool=pool;
+            if(askConfirm('Проверить адреса в подсети '+pool+'.0/24? Если найдётся подходящий адрес, роутер применит его к конфигу '+dn+' и при изменении перезапустит выход.')) job(params, 'подбираю порт WARP');
+          } else if(askConfirm('Подобрать порт для '+dn+' заново? Роутер проверит порты, а если нужно — другие адреса и маскировки, пробным ключом — до трёх минут, работающий выход это не трогает. Конфиг изменится, только если его порт больше не проходит, идёт через московский узел Cloudflare или в конфиге прежняя маскировка роутера: тогда выход перезапустится.')) job(params, 'подбираю порт WARP');
         }
         else if(v==='reget'){
           // «…и в бэкапе, снятом раньше»: the old registration is given back to Cloudflare — a config restored from an earlier

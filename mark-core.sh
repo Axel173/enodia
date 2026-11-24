@@ -50,6 +50,7 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # The packet mark saved into the ct mark (ct-lib.sh `ct_mark_save`, its own section says why): wired below with the marks it
 # serves. No library (a partial update) — no rule, and every scoped flush falls back to the global one.
 if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
+command -v slot_rules_show >/dev/null 2>&1 || slot_rules_show() { ip rule show 2>/dev/null; }
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 if [ -f "$ENODIA_DIR/label-lib.sh" ]; then . "$ENODIA_DIR/label-lib.sh"; fi
 if [ -f "$ENODIA_DIR/set-lib.sh" ]; then . "$ENODIA_DIR/set-lib.sh"; fi   # set_slot_needed: which exit sets the builders require
@@ -77,12 +78,12 @@ SLOT_RULE_LOCK=/tmp/enodia-slot-rules.lock
 # One writer. The lookup list comes from intent, and the kernel skips a table without a route.
 slot_routes() (
     command -v slot_rule_rows >/dev/null && command -v lbl_lock_take >/dev/null || exit 0
-    _sr_before=$(ip rule show 2>/dev/null) || exit 1
+    _sr_before=$(slot_rules_show) || exit 1
     if [ ! -s "$ENODIA_STATE/.slots" ] && ! printf '%s\n' "$_sr_before" | grep -qE '^(9[2-7]|11[0-5]):'; then exit 0; fi
     lbl_lock_take "$SLOT_RULE_LOCK" 'mark-core\.sh' || exit 1
     trap 'lbl_lock_drop "$SLOT_RULE_LOCK"' EXIT
     trap 'exit 1' HUP INT TERM PIPE
-    _sr_before=$(ip rule show 2>/dev/null) || exit 1
+    _sr_before=$(slot_rules_show) || exit 1
     _sr_plan=''
     if [ -z "$1" ] && [ -s "$ENODIA_STATE/.slots" ]; then
         _sr_plan=$(sh "$SLOTS_SH" slot-plan "$2") || exit 1
@@ -117,7 +118,7 @@ EOF
         fi
         if [ "$_sr_ok" != 1 ]; then
             _sr_rc=1
-            _sr_new=$(ip rule show 2>/dev/null | slot_rule_rows "$_sr_id")
+            _sr_new=$(slot_rules_show | slot_rule_rows "$_sr_id")
         fi
         [ "$(printf '%s\n' "$_sr_old" | slot_rule_path)" = "$(printf '%s\n' "$_sr_new" | slot_rule_path)" ] ||
             ct_flush_slot "$_sr_id" origin
@@ -139,7 +140,7 @@ slot_firewall_repair() {
 
 # A late writer must not leave a lookup forbidden by the current off plan.
 slot_off_clean() {
-    _oc_rules=$(ip rule show 2>/dev/null) || return 1
+    _oc_rules=$(slot_rules_show) || return 1
     _oc_plan=''
     if [ -s "$ENODIA_STATE/.slots" ]; then _oc_plan=$(sh "$SLOTS_SH" slot-plan) || return 1; fi
     ! printf '%s\n' "$_oc_rules" | grep -qE 'fwmark 0x1(/[^ ]+)? .*lookup 1000( |$)' || return 1
