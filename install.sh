@@ -109,7 +109,7 @@ command -v lan_if >/dev/null 2>&1 || lan_if() { echo br-lan; }   # lan-lit: ши
 if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
 command -v wan_iface >/dev/null 2>&1 || wan_iface() { ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'; }
 command -v bin_path    >/dev/null 2>&1 || bin_path()    { printf '%s' "$ENODIA_BIN/$1"; }
-command -v bin_install >/dev/null 2>&1 || bin_install() { mv -f "$1" "$ENODIA_BIN/$2" && chmod +x "$ENODIA_BIN/$2"; }
+command -v bin_install >/dev/null 2>&1 || bin_install() { chmod 755 "$1" && [ -x "$1" ] && mv -f "$1" "$ENODIA_BIN/$2"; }
 # The switching lock for step 5b — its owner's way of taking it (daemon-lib.sh::switch_hold: waits for a live watchdog tick or heal
 # run, which drive the carrier WITHOUT the lock, and reaps a dead holder's lock). Shim: the lock only when free (packages.sh does it so).
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
@@ -608,6 +608,7 @@ fi
 # заливается ТОЛЬКО при выборе byedpi (be7000.ps1 шлёт нужный bin/*.user). Конфиг не нужен.
 if [ -f "$ENODIA_DIR/bin/byedpi.user" ]; then
     log "Найден byedpi.user (ciadpi, DPI-десинк), ставлю..."
+    command -v bin_check_exec >/dev/null 2>&1 || { err "Не удалось проверить доступ к ByeDPI: обновите скрипты"; exit 1; }
     put_bin "$ENODIA_DIR/bin/byedpi.user" byedpi
     ok "byedpi (ciadpi) установлен"
 fi

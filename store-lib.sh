@@ -135,20 +135,66 @@ harden_tree() {     # $1 = корень, $2 = режим каталогов, $3 
 # …и САМА ПОЛИТИКА — тоже здесь, одной строкой на каталог. Вызывателей два (install.sh на каждом
 # прогоне, usb-offload.sh после каждого переезда), и «какой режим у состояния» они обязаны знать
 # одинаково: разъехавшись, один заботливо ставил бы 700, а второй возвращал 777 следующим шагом.
+bin_exec_mode() {
+    # Mounts without POSIX modes can ignore chmod. Use the resulting access, not the chmod exit code.
+    chmod 755 "$1" 2>/dev/null || :
+    [ -x "$1" ]
+}
+
+bin_check_exec() {   # $1 = binary name, $2 = final or staged program path
+    [ "$1" = byedpi ] || return 0
+    [ -x "$2" ] || return 1
+    [ "$(id -u)" = 0 ] || return 0
+    # The empty pidfile makes this a foreground exec with no PID matching or state to write.
+    start-stop-daemon -S -p /dev/null -c nobody -x /bin/sh -- -c '[ -x "$1" ]' sh "$2"
+}
+
+harden_bin_access() {
+    [ -d "$1" ] && [ ! -L "$1" ] && [ ! -L "${1%/*}" ] || return 0
+    if { [ -n "${ENODIA_BOOT:-}" ] && [ "$1" = "${ENODIA_BOOT%/*}/enodia-bin" ]; } ||
+       { [ "${1##*/}" = bin ] && store_is_ours "${1%/*}"; }; then
+        # Only add traversal of managed parents. Preserve the pre-existing read and write bits.
+        chmod a+x "$1" "${1%/*}" 2>/dev/null || :
+    fi
+}
+
+bin_install_junk() {
+    [ ! -L "$1" ] && [ ! -L "${1%/*}" ] || return 0
+    for _bi_orphan in "$1"/.enodia-bin-install.*.*; do
+        [ -d "$_bi_orphan" ] && [ ! -L "$_bi_orphan" ] || continue
+        _bi_pid=${_bi_orphan##*/.enodia-bin-install.}; _bi_pid=${_bi_pid%%.*}
+        case "$_bi_pid" in ''|0*|*[!0-9]*) continue ;; esac
+        kill -0 "$_bi_pid" 2>/dev/null || printf '%s\n' "$_bi_orphan"
+    done
+}
+
+bin_reap_install_junk() {
+    bin_install_junk "$1" | while IFS= read -r _bi_old; do
+        for _bi_file in "$_bi_old"/*; do
+            if [ -f "$_bi_file" ] && [ ! -L "$_bi_file" ]; then rm -f "$_bi_file" 2>/dev/null || :; fi
+        done
+        rmdir "$_bi_old" 2>/dev/null || :
+    done
+}
+
+harden_bin_tree() {
+    [ -d "$1" ] && [ ! -L "$1" ] || return 0
+    bin_reap_install_junk "$1"
+    # Generated AWG exit configs live alongside executables. Set their private mode before allowing traversal.
+    find "$1" -type f -name 'awg[0-9]*.conf' -exec chmod 600 {} ';' 2>/dev/null || :
+    harden_tree "$1" 755 -
+    find "$1" -type f ! -name 'awg[0-9]*.conf' -exec chmod 755 {} ';' 2>/dev/null || :
+    harden_bin_access "$1"
+}
+
 harden_perms() {    # $1 = каталог кода, $2 = каталог состояния, $3 = каталог бинарей
     harden_tree "$1" 755 -      # код: каталоги 755, файлы уже верны (0755 скрипты, 0644 данные)
     harden_tree "$2" 700 600    # состояние: секреты, читать их некому, кроме root
-    # Бинари — 755 И КАТАЛОГ, И ФАЙЛЫ. Там лежат ТОЛЬКО исполняемые (проверено на железе
-    # 02.09.2026: семь бинарей и ничего больше), и другого верного режима у них нет.
-    # Сегодня они и так 755 — но лишь ПОБОЧНО: `move_verified` копирует без `-p`, и режим
-    # источника (на exFAT это 0777) обрезает umask, а следом идёт `chmod +x`. Правильный
-    # результат, полученный из семантики `cp` и umask, — не правило, а совпадение; для
-    # файла, который root запускает как демона, «не world-writable» надо ЗАЯВЛЯТЬ.
-    harden_tree "$3" 755 755
-    # …except the EXITS' generated configs (`awg<N>.conf`, transport-awg.sh::slot_ifconf): they live here, next to the binaries,
-    # and carry a private key — «everything here is a binary» made them 755 on every install and every move (measured on BE7000
-    # 11.10.2026). The same closed mode the state directory has.
-    find "$3" -type f -name 'awg[0-9]*.conf' -exec chmod 600 {} ';' 2>/dev/null || :
+    harden_bin_tree "$3"
+    # In bins mode the resident directory and the verified offload directory can both contain executables.
+    if [ "$3" = "$ENODIA_BIN" ] && [ "$BIN_DIR" != "$3" ] && [ ! -L "$STORE_DIR" ]; then
+        harden_bin_tree "$BIN_DIR"
+    fi
     return 0
 }
 
@@ -266,8 +312,14 @@ store_state() {
 # ГРАБЛЯ (set -e, install.sh): условие вынесено в `if`, а НЕ в `[ … ] && printf`.
 # Цепочка `&&` как простая команда пробрасывает код 1 наружу и роняет вызывающего под set -e —
 # ровно этим когда-то обрывался purge-alt.
+bin_use_store() {
+    [ "$BIN_DIR" != "$ENODIA_BIN" ] && [ -x "$BIN_DIR/$1" ] || return 1
+    # Fall back to a runnable resident ByeDPI. If neither copy can run, still report the installed copy.
+    bin_check_exec "$1" "$BIN_DIR/$1" || ! bin_check_exec "$1" "$ENODIA_BIN/$1"
+}
+
 bin_path() {
-    if [ "$BIN_DIR" != "$ENODIA_BIN" ] && [ -x "$BIN_DIR/$1" ]; then
+    if bin_use_store "$1"; then
         printf '%s' "$BIN_DIR/$1"
     else
         printf '%s' "$ENODIA_BIN/$1"
@@ -277,7 +329,7 @@ bin_path() {
 # bin_where <имя> — `store` | `router` | пусто (бинаря нет вовсе). Для диагностики и панели:
 # им нужен не путь, а место жительства. Отдельная функция, чтобы никто не парсил bin_path.
 bin_where() {
-    if [ "$BIN_DIR" != "$ENODIA_BIN" ] && [ -x "$BIN_DIR/$1" ]; then
+    if bin_use_store "$1"; then
         printf 'store'
     elif [ -x "$ENODIA_BIN/$1" ]; then
         printf 'router'
@@ -378,6 +430,7 @@ bin_dest() {
 # накопитель) продолжает отдавать СТАРЫЙ — «обновил и ничего не изменилось».
 bin_prune() {
     _bd=$(bin_dest "$1")
+    if ! bin_check_exec "$1" "$_bd"; then unset _bd; return 0; fi
     if [ "$_bd" = "$ENODIA_BIN/$1" ]; then
         if [ "$BIN_DIR" != "$ENODIA_BIN" ]; then rm -f "$BIN_DIR/$1" 2>/dev/null; fi
     else
@@ -432,16 +485,31 @@ store_purge_bins() {   # optional USB root about to be admitted; otherwise sweep
     return "$_sp_rc"
 }
 
-# bin_install <откуда> <имя> — положить бинарь на его место одним движением (mv + exec-бит +
-# prune). Для установщика, который раскладывает payload bin/*.user. mv, а не cp: на 20-МБ флеше
-# важен ПИК, а не финальный размер. chmod best-effort — на exFAT/NTFS права задаёт монтирование
-# (fmask=0000), и chmod там тихо не делает ничего.
+# bin_install <source> <name> verifies the actual destination inode before replacing any working copy.
+# Same-volume staging only renames. Isolate the candidate from migration and older cleaners' top-level '*.new' glob.
 bin_install() {
-    _bd=$(bin_dest "$2")
-    mkdir -p "${_bd%/*}" 2>/dev/null
-    mv -f "$1" "$_bd" 2>/dev/null || { unset _bd; return 1; }
-    chmod +x "$_bd" 2>/dev/null
-    unset _bd
+    _bid=$(bin_dest "$2")
+    mkdir -p "${_bid%/*}" 2>/dev/null || return 1
+    if [ "$2" = byedpi ]; then harden_bin_access "${_bid%/*}"; fi
+    bin_reap_install_junk "${_bid%/*}"
+    _bidir=$(mktemp -d "${_bid%/*}/.enodia-bin-install.$$.XXXXXX") || return 1
+    _bistage="$_bidir/$2"
+    if [ "$2" = byedpi ]; then chmod a+x "$_bidir" 2>/dev/null || :; fi
+    _bimoved=0
+    if fs_same_volume "$1" "${_bid%/*}"; then
+        mv -f "$1" "$_bistage" 2>/dev/null || { rmdir "$_bidir" 2>/dev/null; return 1; }
+        _bimoved=1
+    else
+        cp "$1" "$_bistage" 2>/dev/null || { rm -f "$_bistage" 2>/dev/null; rmdir "$_bidir" 2>/dev/null; return 1; }
+    fi
+    if ! { bin_exec_mode "$_bistage" && bin_check_exec "$2" "$_bistage" && mv -f "$_bistage" "$_bid"; }; then
+        if [ "$_bimoved" = 1 ]; then mv -f "$_bistage" "$1" 2>/dev/null; else rm -f "$_bistage" 2>/dev/null; fi
+        rmdir "$_bidir" 2>/dev/null || :
+        return 1
+    fi
+    [ "$_bimoved" = 1 ] || rm -f "$1" 2>/dev/null || :
+    rmdir "$_bidir" 2>/dev/null || :
+    unset _bid _bidir _bistage _bimoved
     bin_prune "$2"
     return 0
 }

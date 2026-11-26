@@ -49,7 +49,7 @@ command -v pid_runs >/dev/null 2>&1 || pid_runs() { [ -n "$1" ] && [ -d "/proc/$
 command -v switch_hold >/dev/null 2>&1 || switch_hold() { ( set -C; echo $$ > "$1" ) 2>/dev/null; }
 # Does the main carrier carry right now (cmd_restart) — the owner's answer, ip-lib.sh::carrier_iface (C81).
 if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
-command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table 1000 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
+command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table "100${1:-0}" 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
 command -v jlines >/dev/null 2>&1 || jlines() { cat >/dev/null; }
 command -v bin_path   >/dev/null 2>&1 || bin_path()   { printf '%s' "$ENODIA_BIN/$1"; }
 command -v bin_dest   >/dev/null 2>&1 || bin_dest()   { printf '%s' "$ENODIA_BIN/$1"; }

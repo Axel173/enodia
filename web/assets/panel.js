@@ -8669,7 +8669,7 @@
     // о нём узнает. «Не всё снялось» ОБЯЗАНО читаться как отказ, а не как мягкое замечание.
     "Снимаю VPN…":"Removing the VPN…","Обычно это несколько секунд.":"This usually takes a few seconds.",
     "VPN снят — интернет идёт напрямую через провайдера.":"The VPN is off — traffic now goes straight through your ISP.",
-    "Снялось НЕ ВСЁ: часть правил или демонов пережила отключение.":"NOT everything was removed: some rules or daemons survived the shutdown.",
+    "Роутер не подтвердил полное отключение VPN.":"The router could not confirm that VPN deactivation completed.",
     // — Гео-списки (geo.sh), экран `rt-geo` колодой (шаг 4c) — карточки, сегменты источника и отбора, строки каталога.
     //   Составные подсказки РАЗОРВАНЫ тегами <b> на отдельные текст-узлы ⇒ переводим КАЖДЫЙ фрагмент
     //   (частичный перевод дал бы ru/en-мешанину в одном абзаце — хуже, чем цельный русский).
@@ -8762,8 +8762,8 @@
     "address 0.0.0.0 и ::":"address 0.0.0.0 and ::",
     ", обе семьи. Правило переигрывается на буте; «Выкл» снимает.":", both families. The rule is replayed on boot; «Off» removes it.",
     // — карточка «Каталоги»: обновление и честный прогресс сборки —
-    "«Обновить списки» тянет свежие каталоги и данные включённых категорий (пиновка на коммит — без 12-часового лага jsDelivr); то же самое делает ночное расписание.":
-      "«Update lists» pulls fresh catalogs and the data of the enabled categories (pinned to a commit — no 12-hour jsDelivr lag); the nightly schedule does the same.",
+    "«Обновить списки» загружает каталоги и данные выбранных категорий. Обновление по расписанию загружает только список страновых подсетей, если выбран один Китай и другим функциям каталоги не нужны.":
+      "“Update lists” downloads the catalogs and the selected category data. If only China is selected and no other feature needs the catalogs, the scheduled update downloads just the country’s subnet list.",
     "разобрано файлов":"files parsed","в очереди":"queued",
     "по этому запросу ничего не найдено":"nothing found for this query",
     "в источнике и отборе вместе таких категорий нет":"there are no such categories in this source and filter together",
@@ -10205,7 +10205,7 @@
     "Файлы, настройки и панель на месте; шапка теперь говорит «выключен вами».":"Files, settings and the panel are in place; the header now says you turned the VPN off.",
     "Тумблер VPN в шапке делает то же самое: вернёт правила, настройки подсистем и расписание.":"The VPN switch in the header does the same: it brings back the rules, subsystem settings and schedule.",
     "Включить VPN":"Turn the VPN on",
-    "Что именно уцелело — в отчёте на роутере:":"What survived is in the report on the router:",
+    "Подробности проверки — в отчёте на роутере:":"The router’s report has the verification details:",
     "Повторите отключение; не помогло — перезагрузите роутер.":"Repeat the turn-off; if that doesn't help, reboot the router.",
     "Снятие оборвалось на полпути.":"Taking down broke off halfway.",
     "Роутер перезагрузился или не хватило памяти. Что успело сняться — в отчёте на роутере:":"The router rebooted or ran out of memory. What managed to come off is in the report on the router:",
@@ -10274,7 +10274,7 @@
     "туннель ещё не снят; закрыть его можно и сейчас":"the tunnel isn't down yet; you can close it now too",
     "(роутер ответил не то — команда, возможно, выполнилась; прежде чем повторять, проверьте результат)":"(the router answered something unexpected — the command may have run; check the result before repeating it)",
     "VPN снят — интернет идёт напрямую через провайдера":"The VPN is off — traffic now goes straight through your ISP",
-    "Снялось не всё — подробности на экране «Удаление»":"Not everything came off — details on the “Removal” screen",
+    "Отключение не подтверждено — подробности на экране «Удаление»":"Deactivation unconfirmed — see the “Removal” screen",
     "Снятие оборвалось — подробности на экране «Удаление»":"Taking down broke off — details on the “Removal” screen",
     "Роутер не сообщил, чем кончилось снятие":"The router didn't report how taking down ended",
     "Роутер не ответил, чем кончилось снятие":"The router didn't answer how taking down ended",
@@ -12258,6 +12258,11 @@
     "нет места для работы":"no room to work",
     "не удалось создать ключ (awg genkey)":"could not create a key (awg genkey)",
     "Cloudflare не ответил — попробуйте позже":"Cloudflare did not answer — try later",
+    "не удалось определить IP-адрес Cloudflare":"could not resolve Cloudflare’s IP address",
+    "не удалось установить соединение":"could not connect",
+    "истекло время ожидания":"request timed out",
+    "ошибка защищённого соединения TLS":"TLS connection failed",
+    "ошибка передачи":"transfer failed",
     "Cloudflare прислал незнакомый ключ сервера — нужна новая версия панели":"Cloudflare sent an unknown server key — a new panel version is needed",
     "Cloudflare не прислал адрес — нужна новая версия панели":"Cloudflare sent no address — a new panel version is needed",
     "Cloudflare не прислал адрес сервера — нужна новая версия панели":"Cloudflare sent no server address — a new panel version is needed",
@@ -12500,6 +12505,8 @@
     [/^WARP получен \(выход №([2-7])\), а дорога не встала: (.*)$/,function(m, a, b){ var t=i18nStr('[road] '+b); return "WARP received (exit #"+a+"), but the road didn't come up: "+(t!=='[road] '+b ? t.replace(/^\[road\] /, '') : b); }],
     [/^конфиг «([^«»]*)» сохранён, а выход не создался: (.*)$/,function(m, a, b){ var t=i18nStr('[slots] '+b); return "the config «"+a+"» is saved, but the exit wasn't created: "+(t!=='[slots] '+b ? t.replace(/^\[slots\] /, '') : b); }],
     [/^Cloudflare отклонил регистрацию \(HTTP (\d+)\): он сменил порядок — нужна новая версия панели$/,"Cloudflare refused the registration (HTTP $1): it changed the procedure — a new panel version is needed"],
+    [/^повторяю регистрацию через (\w+)$/,"retrying registration through $1"],
+    [/^Cloudflare не ответил — (.+) \(curl (\d+)\)$/,function(m, why, rc){ return "Cloudflare did not respond — "+i18nStr(why)+" (curl "+rc+")"; }],
     [/^Cloudflare выдал WARP, но провайдер режет его на всех портах \(([0-9, ]+)\) — конфиг не сохранён$/,"Cloudflare issued WARP, but your ISP cuts it on every port ($1) — the config isn't saved"],
     [/^Cloudflare выдал WARP, но провайдер не пропускает к нему ни одного пакета \(проверено адресов: (\d+)\) — конфиг не сохранён$/,"Cloudflare issued WARP, but your ISP lets no packet through to it (addresses checked: $1) — the config isn't saved"],
     [/^Cloudflare выдал WARP, но провайдер не пропускает к нему ни одного пакета \(проверено адресов: (\d+)\) — конфиг «([^«»]*)» не изменён$/,"Cloudflare issued WARP, but your ISP lets no packet through to it (addresses checked: $1) — the config «$2» is not changed"],
@@ -24878,7 +24885,7 @@
         + (r[1] ? '<span class="tiny"><span>апстрим</span> '+esc(geoFreshLabel(r[1]))+'</span>' : '<span class="chip">дата неизвестна</span>')+'</div>';
     }).join('');
     return '<div class="wt">Каталоги</div>'+rows
-      + '<div class="cline">«Обновить списки» тянет свежие каталоги и данные включённых категорий (пиновка на коммит — без 12-часового лага jsDelivr); то же самое делает ночное расписание.</div>'
+      + '<div class="cline">«Обновить списки» загружает каталоги и данные выбранных категорий. Обновление по расписанию загружает только список страновых подсетей, если выбран один Китай и другим функциям каталоги не нужны.</div>'
       + '<div class="acts"><button type="button" class="btn geo-refresh" data-gact="upd"'+(running?' disabled':'')+'>Обновить списки</button>'
       // Вход в мастер импорта ИЗ ЭТОГО экрана. Раньше мастер жил только в ⋮ подписки — то есть
       // человек, переносящий правила из v2rayA/Clash, находил его случайно или не находил вовсе,
@@ -30917,7 +30924,7 @@
       : row('', 'Снято — интернет идёт напрямую через провайдера.', 'Файлы, настройки и панель на месте. Протокол не выбран — туннеля и не было, но то, что работало без него (блокировка, свои имена, «доступ домой»), снято вместе с расписанием.')
         + '<div class="acts"><div class="grow cline" style="margin:0">Вернуть всё, что было включено, — одной кнопкой.</div>'
         + '<button type="button" class="btn pri" data-una="on" data-busy="1"'+(busy ? ' disabled' : '')+'>Включить обратно</button></div>';
-    else if(r.st==='FAIL') h+=row(' bad', 'Снялось НЕ ВСЁ: часть правил или демонов пережила отключение.', '<span>Что именно уцелело — в отчёте на роутере:</span> '+UN_LOG+' <span>Повторите отключение; не помогло — перезагрузите роутер.</span>')
+    else if(r.st==='FAIL') h+=row(' bad', 'Роутер не подтвердил полное отключение VPN.', '<span>Подробности проверки — в отчёте на роутере:</span> '+UN_LOG+' <span>Повторите отключение; не помогло — перезагрузите роутер.</span>')
       + '<div class="acts"><div class="grow"></div><button type="button" class="btn" data-una="again">Повторить</button></div>';
     else if(r.st==='cut') h+=row(' bad', 'Снятие оборвалось на полпути.', '<span>Роутер перезагрузился или не хватило памяти. Что успело сняться — в отчёте на роутере:</span> '+UN_LOG+' <span>Повторите отключение.</span>')
       + '<div class="acts"><div class="grow"></div><button type="button" class="btn" data-una="again">Повторить</button></div>';
@@ -30927,7 +30934,7 @@
     return h+'</div>';
   }
   // Итог — строкой тоста тоже: `role=status`, вставленная уже с текстом, читалкой как правило не озвучивается, а экрана может и не быть.
-  var UN_TOAST={OK:['VPN снят — интернет идёт напрямую через провайдера', true], FAIL:['Снялось не всё — подробности на экране «Удаление»', false],
+  var UN_TOAST={OK:['VPN снят — интернет идёт напрямую через провайдера', true], FAIL:['Отключение не подтверждено — подробности на экране «Удаление»', false],
                 cut:['Снятие оборвалось — подробности на экране «Удаление»', false], late:['Роутер не сообщил, чем кончилось снятие', false],
                 net:['Роутер не ответил, чем кончилось снятие', false]};
   // Дождаться ВЕРДИКТА деактивации. Снятие запускается ОТВЯЗАННО (uninstall.sh под start-stop-daemon -b), и «ok» от action

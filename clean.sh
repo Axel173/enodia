@@ -172,6 +172,10 @@ junk_targets() {
             [ -e "$_t" ] && echo "$_t"
         done
     done
+    # The installer owns the stage namespace and the live-owner check.
+    if [ -f "$ENODIA_DIR/store-lib.sh" ]; then
+        ( . "$ENODIA_DIR/store-lib.sh"; if command -v bin_install_junk >/dev/null 2>&1; then bin_install_junk "$ENODIA_BIN"; fi )
+    fi
     # БРОШЕННАЯ ЗАКАЧКА — `<файл>.dl` от gh-update.sh (бинарь до 8 МБ рядом с бинарями, манифест у состояния): закачку
     # оборвали (ребут, `kill -9` операции), и файл лежал до следующей закачки ТОГО ЖЕ файла, невидимый кнопке (бэклог ревью
     # ветки fix/dot-tails, круг 2). Мусор он, только пока апдейтера нет в живых: идущую закачку сносить нельзя, а ВОЗРАСТ

@@ -1072,13 +1072,7 @@ fetch_bin_staged() {   # $1 = имя, $2 = куда, [$3 = каталог-ист
     _fsh=$(file_sha256 "$_fsd.dl")
     if [ "$_fsh" != "$_fss" ]; then rm -f "$_fsd.dl" "$_fsc/$_fsn" "$_fsc/$_fsn.sha"; fb_fail "$_fsw $_fsn не совпал с манифестом"; return 1; fi
     if ! elf_ok "$_fsd.dl"; then rm -f "$_fsd.dl" "$_fsc/$_fsn" "$_fsc/$_fsn.sha"; fb_fail "$_fsw $_fsn не ELF (не бинарь)"; return 1; fi
-    chmod +x "$_fsd.dl"
-    mv "$_fsd.dl" "$_fsd" || { rm -f "$_fsd.dl"; fb_fail "не смог поставить $_fsn"; return 1; }
-    GH_BGDL=
-    if [ ! -x "$_fsd" ]; then
-        chmod +x "$_fsd" 2>/dev/null
-        [ -x "$_fsd" ] || { rm -f "$_fsd"; fb_fail "$_fsn лёг без права на исполнение ($_fsd) — накопитель смонтирован без exec?"; return 1; }
-    fi
+    fetch_bin_publish "$_fsn" "$_fsd" || return 1
     rm -f "$_fsc/$_fsn" "$_fsc/$_fsn.sha"
     bs_seed "$_fsn" "$_fsd" "bin/$(bin_arch)/$_fsn.user" "$_fsh"
     if [ "$_fsc" = "$BIN_PREFETCH" ]; then log "[fetch-bin] OK: $_fsn (скачан заранее) -> $_fsd"
@@ -1105,6 +1099,31 @@ rel_flat_url() { [ "$GH_REF" = main ] || return 0; echo "$GH_REL/$1"; }
 # FB_OTHER — «по адресу другая сборка» (sha не тот): не подмена и не сбой, а другой релиз — итог выбирает fetch_bin.
 # Строки этой попытки — «[fetch-bin] мимо: …», а не FAIL: итог FAIL пишет fetch_bin, и движок берёт ПОСЛЕДНЮЮ такую строку.
 fb_fail() { FB_WHY="$1"; if [ "$2" = 404 ]; then FB_404=1; else FB_404=0; fi; log "[fetch-bin] мимо: $1"; }
+fetch_bin_publish() {    # $1 = name, $2 = destination, already verified bytes in $2.dl
+    # An explicit mode works under a private umask. On exFAT/NTFS the mount decides; check the staged file on the
+    # same filesystem before replacing a working executable.
+    if ! (
+        if [ -f "$ENODIA_DIR/store-lib.sh" ]; then . "$ENODIA_DIR/store-lib.sh"; fi
+        if command -v bin_check_exec >/dev/null 2>&1; then
+            if [ "$1" = byedpi ] && [ "${2%/*}" != "${BIN_PREFETCH:-}" ]; then
+                harden_bin_access "${2%/*}"
+                bin_exec_mode "$2.dl" && bin_check_exec "$1" "$2.dl"
+            else
+                bin_exec_mode "$2.dl"
+            fi
+        else
+            if [ "$1" = byedpi ] && [ "${2%/*}" != "${BIN_PREFETCH:-}" ]; then exit 1; fi
+            chmod 755 "$2.dl" 2>/dev/null || :
+            [ -x "$2.dl" ]
+        fi
+    ); then
+        rm -f "$2.dl"
+        fb_fail "$1 лёг без права на исполнение ($2) — накопитель смонтирован без exec?"
+        return 1
+    fi
+    mv "$2.dl" "$2" || { rm -f "$2.dl"; fb_fail "не смог поставить $1"; return 1; }
+    GH_BGDL=
+}
 fetch_bin_one() {
     url="$1"; rel="$2"; name="$3"; dst="$4"; minsz="$5"; FB_OTHER=0
     log "[fetch-bin] $name <- $url"
@@ -1149,17 +1168,7 @@ fetch_bin_one() {
     if [ "$_fbh" != "$FB_WANT" ]; then
         rm -f "$dst.dl"; fb_fail "$name по этому адресу — другая сборка, не та, что знает установленная версия"; FB_OTHER=1; return 1
     fi
-    chmod +x "$dst.dl"
-    mv "$dst.dl" "$dst" || { rm -f "$dst.dl"; fb_fail "не смог поставить $name"; return 1; }
-    GH_BGDL=
-    # Исполняемость судим ПО ФАКТУ, а не по тому, что chmod отработал: с появлением внешнего
-    # накопителя $dst бывает на exFAT/NTFS, где права задаёт МОНТИРОВАНИЕ (fmask), а chmod молча
-    # не делает ничего. Файл, легший без +x, — это связка, которая навсегда осталась «не
-    # установлена» после успешной закачки, без единой причины на экране. Лучше явный отказ.
-    if [ ! -x "$dst" ]; then
-        chmod +x "$dst" 2>/dev/null
-        [ -x "$dst" ] || { rm -f "$dst"; fb_fail "$name лёг без права на исполнение ($dst) — накопитель смонтирован без exec?"; return 1; }
-    fi
+    fetch_bin_publish "$name" "$dst" || return 1
     [ "$FB_NOSEED" = 1 ] || bs_seed "$name" "$dst" "$rel" "$_fbh"
     log "[fetch-bin] OK: $name ($sz байт) -> $dst"
 }

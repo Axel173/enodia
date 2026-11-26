@@ -68,6 +68,7 @@ if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 command -v slot_rules_show >/dev/null 2>&1 || slot_rules_show() { ip rule show 2>/dev/null; }
 if [ -f "$ENODIA_DIR/daemon-lib.sh" ]; then . "$ENODIA_DIR/daemon-lib.sh"; fi
 command -v bin_path >/dev/null 2>&1 || bin_path() { printf '%s' "$ENODIA_BIN/$1"; }
+command -v bin_check_exec >/dev/null 2>&1 || bin_check_exec() { [ -x "$2" ]; }
 
 # Реестр: порядок приоритета и cross-перебора. Порядок = приоритет cross («awg» как
 # надёжная база первой). xray и hy2 на флеше взаимоисключающи (см. transport_ready). byedpi
@@ -137,7 +138,7 @@ transport_ready() {
         hy2)  [ -s "$ENODIA_STATE/hysteria.yaml" ] ;;
         # byedpi — БЕЗ секрет-конфига (нет VPS): десинк локальный, бинарей достаточно.
         # Десинк-аргументы опциональны (.byedpi-args или дефолт).
-        byedpi) : ;;
+        byedpi) bin_check_exec byedpi "$(bin_path byedpi)" ;;
         # zapret — БЕЗ конфига, но требует сборку iptables, УМЕЮЩУЮ NFQUEUE: на AX3600 (ядро 4.4,
         # iptables 1.6.2 без libxt_NFQUEUE) бинарь есть, а правило перехвата не поставить —
         # «готов» там означало бы «предложи человеку транспорт, который не встанет». Ответ у
@@ -292,7 +293,7 @@ slot_ready() {
         awg)    [ -x "$ENODIA_BIN/amneziawg-go" ] && [ -x "$ENODIA_BIN/awg" ] && ls "$ENODIA_STATE"/configs/*.conf     >/dev/null 2>&1 ;;
         xray)   [ -x "$(bin_path xray)" ]     && [ -x "$(bin_path hev)" ] && ls "$ENODIA_STATE"/xray-configs/*.json >/dev/null 2>&1 ;;
         hy2)    [ -x "$(bin_path hysteria)" ] && [ -x "$(bin_path hev)" ] && ls "$ENODIA_STATE"/hy2-configs/*.yaml  >/dev/null 2>&1 ;;
-        byedpi) [ -x "$(bin_path byedpi)" ]   && [ -x "$(bin_path hev)" ] ;;   # десинк без сервера
+        byedpi) transport_installed byedpi && bin_check_exec byedpi "$(bin_path byedpi)" ;;
         # zapret — десинк без несущей, но одного бинаря МАЛО: нужен ЯДЕРНЫЙ NFQUEUE. Вопрос тот
         # же, что у transport_ready, а ответ был свой — по бинарю, — и на ядре 4.4 (AX3600/BE3600,
         # libxt_NFQUEUE вырезан) расходился с ним ровно наоборот: `list` zapret не показывал, а
@@ -323,6 +324,11 @@ cmd_next() {
 }
 
 # Поднять несущую транспорта поверх общего ядра (mark-core). Деф. — активный.
+geo_first_up() {
+    [ "${ENODIA_GEO_REPLAY:-}" != 1 ] || return 0   # heal schedules its own update after offline replay
+    [ ! -s "$ENODIA_STATE/geo/.snap-out" ] && [ -f "$ENODIA_DIR/geo.sh" ] || return 0
+    sh "$ENODIA_DIR/geo.sh" start-default || :
+}
 cmd_up() {
     # Пустой флаг = либо роутер, установленный ДО появления `.transport` (несущая там awg —
     # исторический фолбэк ниже), либо установка «только панель», где транспорта нет вовсе. Во
@@ -336,7 +342,8 @@ cmd_up() {
     p=$(plugin_for "$t"); [ -f "$p" ] || { echo "[transport] нет плагина для '$t'"; return 1; }
     apply_marking
     main_road_before_alt "$t"
-    sh "$p" up
+    sh "$p" up || return $?
+    geo_first_up
 }
 
 # Переключить активный транспорт: отпустить текущую несущую (плагин down — чистый
@@ -478,6 +485,7 @@ cmd_switch() {
         # нечем, и на уровне транспортов режим `home` не отличался от `sticky` (жалоба тестера
         # 01.09.2026 — «резерв+возврат не работает», и он был прав).
         [ "$_home_pick" = 1 ] && echo "$new" > "$ENODIA_STATE/.transport-home"
+        [ "$_redeact" = 1 ] || geo_first_up
         redeact_replay
         return 0
     fi

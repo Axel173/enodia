@@ -46,7 +46,7 @@ F=/usr/share/xiaoqiang/xiaoqiang_version
 # Устройство несущей — у владельца (ip-lib.sh::carrier_iface, следит C81): по нему шапка решает
 # «везёт ли VPN». Шим = та же строка на случай частичной установки.
 if [ -f "$D/ip-lib.sh" ]; then . "$D/ip-lib.sh"; fi
-command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table 1000 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
+command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table "100${1:-0}" 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
 # Единый детект модели (та же логика, что у префикса писем/событий). Шим-фолбэк ниже.
 if [ -f "$D/router-lib.sh" ]; then . "$D/router-lib.sh"; fi
 

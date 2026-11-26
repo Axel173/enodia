@@ -238,7 +238,10 @@ km_raw_gc() {
 km_sources() {
     km_profile || return 0
     # Reconciliation must also find a raw selector left before its mangle peer was installed.
-    iptables -t raw -S "$KM_CHAIN" 2>/dev/null |
+    km_tables=$(cat /proc/net/ip_tables_names) || return 1
+    printf '%s\n' "$km_tables" | grep -qx raw || return 0
+    km_src_rules=$(iptables -t raw -S 2>/dev/null) || return 1
+    printf '%s\n' "$km_src_rules" | grep -F -- "-A $KM_CHAIN " |
         grep -- '--helper enodia_noflow' |
         sed -n 's/.* -s \([0-9.]*\)\(\/32\)\{0,1\} .*/\1/p' | sort -u
 }

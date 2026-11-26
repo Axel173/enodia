@@ -178,6 +178,8 @@ ns_ips() {
 # Код 1 (никто не ответил) оставляет прежний путь байт-в-байт: зеркальный случай «dnsmasq лёг,
 # туннель жив / провайдер режет прямой путь к 1.1.1.1» по-прежнему лечится вторым проходом.
 doh_ips() {
+    # A caller retrying a failed path needs DNS on its chosen carrier too.
+    if [ "${3:-}" = bound ]; then _dnslib_doh_all "$1" "$2" bound; return $?; fi
     _dq_h="$1"; _dq_a="$2"
     _dq_w=$(_dnslib_wan)
     if [ -n "$_dq_w" ]; then
@@ -291,7 +293,8 @@ _dnslib_doh_all() {
         # была ВТОРОЙ, то есть платили проверкой там, где платить не требовалось.
         case "$_dda_b" in
             *'"Status"'*) ;;
-            *) _dda_ca=$(curl_ca_opt "$_dq?name=$1&type=A")
+            *) _dda_args=''; [ "${3:-}" != bound ] || _dda_args=$2
+               _dda_ca=$(curl_ca_opt "$_dq?name=$1&type=A" $_dda_args)
                if [ -n "$_dda_ca" ]; then
                    _dda_b=$(_dns_seed_curl 8 -s $_dda_ca --connect-timeout 3 --max-time 8 $2 "$_dq?name=$1&type=A" -H 'accept: application/dns-json' 2>/dev/null || true)
                fi

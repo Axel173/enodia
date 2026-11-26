@@ -289,7 +289,7 @@ why_skip() { if [ "$vpn_off" = 1 ]; then echo "VPN выключен челове
 if [ "$REPLAY" = 0 ] && [ -f "$ENODIA_DIR/gh-update.sh" ]; then
     sh "$ENODIA_DIR/gh-update.sh" bin-purge || :
 fi
-[ -f "$ENODIA_DIR/usb-offload.sh" ] && sh "$ENODIA_DIR/usb-offload.sh" mount-ensure
+[ -f "$ENODIA_DIR/usb-offload.sh" ] && sh "$ENODIA_DIR/usb-offload.sh" mount-ensure boot
 
 # Resolve encrypted DNS paths only after the purge and mount. A removed USB
 # copy may have hidden a compatible flash binary when heal first started.
@@ -664,7 +664,7 @@ elif [ "$active_ready" = 0 ]; then
     echo "транспорт $active_t выбран, но поднять его нечем (нет программы/конфига) — несущую не поднимаю, см. панель :8088"
     echo "  (если программа появится позже — например вместе с накопителем, — несущую поднимет сторож)"
 elif [ -f ./transport.sh ]; then
-    sh ./transport.sh up "$active_t"
+    ENODIA_GEO_REPLAY=1 sh ./transport.sh up "$active_t"
 else
     case "$active_t" in
         xray) [ -f ./xray-transport.sh ] && sh ./xray-transport.sh up ;;
@@ -770,7 +770,11 @@ fi
 # geo_vpn/geo_out — на /data (офлайн-reapply, маршрутизация переживает ребут без сети, как
 # tunnel-cidr). Реестр действий actions.tsv на /data переживает ребут; сам фетч тяжёлый и требует
 # сети → отдельно ФОНОМ (сеть уже поднята выше). reapply офлайн-безопасен; без гео в реестре — no-op.
-if [ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ]; then
+if [ -f ./geo.sh ] && [ ! -f "$ENODIA_STATE/geo/actions.tsv" ]; then
+    sh "$ENODIA_DIR/geo.sh" defaults || echo "Не удалось записать начальные гео-правила"
+fi
+if [ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ] &&
+   ! sh "$ENODIA_DIR/geo.sh" default-deferred; then
     echo "--- geo: офлайн-восстановление гео-категорий из снимка ---"
     prog_sub geo now
     sh "$ENODIA_DIR/geo.sh" reapply 2>&1 | tail -1
@@ -788,8 +792,7 @@ if [ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ]; then
         echo "--- geo: фоновая перекачка гео-источников ---"
         # `3>&-` — по той же причине, что у списков выше: фоновому демону наш fd 3 (stdout
         # вызывателя в режиме replay) не нужен, а унесённая труба вешает вызывателя.
-        ENODIA_UPD_PROG= ENODIA_SWITCH_HOLDER= start-stop-daemon -S -b -m -p /tmp/enodia-geo-update.pid \
-            -x /bin/sh -- "$ENODIA_DIR/geo.sh" update >/dev/null 2>&1 3>&-
+        sh "$ENODIA_DIR/geo.sh" start-update
     fi
 fi
 

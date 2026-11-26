@@ -155,6 +155,9 @@ ipt_reply_guard() {
     [ "$1" != 0 ] || iptables -t mangle -I PREROUTING 1 -m addrtype --dst-type LOCAL -j ACCEPT
 }
 
+# Only these complete device rules can be safely split into argv for teardown.
+ipt_device_queue_specs() { sed -nr '/^-A POSTROUTING -s [0-9.]+(\/32)? -p (tcp|udp) (-m (tcp|udp) )?--dport 443 -m connbytes (--connbytes 1:8 --connbytes-mode packets --connbytes-dir original|--connbytes-dir original --connbytes-mode packets --connbytes 1:8) -m mark ! --mark 0x40000000(\/0x40000000)? -j NFQUEUE --queue-num 212( --queue-bypass)?$/p'; }
+
 # ipt_delete_all <table> <chain> <selector>. Only an absent selector ends a successful removal.
 ipt_delete_all() {
 	_ida_table=$1; shift

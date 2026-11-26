@@ -303,7 +303,7 @@ uses_marking() {
 # в main = трафик идёт ПРЯМО (ровно это и обещает fail-open, см. switch-vpn.sh safety_off).
 # Доп-выходы живут в СВОИХ table 100N и сюда не попадают. Владелец ответа — ip-lib.sh::carrier_iface
 # (та же строка спрашивается карточкой адаптеров панели); шим — на случай старой библиотеки.
-command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table 1000 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
+command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table "100${1:-0}" 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
 carrier_route_dev() {   # тело — отдельной строкой: стенд failopen-direct вырезает функцию по `^}`
     carrier_iface
 }

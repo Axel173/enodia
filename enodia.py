@@ -42,7 +42,7 @@ from collections import namedtuple
 
 # Версия PC-стороны проекта. Держится В СИНХРОНЕ с `version` в pyproject.toml и requirements.txt
 # (копии сознательные — uv-путь и pip-путь; разъезд ловит C35). См. CHANGELOG.md.
-PROJECT_VERSION = "1.3.8"
+PROJECT_VERSION = "1.3.9"
 
 # --- Зависимость paramiko (in-process SSH) — с авто-доустановкой ---
 # paramiko ОБЯЗАТЕЛЕН (in-process SSH). Если его нет — НЕ падаем молча с кодом 1: на
@@ -2930,12 +2930,12 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
                 self.router_summary = None
                 return True, L("Роутер вернулся к стоковому состоянию.", "The router is back to its stock state.")
             if "GONE" in left:
-                warn(L("Файлы стёрты, но часть обвязки пережила снятие — ПЕРЕЗАГРУЗИТЕ роутер",
-                       "The files are gone, but part of the plumbing survived — REBOOT the router"))
+                warn(L("Файлы удалены. Роутер не подтвердил полную очистку сетевых настроек.",
+                       "Files removed. The router could not confirm that all network settings were cleared."))
                 self.awg_state = "FRESH"
                 self.router_summary = None
-                return False, L("Файлы стёрты, но часть обвязки пережила снятие — перезагрузите роутер.",
-                                "The files are gone, but part of the plumbing survived — reboot the router.")
+                return False, L("Файлы удалены. Подробности проверки — в отчёте на роутере.",
+                                "Files removed. See the verification details in the report on the router.")
             warn(L(f"{ENODIA_DIR} остался — проверьте вывод выше и отчёт /data/usr/enodia-uninstall.log",
                    f"{ENODIA_DIR} is still there — check the output above and /data/usr/enodia-uninstall.log"))
             return False, L(f"{ENODIA_DIR} остался — смотрите вывод и отчёт /data/usr/enodia-uninstall.log",
@@ -2945,12 +2945,12 @@ for m in "${_ourmp:-/data}" ${_destmp:+"$_destmp"} /tmp; do _dfl "$m" | awk '{t=
                  "VPN is off, traffic goes directly. Files, settings and the panel are in place."))
             return True, L("VPN снят, интернет идёт напрямую. Панель и настройки на месте.",
                            "VPN is off, traffic goes directly. The panel and the settings are in place.")
-        err(L("Снялось НЕ ВСЁ — что уцелело, сказано в строке «НЕ СНЯТО» выше",
-              "NOT everything came off — what survived is listed in the line above"))
+        err(L("Роутер не подтвердил полное отключение VPN. Подробности — в отчёте выше.",
+              "The router could not confirm that VPN deactivation completed. See the report above."))
         warn(L("Повторите деактивацию; не помогло — перезагрузите роутер (правила живут в RAM)",
                "Run the deactivation again; if that does not help, reboot the router (the rules live in RAM)"))
-        return False, L("Снялось не всё — что уцелело, сказано в строке «НЕ СНЯТО».",
-                        "Not everything came off — what survived is listed in the output.")
+        return False, L("Отключение VPN не подтверждено. Подробности — в отчёте на роутере.",
+                        "VPN deactivation could not be confirmed. See the report on the router.")
 
     def _panel_accepts(self, pw, attempts=3):
         # Пустит ли панель по ЭТОМУ паролю — проба ровно тем путём, которым пойдёт браузер:

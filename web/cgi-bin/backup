@@ -370,7 +370,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 	fi
 
 	# Копируем ТОЛЬКО известные имена (из кода). Файл -> заменяем; каталог -> вливаем содержимое.
-	restored=0
+	restored=0; _geo_restored=0
 	_road_drops=""; _road_lang=ru; _profiles_restored=0; _restore_roads=0
 	if [ -f "$ENODIA_DIR/nf-i18n.sh" ]; then . "$ENODIA_DIR/nf-i18n.sh"; _road_lang=$(nf_lang); fi
 	if [ -e "$tmp/.slots" ] && ! sh "$ENODIA_DIR/slots.sh" validate-registry "$tmp/.slots" >/dev/null 2>&1; then
@@ -469,6 +469,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
 				if cp -rp "$_e" "$ENODIA_STATE/$f"/ 2>/dev/null; then _any=1; fi
 			done
 			if [ "$_any" = 1 ]; then restored=$((restored+1)); fi
+		elif [ "$f" = geo/actions.tsv ] && [ -f "$ENODIA_DIR/geo.sh" ]; then
+			if sh "$ENODIA_DIR/geo.sh" import-actions "$tmp/$f"; then
+				_geo_restored=1; restored=$((restored+1))
+			else
+				_geo_restored=failed
+			fi
 		elif [ "$f" = .cfg-names ] && [ -f "$ENODIA_DIR/cfg-names.sh" ]; then
 			continue   # имена конфигов — ПОСЛЕ цикла, когда каталоги конфигов уже влиты (владелец сверяет с ними)
 		elif [ "$f" = .server-favs ]; then
@@ -561,6 +567,7 @@ cd "$ENODIA_DIR" || exit 1
 exec >>/tmp/enodia-restore.log 2>&1
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') применение импортированных настроек ==="
 if [ -f "$ENODIA_STATE/.vpn-deactivated" ]; then
+    [ "$RESTORE_GEO" != failed ] || { echo "Не удалось восстановить реестр гео-правил"; exit 1; }
     echo "VPN деактивирован. Настройки сохранены и будут применены при включении VPN."
     echo "DONE $(date +%s)" > /tmp/enodia-restore.state.new && mv -f /tmp/enodia-restore.state.new /tmp/enodia-restore.state
     exit $?
@@ -604,7 +611,21 @@ fi
 [ -f ./groups.sh ] && [ -s "$ENODIA_STATE/groups/groups.tsv" ] && sh ./groups.sh apply
 # Движки списков — ПОЛНЫМ путём, не `./`: смена раскладки ждёт их по argv (daemon-lib.sh::lists_work_alive, точная строка
 # «$ENODIA_DIR/geo.sh»), и относительный запуск был ей невидим (ревью с.93, круг 3).
-[ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ] && sh "$ENODIA_DIR/geo.sh" reapply
+geo_refresh=0; geo_failed=0
+[ "$RESTORE_GEO" != failed ] || { echo "Не удалось восстановить реестр гео-правил"; geo_failed=1; }
+if [ -f ./geo.sh ] && [ -f "$ENODIA_STATE/geo/actions.tsv" ]; then
+    if [ -s "$ENODIA_STATE/geo/actions.tsv" ]; then
+        if sh "$ENODIA_DIR/geo.sh" default-deferred; then
+            [ "$RESTORE_GEO" != 1 ] || sh "$ENODIA_DIR/geo.sh" restore-rules || geo_failed=1
+        else
+            sh "$ENODIA_DIR/geo.sh" reapply
+            geo_refresh=1
+        fi
+    elif [ "$RESTORE_GEO" = 1 ]; then
+        # Rebuild from the explicitly empty registry to retire the previous live routes and snapshots.
+        sh "$ENODIA_DIR/geo.sh" restore-rules || geo_failed=1
+    fi
+fi
 # 3. Ядро маркировки — ПОСЛЕ групп и гео: слот-наборы grp_vpn_sN/geo_vpn_sN создаются там, и до
 #    их появления mark-core метить нечего. Несущие доп-выходов НЕ трогаем: их поднимает панель
 #    или ближайший ребут — рвать живой транспорт ради импорта настроек нельзя.
@@ -695,8 +716,7 @@ fi
 #     Пидфайл — ОБЩИЙ с heal (`/tmp/enodia-geo-update.pid`): имя тут принадлежит ЗАДАЧЕ, а не тому, кто
 #     её завёл (так же живут `/tmp/enodia-lists-<cat>.pid` у heal, импорта и панели), и заодно это
 #     бесплатное взаимное исключение — cron heal бежит раз в минуту и мог бы стартовать второй фетч.
-[ -f ./geo.sh ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ] && start-stop-daemon -S -b -m -p /tmp/enodia-geo-update.pid \
-    -x /bin/sh -- "$ENODIA_DIR/geo.sh" update >/dev/null 2>&1
+[ "$geo_refresh" = 0 ] || sh "$ENODIA_DIR/geo.sh" start-update
 # Replay the opted-in exits after restoring the rule sets. The off flag still bars the main carrier.
 if [ "$VOFF" = 1 ] && [ -f ./slots.sh ] && [ -f ./transport.sh ] && [ -n "$(sh ./slots.sh list-admitted 2>/dev/null)" ]; then
     sh ./transport.sh slots-up
@@ -705,7 +725,7 @@ fi
 #     ТОЛЬКО на старте, и без перезапуска служил бы прежним до ребута, пока на диске лежит новый. Последним: перезапуск рвёт
 #     соединения панели по HTTPS на секунду, а опрос хода применения переживает одиночный отказ (спросит ещё).
 [ "$RESTORE_TLS" = 1 ] && [ -f ./web-ui.sh ] && sh ./web-ui.sh tls-reload
-[ "$_syslog_failed" = 0 ] || exit 1
+[ "$_syslog_failed" = 0 ] && [ "$geo_failed" = 0 ] || exit 1
 echo "=== применение завершено ==="
 # ИТОГ — АТОМАРНО (рядом + `mv`): экран «Бэкап» опрашивает этот файл, и обрезанный `>` в окне записи читался бы как
 # «импорта не было» (C105). Оборвалась цепочка раньше этой строки — файл остаётся RUNNING при мёртвом держателе, и
@@ -722,7 +742,7 @@ RESTORE
 	# цепочка не стартовала, и экран писал «оборвалось» (ревью шага 6d, круг 2; тот же класс закрыт в spawn_bg и hotplug-tick).
 	rm -f /tmp/enodia-restore-apply.pid
 	_rtls=0; [ "$_pem" = live ] && _rtls=1
-	RESTORE_TLS=$_rtls start-stop-daemon -S -b -m -p /tmp/enodia-restore-apply.pid \
+	RESTORE_GEO=$_geo_restored RESTORE_TLS=$_rtls start-stop-daemon -S -b -m -p /tmp/enodia-restore-apply.pid \
 		-x /bin/sh -- /tmp/enodia-restore-apply.sh 8>&- >/dev/null 2>&1
 	# ЧТО ИЗ ВОССТАНОВЛЕННОГО ЗДЕСЬ НЕ ЗАРАБОТАЕТ. Бэкап переносит НАМЕРЕНИЕ (какой транспорт, какие
 	# доп-выходы, включён ли шифрованный DNS), а бинарей он не несёт и нести не может — они на два

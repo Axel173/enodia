@@ -122,7 +122,6 @@ RESOLVER_VER=2
 RVER="$GEO/.rver"                         # последняя применённая версия резолвера (флеш)
 
 mkdir -p "$GEO" "$CACHE" 2>/dev/null
-[ -f "$REG" ] || : > "$REG"
 
 # --- ИСТОЧНИКИ (базовые URL, SHA-пиновка) -------------------------------------------
 # Фетч ДАННЫХ пиновим на КОММИТ (@<sha>), а не на мутабельную ветку (@release/@master): эджи jsDelivr
@@ -319,7 +318,21 @@ sort_inplace() { lbl_commit_out "$1" sort -u "$1" 2>/dev/null; }                
 bogon_sorted() { strip_bogon < "$1" 2>/dev/null | sort -u; }                     # a CIDR list without bogons
 cidr_sorted()  { norm_cidr < "$1" | sort -u; }
 cidr6_sorted() { norm_cidr6 < "$1" | strip_bogon6 | sort -u; }
-reg_write()  { cat > "$REG.new" && mv "$REG.new" "$REG"; }   # атомарно (обрыв не бьёт файл)
+# Downloads may hold the build lock for minutes. Only publication of the small registry is serialized with user edits.
+geo_wait_lock() {
+    _wi=0
+    until ls_lock_take "$1" /dev/null; do
+        [ "$?" = 1 ] && [ -d "$RAM" ] || return 1
+        _wi=$((_wi + 1)); [ "$_wi" -le "$2" ] || return 1
+        sleep "$3"
+    done
+}
+reg_locked() (
+    _rl="$RAM/.registry.lock"
+    geo_wait_lock "$_rl" 5 1 || { echo "роутер занят — повторите через несколько секунд" >&2; exit 1; }
+    trap 'ls_lock_drop "$_rl"' EXIT
+    "$@"
+)
 # reg_set <key> <action>: upsert строки. off — строку УБИРАЕМ (нет строки = нет действия).
 reg_set() {
 	_k="$1"; _a="$2"
@@ -329,22 +342,34 @@ reg_set() {
 	case "$_t" in ''|*[!0-9]*) _t=0 ;; esac
 	# slot переживает смену действия ТОЛЬКО пока действие vpn (слот применим лишь к «в VPN»);
 	# уход в bypass/block сбрасывает в 0 — вернувшись в vpn, юзер выбирает выход заново.
-	_s=$(printf '%s' "$_old" | cut -f5)
+	_s=${3:-$(printf '%s' "$_old" | cut -f5)}
 	case "$_s" in [2-7]) ;; *) _s=0 ;; esac
 	[ "$_a" = vpn ] || _s=0
 	_rgl=""; [ "$_a" = off ] || _rgl="$_k$TAB$_a$TAB$_c$TAB$_t$TAB$_s"
 	lbl_commit_out "$REG" lbl_without "$REG" "^$_k$TAB" "$_rgl"   # no line (off) — the key is gone
 }
+reg_slot() {
+    _ln=$(reg_get "$1"); [ -n "$_ln" ] || { echo "категория выключена — сначала выберите действие"; return 1; }
+    if [ "$2" != 0 ] && [ "$(printf '%s' "$_ln" | cut -f2)" != vpn ]; then
+        echo "доп-выход только для действия «в VPN»"; return 1
+    fi
+    lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" -v k="$1" -v s="$2" '$1==k{$5=s} {print}' "$REG"
+}
 reg_set_meta() {  # reg_set_meta <key> <cnt> <ts>
-	lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" -v k="$1" -v c="$2" -v t="$3" '$1==k{$3=c;$4=t} {print}' "$REG" 2>/dev/null
+	reg_locked lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" -v k="$1" -v c="$2" -v t="$3" '$1==k{$3=c;$4=t} {print}' "$REG" 2>/dev/null
 }
 # Миграция реестра 4-col → 5-col (slot добавлен ПОСЛЕДНИМ полем — прежние позиции не задеты).
 # Идемпотентна (5-col строки проходят как есть), атомарна (tmp+mv); зеркало migrate_reg groups.sh.
 migrate_reg() {
 	[ -s "$REG" ] || return 0
 	awk -F"$TAB" 'NF>0 && NF!=5{c=1} END{exit c?0:1}' "$REG" || return 0
-	lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" 'NF==4{print $1,$2,$3,$4,"0"; next} NF>0{print}' "$REG"
+	reg_locked lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" 'NF==4{print $1,$2,$3,$4,"0"; next} NF>0{print}' "$REG"
 }
+# An existing registry, even an empty one, records the owner's choices. Older
+# versions removed the row for "off", so absence of a row cannot authorize a
+# migration. Seed only a new registry, before any caller can edit or fetch it.
+reg_init() { [ -f "$REG" ] || reg_set cn bypass; }
+[ -f "$REG" ] || reg_locked reg_init || exit 1
 migrate_reg
 
 # --- сеты -----------------------------------------------------------------------------
@@ -832,7 +857,9 @@ _build_pass() {
 	_any_slot=0
 	_en_slots=" "
 	[ -f "$ENODIA_DIR/slots.sh" ] && _en_slots=" $(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null | cut -f1 | tr '\n' ' ') "
-	if [ -s "$REG" ]; then
+	_has_actions=0
+	if [ -s "$REG" ] && ! { [ "${_defer_initial:-0}" = 1 ] && default_deferred; }; then
+		_has_actions=1
 		while IFS="$TAB" read -r _k _a _c _t _s; do
 			[ -n "$_k" ] || continue
 			[ -n "$(cat_url "$_k")" ] || continue        # ключа нет НИ У ОДНОГО провайдера (реально устарел) — игнор
@@ -855,7 +882,8 @@ _build_pass() {
 				cat "$_cf" >> "$_dst"
 				_n=$(grep -c '' "$_cf" 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
 			fi
-			reg_set_meta "$_k" "$_n" "$(date +%s)"
+			_stamp=0; [ ! -f "$_cf" ] || _stamp=$(date +%s)
+			reg_set_meta "$_k" "$_n" "$_stamp"
 		done < "$REG"
 	fi
 	# CIDR: busybox sort БЕЗ -o (дампит в stdout) → сорт+дедуп через tmp+mv. Блок-агрегат СТРОГО
@@ -909,7 +937,7 @@ _build_pass() {
 	# ПЕРЕСЕЧЕНИЕ «в VPN» × «мимо» — считаем ЗДЕСЬ, пока агрегаты ещё не удалены, и кладём
 	# вердикт на флеш: панель обязана показывать факт с роутера, а не свою арифметику.
 	lbl_commit_out "$GEO/.overlap" overlap_scan "$_vpn" "$SET_OUT" "$_dv" "$_do" 2>/dev/null
-	wire_rules
+	[ "$_has_actions" = 0 ] || wire_rules
 	# Пул десинка изменился → досборка правил nfqws (zapret сам о нашем сете не узнает). Верб rewire
 	# идемпотентен и НЕ поднимает демон, когда десинк выключен, — звать безопасно всегда.
 	[ -n "$2" ] || { [ ! -f "$ENODIA_DIR/zapret.sh" ] || sh "$ENODIA_DIR/zapret.sh" rewire >/dev/null 2>&1; }
@@ -945,7 +973,9 @@ _build_pass() {
 # Печатаем сводку ПОСЛЕДНЕГО прохода (панель кладёт stdout в .msg — две строки сбили бы i18n).
 do_build() {
 	_want="$1"; _rebind="$2"
-	if [ -n "$_rebind" ]; then
+	if [ "$3" = wait ]; then
+		geo_wait_lock "$GEO_LOCK" 720 5 || return 1
+	elif [ -n "$_rebind" ]; then
 		ls_lock_take "$GEO_LOCK" "$GEO_DIRTY.rebind" 1 || return $?
 	elif ! ls_lock_take "$GEO_LOCK" "$GEO_DIRTY" "$_want"; then
 		echo 'гео: сборка уже идёт — учту свежий выбор в ней'
@@ -1005,6 +1035,26 @@ do_reapply() {
 }
 
 geo_enabled() { [ -s "$REG" ]; }   # есть хоть один выбранный элемент → гео активно
+
+# On a panel-only install the bypass has no work until a carrier starts.
+# A failed download also gets a timestamp. Only a positive count indicates available prefixes.
+default_choice() {
+	awk -F "$TAB" 'NR==1 && $1=="cn" && $2=="bypass" && $3=="0" && $5=="0" { pending=1 } END {exit !(NR==1 && pending)}' "$REG"
+}
+default_pending() { [ ! -s "$SNAP_OUT" ] && default_choice; }
+default_deferred() {
+    default_choice || return 1
+    [ ! -f "$ENODIA_STATE/.vpn-off" ] && [ ! -f "$ENODIA_STATE/.vpn-deactivated" ] || return 0
+    [ -z "$(carrier_iface 2>/dev/null)" ] || return 1
+    if [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = zapret ]; then
+        sh "$ENODIA_DIR/transport.sh" health zapret >/dev/null 2>&1 && return 1
+    fi
+    return 0
+}
+boot_update() {
+	ENODIA_UPD_PROG= ENODIA_SWITCH_HOLDER= start-stop-daemon -S -b -m -p /tmp/enodia-geo-update.pid \
+		-x /bin/sh -- "$ENODIA_DIR/geo.sh" update selected >/dev/null 2>&1 3>&-
+}
 
 # --- свежесть + SHA апстрима (last-commit через GitHub API → $SHAS) ------------------
 # Один вызов на репозиторий-источник: из ответа коммита берём И sha (для пиновки фетча — jsd_ref), И дату
@@ -1243,12 +1293,22 @@ emit_active() {
 }
 
 case "$1" in
+    import-actions) [ -f "$2" ] && reg_locked lbl_commit_out "$REG" cat "$2" ;;
+    defaults) : ;;   # The registry is ready; heal owns the offline replay and background download.
+    default-pending) default_pending ;;
+    default-deferred) default_deferred ;;
+    restore-rules)
+        # Reconcile former rules before acknowledging import, even when another builder holds the lock.
+        _defer_initial=1; do_build 0 '' wait ;;
+    start-default) default_pending || exit 0; boot_update ;;
+    start-update) boot_update ;;
 	list) emit_json ;;
 	active) emit_active ;;
 	set)   # set <key> <vpn|bypass|block|desync|off> — записать выбор действия (мгновенно), сборку зовёт update/apply
 		[ -n "$(cat_url "$2")" ] || { echo "неизвестный ключ гео"; exit 1; }
 		case "$3" in vpn|bypass|block|desync|off) ;; *) echo "действие: vpn|bypass|block|desync|off"; exit 1 ;; esac
-		reg_set "$2" "$3" || { echo "гео «$2»: выбор не записался (нет места на разделе настроек?)"; exit 1; }
+		case "$3:${4:-}" in *:|vpn:0|vpn:[2-7]) ;; *) echo "слот: 0|2..7"; exit 1 ;; esac
+		reg_locked reg_set "$2" "$3" "${4:-}" || { echo "гео «$2»: выбор не записался (нет места на разделе настроек?)"; exit 1; }
 		echo "гео «$2»: $(case "$3" in vpn) echo 'в VPN' ;; bypass) echo 'мимо VPN' ;; block) echo 'заблокировано' ;; desync) echo 'в десинк' ;; *) echo 'выкл' ;; esac)"
 		;;
 	desync-list)   # что выбрано «в десинк» — key|label|доменов/адресов. Читает карточка Zapret:
@@ -1267,11 +1327,7 @@ case "$1" in
 	       # Пишет ТОЛЬКО реестр (мгновенно, как set) — пересборку зовёт фронт следом (geo_apply).
 		[ -n "$(cat_url "$2")" ] || { echo "неизвестный ключ гео"; exit 1; }
 		case "$3" in 0|[2-7]) ;; *) echo "слот: 0|2..7"; exit 1 ;; esac
-		_ln=$(reg_get "$2"); [ -n "$_ln" ] || { echo "категория выключена — сначала выберите действие"; exit 1; }
-		if [ "$3" != 0 ] && [ "$(printf '%s' "$_ln" | cut -f2)" != vpn ]; then
-			echo "доп-выход только для действия «в VPN»"; exit 1
-		fi
-		lbl_commit_out "$REG" awk -F"$TAB" -v OFS="$TAB" -v k="$2" -v s="$3" '$1==k{$5=s} {print}' "$REG"
+		reg_locked reg_slot "$2" "$3" || exit 1
 		echo "выход: $([ "$3" = 0 ] && echo 'Основной' || echo "слот №$3")"
 		;;
 	# want <consumer> [<key>…] — the consumer's whole set of keys (none = it wants nothing); domain and cidr keys alike — each
@@ -1327,12 +1383,7 @@ case "$1" in
 	# wanted — fetch what the consumers want and is not in RAM yet (a background job of the consumer's save). Waits for the geo
 	# lock instead of riding a build: a build pass ends with a dnsmasq restart the save must not cost the house.
 	wanted)
-		_wi=0
-		until ls_lock_take "$GEO_LOCK" "$RAM/.wanted.wait" 1; do
-			_wi=$((_wi + 1)); [ "$_wi" -le 720 ] || exit 1   # an hour: an update of everything is the longest holder
-			sleep 5
-		done
-		rm -f "$RAM/.wanted.wait" 2>/dev/null
+		geo_wait_lock "$GEO_LOCK" 720 5 || exit 1
 		trap 'ls_lock_drop "$GEO_LOCK"' EXIT
 		trap 'exit 1' INT TERM HUP PIPE
 		# `refresh` — every wanted key fetched AGAIN: the daily lists job on a router with no Гео action (an `update` refreshes
@@ -1360,7 +1411,13 @@ case "$1" in
 		exit 0 ;;
 	apply)   do_build 0 ;;     # собрать из кэша (быстро; после смены действия)
 	rebind)  do_build 0 1 ;;
-	update)  resolve_upstream; set_source_urls; v2fly_enumerate; do_build 1 ;;   # SHA+даты → пиновка URL → перечислить v2fly (rf=baked) → перекачать (пиновано) + собрать
+	update)
+		# A new router needs one ipdeny file. Fetching three Git revisions and
+		# enumerating v2fly would cost more than the country data at every boot.
+		if [ "$2" != selected ] || [ "$(cut -f1 "$REG")" != cn ] || [ -n "$(want_keys)" ]; then
+			resolve_upstream; set_source_urls; v2fly_enumerate
+		fi
+		do_build 1 ;;
 	reapply) do_reapply ;;     # офлайн из снимка (boot)
 	# Только ЦЕПОЧКА «Блока» после сноса правил (firewall reload) — зовёт починка правил (`vpn-toggle.sh repair|rules`). Наборы в
 	# ОЗУ reload переживают, марку и «мимо» возвращают mark-core и apply-bypass той же починки; `reapply` перезалил бы наборы и

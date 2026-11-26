@@ -237,7 +237,7 @@ adapter_json() {
 # Имена WAN и несущей — у владельца (ip-lib.sh::wan_iface / carrier_iface, следит C81); шимы = прежние строки.
 if [ -f "$D/ip-lib.sh" ]; then . "$D/ip-lib.sh"; fi
 command -v wan_iface >/dev/null 2>&1 || wan_iface() { ip route show default 2>/dev/null | awk '/^default/{d=""; for(i=1;i<=NF;i++) if($i=="dev") d=$(i+1); if(d!="" && d !~ /^(awg|xtun)/){print d; exit}}'; }
-command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table 1000 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
+command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table "100${1:-0}" 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
 wan_if=$(wan_iface)
 tun_if=$(carrier_iface)
 net="["; nfirst=1

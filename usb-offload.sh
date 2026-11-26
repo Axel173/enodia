@@ -207,9 +207,14 @@ du_b() {
 # rc=0 в этом месте означал бы «хранилище есть» при BIN_DIR = резидентный каталог — то самое
 # состояние, в котором переезд превращается в удаление (см. move_verified).
 store_purge_arrival() {
-    [ -f "$ENODIA_DIR/gh-update.sh" ] || return 0
-    sh "$ENODIA_DIR/gh-update.sh" bin-purge store "$1"
-    case "$?" in 0|2) return 0 ;; *) return 1 ;; esac
+    if [ -f "$ENODIA_DIR/gh-update.sh" ]; then
+        sh "$ENODIA_DIR/gh-update.sh" bin-purge store "$1"
+        case "$?" in 0|2) ;; *) return 1 ;; esac
+    fi
+    if command -v harden_bin_tree >/dev/null 2>&1 && [ ! -L "$1" ] && store_is_ours "$1"; then
+        harden_bin_tree "$1/bin"
+    fi
+    return 0
 }
 
 mark_write() {
@@ -376,6 +381,9 @@ drop_stale_new() {
 # исходника. Порядок именно такой: до последнего шага рабочий файл на месте, а прервись мы в
 # любой точке — хуже некуда не станет (две одинаковые копии безопасны, bin_path возьмёт любую).
 move_verified() {   # $1 = откуда, $2 = куда, $3 = имя для лога
+    if [ "$3" = byedpi ] && ! command -v bin_check_exec >/dev/null 2>&1; then
+        echo "  $3: не удалось проверить доступ — обновите скрипты"; return 1
+    fi
     # ПЕРЕЕЗД САМОГО В СЕБЯ — ОТКАЗ, и громкий. Ниже стоит `rm -f "$1"` ПОСЛЕ того, как копия
     # встала на место: при src == dst он сносит РОВНО ТОТ ФАЙЛ, который только что «перенесли»,
     # а вызыватель слышит «переселено». Так на живом BE7000 (01.09.2026) исчезли hev, byedpi и
@@ -405,12 +413,25 @@ move_verified() {   # $1 = откуда, $2 = куда, $3 = имя для ло�
     if ! cp "$1" "$2.new" 2>/dev/null; then
         echo "  $3: не скопировался — пропускаю"; rm -f "$2.new" 2>/dev/null; return 1
     fi
-    chmod +x "$2.new" 2>/dev/null      # на exFAT/NTFS права даёт монтирование, chmod там no-op
+    if is_program "$1"; then
+        # Config data keeps its private mode. Prepare the program and its directory before checking the copy.
+        if ! { if command -v bin_check_exec >/dev/null 2>&1; then
+            if [ "$3" = byedpi ]; then harden_bin_access "$_dstdir"; fi
+            bin_exec_mode "$2.new" && bin_check_exec "$3" "$2.new"
+        else
+            chmod a+x "$2.new" 2>/dev/null || [ -x "$2.new" ]
+        fi; }; then
+            echo "  $3: с этой ФС не запускается (noexec?) — оставляю на месте"; rm -f "$2.new" 2>/dev/null; return 1
+        fi
+        _mv_program=1
+    else
+        _mv_program=0
+    fi
     sync
     if [ "$(md5_of "$1")" != "$(md5_of "$2.new")" ]; then
         echo "  $3: копия не сошлась по md5 — оставляю на месте"; rm -f "$2.new" 2>/dev/null; return 1
     fi
-    if is_program "$1" && ! exec_ok "$2.new"; then
+    if [ "$_mv_program" = 1 ] && ! exec_ok "$2.new"; then
         echo "  $3: с этой ФС не запускается (noexec?) — оставляю на месте"; rm -f "$2.new" 2>/dev/null; return 1
     fi
     if ! mv -f "$2.new" "$2" 2>/dev/null; then
@@ -484,6 +505,7 @@ resolve_dups() {
     for _b in $STORE_MOVABLE; do
         [ -f "$ENODIA_BIN/$_b" ] || continue
         [ -f "$BIN_DIR/$_b" ] || continue
+        if [ "$_b" = byedpi ] && ! command -v bin_check_exec >/dev/null 2>&1; then continue; fi
         # ЗАКРЕПЛЁННЫЙ бинарь переворачивает разбор выше. Его место назначения — РЕЗИДЕНТНЫЙ путь,
         # значит все писатели (packages.sh, gh-update.sh, zapret.sh) кладут свежее туда, а копия в
         # хранилище осталась от жизни ДО закрепления. Она проигрывает и когда файлы одинаковы, и
@@ -493,8 +515,9 @@ resolve_dups() {
             # ЗАПУСКАЕТСЯ. Судим тем же exec_ok, что и переезд, а не битом -x: бит теряется штатно
             # (chmod на exFAT — no-op, `--push` кладёт 644), но и восстановленный бит не обещает,
             # что файл цел — он мог доехать обрезанным. Вопрос ровно один: стартует ли он.
-            chmod +x "$ENODIA_BIN/$_b" 2>/dev/null
-            if exec_ok "$ENODIA_BIN/$_b"; then
+            chmod a+x "$ENODIA_BIN/$_b" 2>/dev/null
+            if { ! command -v bin_check_exec >/dev/null 2>&1 || bin_check_exec "$_b" "$ENODIA_BIN/$_b"; } &&
+               exec_ok "$ENODIA_BIN/$_b"; then
                 rm -f "$BIN_DIR/$_b" 2>/dev/null
                 echo "usb-offload: $_b закреплён за роутером — копия в хранилище снята"
             else
@@ -503,6 +526,7 @@ resolve_dups() {
             continue
         fi
         if [ "$(md5_of "$ENODIA_BIN/$_b")" = "$(md5_of "$BIN_DIR/$_b")" ]; then
+            if command -v bin_check_exec >/dev/null 2>&1 && ! bin_check_exec "$_b" "$BIN_DIR/$_b"; then continue; fi
             rm -f "$ENODIA_BIN/$_b" 2>/dev/null
             echo "usb-offload: $_b — лишняя копия на флеше роутера снята (файлы идентичны)"
         else
@@ -681,7 +705,9 @@ store_rejected() {
 cmd_mount_ensure() {
     [ -f "$STORE_MARK" ] || return 1        # маркера нет ⇒ накопитель не наш сценарий, no-op
     # A store already resolved at its recorded path has no admission to gate.
-    if store_ready && [ -f "$MISS_STAMP" ]; then store_purge_arrival "$STORE_DIR" || :; fi
+    if store_ready && { [ -f "$MISS_STAMP" ] || [ "${1:-}" = boot ] || [ -n "$ENODIA_ONLY_DEV" ]; }; then
+        store_purge_arrival "$STORE_DIR" || :
+    fi
     store_ready && { rm -f "$MISS_STAMP" 2>/dev/null; resolve_dups; seen_note; return 0; }   # уже на месте
     # Сам ПОИСК носителя живёт в mount-lib.sh — его же зовёт резидентный boot.sh. Здесь остаётся
     # то, чего бутстрап не делает: маркер, разбор дублей и сообщения движка.
@@ -1685,7 +1711,7 @@ case "$1" in
 esac
 case "$1" in
     detect)       cmd_detect ;;
-    mount-ensure) cmd_mount_ensure ;;
+    mount-ensure) cmd_mount_ensure "$2" ;;
     enable)       cmd_enable "$2" ;;
     disable)      cmd_disable ;;
     forget)       cmd_forget ;;

@@ -626,9 +626,10 @@ fi
 # 7b. Гео-категории (geo.sh) — на том же расписании «как opencck». Перекачиваем источники и
 #     пересобираем сеты ТОЛЬКО если гео настроено (реестр непуст); иначе network-фетч впустую.
 #     Best-effort: сбой гео не влияет на iplist (маршрутизация уже применена выше).
-if [ "$REFRESH_LISTS" = 1 ] && [ -f "$ENODIA_DIR/geo.sh" ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ]; then
+if [ "$REFRESH_LISTS" = 1 ] && [ -f "$ENODIA_DIR/geo.sh" ] && [ -s "$ENODIA_STATE/geo/actions.tsv" ] &&
+   ! sh "$ENODIA_DIR/geo.sh" default-deferred; then
     echo "refresh geo categories"
-    sh "$ENODIA_DIR/geo.sh" update >/dev/null 2>&1 || true
+    sh "$ENODIA_DIR/geo.sh" update selected >/dev/null 2>&1 || true
 # …without Гео actions the categories other subsystems want (access schedules: «Ограничено», Telegram's network) are refreshed
 # alone — `update` carried them, and on a router without actions nothing did (review s.112, round 2)
 elif [ "$REFRESH_LISTS" = 1 ] && [ -f "$ENODIA_DIR/geo.sh" ] && [ -n "$(cat "$ENODIA_STATE"/geo/want/* 2>/dev/null | grep .)" ]; then

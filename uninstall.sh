@@ -57,6 +57,8 @@ if [ -f "$ENODIA_DIR/ct-lib.sh" ]; then . "$ENODIA_DIR/ct-lib.sh"; fi
 # Ожидание xtables-лока: ipt-lib.sh подменяет команду `iptables` и добавляет `-w`. Лок занят
 # чужим кроном ⇒ без ожидания правило МОЛЧА не встаёт. Нет файла — прежний путь байт-в-байт.
 if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
+# The standalone uninstaller also runs against older installations without this library verb.
+command -v ipt_device_queue_specs >/dev/null 2>&1 || ipt_device_queue_specs() { sed -nr '/^-A POSTROUTING -s [0-9.]+(\/32)? -p (tcp|udp) (-m (tcp|udp) )?--dport 443 -m connbytes (--connbytes 1:8 --connbytes-mode packets --connbytes-dir original|--connbytes-dir original --connbytes-mode packets --connbytes 1:8) -m mark ! --mark 0x40000000(\/0x40000000)? -j NFQUEUE --queue-num 212( --queue-bypass)?$/p'; }
 command -v ct_flush >/dev/null 2>&1 || ct_flush()      { conntrack -F >/dev/null 2>&1 || true; }
 # «Жив ли держатель и тот ли это процесс» — единственный ответ у daemon-lib.sh (план спрашивает, идёт ли снятие). Шим —
 # прежнее «жив» (частичный apply-scripts не должен ронять план).
@@ -346,10 +348,25 @@ sweep_chain() {      # $1=таблица $2=цепочка $3=ERE «наше» $
     # Индекс правила = его номер СРЕДИ строк `-A` этой цепочки. Так удаление квотинг-безопасно:
     # спека может нести `--comment "…"` с пробелами, и `iptables -D $spec` разъехался бы по словам.
     # Удаляем СВЕРХУ ВНИЗ (sort -nr): удаление сдвигает номера идущих ниже.
-    for _sc in $(iptables -t "$1" -S "$2" 2>/dev/null | grep '^-A' | grep -nE "$3" | cut -d: -f1 | sort -nr); do
+    _sc_rules=$(iptables -t "$1" -S "$2" 2>/dev/null) || return 1
+    for _sc in $(printf '%s\n' "$_sc_rules" | grep '^-A' | grep -nE "$3" | cut -d: -f1 | sort -nr); do
         _n=$((_n+1))
         [ "$4" = del ] && iptables -t "$1" -D "$2" "$_sc" 2>/dev/null
     done
+    # Legacy and partial device rules have no set or chain of ours. Match the
+    # source, anti-loop mark and exact queue, and delete by spec: a concurrent
+    # insertion must never shift a foreign queue into the selected position.
+    if [ "$1 $2" = 'mangle POSTROUTING' ]; then
+        while IFS= read -r _spec; do
+            [ -n "$_spec" ] || continue
+            _n=$((_n+1))
+            if [ "$4" = del ]; then
+                (set -f; iptables -t mangle -D ${_spec#-A }) || return 1
+            fi
+        done <<EOF
+$(printf '%s\n' "$_sc_rules" | ipt_device_queue_specs)
+EOF
+    fi
     return 0
 }
 
@@ -371,7 +388,7 @@ rule_drop() {
 }
 
 sweep_run() {        # $1 = count|del ; $2 = keep → цепочки ПАНЕЛИ не наши (deactivate, см. CRON_PANEL)
-    _n=0
+    _n=0; _sw_err=0
     _sp=$(echo $SET_PREFIXES | sed 's/  */|/g')
     _if=$(echo $IFACES | sed 's/  */|/g')
     # Критерий «наше» и область совпадения — ОДНА строка на подсчёт и на снос: разъедься они, и
@@ -388,7 +405,7 @@ sweep_run() {        # $1 = count|del ; $2 = keep → цепочки ПАНЕЛ�
     # содержимое снимается вместе с ними ниже — считать его дважды значит соврать в плане.
     for _pr in "mangle PREROUTING" "mangle OUTPUT" "mangle POSTROUTING" "nat PREROUTING" \
                "nat POSTROUTING" "filter INPUT" "filter FORWARD" "filter OUTPUT"; do
-        sweep_chain "${_pr% *}" "${_pr#* }" "$_our" "$1"
+        sweep_chain "${_pr% *}" "${_pr#* }" "$_our" "$1" || _sw_err=1
     done
     # Цепочки НЕ из списков выше — наследие ранних версий (имена менялись). Переходы в них уже
     # сняты циклом выше, поэтому `-X` берёт их без «chain is not empty / in use».
@@ -425,11 +442,16 @@ sweep_run() {        # $1 = count|del ; $2 = keep → цепочки ПАНЕЛ�
     rule_drop "$1" "$GUEST_BYPASS_SHOW" $GUEST_BYPASS_DEL
     rule_drop "$1" "$GUEST_DNS_SHOW"    $GUEST_DNS_DEL
     echo "$_n"
+    return "$_sw_err"
 }
 
 step_sweep() {       # $1 = keep → цепочки панели оставляем (deactivate)
-    _sw=$(sweep_run del "$1")
+    _sw=$(sweep_run del "$1"); _sw_rc=$?
     ct_flush      # сняли правила — вердикт в conntrack протух (грабля №1)
+    if [ "$_sw_rc" != 0 ]; then
+        log "Доборка не завершена: не удалось прочитать или снять правила. Проверяю, что осталось."
+        return 1
+    fi
     log "Доборка по факту: снято артефактов $_sw (правила, цепочки, ip rule — независимо от того, кто их ставил)."
 }
 
@@ -1054,8 +1076,19 @@ EOF
     # Тем же критерием, каким доборка сносила, спрашиваем «осталось ли». Цепочки выше проверяются
     # ПОИМЁННО и ловят только известные имена — а доборка берёт и наследие ранних версий, и
     # одиночные правила в стоковых цепочках, у которых своей цепочки нет вовсе.
-    _sw=$(sweep_run count "$2")
+    _sw=$(sweep_run count "$2") || _left="$_left iptables(?)"
     case "$_sw" in ''|0) ;; *) _left="$_left правила($_sw)" ;; esac
+    # The PC wizard updates only this file. An older src-list can mistake another queue for 212.
+    # A table in the kernel's list exists already; querying it cannot autoload raw on stock firmware.
+    if [ -e /proc/net/ip_tables_names ]; then
+        _tables=$(cat /proc/net/ip_tables_names) || _left="$_left iptables(?)"
+        if printf '%s\n' "$_tables" | grep -qx raw; then
+            _raw=$(iptables -t raw -S) || _left="$_left NFQUEUE(?)"
+            if printf '%s\n' "$_raw" | grep -Eq '^-A ENODIA_NFQ_RAW .* --helper enodia_noflow( |$)'; then
+                _left="$_left NFQUEUE"
+            fi
+        fi
+    fi
     # Строка сида в /etc/hosts переживает всё остальное и продолжает прибивать домен к нашему
     # старому адресу для КАЖДОГО процесса на роутере (Go читает hosts раньше резолвера).
     grep -qF "$HOSTS_TAG" /etc/hosts 2>/dev/null && _left="$_left /etc/hosts"
@@ -1079,7 +1112,7 @@ EOF
         log "Мелочь: зона '$FW_ZONE' в /etc/config/firewall осталась (uci не отдал запись). Трафика не трогает; убрать вручную: uci delete firewall.$FW_ZONE && uci commit firewall."
     fi
     if [ -n "$_left" ]; then
-        log "НЕ СНЯТО:$_left"
+        log "Проверка не пройдена:$_left"
         return 1
     fi
     log "Проверка: правил, марок, демонов, cron-строк и сниппетов dnsmasq не осталось."
@@ -1156,7 +1189,7 @@ cmd_deactivate() {
     # теперь свой шаг выше; вызов `step_ram` без `full` стал бы пустым, а читался бы как работа.
     if ! step_verify "" keep; then
         set_state FAIL
-        log "ДЕАКТИВАЦИЯ НЕ ЗАВЕРШЕНА: часть обвязки пережила снятие (перечень — в строке выше)."
+        log "Полное отключение VPN не подтверждено. Подробности проверки приведены выше."
         log "Интернет может идти всё ещё через VPN или не идти вовсе. Повторите деактивацию;"
         log "не помогло — перезагрузите роутер (правила живут в RAM и на буте их ставит cron, который снят)."
         return 1
@@ -1258,7 +1291,7 @@ cmd_purge() {
     # Файлы стёрты, а правила/демоны пережили снятие — самый неприятный исход: чинить их уже
     # нечем (скриптов нет), и единственный честный совет — ребут, после которого RAM-правила
     # исчезнут сами, а поднять их будет некому (cron снят).
-    [ "$_vr" = 0 ] || { log "НО: часть обвязки пережила снятие (см. «НЕ СНЯТО» выше) — ПЕРЕЗАГРУЗИТЕ роутер."; return 1; }
+    [ "$_vr" = 0 ] || { log "Файлы удалены. Полная очистка сетевых настроек не подтверждена. Подробности проверки приведены выше."; return 1; }
     return 0
 }
 

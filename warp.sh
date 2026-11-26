@@ -382,6 +382,64 @@ cmd_import() {
 }
 
 # ---- Cloudflare ----------------------------------------------------------------------------------------------------------------
+reg_attempt() {
+    _wca=$(curl_ca_opt "$_wurl" "$@")
+    if [ -n "${DNS_SEED_DEADLINE:-}" ]; then
+        _wleft=$((DNS_SEED_DEADLINE - $(uptime_s)))
+        [ "$_wleft" -gt 0 ] || return 0
+        set -- "$@" --max-time "$_wleft"
+    fi
+    if [ "$_wmethod" = DELETE ]; then
+        _wc=$(curl -s $_wca -K "$_wdh" -o /dev/null -w '%{http_code} %{size_upload}' --connect-timeout 8 --max-time 15 -X DELETE \
+            -H "User-Agent: $UA" -H "CF-Client-Version: $CV" "$@" "$_wurl" 2>/dev/null)
+    else
+        # size_upload distinguishes a connect timeout from a lost reply to a POST.
+        # shellcheck disable=SC2086
+        _wc=$(curl -s $_wca -o "$W/reg" -w '%{http_code} %{size_upload}' --connect-timeout 10 --max-time 20 -X POST \
+            -H "User-Agent: $UA" -H "CF-Client-Version: $CV" -H 'Content-Type: application/json' --data-binary @"$W/req" "$@" "$_wurl" 2>/dev/null)
+    fi
+    _wrc=$?; _wsent=${_wc#* }; _wc=${_wc%% *}
+}
+
+reg_may_retry() {
+    case "$_wc:$_wsent:$_wrc" in
+        000:0:6|000:0:7|000:0:28|000:0:35|000:0:52|000:0:56|000:0:60) return 0 ;;
+    esac
+    return 1
+}
+
+# Use the same API routes for creating and returning a registration.
+reg_request() {
+    _wmethod=$1; _wurl=$2
+    reg_attempt
+    reg_may_retry || return 0
+    [ -f "$ENODIA_DIR/ip-lib.sh" ] || return 0
+    . "$ENODIA_DIR/ip-lib.sh"
+    _wdns=0; _wend=$(( $(uptime_s) + 25 ))
+    for _wid in 0 $(sh "$ENODIA_DIR/slots.sh" list-admitted 2>/dev/null | cut -f1); do
+        case "$_wid" in 0|[2-7]) ;; *) continue ;; esac
+        _wif=$(carrier_iface "$_wid")
+        case "$_wid:$_wif" in
+            0:awg0|0:xtun) ;;
+            [2-7]:*) [ "$_wif" = "awg$_wid" ] || [ "$_wif" = "xtun$_wid" ] || continue ;;
+            *) continue ;;
+        esac
+        [ -d "/sys/class/net/$_wif" ] || continue
+        _wnow=$(uptime_s); [ "$_wnow" -lt "$_wend" ] || break
+        _wlimit=$((_wnow + 10)); [ "$_wlimit" -le "$_wend" ] || _wlimit=$_wend
+        set -- --interface "if!$_wif"
+        [ "$_wrc" != 6 ] || _wdns=1
+        if [ "$_wdns" = 1 ] && command -v doh_ips >/dev/null 2>&1; then
+            _whost=${API#https://}; _whost=${_whost%%/*}
+            _wip=$(DNS_SEED_DEADLINE=$_wlimit doh_ips "$_whost" "--interface if!$_wif" bound | head -1)
+            if is_ipv4 "$_wip"; then set -- "$@" --resolve "$_whost:443:$_wip"; fi
+        fi
+        [ "$_wmethod" != POST ] || say "повторяю регистрацию через $_wif"
+        DNS_SEED_DEADLINE=$_wlimit reg_attempt "$@"
+        reg_may_retry || break
+    done
+}
+
 # A new registration → _wpriv _wpub _wv4 _wv6 _wep _wrid _wtok. Needs the work directory $W.
 reg_new() {
     say "создаю ключ на роутере"
@@ -390,13 +448,19 @@ reg_new() {
     say "регистрируюсь у Cloudflare"
     _wtos=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
     printf '{"key":"%s","install_id":"","fcm_token":"","tos":"%s","model":"PC","serial_number":"","locale":"en_US"}' "$_wpub" "$_wtos" > "$W/req"
-    _wca=$(curl_ca_opt "$API/reg")
-    # shellcheck disable=SC2086
-    _wc=$(curl -s $_wca -o "$W/reg" -w '%{http_code}' --connect-timeout 10 --max-time 20 -X POST \
-        -H "User-Agent: $UA" -H "CF-Client-Version: $CV" -H 'Content-Type: application/json' --data-binary @"$W/req" "$API/reg" 2>/dev/null)
+    reg_request POST "$API/reg"
+    if [ "$_wrc" != 0 ] || [ "$_wc" = 000 ] || [ -z "$_wc" ]; then
+        case "$_wrc" in
+            6) _why="не удалось определить IP-адрес Cloudflare" ;;
+            7) _why="не удалось установить соединение" ;;
+            28) _why="истекло время ожидания" ;;
+            35|60|77) _why="ошибка защищённого соединения TLS" ;;
+            *) _why="ошибка передачи" ;;
+        esac
+        fail "Cloudflare не ответил — $_why (curl $_wrc)"
+    fi
     case "$_wc" in
         200) ;;
-        000|'') fail "Cloudflare не ответил — попробуйте позже" ;;
         *) fail "Cloudflare отклонил регистрацию (HTTP $_wc): он сменил порядок — нужна новая версия панели" ;;
     esac
     _wsk=$(jsonfilter -i "$W/reg" -e '@.config.peers[0].public_key' 2>/dev/null)
@@ -422,10 +486,7 @@ reg_del() {
     [ -n "$1" ] && [ -n "$2" ] && [ "$1" != - ] && [ "$2" != - ] || return 0
     _wdh=$(umask 077; mktemp /tmp/enodia-warp-del.XXXXXX 2>/dev/null) || return 0
     printf 'header = "Authorization: Bearer %s"\n' "$2" > "$_wdh"
-    _wca=$(curl_ca_opt "$API/reg/$1")
-    # shellcheck disable=SC2086
-    curl -s $_wca -K "$_wdh" -o /dev/null --connect-timeout 8 --max-time 15 -X DELETE \
-        -H "User-Agent: $UA" -H "CF-Client-Version: $CV" "$API/reg/$1" >/dev/null 2>&1
+    reg_request DELETE "$API/reg/$1"
     rm -f "$_wdh"
     return 0
 }

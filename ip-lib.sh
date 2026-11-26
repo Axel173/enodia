@@ -191,8 +191,8 @@ wan_gateway() {
 # пусто = lookup проваливается в main = трафик идёт ПРЯМО (ровно это и обещает fail-open, см.
 # switch-vpn.sh safety_off). Доп-выходы живут в СВОИХ table 100N и сюда не попадают. Спрашивают
 # сторож (carrier_route_dev) и карточка адаптеров панели (sysinfo).
-carrier_iface() {
-    ip route show table 1000 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
+carrier_iface() {   # optional exit id; the main carrier uses table 1000
+    ip route show table "100${1:-0}" 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
 }
 
 # carrier_mtu — MTU НЕСУЩЕЙ, то есть ФАКТ из ядра, а не намерение `.tun-mtu`: у awg0 норма

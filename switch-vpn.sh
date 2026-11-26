@@ -586,7 +586,9 @@ off_stop() {
 apply_routing() {
     [ -f "$ENODIA_DIR/mark-core.sh" ] && sh "$ENODIA_DIR/mark-core.sh" >/dev/null 2>&1
     if [ -f "$ENODIA_DIR/transport-awg.sh" ]; then
-        sh "$ENODIA_DIR/transport-awg.sh" up >/dev/null 2>&1
+        if sh "$ENODIA_DIR/transport-awg.sh" up >/dev/null 2>&1 && [ -f "$ENODIA_DIR/geo.sh" ]; then
+            sh "$ENODIA_DIR/geo.sh" start-default >/dev/null 2>&1
+        fi
     elif [ -f "$ENODIA_DIR/split-route.sh" ]; then
         sh "$ENODIA_DIR/split-route.sh" >/dev/null 2>&1
     fi

@@ -204,8 +204,13 @@ zt_any_slot_enabled() {
 # «десинк по источнику» ниже). Судим по ФАКТУ в mangle, а не по чужому хранилищу: владелец списка
 # устройств — apply-bypass.sh, и читать его файл отсюда значило бы завести второго владельца.
 zt_any_src_wired() {
-    iptables -t mangle -S POSTROUTING 2>/dev/null \
-        | grep -e '-s [0-9]' | grep -q -e "--queue-num $QNUM"
+    # Unknown ownership keeps an existing daemon, but cannot authorize starting one.
+    if _zw_rules=$(iptables -t mangle -S POSTROUTING 2>/dev/null) &&
+       _zw_owned=$(printf '%s\n' "$_zw_rules" | ipt_device_queue_specs); then
+        [ -n "$_zw_owned" ]
+    else
+        [ "${1:-}" = keep ]
+    fi
 }
 # «Десинк РЕАЛЬНО несёт трафик» = zapret активен транспортом ИЛИ живёт хотя бы одним доп-выходом
 # ИЛИ хотя бы одним устройством. Гейт свипа/reload раньше смотрел ТОЛЬКО $ON_FLAG (флаг
@@ -230,7 +235,7 @@ cmd_wired() { zt_desync_live || [ -f "$ON_FLAG" ] || proc_alive "$NFQ_PID"; }
 # в шапке «Zapret активен» (тестер, 18.08.2026). Отличаем по СЕТУ — пулы транспорта перечислены
 # в ZAPRET_SETS, у выхода наборы свои (grp_vpn_sN/geo_vpn_sN), у устройства правило по источнику.
 zt_transport_wired() {
-    _tw=$(iptables -t mangle -S POSTROUTING 2>/dev/null | grep -e "--queue-num $QNUM")
+    _tw=$(iptables -t mangle -S POSTROUTING 2>/dev/null | grep -E -- "-j NFQUEUE --queue-num $QNUM( |$)")
     for _tws in $ZAPRET_SETS; do
         case "$_tw" in *"--match-set $_tws dst"*) return 0 ;; esac
     done
@@ -579,9 +584,14 @@ nfq_src_rules() {   # <ip> <add|del|check>
     fi
     nfq_platform wire-src "$_si" "$2" || return 1
     if [ "$2" = del ]; then
-        for proto in tcp udp; do
-            while iptables -t mangle -D POSTROUTING -s "$_si" -p $proto --dport 443 $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null; do :; done
-        done
+        command -v ipt_device_queue_specs >/dev/null 2>&1 || return 1
+        _src_rules=$(iptables -t mangle -S POSTROUTING) || return 1
+        while IFS= read -r _spec; do
+            [ -n "$_spec" ] || continue
+            (set -f; iptables -t mangle -D ${_spec#-A }) || return 1
+        done <<EOF
+$(printf '%s\n' "$_src_rules" | ipt_device_queue_specs | awk -v ip="${_si%/32}" '$4==ip || $4==ip "/32"')
+EOF
     else
         for proto in tcp udp; do
             iptables -t mangle -C POSTROUTING -s "$_si" -p $proto --dport 443 $CB -m mark ! --mark "$MARKM" -j NFQUEUE --queue-num "$QNUM" --queue-bypass 2>/dev/null || \
@@ -652,7 +662,7 @@ teardown() {
     # Демон и анти-петля ОБЩИЕ на трёх потребителей (транспорт · доп-выходы · устройства «в
     # десинк»): гасим, только когда не нужны НИКОМУ. Забыть здесь про устройства значило бы
     # «выключил zapret-транспорт — и у ТВ тихо пропал десинк», причём правила остались бы на месте.
-    if zt_any_slot_enabled || zt_any_src_wired; then
+    if zt_any_slot_enabled || zt_any_src_wired keep; then
         ct_flush
         return 0
     fi
@@ -841,7 +851,7 @@ cmd_slot_down() {   # <id> — снять zapret-десинк слота
     for _s in $(zt_slot_sets "$_id"); do nfq_set_rules "$_s" del || return 1; done
     # nfqws/анти-петля ОБЩИЕ: гасим, только если не нужны НИ транспорту, НИ ДРУГОМУ zapret-слоту,
     # НИ устройствам «целиком в десинк» (правила по источнику живут отдельно от слотов).
-    if ! zt_transport_active && ! zt_any_slot_enabled "$_id" && ! zt_any_src_wired; then
+    if ! zt_transport_active && ! zt_any_slot_enabled "$_id" && ! zt_any_src_wired keep; then
         nfq_antiloop del
         stop_nfqws
     fi
@@ -917,7 +927,7 @@ cmd_src_unwire() {   # <ip>
     _sip=$(printf '%s' "$1" | tr -d ' \r\n')
     echo "$_sip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
     nfq_src_rules "$_sip" del || return 1
-    if ! zt_transport_active && ! zt_any_slot_enabled && ! zt_any_src_wired; then
+    if ! zt_transport_active && ! zt_any_slot_enabled && ! zt_any_src_wired keep; then
         nfq_antiloop del
         stop_nfqws
     fi
@@ -930,18 +940,21 @@ cmd_src_unwire() {   # <ip>
 # apply-bypass сверяет им своё хранилище и снимает осиротевшее. Источник истины про ПРАВИЛА —
 # сам mangle, а не файл: после fw3-reload/ребута правил нет, а файл на месте (и наоборот).
 cmd_src_list() {
+    command -v ipt_device_queue_specs >/dev/null 2>&1 || return 1
+    _src_rules=$(iptables -t mangle -S POSTROUTING) || return 1
+    _src_raw=$(nfq_platform sources) || return 1
     {
-    iptables -t mangle -S POSTROUTING 2>/dev/null \
-        | grep -e "--queue-num $QNUM" \
-        | sed -n 's/^-A POSTROUTING -s \([0-9.]*\)\/32 .*/\1/p'
-    nfq_platform sources
+        printf '%s\n' "$_src_rules" | ipt_device_queue_specs |
+            sed -n 's/^-A POSTROUTING -s \([0-9.]*\)\(\/32\)\{0,1\} .*/\1/p'
+        [ -z "$_src_raw" ] || printf '%s\n' "$_src_raw"
     } | sort -u
 }
 # Снять ВСЕ правила по источнику разом — не зная списка (его владелец может быть уже удалён:
 # зовут uninstall.sh и cmd_remove). Демон здесь НЕ гасим: у cmd_remove следом идёт cmd_off, а
 # uninstall.sh снимает несущую своим порядком (правила → демоны).
 cmd_src_clear() {
-    for _sip in $(cmd_src_list); do nfq_src_rules "$_sip" del || return 1; done
+    _src_ips=$(cmd_src_list) || return 1
+    for _sip in $_src_ips; do nfq_src_rules "$_sip" del || return 1; done
     return 0
 }
 

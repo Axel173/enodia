@@ -61,7 +61,7 @@ if [ -f "$ENODIA_DIR/ipt-lib.sh" ]; then . "$ENODIA_DIR/ipt-lib.sh"; fi
 # Устройство несущей (`default` в table 1000) — у владельца ip-lib.sh::carrier_iface (следит C81):
 # по нему doh_direct_regime судит «прямой ли режим». Шим той же строки — на случай частичной установки.
 if [ -f "$ENODIA_DIR/ip-lib.sh" ]; then . "$ENODIA_DIR/ip-lib.sh"; fi
-command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table 1000 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
+command -v carrier_iface >/dev/null 2>&1 || carrier_iface() { ip route show table "100${1:-0}" 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
 command -v age_since >/dev/null 2>&1 || age_since() {
 	case "$1" in ''|*[!0-9]*) echo 999999; return ;; esac
 	[ "$1" -gt 0 ] && echo $(( $(date +%s) - $1 )) || echo 999999

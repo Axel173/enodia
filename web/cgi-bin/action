@@ -2156,7 +2156,7 @@ EOF
 			# «панель зависла». Провал `up` теперь тоже честный отказ, а не «ok» поверх мёртвой
 			# несущей. jesc — единственный конвейер «вывод скрипта → строка в JSON» (json-lib.sh).
 			sh "$ENODIA_DIR/xray-transport.sh" down >/dev/null 2>&1
-			cap_run xray-transport.sh up; rc=$?; raw=$CAP_OUT
+			cap_run transport.sh up xray; rc=$?; raw=$CAP_OUT
 			# Берём ТОЛЬКО строки про причину: на успехе cmd_up печатает ещё и cmd_status, а он
 			# в тост не нужен. Причина кладётся в msg, а не в отдельное поле: postAction в панели
 			# показывает msg и в тосте, и в журнале действий, а лишних полей он не читает.
@@ -2189,7 +2189,7 @@ EOF
 			&& echo "$name" > "$ENODIA_STATE/.hy2-active" || fail "не удалось активировать $name"
 		if [ "$(cat "$ENODIA_STATE/.transport" 2>/dev/null)" = hy2 ] && ! vpn_is_off; then
 			sh "$ENODIA_DIR/transport-hy2.sh" down >/dev/null 2>&1
-			cap_run transport-hy2.sh up; rc=$?; raw=$CAP_OUT   # причину не глотаем — зеркало set_xray_server
+			cap_run transport.sh up hy2; rc=$?; raw=$CAP_OUT   # причину не глотаем — зеркало set_xray_server
 			why=$(alt_raise_why "$raw")
 			if [ "$rc" = 0 ]; then
 				if [ -n "$why" ]; then
@@ -2434,7 +2434,7 @@ EOF
 					_msg="$_msg — применится, когда включите VPN"
 				else
 					sh "$ENODIA_DIR/$tsh" down >/dev/null 2>&1
-					cap_run "$tsh" up; rc=$?
+					cap_run transport.sh up "$tname"; rc=$?
 					why=$(alt_raise_why "$CAP_OUT")
 					if [ "$rc" = 0 ]; then _msg="$_msg, несущая перезапущена${why:+. $why}"
 					else _ok=false; _msg="$_msg, но несущая НЕ поднялась. ${why:-подробности в логе транспорта}"; fi
@@ -3973,21 +3973,14 @@ EOF
 		[ -f "$ENODIA_DIR/geo.sh" ] || fail "geo.sh не установлен (обновите панель)"
 		run geo.sh slot "$key" "$slot" ;;
 	geo_preset)
-		# Чип-пресет на десинк-выходе (Ф1b): включить/выключить гео-категорию (v2fly-*) с привязкой
-		# к слоту одним действием. on=1: set vpn + slot (реестр, синхронно) → фоновая пересборка
-		# (do_build медленный при первом резолве v2fly-каталога). on=0: set off. Ключ — узкий
-		# whitelist пресетов (v2fly-youtube|discord|telegram), slot строгий 2..7.
+		# Publish the preset and its exit in one registry write before starting the background rebuild.
 		key=$(field key); slot=$(field slot); on=$(field on)
 		case "$key" in v2fly-youtube|v2fly-discord|v2fly-telegram) ;; *) fail "неизвестный пресет" ;; esac
 		case "$slot" in [2-7]) ;; *) fail "битый выход" ;; esac
 		case "$on" in 0|1) ;; *) fail "нужно 0|1" ;; esac
 		[ -f "$ENODIA_DIR/geo.sh" ] || fail "geo.sh не установлен (обновите панель)"
-		if [ "$on" = 1 ]; then
-			sh "$ENODIA_DIR/geo.sh" set "$key" vpn >/dev/null 2>&1
-			sh "$ENODIA_DIR/geo.sh" slot "$key" "$slot" >/dev/null 2>&1
-		else
-			sh "$ENODIA_DIR/geo.sh" set "$key" off >/dev/null 2>&1
-		fi
+		if [ "$on" = 1 ]; then set -- vpn "$slot"; else set -- off; fi
+		cap_run geo.sh set "$key" "$@" || fail "$(printf '%s' "$CAP_OUT" | tail -n 1 | jesc 300)"
 		spawn_bg /tmp/enodia-geo.pid "$ENODIA_DIR/geo.sh" apply
 		printf '{"ok":true,"code":0,"msg":"%s"}\n' \
 			"$([ "$on" = 1 ] && echo 'Привязываю пресет к выходу (фоном)' || echo 'Отвязываю пресет (фоном)')"; exit 0 ;;
